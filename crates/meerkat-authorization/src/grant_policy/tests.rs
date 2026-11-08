@@ -305,6 +305,7 @@ impl Fixture {
         );
         let root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id("root-grant"),
                 who("first"),
@@ -314,6 +315,7 @@ impl Fixture {
             .expect("root");
         let child = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("first"),
                 &root,
                 id("child"),
@@ -323,6 +325,7 @@ impl Fixture {
             .expect("child");
         let leaf = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("second"),
                 &child,
                 id("leaf"),
@@ -332,6 +335,7 @@ impl Fixture {
             .expect("leaf");
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id("controller"),
                 who("executor"),
@@ -549,6 +553,7 @@ fn factory_uses_actual_grant_publication_and_expiry() {
     fixture
         .grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &fixture.lineage[0],
             &mut crate::grants::IsolatedGrantTestCustody,
@@ -661,6 +666,7 @@ fn exact_controller_selection_and_actual_endpoint_are_independent_checks() {
     fixture
         .grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &fixture.controller,
             &mut crate::grants::IsolatedGrantTestCustody,

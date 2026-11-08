@@ -691,6 +691,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -700,6 +701,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
         .expect("controller lineage");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("peer-send"),
             principal("executor"),

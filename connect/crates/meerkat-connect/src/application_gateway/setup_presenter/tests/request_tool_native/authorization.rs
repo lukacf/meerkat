@@ -111,6 +111,7 @@ impl FixtureAuthorization {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 id("controller"),
                 executor.clone(),
@@ -120,6 +121,7 @@ impl FixtureAuthorization {
             .unwrap();
         let operations = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 id("operations"),
                 executor.clone(),

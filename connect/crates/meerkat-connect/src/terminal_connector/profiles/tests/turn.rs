@@ -684,7 +684,10 @@ fn initial_secret_refusal_schedule(
                 store.patch(ConfigDelta(json!({"realm":{"global":{}}}))).await.unwrap();
             }
             let writer = ConfigRuntime::new(store, occupied_path.with_file_name("config_state.json"));
-            McpRealmPersistTarget::new(&writer).add(config.clone(), Some(0)).await.unwrap();
+            // The parent's declaration above, a store write, moved the
+            // generation; the add is checked against the current one.
+            let generation = writer.get().await.unwrap().generation;
+            McpRealmPersistTarget::new(&writer).add(config.clone(), Some(generation)).await.unwrap();
             drop(writer);
             let own_before = crate::realm::read_own_mcp_config(&storage).await.unwrap();
             assert_eq!(own_before.0.iter().any(|server| server.name == config.name), !inherited);

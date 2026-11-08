@@ -21595,6 +21595,22 @@ mod tests {
             ) -> Result<Config, meerkat_core::config::ConfigError> {
                 self.inner.patch(delta).await
             }
+
+            async fn set_held(
+                &self,
+                guard: &meerkat_core::AdmissionGuard,
+                config: Config,
+            ) -> Result<(), meerkat_core::config::ConfigError> {
+                self.inner.set_held(guard, config).await
+            }
+
+            async fn patch_held(
+                &self,
+                guard: &meerkat_core::AdmissionGuard,
+                delta: meerkat_core::config::ConfigDelta,
+            ) -> Result<Config, meerkat_core::config::ConfigError> {
+                self.inner.patch_held(guard, delta).await
+            }
         }
 
         for recovering in [false, true] {
@@ -43717,6 +43733,7 @@ mod governed_host_original_tests {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("controller"),
                 principal("executor"),
@@ -43726,6 +43743,7 @@ mod governed_host_original_tests {
             .expect("controller lineage");
         let operation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("read-only"),
                 principal("executor"),

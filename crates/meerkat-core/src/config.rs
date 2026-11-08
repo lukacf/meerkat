@@ -3238,6 +3238,35 @@ pub enum ConfigError {
 
     #[error("realm inheritance chain error: {0}")]
     RealmChain(#[from] crate::connection::RealmChainError),
+
+    /// The document's admission fence (`crate::realm_admission`) is held,
+    /// by an admission or another fenced write, beyond this write's bound.
+    /// The write did not start and nothing was written. It may be retried,
+    /// though an admission's hold can last until the process holding it
+    /// restarts.
+    #[error(
+        "an admission is in progress for this config document; nothing was written; retry \
+         later (an admission's hold may last until its process restarts)"
+    )]
+    AdmissionInProgress,
+
+    /// The document's admission fence could not be opened, created, locked
+    /// or identity-checked, or the write's guard does not hold it. The write
+    /// did not start and nothing was written; it fails closed.
+    #[error("the config document's admission fence is unavailable; nothing was written: {0}")]
+    AdmissionFenceUnavailable(String),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<crate::realm_admission::AdmissionRefusal> for ConfigError {
+    fn from(refusal: crate::realm_admission::AdmissionRefusal) -> Self {
+        match refusal {
+            crate::realm_admission::AdmissionRefusal::InProgress => Self::AdmissionInProgress,
+            crate::realm_admission::AdmissionRefusal::Unavailable(unavailable) => {
+                Self::AdmissionFenceUnavailable(unavailable.to_string())
+            }
+        }
+    }
 }
 
 impl ConfigError {

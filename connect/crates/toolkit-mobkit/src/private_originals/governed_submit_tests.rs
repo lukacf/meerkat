@@ -647,6 +647,7 @@ impl Fixture {
         let grants = owner.grants();
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("controller"),
                 principal("agent"),
@@ -656,6 +657,7 @@ impl Fixture {
             .unwrap();
         let invocation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("invocation"),
                 principal("user"),
@@ -1626,6 +1628,7 @@ async fn controller_only_owner_refuses_operation_basis_before_persistence() {
     let grants = owner.grants();
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("controller"),
             principal("agent"),
@@ -1635,6 +1638,7 @@ async fn controller_only_owner_refuses_operation_basis_before_persistence() {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("operation"),
             principal("admin"),

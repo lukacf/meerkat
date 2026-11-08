@@ -163,6 +163,7 @@ pub(crate) fn issue_or_recover(
             let parent = match grants.issued_reference(id)? {
                 Some(parent) => parent,
                 None => grants.issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     id.clone(),
                     application.clone(),
@@ -221,6 +222,6 @@ pub(crate) fn issue_or_recover(
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
     })
 }

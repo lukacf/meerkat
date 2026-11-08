@@ -490,6 +490,8 @@ check made by the CLI itself, exits 1.
 | 55 | Approval commit outcome unknown (`APPROVAL_COMMIT_UNKNOWN`) |
 | 56 | Mob delivery scope is stale |
 | 57 | Fork refused by the host's fork instruction policy (`FORK_INSTRUCTION_REFUSED`, since 0.9.4) |
+| 58 | A write refused because a [realm admission fence](/concepts/realm-admission) it needs is held: a config write, `realm govern`, `realm grant`, `realm revoke-grant` or `realm delete`; nothing was written or removed (`ADMISSION_IN_PROGRESS`, since 0.9.11) |
+| 59 | A write refused because a realm admission fence it needs could not be used: a config write, `realm govern`, `realm grant`, `realm revoke-grant` or `realm delete`; nothing was written or removed (`ADMISSION_FENCE_UNAVAILABLE`, since 0.9.11) |
 
 A mob error with a typed console detail (codes 45-48 and 56) also prints one
 `detail:` line with that detail as JSON. Inspect the diagnostic or an

@@ -698,6 +698,7 @@ fn provision_selected_source(
             },
             Arc::new(FileGrantOwnerStore::new(
                 directory_path.join("grants.jsonl"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             Arc::new(HostAuthorizationClock),
             native.ingress_domain.clone(),
@@ -708,6 +709,7 @@ fn provision_selected_source(
             let parent = source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new("controller-parent").unwrap(),
                     native.grant_administrator.clone(),
@@ -730,6 +732,7 @@ fn provision_selected_source(
             let parent = source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new("helper-controller-parent").unwrap(),
                     native.grant_administrator.clone(),
@@ -766,6 +769,7 @@ fn provision_selected_source(
             let parent = source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new("warm-helper-catalog-parent").unwrap(),
                     native.grant_administrator.clone(),
@@ -990,7 +994,10 @@ pub(crate) fn configure_service_parent_before_restore(
     let directory = state_directory(selection, native, NativeOwnerStartup::Restore).unwrap();
     {
         let owner = ToolkitOriginalOwner::restore(
-            Arc::new(FileGrantOwnerStore::new(directory.join("grants.jsonl"))),
+            Arc::new(FileGrantOwnerStore::new(
+                directory.join("grants.jsonl"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+            )),
             Arc::new(HostAuthorizationClock),
             native.ingress_domain.clone(),
         )
@@ -1034,6 +1041,7 @@ pub(crate) fn configure_service_parent_before_restore(
         let parent = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new("stopped-service-parent").unwrap(),
                 native.grant_administrator.clone(),

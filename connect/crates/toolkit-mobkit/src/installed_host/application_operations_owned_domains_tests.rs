@@ -114,6 +114,7 @@ fn configured_authorities_keep_native_session_children_separate_across_restore()
         for (family, parent_bounds) in parents[..2].iter().enumerate() {
             let parent = grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id(&format!("app-{app_index}-family-{family}")),
                     application.clone(),
@@ -139,7 +140,11 @@ fn configured_authorities_keep_native_session_children_separate_across_restore()
                     requested: requested.clone(),
                 };
                 let ChildGrantOutcome::Issued { lineage } = grants
-                    .issue_or_recover_child_under_exclusion(&intent, open)
+                    .issue_or_recover_child_under_exclusion(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &intent,
+                        open,
+                    )
                     .unwrap()
                 else {
                     panic!("fresh child was not issued")
@@ -218,11 +223,19 @@ fn configured_authorities_keep_native_session_children_separate_across_restore()
                     ..intent.clone()
                 };
                 assert_eq!(
-                    grants.issue_or_recover_child_under_exclusion(&grandchild, open),
+                    grants.issue_or_recover_child_under_exclusion(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &grandchild,
+                        open
+                    ),
                     Err(ChildGrantRefusal::Denied)
                 );
                 assert_eq!(
-                    grants.issue_or_recover_child_under_exclusion(&intent, open),
+                    grants.issue_or_recover_child_under_exclusion(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &intent,
+                        open
+                    ),
                     Ok(ChildGrantOutcome::Recovered {
                         lineage: lineage.clone()
                     })
@@ -237,7 +250,11 @@ fn configured_authorities_keep_native_session_children_separate_across_restore()
                     ..intent.clone()
                 };
                 assert_eq!(
-                    grants.issue_or_recover_child_under_exclusion(&foreign_intent, open),
+                    grants.issue_or_recover_child_under_exclusion(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &foreign_intent,
+                        open
+                    ),
                     Err(ChildGrantRefusal::Denied)
                 );
                 assert_eq!(std::fs::read(&path).unwrap(), journal);
@@ -273,7 +290,10 @@ fn configured_authorities_keep_native_session_children_separate_across_restore()
     drop(grants);
     drop(source);
     let restored = ToolkitOriginalOwner::restore(
-        Arc::new(FileGrantOwnerStore::new(&path)),
+        Arc::new(FileGrantOwnerStore::new(
+            &path,
+            meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+        )),
         Arc::new(HostAuthorizationClock),
         domain,
     )
@@ -281,7 +301,11 @@ fn configured_authorities_keep_native_session_children_separate_across_restore()
     for (intent, lineage, expected, own, other_session, other_app) in retained {
         let grants = restored.grants();
         assert_eq!(
-            grants.issue_or_recover_child_under_exclusion(&intent, open),
+            grants.issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &intent,
+                open
+            ),
             Ok(ChildGrantOutcome::Recovered {
                 lineage: lineage.clone()
             })

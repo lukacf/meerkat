@@ -192,6 +192,7 @@ fn grant(fixture: &Fixture, id_name: &str, actions: &[&str]) -> GrantLineageRef 
     fixture
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id(id_name),
             who("executor"),
@@ -441,6 +442,7 @@ async fn a_delegated_search_never_uses_the_controller_route_permission() {
     let controller = fixture
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("controller-route"),
             who("executor"),
@@ -514,14 +516,24 @@ async fn a_delegated_search_never_uses_the_controller_route_permission() {
 
     fixture
         .grants
-        .revoke(&who("root"), &controller, &mut NoCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &controller,
+            &mut NoCustody,
+        )
         .expect("revoke the controller grant");
     delegate(&fixture.context(&policy, &selected), same_route.clone())
         .await
         .expect("the controller grant never authorized it");
     fixture
         .grants
-        .revoke(&who("root"), &own, &mut NoCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &own,
+            &mut NoCustody,
+        )
         .expect("revoke its own grant");
     let result = delegate(&fixture.context(&policy, &selected), same_route).await;
     assert!(is_denied(&result), "{result:?}");
@@ -626,7 +638,12 @@ async fn revoking_the_call_lineage_keeps_an_entered_invocations_helper() {
     .expect("the call entered and minted its delegate");
     fixture
         .grants
-        .revoke(&who("root"), &call, &mut NoCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &call,
+            &mut NoCustody,
+        )
         .expect("revoke the call's own lineage");
     assert!(
         matches!(
@@ -649,7 +666,12 @@ async fn revoking_the_call_lineage_keeps_an_entered_invocations_helper() {
         .expect("still current at its own entry check");
     fixture
         .grants
-        .revoke(&who("root"), &own, &mut NoCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &own,
+            &mut NoCustody,
+        )
         .expect("revoke the helper's own lineage");
     let result = prepared.current();
     assert!(
@@ -741,6 +763,7 @@ async fn a_selected_lineage_keeps_its_time_operation_and_data_restrictions() {
         fixture
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(&name),
                 who("executor"),

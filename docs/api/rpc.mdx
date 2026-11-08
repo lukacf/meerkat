@@ -3638,6 +3638,8 @@ and `data`, never on the message text.
 | -32035 | Approval commit unknown | The store cannot confirm the commit; reconcile from the store, never resend |
 | -32036 | Stale delivery scope | A scope-bound mob submit named a session that is no longer the member's; re-capture the delivery scope |
 | -32037 | Fork instruction refused | A fork was refused before commit because its child would inherit activated instructions that the fork instruction policy does not carry into it; `data.fork_instruction_refusal` names the cause and keys. Nothing was committed |
+| -32038 | Admission in progress | A realm admission fence the request needs is held, by an admission or another fenced write, beyond the request's bound: `config/set` and `config/patch` (with or without a config runtime). Nothing started and nothing was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts, so an immediate retry is not promised to succeed |
+| -32039 | Admission fence unavailable | A realm admission fence the request needs could not be opened, created, locked or identity-checked. Nothing started and nothing was written (fail closed) |
 
 ### comms/send error data
 

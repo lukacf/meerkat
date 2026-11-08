@@ -1370,6 +1370,16 @@ async fn init_project_config() -> anyhow::Result<()> {
 
     if !global_path.exists() {
         let _ = meerkat_core::FileConfigStore::global(meerkat_models::canonical()).await?;
+        // The store creates the document only while its admission fence and
+        // custody are free: a holder leaves it missing.
+        if !global_path.exists() {
+            anyhow::bail!(
+                "The user configuration at {} could not be created now: an admission or \
+                 another writer holds it, or its admission fence cannot be used. Nothing was \
+                 written; retry later (an admission's hold may last until its process restarts).",
+                global_path.display()
+            );
+        }
     }
 
     let project_config = rkat_dir.join("config.toml");
@@ -2521,6 +2531,31 @@ enum StorageCommands {
         /// roots are read.
         #[arg(long = "root", value_name = "PATH")]
         roots: Vec<PathBuf>,
+    },
+
+    /// Report whether each directory's filesystem can host an admission fence
+    ///
+    /// Runs, in this process's own view of the filesystem, the one predicate
+    /// that admission fence writers, holders and verifiers use
+    /// (`meerkat_core::realm_admission::directory_hosts_fences`), and prints
+    /// one JSON object per directory, one per line, in argument order, and
+    /// nothing else on stdout: `{"dir": PATH, "hosts": true|false}`, or
+    /// `{"dir": PATH, "unavailable": {"kind": KIND, "cause": TEXT}}` when the
+    /// directory's filesystem could not be inspected (a directory that does
+    /// not exist, for one). KIND is a stable snake_case name; TEXT is for
+    /// people. PATH is the argument as given (lossy UTF-8).
+    ///
+    /// It runs before any realm, state, config or auth initialization and
+    /// reads and writes nothing but the directories' filesystem facts; it
+    /// takes no global option.
+    ///
+    /// Exit codes: 0 = every directory was evaluated, whatever the answers;
+    /// 1 = the report could not be written; 2 = usage error, or the process
+    /// could not start at all (as for every command).
+    HostsFences {
+        /// The directories to evaluate.
+        #[arg(value_name = "DIR", required = true)]
+        directories: Vec<PathBuf>,
     },
 }
 
@@ -4411,6 +4446,18 @@ fn main() -> anyhow::Result<ExitCode> {
 #[allow(clippy::large_futures)]
 async fn cli_main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
+    // `rkat storage hosts-fences` answers from its directory arguments
+    // alone, before tracing and before any realm, state, config, auth or
+    // migration step: a qualification probe is never a first state open.
+    if let Some(Commands::Storage {
+        command: StorageCommands::HostsFences { directories },
+    }) = &cli.command
+    {
+        return Ok(storage_hosts_fences(
+            directories,
+            normalize_cli_args(std::env::args_os()),
+        ));
+    }
     let auth_config_realm = if matches!(&cli.command, Some(Commands::Auth { .. })) {
         cli.realm.clone()
     } else {
@@ -6089,6 +6136,38 @@ impl ConfigStore for CliConfigDocStore {
         self.report(&warnings);
         Ok((config, warnings))
     }
+
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.inner.admission_fence()
+    }
+
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), meerkat_core::config::ConfigError> {
+        self.inner.set_held(guard, config).await
+    }
+
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, meerkat_core::config::ConfigError> {
+        self.patch_held_with_warnings(guard, delta)
+            .await
+            .map(|(config, _)| config)
+    }
+
+    async fn patch_held_with_warnings(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
+        let (config, warnings) = self.inner.patch_held_with_warnings(guard, delta).await?;
+        self.report(&warnings);
+        Ok((config, warnings))
+    }
 }
 
 async fn load_config_with_warnings(
@@ -6245,7 +6324,7 @@ async fn handle_config_set(
     let snapshot = runtime
         .set(config, expected_generation)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+        .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to persist config: {e}")))?;
     println!("generation={}", snapshot.generation);
     Ok(())
 }
@@ -6301,7 +6380,9 @@ async fn handle_set_default_model(model: &str, scope: &RuntimeScope) -> anyhow::
             None,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist default model: {e}"))?;
+        .map_err(|e| {
+            exit_status::typed_failure(e, |e| format!("Failed to persist default model: {e}"))
+        })?;
     println!(
         "Default model set to {model} ({}) [generation {}]",
         provider.as_str(),
@@ -6335,7 +6416,7 @@ async fn handle_config_patch(
     let snapshot = runtime
         .patch(ConfigDelta(patch_value), expected_generation)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
+        .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to patch config: {e}")))?;
     println!("generation={}", snapshot.generation);
     Ok(())
 }
@@ -8232,10 +8313,11 @@ async fn noninteractive_copilot_login(
         }
     };
     if config_changed {
-        config_store
-            .set(config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write the GitHub Copilot routes: {e}"))?;
+        config_store.set(config).await.map_err(|e| {
+            exit_status::typed_failure(e, |e| {
+                format!("Failed to write the GitHub Copilot routes: {e}")
+            })
+        })?;
     }
     let routes = meerkat_copilot::CopilotProviderRoute::ALL
         .map(|route| format!("global:{}", route.binding_id()))
@@ -9263,10 +9345,11 @@ async fn interactive_login(
     let config_changed = ensure_cli_interactive_oauth_config(provider, &mut config)?;
     let target = resolve_configured_cli_interactive_oauth_target(provider, &config)?;
     if config_changed {
-        config_store
-            .set(config.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to persist OAuth login target config: {e}"))?;
+        config_store.set(config.clone()).await.map_err(|e| {
+            exit_status::typed_failure(e, |e| {
+                format!("Failed to persist OAuth login target config: {e}")
+            })
+        })?;
     }
     tracing::debug!(
         realm = %target.auth_binding.realm.as_str(),
@@ -10139,6 +10222,104 @@ async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow:
             json,
             roots,
         } => handle_storage_prune(cli, *apply, *older_than_days, *json, roots).await,
+        // Dispatched first thing in `cli_main`, before any of this.
+        StorageCommands::HostsFences { .. } => Err(anyhow::anyhow!(
+            "`rkat storage hosts-fences` is dispatched before any other step"
+        )),
+    }
+}
+
+/// `rkat storage hosts-fences`: one JSON line per directory, in argument
+/// order ([`StorageHostsFencesLine`]), and nothing else on stdout. It takes
+/// no global option: each names state this command never reads, so `args`
+/// (the command line) giving one is a usage error.
+fn storage_hosts_fences(directories: &[PathBuf], args: Vec<std::ffi::OsString>) -> ExitCode {
+    use std::io::Write as _;
+    let given = storage_hosts_fences_global_options(args);
+    if !given.is_empty() {
+        eprintln!(
+            "error: `rkat storage hosts-fences` takes only its directories, not {}",
+            given.join(", ")
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let mut stdout = std::io::stdout().lock();
+    for directory in directories {
+        let written = serde_json::to_string(&StorageHostsFencesLine::of(directory))
+            .map_err(std::io::Error::other)
+            .and_then(|line| writeln!(stdout, "{line}"));
+        if let Err(error) = written {
+            eprintln!("error: the hosts-fences report could not be written: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    }
+    if let Err(error) = stdout.flush() {
+        eprintln!("error: the hosts-fences report could not be written: {error}");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    ExitCode::from(EXIT_SUCCESS)
+}
+
+/// The global options the command line `args` gives explicitly, as their
+/// long names. A command line that does not parse again counts as giving
+/// one (it parsed once already, so this does not happen).
+fn storage_hosts_fences_global_options(args: Vec<std::ffi::OsString>) -> Vec<String> {
+    let command = <Cli as clap::CommandFactory>::command();
+    let Ok(matches) = command.clone().try_get_matches_from(args) else {
+        return vec!["an option".to_string()];
+    };
+    command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .filter(|arg| {
+            matches.value_source(arg.get_id().as_str())
+                == Some(clap::parser::ValueSource::CommandLine)
+        })
+        .map(|arg| {
+            arg.get_long()
+                .map_or_else(|| arg.get_id().to_string(), |long| format!("--{long}"))
+        })
+        .collect()
+}
+
+/// One line of `rkat storage hosts-fences`: a directory and the answer of
+/// `meerkat_core::realm_admission::directory_hosts_fences` for it, or the
+/// typed reason there is none. Its fields serialize in this order.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum StorageHostsFencesLine {
+    Answered {
+        dir: String,
+        hosts: bool,
+    },
+    Unavailable {
+        dir: String,
+        unavailable: StorageHostsFencesUnavailable,
+    },
+}
+
+/// Why `directory_hosts_fences` has no answer for a directory.
+#[derive(Debug, serde::Serialize)]
+struct StorageHostsFencesUnavailable {
+    /// The cause's stable snake_case kind.
+    kind: &'static str,
+    /// The cause, for people.
+    cause: String,
+}
+
+impl StorageHostsFencesLine {
+    fn of(directory: &Path) -> Self {
+        let dir = directory.to_string_lossy().into_owned();
+        match meerkat_core::realm_admission::directory_hosts_fences(directory) {
+            Ok(hosts) => Self::Answered { dir, hosts },
+            Err(unavailable) => Self::Unavailable {
+                dir,
+                unavailable: StorageHostsFencesUnavailable {
+                    kind: unavailable.cause.kind(),
+                    cause: unavailable.cause.to_string(),
+                },
+            },
+        }
     }
 }
 
@@ -11350,6 +11531,14 @@ async fn delete_realm(
     realm_id: &str,
     force: bool,
 ) -> anyhow::Result<()> {
+    // The realm's admission fence first, without waiting and before the
+    // lease check: an admission's hold refuses the delete whatever --force
+    // says (it overrides heartbeat leases only). It is held through the
+    // removal: only delete, prune and the migration archive remove a live
+    // admission.lock, and only while they hold it.
+    let _fence = realm_removal_fence(state_root, realm_id).map_err(|refusal| {
+        anyhow::Error::new(refusal).context(format!("Failed to delete realm '{realm_id}'"))
+    })?;
     let children = realms_naming_parent(state_root, realm_id).await?;
     if !children.is_empty() {
         return Err(RealmIsParent {
@@ -11376,6 +11565,27 @@ async fn delete_realm(
         .map_err(|e| anyhow::anyhow!("Failed to delete realm '{realm_id}': {e}"))?;
     println!("Deleted realm '{realm_id}'");
     Ok(())
+}
+
+/// R, the admission fence of `realm_id` under `state_root`, taken EXCLUSIVE
+/// without waiting for a removal of the realm's directory: held by an
+/// admission or another fenced operation, it refuses
+/// ([`meerkat_core::AdmissionRefusal::InProgress`]).
+fn realm_removal_fence(
+    state_root: &std::path::Path,
+    realm_id: &str,
+) -> Result<Arc<meerkat_core::AdmissionGuard>, meerkat_core::AdmissionRefusal> {
+    let realm = meerkat_core::connection::RealmId::parse(realm_id).map_err(|_| {
+        meerkat_core::AdmissionRefusal::Unavailable(meerkat_core::FenceUnavailable {
+            path: state_root
+                .join(meerkat_core::sanitize_realm_id(realm_id))
+                .join(meerkat_core::realm_admission::ADMISSION_LOCK_FILE),
+            cause: meerkat_core::FenceUnavailableCause::InvalidName,
+        })
+    })?;
+    meerkat_core::AdmissionGuard::try_acquire(vec![meerkat_core::AdmissionFence::realm(
+        state_root, &realm,
+    )?])
 }
 
 async fn remove_realm_root_with_retries(
@@ -11486,6 +11696,22 @@ async fn prune_realms_inner(
             continue;
         }
 
+        // The realm's admission fence first, without waiting and before the
+        // lease check, held through the removal: a realm an admission holds
+        // is kept as an active one, whatever --force says.
+        let _fence = match realm_removal_fence(state_root, manifest.realm.as_str()) {
+            Ok(fence) => fence,
+            Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                outcome.skipped_active += 1;
+                continue;
+            }
+            Err(refusal) => {
+                outcome
+                    .leftovers
+                    .push(format!("{} ({refusal})", manifest.realm));
+                continue;
+            }
+        };
         let lease_status =
             meerkat_store::inspect_realm_leases_in(state_root, manifest.realm.as_str(), true)
                 .await
@@ -11712,6 +11938,11 @@ async fn grant_realm_agent(
         Err(StockGrantError::Refused(error)) => {
             anyhow::bail!("nothing was issued, selected or revoked: {error}")
         }
+        // Typed in the chain: the exit status reads the fence's code.
+        Err(
+            error @ (StockGrantError::AdmissionInProgress
+            | StockGrantError::AdmissionFenceUnavailable(_)),
+        ) => return Err(error.into()),
         Err(StockGrantError::SelectionUncertain {
             issued, previous, ..
         }) => {
@@ -20091,7 +20322,7 @@ async fn patch_cli_skills(
             Some(generation),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+        .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to persist config: {e}")))?;
     Ok(())
 }
 
@@ -38466,6 +38697,98 @@ supports_reasoning = true
         assert!(forced.is_ok(), "delete --force should proceed");
     }
 
+    /// An admission's hold of the realm's fence refuses `rkat realm delete`,
+    /// with or without `--force` (which overrides heartbeat leases only),
+    /// typed (exit 58) and before the lease check: the realm and its
+    /// `admission.lock` stay. Once the hold ends, the delete proceeds.
+    #[tokio::test]
+    async fn realm_delete_force_refuses_while_the_fence_is_held_and_keeps_admission_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "held-realm";
+        meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+        let fence = meerkat_core::AdmissionFence::realm(
+            &state_root,
+            &meerkat_core::connection::RealmId::parse(realm_id).expect("realm id"),
+        )
+        .expect("the realm's fence");
+        fence.ensure_exists().expect("the fence a holder needs");
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+            .expect("an admission holds the realm's fence");
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        for force in [false, true] {
+            let refused = delete_realm(&state_root, realm_id, force)
+                .await
+                .expect_err("an admission's hold refuses the delete");
+            assert_eq!(
+                crate::exit_status::failure_exit_status(&refused),
+                58,
+                "force {force}: {refused:#}"
+            );
+            assert!(fence.path().exists(), "force {force}: admission.lock stays");
+            assert!(
+                paths.manifest_path.exists(),
+                "force {force}: the realm stays"
+            );
+        }
+        hold.release();
+        delete_realm(&state_root, realm_id, false)
+            .await
+            .expect("deleted once the hold ended");
+        assert!(!paths.root.exists());
+    }
+
+    /// Prune keeps a realm an admission holds, counted as active whatever
+    /// `--force` says, with its `admission.lock`, and removes the free one.
+    #[tokio::test]
+    async fn realm_prune_skips_a_held_realm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        for realm_id in ["held", "free"] {
+            meerkat_store::ensure_realm_manifest_in(
+                &state_root,
+                realm_id,
+                Some(meerkat_store::RealmBackend::Sqlite),
+                Some(meerkat_store::RealmOrigin::Generated),
+            )
+            .await
+            .expect("create manifest");
+        }
+        let fence = meerkat_core::AdmissionFence::realm(
+            &state_root,
+            &meerkat_core::connection::RealmId::parse("held").expect("realm id"),
+        )
+        .expect("the realm's fence");
+        fence.ensure_exists().expect("the fence a holder needs");
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+            .expect("an admission holds the realm's fence");
+        let outcome = prune_realms_inner(&state_root, true, 0, true)
+            .await
+            .expect("prune");
+        hold.release();
+        assert_eq!(outcome.removed, 1, "{outcome:?}");
+        assert_eq!(outcome.skipped_active, 1, "{outcome:?}");
+        assert!(outcome.leftovers.is_empty(), "{outcome:?}");
+        assert!(fence.path().exists(), "the held realm keeps admission.lock");
+        assert!(
+            meerkat_store::realm_paths_in(&state_root, "held")
+                .manifest_path
+                .exists()
+        );
+        assert!(
+            !meerkat_store::realm_paths_in(&state_root, "free")
+                .root
+                .exists()
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_prune_inner_reports_leftovers_on_partial_failure() {
@@ -39013,6 +39336,47 @@ supports_reasoning = true
                 .collect::<Vec<_>>(),
             vec!["parent-src"]
         );
+    }
+
+    /// A config writer the realm's admission fence refuses keeps the typed
+    /// error in the chain: `rkat skill add` under a held fence exits 58
+    /// (`ADMISSION_IN_PROGRESS`), with the realm's document unchanged.
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn skill_add_under_a_held_realm_fence_exits_58() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(dir.path().to_path_buf(), "child");
+        let source = dir.path().join("child-skills");
+        tokio::fs::create_dir_all(&source)
+            .await
+            .expect("create skill source dir");
+        write_policy_parent_and_child_realm_docs(dir.path(), "").await;
+        let (before, _) = realm_doc(dir.path(), "child").await;
+        let fence = meerkat_core::AdmissionFence::realm(
+            dir.path(),
+            &meerkat_core::connection::RealmId::parse("child").expect("realm id"),
+        )
+        .expect("the realm's fence");
+        fence.ensure_exists().expect("the fence a holder needs");
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence])
+            .expect("an admission holds the realm's fence");
+        let error = handle_skills_command(
+            SkillsCommands::Add {
+                path: source.display().to_string(),
+                name: Some("child-src".to_string()),
+            },
+            &scope,
+        )
+        .await
+        .expect_err("a held fence refuses the write");
+        hold.release();
+        assert_eq!(
+            crate::exit_status::failure_exit_status(&error),
+            58,
+            "{error:#}"
+        );
+        let (after, _) = realm_doc(dir.path(), "child").await;
+        assert_eq!(after, before, "nothing was written");
     }
 
     async fn config_generation(scope: &RuntimeScope) -> u64 {

@@ -560,6 +560,12 @@ fn outcome_facts(outcome: &Outcome) -> Value {
         Outcome::Grant(Err(StockGrantError::Refused(reason))) => {
             json!({"state":"refused","reason_kind":grant_refusal_tag(reason),"issued":false,"selection_changed":false})
         }
+        Outcome::Grant(Err(StockGrantError::AdmissionInProgress)) => {
+            json!({"state":"refused","reason_kind":"AdmissionInProgress","issued":false,"selection_changed":false})
+        }
+        Outcome::Grant(Err(StockGrantError::AdmissionFenceUnavailable(_))) => {
+            json!({"state":"refused","reason_kind":"AdmissionFenceUnavailable","issued":false,"selection_changed":false})
+        }
         Outcome::Grant(Err(StockGrantError::IssuanceUncertain { id })) => {
             json!({"state":"issuance_uncertain","possibly_issued_id":id,"selection_changed":false})
         }

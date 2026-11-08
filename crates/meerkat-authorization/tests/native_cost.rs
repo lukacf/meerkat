@@ -866,6 +866,7 @@ fn issue_lineage(
     assert!((1..=3).contains(&depth));
     let root = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id(&format!("{label}-0")),
             principal("executor"),
@@ -877,6 +878,7 @@ fn issue_lineage(
     for index in 1..depth {
         let next = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("executor"),
                 chain.last().unwrap(),
                 id(&format!("{label}-{index}")),
@@ -1414,6 +1416,7 @@ async fn native_cost_correctness() {
                 .as_ref()
                 .expect("real grants")
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("grant-owner"),
                     fixture.operation.last().unwrap(),
                     &mut custody,

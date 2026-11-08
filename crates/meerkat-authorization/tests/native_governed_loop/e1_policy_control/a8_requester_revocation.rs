@@ -491,6 +491,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         ExactRestriction::exact([action("append"), action("delete"), action("read")]);
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("a8-controller"),
             principal("executor"),
@@ -500,6 +501,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("a8-operations"),
             principal("executor"),

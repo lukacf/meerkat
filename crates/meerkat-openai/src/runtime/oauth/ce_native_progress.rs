@@ -663,6 +663,7 @@ async fn exercise(paused_refresh: bool) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -672,6 +673,7 @@ async fn exercise(paused_refresh: bool) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("operation"),
             principal("executor"),

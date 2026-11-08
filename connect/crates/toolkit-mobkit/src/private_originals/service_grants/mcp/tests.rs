@@ -108,6 +108,7 @@ async fn selected_adapter_for_decision(
     let parent = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &operator,
             EvidenceId::new("application-parent").unwrap(),
             app(),
@@ -755,6 +756,7 @@ async fn narrowed_intermediate_parent_cannot_restore_removed_connector_approval(
     let root = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &operator,
             EvidenceId::new("approved-root").unwrap(),
             app(),
@@ -780,6 +782,7 @@ async fn narrowed_intermediate_parent_cannot_restore_removed_connector_approval(
     let child = owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &app(),
             &root,
             EvidenceId::new("narrowed-parent").unwrap(),

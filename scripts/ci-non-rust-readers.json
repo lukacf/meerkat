@@ -10,6 +10,19 @@
     "./": [
       {
         "package": "meerkat",
+        "target": "test:admission_fence_sites",
+        "scope": "target",
+        "tests": [
+          "bound_store_write_primitives_all_take_an_admission_guard",
+          "fence_acquisition_sites_are_exactly_the_listed_outermost_entries",
+          "raw_held_writes_are_called_only_from_config_runtime"
+        ],
+        "sources": [
+          "crates/meerkat/tests/admission_fence_sites.rs"
+        ]
+      },
+      {
+        "package": "meerkat",
         "target": "test:host_launch_sites",
         "scope": "target",
         "tests": [

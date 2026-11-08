@@ -29,6 +29,32 @@ fn retained_original(name: &str) -> RetainedOriginal {
     }
 }
 
+/// A guard over `grants`' own admission fences, for an administrative
+/// mutation of the fixture: none for an owner in memory, the grant log's
+/// fence for a fenced one.
+fn guard_of(grants: &LocalGrantAuthority) -> Arc<meerkat_core::AdmissionGuard> {
+    meerkat_core::AdmissionGuard::try_acquire(grants.admission_fences())
+        .expect("the grant log's fence")
+}
+
+/// R of the realm `fenced` under `state_root`: the fence of that realm's own
+/// grant log.
+fn realm_fence(state_root: &std::path::Path) -> meerkat_core::AdmissionFence {
+    meerkat_core::AdmissionFence::realm(
+        state_root,
+        &meerkat_core::connection::RealmId::parse("fenced").expect("realm id"),
+    )
+    .expect("the realm's fence")
+}
+
+/// The grant log `fence` covers, where a realm keeps its own.
+fn grant_log(fence: &meerkat_core::AdmissionFence) -> std::path::PathBuf {
+    fence
+        .directory()
+        .join("authorization")
+        .join("grant-owner.jsonl")
+}
+
 /// The native clock, set explicitly; never a sleep. The wall and monotonic
 /// readings move independently; `jump_at` moves the wall clock to `jump_to`
 /// on that exact read (counted from the clock's creation), so an expiry can
@@ -111,21 +137,52 @@ impl Fixture {
 
     /// The fixture with `operation_owner` as the records operation owner.
     fn new_with(operation_owner: Arc<dyn OperationPolicyOwner>) -> Self {
+        Self::compose(operation_owner, None)
+    }
+
+    /// The fixture whose grant owner is a durable grant log fenced by
+    /// `fence`, as a realm's own grant log is ([`grant_log`]).
+    fn fenced(fence: &meerkat_core::AdmissionFence) -> Self {
+        Self::compose(Arc::new(Records), Some(fence))
+    }
+
+    fn compose(
+        operation_owner: Arc<dyn OperationPolicyOwner>,
+        fence: Option<&meerkat_core::AdmissionFence>,
+    ) -> Self {
         let (ledger, publication) = ledger();
         let root = principal("grant-owner");
         let clock = Arc::new(Settable::new(100));
-        let grants = Arc::new(
-            LocalGrantAuthority::new(
-                LocalGrantConfiguration {
-                    root: root.clone(),
-                    namespace: id("controller"),
-                    generation: 1,
-                },
+        let configuration = LocalGrantConfiguration {
+            root: root.clone(),
+            namespace: id("controller"),
+            generation: 1,
+        };
+        let grants = Arc::new(match fence {
+            None => LocalGrantAuthority::new(
+                configuration,
                 publication.clone(),
                 Arc::clone(&clock) as Arc<dyn LocalAuthorizationClock>,
             )
             .expect("grant owner on the ledger's publication"),
-        );
+            Some(fence) => {
+                let log = grant_log(fence);
+                std::fs::create_dir_all(log.parent().expect("the log's directory"))
+                    .expect("the realm's authorization directory");
+                LocalGrantAuthority::new_durable(
+                    &meerkat_core::AdmissionGuard::try_acquire(vec![fence.clone()])
+                        .expect("the grant log's fence"),
+                    configuration,
+                    Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
+                        log,
+                        meerkat_authorization::grants::GrantLogFence::Realm(fence.clone()),
+                    )),
+                    publication.clone(),
+                    Arc::clone(&clock) as Arc<dyn LocalAuthorizationClock>,
+                )
+                .expect("durable grant owner on the ledger's publication")
+            }
+        });
         let configuration = ScopedGrantComposition {
             grants: Arc::clone(&grants),
             ingress_domain: namespace("x").ingress,
@@ -143,6 +200,7 @@ impl Fixture {
         let controller = |name: &str| {
             grants
                 .issue_root(
+                    &guard_of(&grants),
                     &root,
                     id(name),
                     principal("controller"),
@@ -240,6 +298,7 @@ impl Fixture {
         let lineage = self
             .grants
             .issue_root(
+                &guard_of(&self.grants),
                 &self.root,
                 id(name),
                 principal("executor"),
@@ -470,7 +529,12 @@ async fn every_originating_source_and_the_parent_are_conjuncts() {
 
     fixture
         .grants
-        .revoke(&fixture.root, &fixture.parent, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &fixture.root,
+            &fixture.parent,
+            &mut NoController,
+        )
         .expect("the independent parent is revoked");
     let orphaned =
         fixture.unchanged(|| fixture.issuance("after-revoke", &["p"]).issue_or_recover());
@@ -1591,7 +1655,12 @@ async fn an_entered_step_is_denied_once_a_further_grant_is_revoked() {
         .expect("lookup")
         .expect("the further original's grant");
     f.grants
-        .revoke(&f.root, &lineage, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut NoController,
+        )
         .expect("the further original's grant is revoked");
     assert_entered_steps_denied(&f, &entered, &["s"], "revoked").await;
 }
@@ -1972,6 +2041,176 @@ async fn a_waiting_child_issuance_waits_out_a_held_exclusion_then_issues() {
             "{name}: a retried intent recovers it: nothing was appended twice"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The grant log's admission fence: held by an admission, it refuses child
+// issuance before anything is decided or appended, typed.
+// ---------------------------------------------------------------------------
+
+/// Under an admission's hold of the grant log's fence, the prepared path
+/// answers `AdmissionInProgress` at once, and the work owner of the
+/// dispatch and entered paths answers its typed marker, each before
+/// anything is decided or appended and with no owner change published;
+/// once the hold ends, the same intent issues.
+#[test]
+fn child_issuance_try_refuses_under_a_held_fence_with_nothing_appended() {
+    use meerkat_authorization::work::FurtherOriginals;
+    use meerkat_core::authorization::{ChildIssuanceAdmissionInProgress, OperationReviewTier};
+    use meerkat_runtime::meerkat_machine::SourceOriginalBasis;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fence = realm_fence(directory.path());
+    let f = Fixture::fenced(&fence);
+    f.source("p", ExecutionRestrictions::unrestricted());
+    let before = std::fs::read(grant_log(&fence)).expect("the grant log");
+    let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+        .expect("an admission holds the grant log's fence");
+
+    assert_eq!(
+        f.unchanged(|| f.issuance("helper-child", &["p"]).issue_or_recover()),
+        Err(HelperChildIssuanceRefusal::AdmissionInProgress),
+        "the prepared path answers at once, typed"
+    );
+    let further = FurtherOriginals {
+        originals: Arc::from([retained_original("p")]),
+        source: Arc::new(SourceOriginalBasis::new(f.ledger.clone())),
+    };
+    let answer = f
+        .unchanged(|| {
+            f.context.authorization().issue_child_if_current_within(
+                f.setup.binding(),
+                f.setup.validity().as_ref(),
+                &further,
+                &f.intent("helper-child"),
+                OperationReviewTier::R1,
+            )
+        })
+        .expect("the work owner answers");
+    assert!(
+        answer.is::<ChildIssuanceAdmissionInProgress>(),
+        "the work owner answers its typed marker, never an outcome"
+    );
+    assert_eq!(
+        std::fs::read(grant_log(&fence)).expect("the grant log"),
+        before,
+        "nothing was appended"
+    );
+    assert!(f.issued("helper-child").is_none());
+
+    hold.release();
+    assert!(
+        matches!(
+            f.issuance("helper-child", &["p"]).issue_or_recover(),
+            Ok(ChildGrantOutcome::Issued { .. })
+        ),
+        "issued once the hold ended"
+    );
+}
+
+/// A fresh governed dispatch in the fixture's work, and the issuance of the
+/// child `name` from its own operation (`entered` false) or from a step of
+/// its entered operation (`entered` true). Each issuance has a dispatch of
+/// its own, so each waiting form has the call's whole tool time.
+fn fenced_issuance(
+    f: &Fixture,
+    entered: bool,
+    name: &str,
+) -> (Dispatch, GovernedHelperChildIssuance) {
+    let dispatch = Dispatch::new(&f.context);
+    let issuance = if entered {
+        entered_issuance(f, &dispatch.enter(), &["s"], name)
+    } else {
+        GovernedHelperChildIssuance::from_dispatch(
+            dispatch.call(),
+            &dispatch.context,
+            f.ledger.clone(),
+            retained_originals(&["s"]),
+            f.intent(name),
+        )
+        .expect("the dispatch's own operation builds the issuance")
+    };
+    (dispatch, issuance)
+}
+
+/// A dispatch's own child issuance and a step of its entered operation meet
+/// an admission's hold of the grant log's fence. The synchronous form
+/// answers `AdmissionInProgress` at once; the waiting form meets the hold
+/// and waits it out within the step's bound (its first poll is pending),
+/// then issues the child once the hold ends.
+#[tokio::test]
+async fn a_waiting_child_issuance_waits_out_a_held_admission_fence_then_issues() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fence = realm_fence(directory.path());
+    let f = Fixture::fenced(&fence);
+    f.source("s", ExecutionRestrictions::unrestricted());
+    for (entered, name) in [(false, "dispatch-waited"), (true, "entered-waited")] {
+        let (_dispatch, issuance) = fenced_issuance(&f, entered, name);
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+            .expect("an admission holds the grant log's fence");
+        assert_eq!(
+            issuance.issue_or_recover(),
+            Err(HelperChildIssuanceRefusal::AdmissionInProgress),
+            "{name}: the synchronous form answers at once, typed"
+        );
+        let mut waiting = std::pin::pin!(issuance.issue_or_recover_after_owner_change());
+        assert!(
+            futures::poll!(waiting.as_mut()).is_pending(),
+            "{name}: the waiting form met the hold and waits for it"
+        );
+        hold.release();
+        assert!(
+            matches!(waiting.await, Ok(ChildGrantOutcome::Issued { .. })),
+            "{name}: issued once the hold ended, within the step's bound"
+        );
+        assert!(f.issued(name).is_some(), "{name}: the child is retained");
+    }
+}
+
+/// Held past the step's bounds, the waiting form answers the typed
+/// `AdmissionInProgress`, never `Unavailable` or `Denied`: it waited (its
+/// first poll is pending), answered once the step's bounds were spent (its
+/// free rebuilds, within its deadline: the call's tool time, 1 s here,
+/// under the owner-change bound), and issued nothing.
+#[tokio::test]
+async fn a_held_admission_fence_answers_admission_in_progress_at_the_bound_with_nothing_issued() {
+    use meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fence = realm_fence(directory.path());
+    let f = Fixture::fenced(&fence);
+    f.source("s", ExecutionRestrictions::unrestricted());
+    let before = std::fs::read(grant_log(&fence)).expect("the grant log");
+    let bound = std::time::Duration::from_secs(1).min(OWNER_CHANGE_WAIT_BOUND);
+    let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+        .expect("an admission holds the grant log's fence");
+    for (entered, name) in [(false, "dispatch-held"), (true, "entered-held")] {
+        let (_dispatch, issuance) = fenced_issuance(&f, entered, name);
+        let started = std::time::Instant::now();
+        let mut waiting = std::pin::pin!(issuance.issue_or_recover_after_owner_change());
+        assert!(
+            futures::poll!(waiting.as_mut()).is_pending(),
+            "{name}: the waiting form waits"
+        );
+        let answer = waiting.await;
+        let waited = started.elapsed();
+        assert_eq!(
+            answer,
+            Err(HelperChildIssuanceRefusal::AdmissionInProgress),
+            "{name}: typed at the bound, never Unavailable or Denied"
+        );
+        assert!(
+            waited <= bound + std::time::Duration::from_millis(500),
+            "{name}: answered by the step's bound: {waited:?}"
+        );
+        assert!(f.issued(name).is_none(), "{name}: nothing issued");
+    }
+    assert_eq!(
+        std::fs::read(grant_log(&fence)).expect("the grant log"),
+        before,
+        "nothing was appended"
+    );
+    hold.release();
 }
 
 // ---------------------------------------------------------------------------

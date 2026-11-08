@@ -35,6 +35,158 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-contracts`: `ErrorCode` gains `AdmissionInProgress`
+  (`ADMISSION_IN_PROGRESS`: JSON-RPC -32038, HTTP 409, CLI exit 58) and
+  `AdmissionFenceUnavailable` (`ADMISSION_FENCE_UNAVAILABLE`: -32039, HTTP
+  503, exit 59), and the closed error vocabularies gain them with it: the
+  generated schemas and the Python, TypeScript and Web SDK error codes. A
+  config write a realm admission fence refused before it started reports
+  them instead of an internal error: JSON-RPC `config/set` and
+  `config/patch` (with or without a config runtime), the REST config writes,
+  the MCP `meerkat_config` tool, and `rkat config set`, `config patch`,
+  `--default-model`, `skill add` and `remove`, `mcp add` and `remove` with
+  `--scope realm`, and `auth login`'s login target and Copilot route
+  writes. `meerkat-rest`: `ApiError` gains
+  `AdmissionInProgress(String)` and `AdmissionFenceUnavailable(String)`.
+- `meerkat-core`: config document writes are fenced by the realm admission
+  fences. `ConfigStore` gains the required raw writes `set_held` and
+  `patch_held`, and the provided `admission_fence` and
+  `patch_held_with_warnings`: they take the `AdmissionGuard` of a caller that
+  already holds the document's fence and custody, and a document-backed store
+  refuses a guard that does not hold its fence, with nothing written. Every
+  implementation must provide them. `ConfigError` and `ConfigRuntimeError`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable(String)`: the
+  write did not start and wrote nothing (`EnteredConfigWriteError::NotWritten`
+  and `McpRealmPersistError::Config` carry the runtime's).
+  `ConfigRuntimeError::Config` is no longer built by `#[from]`; the `From`
+  conversion remains and reports a store's admission refusal as the
+  runtime's own variant. Behaviour: `ConfigRuntime::set`, `patch` and
+  `patch_entered` take the admission fences of the document and of its
+  generation sidecar (named by kind, the user document's and the realm's,
+  for a host's runtime of the `global` realm) before their custody, waiting
+  up to 5 s for a holder. `FileConfigStore`'s public `set`, `patch` and
+  `patch_with_warnings` run the same sequence for their document and now move
+  the generation sidecar beside it. A store that bootstraps its document on
+  read creates it only while its fence and custody are free, never waiting,
+  and otherwise reads it as empty. A runtime whose generation sidecar lies
+  outside its document's directory, other than a user-document store's
+  sidecar in a directory named by a realm id (as a host's runtime of the
+  `global` realm keeps it), now refuses every write with
+  `AdmissionFenceUnavailable` (a fence set outside the global order). Writes
+  create `admission.lock` beside each document they write, and in the
+  `global` realm's directory for a host's `global` write; a store's own
+  writes and create-on-read also write `config_state.json` beside the
+  document. A `ConfigStore` backed by a document must return its fence from
+  `admission_fence` and check `AdmissionGuard::covers` in its raw writes: the
+  default, `None`, declares a store with no document, whose writes the
+  runtime fences by its generation sidecar alone.
+- `meerkat-authorization`: grant log writes are fenced by the realm
+  admission fences. `GrantOwnerStore::create` and `append` take the
+  operation's `&AdmissionGuard`, and the trait gains the provided
+  `admission_fence`. `FileGrantOwnerStore::new` takes the log's
+  `GrantLogFence`: `Realm(fence)` for a realm's own grant log, whose
+  `create` and `append` refuse a guard that does not hold that fence before
+  they write, or `NotAdmissionRead` for a log no admission reads, which
+  accepts any guard. `LocalGrantAuthority::new_durable`, `issue_root`,
+  `issue_child`, `issue_or_recover_child_under_exclusion`, `revoke` and
+  `revoke_expecting` take the guard as their first argument. `GrantRefusal`,
+  `GrantStoreError` and `GrantDurabilityError` gain `AdmissionFence`:
+  refused before anything was written, never uncertain (a revocation reports
+  it as refused). Behaviour: `FileGrantOwnerStore::load` never writes; a
+  torn tail stays until the first `append` truncates it under its guard.
+- `meerkat`: every stock grant command takes the realm's admission fence
+  first, before its custody, waiting up to 5 s for a holder:
+  `grant_stock_agent`, `grant_stock_agent_for_reviewed_installation`,
+  `revoke_stock_agent`, `record_stock_grant_selection`, `govern_stock_realm`
+  (now settled on its own task, which a caller that stops waiting does not
+  cancel) and `finalize_reviewed_connector`, which takes the realm's fence
+  (for the `global` realm the user document fence and the `global` realm's)
+  and runs every later step on its own task. `StagedStockRealm`'s
+  `grant_stock_agent`, which runs under the stage's custody, takes the
+  realm's fence without waiting: a held fence refuses at once.
+  `StockGrantError`, `StockGovernanceError` and `ReviewedConnectorRefusal`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable(String)`, and
+  `HelperChildIssuanceRefusal` gains `AdmissionInProgress`: a helper's child
+  issuance takes the realm grant log's fence without waiting, beside its
+  reservation, and the waiting forms wait a held fence out like a refusal to
+  rebuild. `rkat realm govern`, `grant` and `revoke-grant` refused by a held
+  or unusable fence exit 58 or 59.
+
+### Added
+
+- `meerkat-authorization`: `GrantLogFence`, and
+  `LocalGrantAuthority::admission_fences`, the fences of an owner's writes
+  (its durable log's fence, none in memory).
+- `meerkat-core`: `authorization::ChildIssuanceAdmissionInProgress`, a work
+  owner's answer, boxed in place of the grant owner's outcome, for a child
+  issuance a held grant log fence refused before anything was decided or
+  appended; the waiting child issuance forms wait it out like a refusal to
+  rebuild, within the same bounds.
+- `meerkat-core`: `ConfigRuntime::set_under`, `patch_under`,
+  `patch_entered_under` and `admission_fences`, and
+  `McpRealmPersistTarget::add_under`, for an operation that already holds the
+  document's admission fences; `FileConfigStore` is `Clone`.
+- `meerkat-core`: `realm_admission` (native targets), the realm admission
+  fences. `AdmissionFence` names a fence file (`admission.lock`) and its
+  place in one global order: `user_document` (U), `credentials` (C of a
+  realm id), `realm` and `realm_chain` (R; chain positions come only from the
+  composed chain), and `beside` (a document's directory, only ever the one
+  fence of its set). `AdmissionGuard::acquire` and `try_acquire` take a set
+  EXCLUSIVE in that order, with bounded waits that never block a runtime
+  thread; a refusal is `AdmissionRefusal::InProgress` or
+  `AdmissionRefusal::Unavailable(FenceUnavailable)`, with a typed
+  `FenceUnavailableCause`, and nothing has started. `covers` answers only
+  from the guard's own acquisition, matching by fence file, and
+  `AdmissionGuard::none` covers nothing. `AdmissionHold` takes a set SHARED
+  and never creates a fence; `settle_entered` keeps an entered operation's
+  guard until its work returns; `directory_hosts_fences` is the one
+  filesystem predicate; `file_coverage`, `require_files_covered` and
+  `credential_entry_coverage` (with `FileCoverage` and
+  `ImmutableInstallationFiles`) check that every file a verifier reads is
+  fenced or an immutable installation file. A fence root that holds
+  `composed-install.json` makes acquisition refuse, instead of skip, a fence
+  on a filesystem that cannot host one. It also adds `AdmissionFenceKind`,
+  `FenceIdentity` (the device and inode of a fence file), `EnteredWorkLost`,
+  `UncoveredFile` and `UncoveredCredentialEntry`; the constants
+  `ADMISSION_LOCK_FILE`, `INTERACTIVE_FENCE_WAIT` and `COMPOSED_INSTALL_FILE`;
+  and, for a verifier, `AdmissionFence::ensure_exists`, `identity`,
+  `covers_file`, `directory`, `path` and `kind`, `AdmissionGuard::fences` and
+  `identities`, `AdmissionHold::identities`, `fences`, `require_current` and
+  `release`, and `ImmutableInstallationFiles::from_checked_install_owner`,
+  `none` and `contains`.
+- `meerkat-rpc`: `error::ADMISSION_IN_PROGRESS` (-32038) and
+  `error::ADMISSION_FENCE_UNAVAILABLE` (-32039), the JSON-RPC codes of a
+  request a realm admission fence refused before it started, taken from
+  `ErrorCode`.
+- `rkat storage hosts-fences DIR...`: whether each directory's filesystem can
+  host a realm admission fence, from the one predicate fence writers, holders
+  and verifiers use (`meerkat_core::realm_admission::directory_hosts_fences`),
+  run in the process's own view of the filesystem before any realm, state,
+  config, auth or migration step. It prints one JSON object per directory and
+  line, in argument order, and nothing else on stdout:
+  `{"dir": PATH, "hosts": BOOL}`, or
+  `{"dir": PATH, "unavailable": {"kind": KIND, "cause": TEXT}}`, KIND being
+  the new `FenceUnavailableCause::kind()`, a stable snake_case name per cause.
+  Exit 0 when every directory was evaluated, 1 when the report could not be
+  written, 2 on a usage error (no directory, or any global option) or, as for
+  every command, when the process could not start at all.
+
+### Changed
+
+- `rkat realm delete` and `rkat realm prune` take the realm's admission fence
+  first, without waiting and before the lease check, and hold it through the
+  removal: a realm an admission holds is not removed, whatever `--force` says
+  (it overrides heartbeat leases only). `realm delete` then exits 58
+  (`ADMISSION_IN_PROGRESS`), or 59 for an unusable fence; `realm prune` keeps
+  the realm, counted as active, and reports an unusable fence as a leftover.
+  `rkat storage migrate --apply` takes the admission fence of every copy of a
+  split-brain realm the same way, before its maintenance fence, and refuses
+  the resolution while any of them is held or unusable, naming the fence.
+  These are the only operations that remove or move a live `admission.lock`,
+  and only while they hold it.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

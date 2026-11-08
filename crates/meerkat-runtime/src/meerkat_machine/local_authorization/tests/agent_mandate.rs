@@ -240,6 +240,7 @@ impl Fixture {
     ) -> GrantLineageRef {
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("operator"),
                 EvidenceId::new(id).expect("id"),
                 who(agent),
@@ -277,6 +278,7 @@ impl Fixture {
     ) -> GrantLineageRef {
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("operator"),
                 EvidenceId::new(id).expect("id"),
                 who(agent),
@@ -311,6 +313,7 @@ impl Fixture {
     ) -> GrantLineageRef {
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("operator"),
                 EvidenceId::new(id).expect("id"),
                 who(agent),
@@ -790,6 +793,7 @@ async fn an_owner_scoped_grant_approves_no_connector() {
     let grant = fx
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("operator"),
             EvidenceId::new("a-owned").expect("id"),
             who("agent-a"),
@@ -824,7 +828,12 @@ async fn revoked_expired_and_other_realm_grants_refuse_at_each_decision() {
         .expect("select");
     assert_eq!(authority.authorize_configured(&server("sentinel")), Ok(()));
     fx.grants
-        .revoke(&who("operator"), &grant, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("operator"),
+            &grant,
+            &mut NoController,
+        )
         .expect("revoke");
     assert_eq!(
         authority.authorize_configured(&server("sentinel")),
@@ -958,7 +967,12 @@ async fn each_server_resolves_only_the_lineage_selected_for_it() {
     );
 
     fx.grants
-        .revoke(&who("operator"), &first, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("operator"),
+            &first,
+            &mut NoController,
+        )
         .expect("revoke the first lineage");
     assert_eq!(
         authority.authorize_configured(&server("sentinel")),
@@ -1014,11 +1028,17 @@ impl ConfiguredMcpAttachmentAuthority for MutatingPolicy {
         match self.revoke.lock().expect("slot").take() {
             Some(grant) => self
                 .grants
-                .revoke(&who("operator"), &grant, &mut NoController)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &who("operator"),
+                    &grant,
+                    &mut NoController,
+                )
                 .expect("revoke inside policy"),
             None => {
                 self.grants
                     .issue_root(
+                        &meerkat_core::AdmissionGuard::none(),
                         &who("operator"),
                         EvidenceId::new(format!("unrelated-{}", uuid::Uuid::new_v4())).expect("id"),
                         who("someone-else"),

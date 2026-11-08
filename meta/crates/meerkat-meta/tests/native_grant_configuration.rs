@@ -171,7 +171,10 @@ const FIRST_HOST_PROCESS: &str = "META_E1_FIRST_HOST_PROCESS";
 const RESTART_TEST: &str = "a_restored_grant_owner_is_installed_after_a_host_restart";
 
 fn owner_store(dir: &std::path::Path) -> Arc<dyn GrantOwnerStore> {
-    Arc::new(FileGrantOwnerStore::new(dir.join("grant-owner")))
+    Arc::new(FileGrantOwnerStore::new(
+        dir.join("grant-owner"),
+        meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+    ))
 }
 
 /// The first host process: a new durable owner, the host's administrative
@@ -180,6 +183,7 @@ fn owner_store(dir: &std::path::Path) -> Arc<dyn GrantOwnerStore> {
 async fn first_host_process(dir: &std::path::Path) -> ! {
     let grants = Arc::new(
         LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             grant_configuration(),
             owner_store(dir),
             LocalAuthorizationPublication::new(),
@@ -189,6 +193,7 @@ async fn first_host_process(dir: &std::path::Path) -> ! {
     );
     let issued = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             EvidenceId::new("before-restart").expect("grant id"),
             principal("holder"),
@@ -457,6 +462,7 @@ async fn a_shut_down_runtime_releases_its_machine_and_grant_owner() {
         let dir = tempfile::tempdir().unwrap();
         let grants = Arc::new(
             LocalGrantAuthority::new_durable(
+                &meerkat_core::AdmissionGuard::none(),
                 grant_configuration(),
                 owner_store(dir.path()),
                 LocalAuthorizationPublication::new(),
@@ -498,6 +504,7 @@ async fn a_shut_down_runtime_releases_its_machine_and_grant_owner() {
 fn durable_owner(dir: &std::path::Path) -> Arc<LocalGrantAuthority> {
     Arc::new(
         LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             grant_configuration(),
             owner_store(dir),
             LocalAuthorizationPublication::new(),

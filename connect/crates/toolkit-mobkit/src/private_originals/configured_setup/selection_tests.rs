@@ -63,6 +63,7 @@ fn capability(fixture: &ContinuationFixture, name: &str) -> CompiledAgentSetupCa
         .owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &selected.parent.root_authority,
             EvidenceId::new(format!("{name}-report")).unwrap(),
             native.grant_administrator.clone(),
@@ -97,6 +98,7 @@ fn first_child(
         .owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &facts.application,
             &selected.parent,
             source.configured_child_id(reference).unwrap(),
@@ -209,6 +211,7 @@ async fn configured_target_recovery_keeps_first_selection_and_missing_selection_
                 .owner
                 .grants()
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &selected.parent.root_authority,
                     &selected.parent,
                     &mut custody,

@@ -585,16 +585,34 @@ impl WorkAuthorization for LocalWorkAuthorization {
             .publication
             .try_reserve_owner_change()
             .map_err(reservation_refusal)?;
+        // Beside it, the grant store's admission fence, also without
+        // waiting: an admission (or another fenced write) holding it answers
+        // before anything is decided or appended, and a waiting issuance
+        // waits it out.
+        let guard =
+            match meerkat_core::AdmissionGuard::try_acquire(policy.grants().admission_fences()) {
+                Ok(guard) => guard,
+                Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                    return Ok(Box::new(
+                        meerkat_core::authorization::ChildIssuanceAdmissionInProgress,
+                    ));
+                }
+                Err(meerkat_core::AdmissionRefusal::Unavailable(_)) => {
+                    return Err(meerkat_core::OperationAuthorizationError::Unavailable);
+                }
+            };
         let decision = self.current_decision_within(binding, further, &policy)?;
         // The decision may require no more review than this dispatch entered.
         if decision.review_tier > entered_tier {
             return Err(denied().into());
         }
         let validity = self.within_prepared(&decision, prepared)?;
-        let outcome =
-            policy
-                .grants()
-                .issue_or_recover_child_reserved(&mut reservation, intent, || Ok(validity));
+        let outcome = policy.grants().issue_or_recover_child_reserved(
+            &mut reservation,
+            &guard,
+            intent,
+            || Ok(validity),
+        );
         Ok(Box::new(outcome))
     }
 

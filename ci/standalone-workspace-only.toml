@@ -438,6 +438,7 @@ excluded = [
     { path = "tests/agent_builder_policy_canary.rs", reason = "repository policy canary: reads sibling crates' build scripts, sources and Bazel targets" },
     { path = "tests/brain_swap_surface_parity.rs", reason = "scans sibling crates' surface sources" },
     { path = "tests/host_launch_sites.rs", reason = "workspace launch-site gate over clippy.toml and every crate's sources" },
+    { path = "tests/admission_fence_sites.rs", reason = "workspace admission fence gate over every crate's sources" },
     { path = "tests/integration.rs", reason = "needs the unpublished mcp-test-server crate" },
     { path = "tests/governed_realm.rs", reason = "needs the unpublished mcp-test-server crate" },
     { path = "tests/governed_realm_account_binding.rs", reason = "needs the unpublished mcp-test-server crate" },

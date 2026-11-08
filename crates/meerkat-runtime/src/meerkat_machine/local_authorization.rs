@@ -1209,6 +1209,7 @@ mod tests {
         );
         let grant = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new("controller-leaf").expect("id"),
                 executor.clone(),
@@ -1799,6 +1800,7 @@ mod tests {
         candidate.controller_grant_lineage = vec![
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new("controller-leaf").expect("id"),
                     candidate.logical_executor.clone(),

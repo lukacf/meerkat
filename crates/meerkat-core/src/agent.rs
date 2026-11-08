@@ -1228,7 +1228,10 @@ impl GovernedDispatchOperation {
 
     /// [`Self::issue_child_if_current_within`], waiting out what refused it
     /// to rebuild, as [`Self::run_if_current_within_after_owner_change`]
-    /// does (site `tool_child_issuance`). The work owner validates `further`
+    /// does (site `tool_child_issuance`), and a held admission fence of the
+    /// grant owner's store
+    /// ([`crate::authorization::ChildIssuanceAdmissionInProgress`]) the same
+    /// way. The work owner validates `further`
     /// and `intent` first. Then THIS dispatch's single consuming entry is
     /// made once, its staging waiting out an owner change in progress within
     /// the dispatch attempt's own bounds (site `tool_entry`). That staging
@@ -1305,12 +1308,13 @@ impl GovernedDispatchOperation {
                 .map_err(crate::ToolError::from)
         };
         let mut wait = StepOwnerChangeWait::new(&self.context, &self.work, "tool_child_issuance");
-        if !refuses_to_rebuild(&first) || !wait.again().await {
+        if !child_issuance_waits(&first) || !wait.again().await {
             return first;
         }
-        // Only a refusal to rebuild goes on, through the entry's witness:
-        // its attempts never spend, and each is admitted by the review owner,
-        // since the dispatch may have ended during the wait.
+        // Only a refusal to rebuild, or a held admission fence, goes on,
+        // through the entry's witness: its attempts never spend, and each is
+        // admitted by the review owner, since the dispatch may have ended
+        // during the wait.
         let operation = match entering {
             Some(entering) => entering.governed_operation(call)?,
             None => self.clone(),
@@ -3490,6 +3494,17 @@ fn refuses_to_rebuild<T>(answer: &Result<T, crate::ToolError>) -> bool {
         Err(crate::ToolError::AuthorizationRefused { refusal })
             if refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
     )
+}
+
+/// Whether a waiting child issuance waits after this attempt: a refusal to
+/// rebuild, or the work owner's answer that an admission holds the grant
+/// store's fence ([`crate::authorization::ChildIssuanceAdmissionInProgress`]),
+/// which it waits out the same way, within the same bounds.
+fn child_issuance_waits(answer: &Result<Box<dyn std::any::Any + Send>, crate::ToolError>) -> bool {
+    refuses_to_rebuild(answer)
+        || answer.as_ref().is_ok_and(|outcome| {
+            (**outcome).is::<crate::authorization::ChildIssuanceAdmissionInProgress>()
+        })
 }
 
 /// The owner-change waiting state of one waiting step of a dispatch's

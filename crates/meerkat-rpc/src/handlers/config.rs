@@ -143,6 +143,14 @@ fn runtime_error_to_response(id: Option<RpcId>, err: ConfigRuntimeError) -> RpcR
             error::INVALID_PARAMS,
             format!("Generation conflict: expected {expected}, current {current}"),
         ),
+        // A held or unusable admission fence: the write did not start and
+        // wrote nothing; typed, never an internal error.
+        refused @ ConfigRuntimeError::AdmissionInProgress => {
+            RpcResponse::error(id, error::ADMISSION_IN_PROGRESS, refused.to_string())
+        }
+        refused @ ConfigRuntimeError::AdmissionFenceUnavailable(_) => {
+            RpcResponse::error(id, error::ADMISSION_FENCE_UNAVAILABLE, refused.to_string())
+        }
         // An ordinary write is not administration of a section the host
         // administers in the documents, nor of what a realm composes of it;
         // nothing was written.
@@ -189,11 +197,18 @@ fn administration_response(id: Option<RpcId>, refused: &meerkat_core::ConfigErro
 }
 
 /// A store write's failure on the path without a config runtime: the
-/// governance refusal stays typed, anything else is internal.
+/// governance refusal and an admission fence refusal stay typed, anything
+/// else is internal.
 fn store_write_error_response(id: Option<RpcId>, err: meerkat_core::ConfigError) -> RpcResponse {
     match err {
         refused if refused.administered_section().is_some() => {
             administration_response(id, &refused)
+        }
+        refused @ meerkat_core::ConfigError::AdmissionInProgress => {
+            RpcResponse::error(id, error::ADMISSION_IN_PROGRESS, refused.to_string())
+        }
+        refused @ meerkat_core::ConfigError::AdmissionFenceUnavailable(_) => {
+            RpcResponse::error(id, error::ADMISSION_FENCE_UNAVAILABLE, refused.to_string())
         }
         other => RpcResponse::error(id, error::INTERNAL_ERROR, other.to_string()),
     }

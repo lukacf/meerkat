@@ -299,6 +299,26 @@ impl ConfigStore for ObstructGenerationAfterPatch {
         tokio::fs::create_dir(&self.state_path).await?;
         Ok(config)
     }
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.file.admission_fence()
+    }
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), ConfigError> {
+        self.file.set_held(guard, config).await
+    }
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        let config = self.file.patch_held(guard, delta).await?;
+        self.patched.fetch_add(1, Ordering::SeqCst);
+        tokio::fs::create_dir(&self.state_path).await?;
+        Ok(config)
+    }
 }
 
 #[tokio::test]
@@ -386,6 +406,26 @@ impl ConfigStore for HeldPatch {
         self.entered.add_permits(1);
         self.release.acquire().await.unwrap().forget();
         self.file.patch(delta).await
+    }
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.file.admission_fence()
+    }
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), ConfigError> {
+        self.file.set_held(guard, config).await
+    }
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        self.patched.fetch_add(1, Ordering::SeqCst);
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        self.file.patch_held(guard, delta).await
     }
 }
 

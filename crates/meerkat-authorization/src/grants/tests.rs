@@ -34,7 +34,12 @@ fn resolved_grant_retains_actual_publication_until_accepted_mutation() {
 
     fixture
         .authority
-        .revoke(&who("root"), &lineage[0], &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &lineage[0],
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("accepted ancestor revocation");
     assert_eq!(resolved.check_current(), Err(PublicationError::Changed));
     assert!(matches!(
@@ -86,6 +91,7 @@ fn actual_resolution_rejects_publication_change_during_clock_read() {
     .expect("configure");
     let grant = authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("clock-grant"),
             who("executor"),
@@ -108,6 +114,7 @@ fn controller_lineage_requires_declared_unrestricted_ancestors_not_max_finite_ex
     let finite = fixture
         .authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("finite-max"),
             who("executor"),
@@ -130,6 +137,7 @@ fn controller_lineage_requires_declared_unrestricted_ancestors_not_max_finite_ex
     let root = fixture
         .authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("controller-root"),
             who("delegator"),
@@ -143,6 +151,7 @@ fn controller_lineage_requires_declared_unrestricted_ancestors_not_max_finite_ex
     let child = fixture
         .authority
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("delegator"),
             &root,
             id("controller-leaf"),
@@ -212,6 +221,7 @@ impl Fixture {
     fn root(&self) -> GrantLineageRef {
         self.authority
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id("root-grant"),
                 who("delegator"),
@@ -225,6 +235,7 @@ impl Fixture {
         let child = self
             .authority
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("delegator"),
                 &root,
                 id("child"),
@@ -240,6 +251,7 @@ impl Fixture {
         let leaf = self
             .authority
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("second-delegator"),
                 &child,
                 id("leaf"),
@@ -271,6 +283,7 @@ fn three_levels_use_exact_attenuation_and_zero_depth_only_forbids_children() {
     assert_eq!(resolved.expires_at_ms(), 250);
     assert!(matches!(
         fixture.authority.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("executor"),
             &chain[2],
             id("exhausted"),
@@ -291,12 +304,18 @@ fn revoked_ancestor_refuses_descendant_and_invalidates_existing_publication() {
         .expect("coherent observation");
     fixture
         .authority
-        .revoke(&who("root"), &chain[0], &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &chain[0],
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke root grant");
     assert!(stamp.check_current().is_err());
     assert!(matches!(fixture.resolve(&chain), Err(GrantRefusal::Denied)));
     assert!(matches!(
         fixture.authority.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("second-delegator"),
             &chain[1],
             id("after-revoke"),
@@ -323,6 +342,7 @@ fn full_chain_is_checked_at_fresh_time_without_cached_valid_state() {
         fixture
             .authority
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("delegator"),
                 &chain[0],
                 id("still-root-current"),
@@ -336,6 +356,7 @@ fn full_chain_is_checked_at_fresh_time_without_cached_valid_state() {
         fixture
             .authority
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("delegator"),
                 &chain[0],
                 id("expired-root"),
@@ -396,6 +417,7 @@ fn executor_represented_subject_and_issuer_are_distinct() {
         fixture
             .authority
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 &chain[1],
                 id("root-not-holder"),
@@ -407,7 +429,12 @@ fn executor_represented_subject_and_issuer_are_distinct() {
     assert!(
         fixture
             .authority
-            .revoke(&who("executor"), &chain[1], &mut IsolatedGrantTestCustody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("executor"),
+                &chain[1],
+                &mut IsolatedGrantTestCustody
+            )
             .is_err()
     );
 }
@@ -474,7 +501,12 @@ fn liveness_uses_the_leafs_own_identity_and_every_other_use_check() {
 
     fixture
         .authority
-        .revoke(&who("root"), &chain[1], &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &chain[1],
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke the middle link");
     assert_eq!(
         live(&chain),
@@ -519,6 +551,7 @@ fn liveness_is_one_owner_observation() {
     .expect("configure");
     let grant = authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("liveness-grant"),
             who("executor"),
@@ -554,7 +587,12 @@ fn a_lineage_ceiling_is_the_resolution_for_its_own_leaf() {
 
     fixture
         .authority
-        .revoke(&who("root"), &chain[1], &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &chain[1],
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke the middle link");
     assert_eq!(ceiling.check_current(), Err(PublicationError::Changed));
     assert!(matches!(
@@ -577,6 +615,7 @@ fn issuance_and_revocation_are_immutable_with_no_id_reuse() {
         fixture
             .authority
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 root.grant_id.clone(),
                 who("new-holder"),
@@ -587,7 +626,12 @@ fn issuance_and_revocation_are_immutable_with_no_id_reuse() {
     );
     fixture
         .authority
-        .revoke(&who("root"), &root, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &root,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     let revision = fixture
         .authority
@@ -598,7 +642,12 @@ fn issuance_and_revocation_are_immutable_with_no_id_reuse() {
         .revision;
     fixture
         .authority
-        .revoke(&who("root"), &root, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &root,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("idempotent revoke");
     assert_eq!(
         revision,
@@ -614,6 +663,7 @@ fn issuance_and_revocation_are_immutable_with_no_id_reuse() {
         fixture
             .authority
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 root.grant_id,
                 who("new-holder"),
@@ -643,7 +693,14 @@ fn unresolved_lifetime_and_depth_never_allow_use_or_child_issue() {
         }
         let root = fixture
             .authority
-            .issue_root(&who("root"), id("unknown"), who("executor"), None, limits)
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("root"),
+                id("unknown"),
+                who("executor"),
+                None,
+                limits,
+            )
             .expect("retained restrictive data");
         assert!(
             fixture
@@ -655,6 +712,7 @@ fn unresolved_lifetime_and_depth_never_allow_use_or_child_issue() {
             fixture
                 .authority
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &who("executor"),
                     &root,
                     id("child"),
@@ -688,6 +746,7 @@ fn qualified_principal_shape_does_not_accept_legacy_or_same_id_other_domain() {
         fixture
             .authority
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("not-root"),
                 id("forged-root"),
                 who("executor"),
@@ -829,6 +888,7 @@ fn unavailable_clock_refuses_use_and_child_without_changing_grant_state() {
     .expect("configure");
     let root = authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("clock-root"),
             who("delegator"),
@@ -848,6 +908,7 @@ fn unavailable_clock_refuses_use_and_child_without_changing_grant_state() {
     assert_eq!(stamp.check_current(), Ok(()));
     assert!(matches!(
         authority.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("delegator"),
             &root,
             id("clock-child"),
@@ -862,6 +923,7 @@ fn unavailable_clock_refuses_use_and_child_without_changing_grant_state() {
     clock.0.store(false, Ordering::SeqCst);
     let child = authority
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("delegator"),
             &root,
             id("clock-child"),
@@ -936,7 +998,12 @@ fn native_custody_veto_precedes_publication_and_grant_mutation() {
     ] {
         custody.refusal = Some(refusal);
         assert_eq!(
-            fixture.authority.revoke(&who("root"), &root, &mut custody),
+            fixture.authority.revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("root"),
+                &root,
+                &mut custody
+            ),
             Err(expected)
         );
         assert_eq!(
@@ -950,7 +1017,12 @@ fn native_custody_veto_precedes_publication_and_grant_mutation() {
     custody.refusal = None;
     fixture
         .authority
-        .revoke(&who("root"), &root, &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &root,
+            &mut custody,
+        )
         .expect("permitted custody callback");
     assert_eq!(custody.callbacks, 1);
     assert_eq!(
@@ -1066,6 +1138,7 @@ fn restart_same_configuration_and_id_refuses_old_reference() {
     let old = original
         .authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("restart-root"),
             who("executor"),
@@ -1088,6 +1161,7 @@ fn restart_same_configuration_and_id_refuses_old_reference() {
     let fresh = restarted
         .authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("restart-root"),
             who("executor"),
@@ -1125,7 +1199,12 @@ fn restart_reissued_revoked_root_does_not_resurrect_old_reference() {
     let old = original.root();
     original
         .authority
-        .revoke(&who("root"), &old, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &old,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     assert!(
         original
@@ -1163,7 +1242,12 @@ fn restart_recreated_revoked_ancestor_chain_refuses_old_and_mixed_lineages() {
     let old = original.three_levels();
     original
         .authority
-        .revoke(&who("root"), &old[0], &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &old[0],
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke ancestor");
     assert!(original.resolve(&old).is_err());
     drop(original);
@@ -1198,6 +1282,7 @@ fn cross_owner_reference_cannot_issue_child_or_revoke_live_grant() {
     );
     assert!(matches!(
         second.authority.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("delegator"),
             &old,
             id("foreign-child"),
@@ -1207,14 +1292,18 @@ fn cross_owner_reference_cannot_issue_child_or_revoke_live_grant() {
         Err(GrantRefusal::Denied)
     ));
     assert!(matches!(
-        second
-            .authority
-            .revoke(&who("root"), &old, &mut IsolatedGrantTestCustody),
+        second.authority.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &old,
+            &mut IsolatedGrantTestCustody
+        ),
         Err(GrantRefusal::Denied)
     ));
     let child = second
         .authority
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("delegator"),
             &fresh,
             id("foreign-child"),
@@ -1234,7 +1323,12 @@ fn cross_owner_reference_cannot_issue_child_or_revoke_live_grant() {
     );
     second
         .authority
-        .revoke(&who("root"), &fresh, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &fresh,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("matching live owner can revoke");
 }
 
@@ -1384,6 +1478,7 @@ fn controller_custody_keeps_only_controller_lineage_sticky() {
     let controller_root = fixture
         .authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("controller-root"),
             who("delegator"),
@@ -1397,6 +1492,7 @@ fn controller_custody_keeps_only_controller_lineage_sticky() {
     let controller_leaf = fixture
         .authority
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("delegator"),
             &controller_root,
             id("controller-leaf"),
@@ -1410,6 +1506,7 @@ fn controller_custody_keeps_only_controller_lineage_sticky() {
     let operation = fixture
         .authority
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("operation-grant"),
             who("executor"),
@@ -1436,7 +1533,12 @@ fn controller_custody_keeps_only_controller_lineage_sticky() {
     assert!(custody.operation_lineage.contains(&operation));
     fixture
         .authority
-        .revoke(&who("root"), &operation, &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &operation,
+            &mut custody,
+        )
         .expect("held ordinary delegation remains revocable");
     assert_eq!(custody.callbacks, 1);
     assert!(matches!(
@@ -1459,9 +1561,12 @@ fn controller_custody_keeps_only_controller_lineage_sticky() {
         .clone();
     let ((), stamp) = fixture.publication.observe(|| ()).expect("before veto");
     for reference in &controller_lineage {
-        let result = fixture
-            .authority
-            .revoke(&who("root"), reference, &mut custody);
+        let result = fixture.authority.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            reference,
+            &mut custody,
+        );
         assert_eq!(result, Err(GrantRefusal::ControllerInUse));
         assert_eq!(
             fixture.authority.owner.lock().expect("owner").state(),
@@ -1479,7 +1584,12 @@ fn controller_custody_keeps_only_controller_lineage_sticky() {
     custody.controller_lineage.clear();
     fixture
         .authority
-        .revoke(&who("root"), &controller_lineage[0], &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &controller_lineage[0],
+            &mut custody,
+        )
         .expect("settled controller can be revoked");
     assert_eq!(custody.callbacks, 2);
     assert!(matches!(
@@ -1559,6 +1669,7 @@ fn native_controller_revoke_refuses_busy_publication_without_waiting_or_publishi
     let worker = std::thread::spawn(move || {
         started_tx.send(()).expect("caller entered");
         let result = worker_fixture.authority.revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &worker_grant,
             &mut IsolatedGrantTestCustody,
@@ -1632,6 +1743,7 @@ fn native_controller_revoke_refuses_busy_grant_owner_without_waiting_or_publishi
     let worker = std::thread::spawn(move || {
         started_tx.send(()).expect("caller entered");
         let result = worker_fixture.authority.revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &worker_grant,
             &mut IsolatedGrantTestCustody,

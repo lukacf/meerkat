@@ -821,6 +821,7 @@ mod tests {
         .expect("owner");
         let grant = owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("operator"),
                 EvidenceId::new("agent-a-sentinel").expect("id"),
                 who("agent-a"),
@@ -856,7 +857,12 @@ mod tests {
                 .is_err()
         );
         owner
-            .revoke(&who("operator"), &grant, &mut IsolatedGrantTestCustody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("operator"),
+                &grant,
+                &mut IsolatedGrantTestCustody,
+            )
             .expect("revoke");
         assert!(
             owner
@@ -921,6 +927,7 @@ mod tests {
         let issue_root = |id: &str, restrictions| {
             owner
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &who("operator"),
                     EvidenceId::new(id).expect("id"),
                     who("agent-a"),
@@ -931,6 +938,7 @@ mod tests {
         };
         let issue_child = |id: &str, parent, restrictions| {
             owner.issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("agent-a"),
                 parent,
                 EvidenceId::new(id).expect("id"),
@@ -971,6 +979,7 @@ mod tests {
         assert_eq!(
             owner
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &who("operator"),
                     EvidenceId::new("root-two").expect("id"),
                     who("agent-a"),
@@ -1003,6 +1012,7 @@ mod tests {
         // descendants: its grantee cannot restore it through the other form.
         let removed = owner
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("agent-a"),
                 &domain_a,
                 EvidenceId::new("middle-removed").expect("id"),
@@ -1016,6 +1026,7 @@ mod tests {
         assert_eq!(
             owner
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &who("agent-m"),
                     &removed,
                     EvidenceId::new("leaf-restored").expect("id"),
@@ -1029,6 +1040,7 @@ mod tests {
         // The same account through a keeping intermediate stays delegable.
         let kept = owner
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("agent-a"),
                 &domain_a,
                 EvidenceId::new("middle-kept").expect("id"),
@@ -1038,6 +1050,7 @@ mod tests {
             .expect("keeping the approval");
         let grandchild = owner
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("agent-m"),
                 &kept,
                 EvidenceId::new("leaf-kept").expect("id"),
@@ -1161,6 +1174,7 @@ mod tests {
         };
         let grant = owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("operator"),
                 EvidenceId::new("two-owners").expect("id"),
                 who("agent"),
@@ -1181,6 +1195,7 @@ mod tests {
         assert_eq!(
             owner
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &who("operator"),
                     EvidenceId::new("ambiguous-action").expect("id"),
                     who("agent"),
@@ -1228,6 +1243,7 @@ mod tests {
         // with owner B's.
         let narrowed = owner
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("agent"),
                 &grant,
                 EvidenceId::new("narrowed-to-a").expect("id"),

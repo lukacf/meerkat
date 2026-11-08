@@ -1321,6 +1321,7 @@ async fn native_representative_correctness() {
                 .as_ref()
                 .unwrap()
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("grant-owner"),
                     f.operations[2].last().unwrap(),
                     &mut custody,

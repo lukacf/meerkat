@@ -241,6 +241,7 @@ async fn an_authenticated_scoped_original_carries_a_native_turn() {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -250,6 +251,7 @@ async fn an_authenticated_scoped_original_carries_a_native_turn() {
         .expect("actual controller lineage with unrestricted lifetime");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -263,6 +265,7 @@ async fn an_authenticated_scoped_original_carries_a_native_turn() {
     });
     let invocation_grant = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("invocation"),
             principal("requester"),
@@ -492,6 +495,7 @@ async fn an_authenticated_scoped_original_carries_a_native_turn() {
     // is refused at admission through the installed invocation policy.
     grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             &invocation_grant,
             &mut AnyCustody,
@@ -538,6 +542,7 @@ async fn a_governed_dispatch_builds_its_helper_fence_from_its_own_operation() {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -547,6 +552,7 @@ async fn a_governed_dispatch_builds_its_helper_fence_from_its_own_operation() {
         .expect("actual controller lineage with unrestricted lifetime");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -560,6 +566,7 @@ async fn a_governed_dispatch_builds_its_helper_fence_from_its_own_operation() {
     });
     let invocation_grant = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("invocation"),
             principal("requester"),
@@ -593,6 +600,7 @@ async fn a_governed_dispatch_builds_its_helper_fence_from_its_own_operation() {
     // The independent parent the helper's child is issued from.
     let helper_parent = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("helper-parent"),
             principal("helper-operator"),

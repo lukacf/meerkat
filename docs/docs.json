@@ -50,6 +50,7 @@
                   "concepts/composability",
                   "concepts/realms",
                   "concepts/realm-inheritance",
+                  "concepts/realm-admission",
                   "concepts/sessions",
                   "concepts/auth-and-bindings",
                   "concepts/authorization",

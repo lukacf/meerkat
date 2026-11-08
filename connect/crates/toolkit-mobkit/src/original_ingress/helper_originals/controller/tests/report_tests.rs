@@ -22,6 +22,7 @@ pub(super) async fn issued(fixture: &Fixture) -> (HelperNativeBinding, ChildGran
             .owner
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &report.issuer,
                 report.parent_lineage.last().unwrap(),
                 report.id.clone(),
@@ -410,6 +411,7 @@ async fn partial_helper_issuance_never_publishes_and_recovers_each_exact_child()
             .owner
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &first.issuer,
                 first.parent_lineage.last().unwrap(),
                 first.id.clone(),
@@ -526,7 +528,12 @@ async fn report_revocation_is_target_local_and_does_not_erase_retained_binding()
     fixture
         .owner
         .grants
-        .revoke(&report.issuer, &report_leaf, &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &report.issuer,
+            &report_leaf,
+            &mut custody,
+        )
         .unwrap();
     drop(custody);
     assert!(

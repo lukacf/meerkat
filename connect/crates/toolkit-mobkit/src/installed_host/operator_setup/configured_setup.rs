@@ -185,6 +185,7 @@ pub(crate) fn configure_prepared(
         let parent = match grants.issued_reference(&request.issuance_id)? {
             Some(parent) => parent,
             None => grants.issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 operator,
                 request.issuance_id.clone(),
                 native.grant_administrator.clone(),
@@ -211,6 +212,7 @@ pub(crate) fn configure_prepared(
             let reference = match grants.issued_reference(&target.issuance_id)? {
                 Some(reference) => reference,
                 None => grants.issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     target.issuance_id.clone(),
                     native.grant_administrator.clone(),
@@ -251,6 +253,6 @@ pub(crate) fn configure_prepared(
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
     })
 }

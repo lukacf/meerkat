@@ -596,6 +596,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 .owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &operator,
                     meerkat_authorization_contracts::evidence::EvidenceId::new(
                         "fixture-helper-report",
@@ -661,6 +662,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 .owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &operator,
                     EvidenceId::new("fixture-catalog-selection").unwrap(),
                     grantee,

@@ -16,9 +16,11 @@
 use std::sync::Arc;
 
 use meerkat_core::connection::CredentialAccountRef;
+use meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT;
 use meerkat_core::storage_layout::ResolvedStorage;
 use meerkat_core::{
-    ConfigRuntime, FileConfigStore, McpRealmPersistError, McpRealmPersistTarget, McpServerConfig,
+    AdmissionFence, AdmissionGuard, AdmissionRefusal, ConfigRuntime, FileConfigStore,
+    McpRealmPersistError, McpRealmPersistTarget, McpServerConfig,
 };
 use meerkat_providers::connector_login::{
     ConnectorAuthPhase, ConnectorCallExpectation, ConnectorLoginError, ConnectorVerifiedAccount,
@@ -84,6 +86,21 @@ pub enum ReviewedConnectorRefusal {
     /// The realm already lists a server under the reviewed name.
     #[error("the realm already lists MCP server '{0}'")]
     ServerExists(String),
+    /// An admission, or another fenced operation, holds an admission fence
+    /// of the realm's own document or grant log beyond the finalization's
+    /// bound; refused before the custody. It may be retried once the hold
+    /// ends, which can be only when the holding process restarts.
+    #[error(
+        "an admission or another fenced operation holds the realm's admission fence; nothing \
+         was started or written; retry later (an admission's hold may last until its process \
+         restarts)"
+    )]
+    AdmissionInProgress,
+    /// An admission fence of the realm's own document or grant log could
+    /// not be opened, created, locked or identity-checked; refused before
+    /// the custody.
+    #[error("{0}; nothing was started or written")]
+    AdmissionFenceUnavailable(String),
 }
 
 /// The step the finalization reached. Each variant states exactly what was
@@ -124,7 +141,14 @@ pub enum ReviewedConnectorFinalization {
 /// Finalize a reviewed connector installation in `storage`'s realm as the
 /// realm's operator `principals`, under one administrative custody.
 ///
-/// The custody is taken first, and the connector credential owner is built
+/// The realm's admission fences are taken first (`meerkat_core::realm_admission`):
+/// R of the realm, or for the `global` realm the user document fence and
+/// R(global), waiting up to the interactive bound. A held fence refuses
+/// before the custody ([`ReviewedConnectorRefusal::AdmissionInProgress`])
+/// with nothing written. From the fences on, every step runs on the
+/// finalization's owned task, which owns them until the grant settled.
+///
+/// The custody is taken next, and the connector credential owner is built
 /// inside it from `factory`'s actual credential persistence and the held
 /// realm runtime's provider-auth authority, with the connector client
 /// profiles the realm's effective configuration declares now
@@ -166,7 +190,6 @@ pub async fn finalize_reviewed_connector(
     use ReviewedConnectorFinalization::Refused;
     use ReviewedConnectorRefusal as Refusal;
 
-    let realms_root = storage.locator.state_root.as_path();
     let realm_id = storage.locator.realm.as_str();
     let expectation = match check_review(storage, review) {
         Ok(expectation) => expectation,
@@ -194,99 +217,201 @@ pub async fn finalize_reviewed_connector(
         Err(refusal) => return Refused(refusal),
     };
     let document = source.config_doc_path(&storage.locator.realm);
-    let source: Arc<dyn meerkat_core::RealmConfigSource> = Arc::new(source);
-
-    // One administrative custody for every step below.
-    let bundle = match issuance::administrative_custody(realms_root, realm_id).await {
-        Ok(bundle) => bundle,
-        Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
+    let fences = match finalization_fences(storage, &document) {
+        Ok(fences) => fences,
+        Err(refusal) => return Refused(admission_refusal(refusal)),
     };
-    // The connector clients the realm's effective configuration declares
-    // now, not the ones a host installed earlier.
-    let effective = match meerkat_core::EffectiveConfigReader::new(Arc::clone(&source))
-        .effective_config(&storage.locator.realm)
+    let finalization = Finalization {
+        storage: storage.clone(),
+        principals: principals.clone(),
+        factory: factory.clone(),
+        review: review.clone(),
+        expectation,
+        request,
+        prepared,
+        document,
+        source: Arc::new(source),
+    };
+    // From the fences on the operation is entered: they, the custody and
+    // every step after them, the document write included, run on this owned
+    // task, which owns the guard, so a caller that stops waiting releases
+    // nothing while a write can still land.
+    tokio::spawn(finalization.run(fences))
         .await
-    {
-        Ok(effective) => effective,
-        Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
-    };
-    let client_profiles =
-        match crate::connector_client_auth_profiles(&effective, &storage.locator.realm) {
-            Ok(profiles) => profiles,
-            Err(_) => return Refused(Refusal::ClientConfigChanged),
-        };
-    let host_auth = match crate::HostAuthService::from_factory(
-        factory,
-        bundle.runtime_adapter().provider_auth_runtime_authority(),
-    ) {
-        Ok(host_auth) => host_auth.with_connector_client_auth_profiles(client_profiles),
-        Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
-    };
+        .unwrap_or_else(|_| ReviewedConnectorFinalization::PersistUncertain {
+            reason: "the finalization did not run to its end; whether the server was written is \
+                     unknown"
+                .to_string(),
+        })
+}
 
-    match host_auth.connector_status(&review.slot).await {
-        Ok(status)
-            if status.phase == ConnectorAuthPhase::Authorized
-                && status.verified_account.as_ref() == Some(&review.account) => {}
-        Ok(_) => return Refused(Refusal::AccountChanged),
-        Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
+/// The fences a finalization takes, by kind, in the global order: R of the
+/// realm, which for every realm but `global` is also the fence of the
+/// realm's own `document`; for `global`, whose own document is the
+/// user-global one, the user document fence and R(global). Never the fence
+/// beside a document.
+fn finalization_fences(
+    storage: &ResolvedStorage,
+    document: &std::path::Path,
+) -> Result<Vec<AdmissionFence>, AdmissionRefusal> {
+    let realm = AdmissionFence::realm(&storage.locator.state_root, &storage.locator.realm)?;
+    if !storage.locator.realm.is_global() {
+        return Ok(vec![realm]);
     }
-    if let Err(refusal) = host_auth
-        .connector_check_expectation(&expectation)
-        .await
-        .map_err(expectation_refusal)
-    {
-        return Refused(refusal);
-    }
-    if let Some(binding) = &review.client_profile_binding
-        && !host_auth.has_connector_client_auth_binding(binding)
-    {
-        return Refused(Refusal::ClientConfigChanged);
-    }
+    let user_root = document
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    Ok(vec![AdmissionFence::user_document(user_root), realm])
+}
 
-    // The realm's own document, composed with its ancestors as at start:
-    // this write is of the realm's own MCP servers alone, and the realm chain
-    // keeps it from changing the `[confinement]` or `[governance]` the realm
-    // composes all the same.
-    let runtime = ConfigRuntime::new(
-        Arc::new(
-            FileConfigStore::new(document.clone(), meerkat_models::canonical())
-                .with_realm_chain(storage.locator.realm.clone(), source),
-        ),
-        document.with_file_name(CONFIG_STATE_FILE),
-    );
-    let generation = match McpRealmPersistTarget::new(&runtime)
-        .add(review.server.clone(), Some(review.expected_generation))
-        .await
-    {
-        Ok(snapshot) => snapshot.generation,
-        Err(error) => return persist_failure(review, error),
-    };
+/// A fence refusal as the finalization's refusal: nothing was written.
+fn admission_refusal(refusal: AdmissionRefusal) -> ReviewedConnectorRefusal {
+    match refusal {
+        AdmissionRefusal::InProgress => ReviewedConnectorRefusal::AdmissionInProgress,
+        AdmissionRefusal::Unavailable(unavailable) => {
+            ReviewedConnectorRefusal::AdmissionFenceUnavailable(unavailable.to_string())
+        }
+    }
+}
 
-    // The written server's grant is issued and selected on the
-    // administrative command's own task, still under this custody: a caller
-    // that stops waiting cannot drop the outcome.
-    let (realms_root, realm_id) = (realms_root.to_path_buf(), realm_id.to_string());
-    let (principals, server) = (principals.clone(), review.server.clone());
-    let grant = issuance::on_owned_task(async move {
-        #[cfg(test)]
-        held_after_write(&document).await;
-        let grant = issuance::issue_for_current_installation(
-            &bundle,
-            &realms_root,
-            &realm_id,
-            &principals,
-            &request,
+/// One finalization, validated, with everything its owned task needs.
+struct Finalization {
+    storage: ResolvedStorage,
+    principals: StockPrincipals,
+    factory: crate::AgentFactory,
+    review: ReviewedConnector,
+    expectation: ConnectorCallExpectation,
+    request: StockGrantRequest,
+    prepared: issuance::PreparedGrant,
+    document: std::path::PathBuf,
+    source: Arc<meerkat_store::FilesystemRealmConfigSource>,
+}
+
+impl Finalization {
+    /// The entered finalization, on its owned task: the fences, then one
+    /// administrative custody for every step below, the rechecks, the
+    /// document write and the grant.
+    async fn run(self, fences: Vec<AdmissionFence>) -> ReviewedConnectorFinalization {
+        use ReviewedConnectorFinalization::Refused;
+        use ReviewedConnectorRefusal as Refusal;
+
+        let Self {
+            storage,
+            principals,
+            factory,
+            review,
+            expectation,
+            request,
             prepared,
-            &document,
-            &server,
-            generation,
-        )
+            document,
+            source,
+        } = self;
+        let realms_root = storage.locator.state_root.as_path();
+        let realm_id = storage.locator.realm.as_str();
+        // Before the custody, and refused with nothing written when held.
+        let guard = match AdmissionGuard::acquire(fences, INTERACTIVE_FENCE_WAIT).await {
+            Ok(guard) => guard,
+            Err(refusal) => return Refused(admission_refusal(refusal)),
+        };
+        let source: Arc<dyn meerkat_core::RealmConfigSource> = source;
+
+        // One administrative custody for every step below.
+        let bundle = match issuance::administrative_custody(realms_root, realm_id).await {
+            Ok(bundle) => bundle,
+            Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
+        };
+        // The connector clients the realm's effective configuration declares
+        // now, not the ones a host installed earlier.
+        let effective = match meerkat_core::EffectiveConfigReader::new(Arc::clone(&source))
+            .effective_config(&storage.locator.realm)
+            .await
+        {
+            Ok(effective) => effective,
+            Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
+        };
+        let client_profiles =
+            match crate::connector_client_auth_profiles(&effective, &storage.locator.realm) {
+                Ok(profiles) => profiles,
+                Err(_) => return Refused(Refusal::ClientConfigChanged),
+            };
+        let host_auth = match crate::HostAuthService::from_factory(
+            &factory,
+            bundle.runtime_adapter().provider_auth_runtime_authority(),
+        ) {
+            Ok(host_auth) => host_auth.with_connector_client_auth_profiles(client_profiles),
+            Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
+        };
+
+        match host_auth.connector_status(&review.slot).await {
+            Ok(status)
+                if status.phase == ConnectorAuthPhase::Authorized
+                    && status.verified_account.as_ref() == Some(&review.account) => {}
+            Ok(_) => return Refused(Refusal::AccountChanged),
+            Err(error) => return Refused(Refusal::Unavailable(error.to_string())),
+        }
+        if let Err(refusal) = host_auth
+            .connector_check_expectation(&expectation)
+            .await
+            .map_err(expectation_refusal)
+        {
+            return Refused(refusal);
+        }
+        if let Some(binding) = &review.client_profile_binding
+            && !host_auth.has_connector_client_auth_binding(binding)
+        {
+            return Refused(Refusal::ClientConfigChanged);
+        }
+
+        // The realm's own document, composed with its ancestors as at start:
+        // this write is of the realm's own MCP servers alone, and the realm
+        // chain keeps it from changing the `[confinement]` or `[governance]`
+        // the realm composes all the same. It writes under the held fences.
+        let runtime = ConfigRuntime::new(
+            Arc::new(
+                FileConfigStore::new(document.clone(), meerkat_models::canonical())
+                    .with_realm_chain(storage.locator.realm.clone(), source),
+            ),
+            document.with_file_name(CONFIG_STATE_FILE),
+        );
+        let generation = match McpRealmPersistTarget::new(&runtime)
+            .add_under(
+                &guard,
+                review.server.clone(),
+                Some(review.expected_generation),
+            )
+            .await
+        {
+            Ok(snapshot) => snapshot.generation,
+            Err(error) => return persist_failure(&review, error),
+        };
+
+        // The written server's grant is issued and selected on the
+        // administrative command's own task, still under this custody and
+        // these fences: a caller that stops waiting cannot drop the outcome.
+        let (realms_root, realm_id) = (realms_root.to_path_buf(), realm_id.to_string());
+        let server = review.server.clone();
+        let grant = issuance::on_owned_task(async move {
+            #[cfg(test)]
+            held_after_write(&document).await;
+            let grant = issuance::issue_for_current_installation(
+                &bundle,
+                &guard,
+                &realms_root,
+                &realm_id,
+                &principals,
+                &request,
+                prepared,
+                &document,
+                &server,
+                generation,
+            )
+            .await;
+            drop(bundle);
+            grant
+        })
         .await;
-        drop(bundle);
-        grant
-    })
-    .await;
-    ReviewedConnectorFinalization::Persisted { generation, grant }
+        ReviewedConnectorFinalization::Persisted { generation, grant }
+    }
 }
 
 /// Test holds right after a finalization's config write, one per config
@@ -437,6 +562,13 @@ fn persist_failure(
             Refusal::InvalidReview(format!("server '{}' was not added", review.server.name))
         }
         McpRealmPersistError::NotAdmitted(refusal) => Refusal::Unavailable(refusal.to_string()),
+        // Refused before anything was locked or written.
+        McpRealmPersistError::Config(
+            meerkat_core::config_runtime::ConfigRuntimeError::AdmissionInProgress,
+        ) => Refusal::AdmissionInProgress,
+        McpRealmPersistError::Config(
+            meerkat_core::config_runtime::ConfigRuntimeError::AdmissionFenceUnavailable(reason),
+        ) => Refusal::AdmissionFenceUnavailable(reason),
         McpRealmPersistError::Config(error) | McpRealmPersistError::OutcomeUnknown(error) => {
             return ReviewedConnectorFinalization::PersistUncertain {
                 reason: error.to_string(),
@@ -452,6 +584,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
+    use meerkat_core::AdmissionHold;
     use meerkat_core::connection::{CredentialAccountId, RealmId};
     use meerkat_core::mcp_config::{McpConnectorBinding, McpConnectorOperation, McpServerAccess};
     use meerkat_core::runtime_bootstrap::{RealmLocator, RealmRootChoice};
@@ -1151,7 +1284,8 @@ mod tests {
 
     /// The written server is replaced after the config write and before the
     /// selection: nothing is issued or selected, and the existing selection
-    /// is unchanged.
+    /// is unchanged. Only a hand edit can replace it there: a fenced config
+    /// writer is refused while the finalization holds the realm's fence.
     #[tokio::test]
     async fn a_server_replaced_after_the_write_is_not_selected() {
         use super::super::issuance::{StockGrantTarget, grant_stock_agent};
@@ -1181,16 +1315,24 @@ mod tests {
             acknowledged
                 .await
                 .expect("the finalization wrote the server");
-            // Another config writer replaces the written server with one bound
-            // to another account.
+            // A fenced config writer cannot replace the written server: the
+            // finalization holds the realm's fence until its grant settled.
             let target_config = realm_config(tmp.path());
             let target = McpRealmPersistTarget::new(&target_config);
-            target.remove("mail", None).await.expect("removed");
-            let mut other = review.server.clone();
-            if let Some(binding) = other.connector.as_mut() {
-                binding.account = "subject-2".into();
-            }
-            target.add(other, None).await.expect("replaced");
+            assert!(
+                matches!(
+                    target.remove("mail", None).await,
+                    Err(McpRealmPersistError::Config(
+                        meerkat_core::config_runtime::ConfigRuntimeError::AdmissionInProgress
+                    ))
+                ),
+                "a fenced writer is refused while the finalization holds the realm's fence"
+            );
+            // A hand edit, which no fence arbitrates, still can: the written
+            // server, now bound to another account.
+            let document = std::fs::read_to_string(&paths.config_path).unwrap();
+            assert_eq!(document.matches(SUBJECT).count(), 1, "{document}");
+            std::fs::write(&paths.config_path, document.replace(SUBJECT, "subject-2")).unwrap();
             release.send(()).unwrap();
         };
         let (storage, principals) = (storage(tmp.path()), principals());
@@ -1368,5 +1510,123 @@ mod tests {
             assert!(matched, "{expected}: {finalized:?}");
         }
         assert_eq!(realm_state(tmp.path()), before, "nothing was written");
+    }
+
+    // -----------------------------------------------------------------
+    // The admission fences a finalization takes first.
+    // -----------------------------------------------------------------
+
+    fn governed_fence(root: &Path) -> AdmissionFence {
+        AdmissionFence::realm(root, &realm()).expect("the realm's fence")
+    }
+
+    /// With no holder, the finalization takes the realm's fence, writes the
+    /// reviewed server, issues and selects its grant, and releases the fence
+    /// once the grant settled.
+    #[tokio::test]
+    async fn finalize_reviewed_connector_with_no_holder_succeeds() {
+        let tmp = governed_realm().await;
+        let factory = factory(tmp.path(), persistence());
+        let account = sign_in(tmp.path(), &factory).await;
+        let review = signed_in_review(tmp.path(), &account).await;
+        let finalized =
+            finalize_reviewed_connector(&storage(tmp.path()), &principals(), &factory, &review)
+                .await;
+        let ReviewedConnectorFinalization::Persisted { generation, grant } = finalized else {
+            panic!("finalized: {finalized:?}");
+        };
+        assert!(generation > review.expected_generation);
+        grant.expect("issued and selected");
+        AdmissionGuard::try_acquire(vec![governed_fence(tmp.path())])
+            .expect("the finalization released the realm's fence");
+    }
+
+    /// Under an admission's hold of the realm's fence the finalization
+    /// refuses before the custody, typed, with nothing written: not the
+    /// document, the grant log or the selection. Once the hold ends the same
+    /// review finalizes.
+    #[tokio::test]
+    async fn finalize_reviewed_connector_under_a_held_fence_refuses_not_started_with_nothing_written()
+     {
+        let tmp = governed_realm().await;
+        let factory = factory(tmp.path(), persistence());
+        let account = sign_in(tmp.path(), &factory).await;
+        let review = signed_in_review(tmp.path(), &account).await;
+        let before = realm_state(tmp.path());
+        let mut hold = AdmissionHold::try_acquire(vec![governed_fence(tmp.path())])
+            .expect("an admission holds the realm's fence");
+        let finalized =
+            finalize_reviewed_connector(&storage(tmp.path()), &principals(), &factory, &review)
+                .await;
+        assert!(
+            matches!(
+                refusal(&finalized),
+                ReviewedConnectorRefusal::AdmissionInProgress
+            ),
+            "refused, typed: {finalized:?}"
+        );
+        assert_eq!(realm_state(tmp.path()), before, "nothing was written");
+
+        hold.release();
+        let finalized =
+            finalize_reviewed_connector(&storage(tmp.path()), &principals(), &factory, &review)
+                .await;
+        assert!(
+            matches!(
+                finalized,
+                ReviewedConnectorFinalization::Persisted { grant: Ok(_), .. }
+            ),
+            "finalized once the hold ended: {finalized:?}"
+        );
+    }
+
+    /// For the `global` realm, whose own document is the user-global one, the
+    /// finalization takes the user document fence and then R(global), never
+    /// the fence beside the document; a hold of either refuses it before the
+    /// custody, typed, with nothing written.
+    #[tokio::test]
+    async fn finalize_on_global_takes_the_user_document_fence_then_r_global() {
+        let state = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let storage = storage_for(state.path(), RealmId::global(), Some(home.path()));
+        let document = realm_config_source(&storage)
+            .unwrap()
+            .config_doc_path(&RealmId::global());
+        let user = AdmissionFence::user_document(document.parent().unwrap());
+        let global = AdmissionFence::realm(state.path(), &RealmId::global()).unwrap();
+        let fences = finalization_fences(&storage, &document).unwrap();
+        assert_eq!(fences, vec![user.clone(), global.clone()]);
+        assert!(
+            fences.iter().all(|fence| !matches!(
+                fence.kind(),
+                meerkat_core::AdmissionFenceKind::Document { .. }
+            )),
+            "never the fence beside the document"
+        );
+
+        let mut review = review();
+        review.slot.realm = RealmId::global();
+        if let Some(binding) = review.server.connector.as_mut() {
+            binding.realm_id = "global".into();
+        }
+        let principals = StockPrincipals::for_user(&RealmId::global(), 4242).unwrap();
+        let factory = factory(state.path(), persistence());
+        for held in [user, global] {
+            held.ensure_exists()
+                .expect("the fence exists, as a holder needs");
+            let mut hold = AdmissionHold::try_acquire(vec![held.clone()])
+                .expect("an admission holds the fence");
+            let finalized =
+                finalize_reviewed_connector(&storage, &principals, &factory, &review).await;
+            assert!(
+                matches!(
+                    refusal(&finalized),
+                    ReviewedConnectorRefusal::AdmissionInProgress
+                ),
+                "{held:?}: {finalized:?}"
+            );
+            hold.release();
+        }
+        assert!(!document.exists(), "nothing was written");
     }
 }

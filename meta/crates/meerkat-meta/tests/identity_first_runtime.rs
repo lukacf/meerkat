@@ -938,6 +938,9 @@ struct CountingBridge {
     /// Set while the declared apply unlists: each retirement it starts is
     /// journaled for that cause, as Core's seal journals it.
     sealing: AtomicBool,
+    /// Core refuses each declared apply as a whole: nothing of the
+    /// declaration is applied.
+    refuse_declarations: AtomicBool,
 }
 
 impl CountingBridge {
@@ -1782,7 +1785,8 @@ impl SessionBridge for CountingBridge {
     /// seal's unlisting ([`declared_apply::DeclaredSet`]). A seat on an
     /// archived session is revived as Core revives it (a resume of that
     /// session, counted as one), refused while the double refuses resumes
-    /// as archived and not revivable.
+    /// as archived and not revivable. While the double refuses declarations,
+    /// nothing is applied.
     async fn apply_declared_roster(
         &self,
         roster: meerkat_meta::identity_first::DeclaredRosterRequest,
@@ -1790,6 +1794,9 @@ impl SessionBridge for CountingBridge {
         meerkat_meta::identity_first::DeclaredRosterAnswer,
         meerkat_meta::identity_first::BridgeError,
     > {
+        if self.refuse_declarations.load(Ordering::SeqCst) {
+            return Err(BridgeError::Mob("declared apply refused".to_string()));
+        }
         let revive = |identity: &AgentIdentity,
                       spec: &DurableAgentSpec,
                       session_id: &meerkat_core::types::SessionId| {
@@ -8010,4 +8017,142 @@ async fn a_reset_harvests_a_settled_batch_once_though_its_memory_holds_it() {
         vec![(id.clone(), false)],
         "Core's settle is asked once, before Core's rotation"
     );
+}
+
+/// A first-boot `Fresh` row (the row an offline reset writes) of a dormant
+/// identity whose member owes a compaction's projection: the roster pass's
+/// declaration that carries the identity's build settles the projection
+/// before Core is asked, and once Core's rotation carried the row out, the
+/// lifecycle projection's retirement harvests the batch before it distills
+/// the retired session's transcript. Without that settle the batch stays
+/// owed in Core and its discards never reach the distiller.
+#[tokio::test]
+async fn a_first_boot_fresh_row_harvests_an_owed_compaction_before_its_transcript_distillation() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-first-boot").await;
+    let id = make_identity("triage:owed-first-boot");
+    let state_dir = tempfile::tempdir().unwrap();
+    meerkat_meta::identity_first::FirstBootManifest::write_new(
+        state_dir.path(),
+        vec![meerkat_meta::identity_first::FirstBootRow::Fresh {
+            identity: id.clone(),
+            retired_session: session.clone(),
+        }],
+    )
+    .expect("the offline reset writes the first-boot manifest");
+    runtime.set_first_boot_state_dir(Some(state_dir.path().to_path_buf()));
+
+    context
+        .bootstrap_roster(&[make_spec("triage:owed-first-boot")])
+        .await
+        .expect("the roster pass");
+    assert_eq!(
+        bridge.rotations(),
+        vec![id.clone()],
+        "the row's fresh life is Core's rotation of the member"
+    );
+    assert_ne!(
+        core_member(&bridge, &id).session_id,
+        Some(session.clone()),
+        "the fresh life runs on a fresh session"
+    );
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
+    });
+    let transcript =
+        at("transcript").expect("the fresh life distills the retired session's transcript");
+    assert!(
+        harvest < transcript,
+        "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's rotation"
+    );
+    drop(runtime);
+}
+
+/// A roster pass whose declaration Core refuses as a whole: the unlisting
+/// of a dormant identity whose member owes a compaction's projection
+/// settled it before Core was asked, and Core retired nothing, so the
+/// session goes on and the settled batch is harvested as its live
+/// compaction's would have been; nothing of the retirement runs. Without
+/// the hand-back the batch would wait for a retirement that never comes.
+#[tokio::test]
+async fn a_declaration_core_refuses_hands_an_unlisting_s_settled_batch_to_the_ordinary_harvest() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-refused-roster").await;
+    let id = make_identity("triage:owed-refused-roster");
+    bridge.refuse_declarations.store(true, Ordering::SeqCst);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        0,
+        "Core retires nothing of a declaration it refuses"
+    );
+    let member = core_member(&bridge, &id);
+    assert!(member.live, "the member stays live");
+    assert_eq!(
+        member.session_id,
+        Some(session.clone()),
+        "the member stays on its session"
+    );
+
+    let events = events_once(&events, |event| event == "harvest").await;
+    assert!(
+        !events.iter().any(|event| event == "transcript"),
+        "nothing of the retirement runs: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core is asked to unlist"
+    );
+    drop(runtime);
+}
+
+/// The roster's unlisting of a dormant identity whose member owes a
+/// compaction's projection, where Core's seal fails to retire the member:
+/// the projection was settled before Core was asked, Core's answer leaves
+/// the member live on its session, and the settled batch is harvested as
+/// the session's live compaction's would have been; nothing of the
+/// retirement runs. Without the hand-back the batch would wait for a
+/// retirement that never comes.
+#[tokio::test]
+async fn an_unlisting_core_fails_to_retire_hands_its_settled_batch_to_the_ordinary_harvest() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-unlist-failed").await;
+    let id = make_identity("triage:owed-unlist-failed");
+    bridge.fail_retire_of(&id);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        1,
+        "Core's seal tries to retire the unlisted member once"
+    );
+    let member = core_member(&bridge, &id);
+    assert!(member.live, "the member stays live");
+    assert_eq!(
+        member.session_id,
+        Some(session.clone()),
+        "the member stays on its session"
+    );
+
+    let events = events_once(&events, |event| event == "harvest").await;
+    assert!(
+        !events.iter().any(|event| event == "transcript"),
+        "nothing of the retirement runs: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's seal"
+    );
+    drop(runtime);
 }

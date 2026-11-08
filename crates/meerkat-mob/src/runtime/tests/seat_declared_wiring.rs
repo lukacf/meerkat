@@ -1129,13 +1129,18 @@ async fn later_members_are_not_wired_to_an_exempt_member() {
     let exempt_worker = AgentIdentity::from("exempt-worker");
     let worker = AgentIdentity::from("bound-worker");
     let reviewer = AgentIdentity::from("bound-reviewer");
-    for member in [
-        spec("lead", &lead),
-        exempt(spec("lead", &side_lead)),
-        exempt(spec("worker", &exempt_worker)),
-        spec("worker", &worker),
-        spec("reviewer", &reviewer),
+    for (role, member, exempt_member) in [
+        ("lead", &lead, false),
+        ("lead", &side_lead, true),
+        ("worker", &exempt_worker, true),
+        ("worker", &worker, false),
+        ("reviewer", &reviewer, false),
     ] {
+        let member = if exempt_member {
+            exempt(spec(role, member))
+        } else {
+            spec(role, member)
+        };
         mob.handle.spawn_spec(member).await.expect("spawn a member");
     }
     assert_eq!(

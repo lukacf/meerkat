@@ -954,9 +954,11 @@ them.
   refused with a 400, the client sends it once more without any thinking
   block (and without manual `enabled` thinking, which needs one, so the
   model's own default applies) and logs a warning with the number of blocks
-  it removed. If that request fails too, the first error is returned. The
-  model answers without the omitted reasoning. Nothing new is sent to
-  Copilot or Bedrock, and their prompt-cache default is unchanged.
+  it removed. If that request fails too, the first error is returned, or
+  the resend's own error when it is one the caller retries (a rate limit,
+  an overload, a server or network error). The model answers without the
+  omitted reasoning. Nothing new is sent to Copilot or Bedrock, and their
+  prompt-cache default is unchanged.
 
 - `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
   claims forced tool choice support. Anthropic answers 400 to `tool_choice`

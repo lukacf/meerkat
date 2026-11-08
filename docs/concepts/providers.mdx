@@ -386,12 +386,14 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     sends it once more without any thinking block, and without manual
     `enabled` thinking, which needs one, logs a warning with the number of
     blocks it removed, and returns the first error if that request fails
-    too. A request that forces a tool call with thinking omitted is sent as
-    before, without the control: Meerkat refuses a forced tool call beside
-    explicit thinking, and a forced call skips thinking on the models that
-    accept one. The model answers that turn without the dropped reasoning
-    and the prompt cache restarts at the first dropped block; Meerkat logs a
-    warning naming each dropped block.
+    too, or the resend's own error when it is one Meerkat retries (a rate
+    limit, an overload, a server or network error). A request that forces
+    a tool call with thinking omitted is sent as before, without the
+    control: Meerkat refuses a forced tool call beside explicit thinking,
+    and a forced call skips thinking on the models that accept one. The
+    model answers that turn without the dropped reasoning and the prompt
+    cache restarts at the first dropped block; Meerkat logs a warning
+    naming each dropped block.
 
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,

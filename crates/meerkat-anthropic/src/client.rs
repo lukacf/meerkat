@@ -173,7 +173,9 @@ impl AnthropicClientBuilder {
     /// thinking of the turn in progress only, never that of completed turns,
     /// and one that is refused with a 400 while it replays thinking is sent
     /// once more without any thinking block (and without manual `enabled`
-    /// thinking); if that fails too, the first error is returned.
+    /// thinking); if that fails too, the first error is returned, or the
+    /// resend's own error when it is one the caller retries (a rate limit, an
+    /// overload, a server or network error).
     /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
     pub fn thinking_binding_controls_supported(mut self, supported: bool) -> Self {
         self.thinking_binding_controls_supported = supported;
@@ -2516,7 +2518,10 @@ impl AnthropicClient {
                 );
                 // A request that replays thinking without the binding control
                 // is sent once more without it (`thinking_resend`). If that
-                // fails too, the caller gets the first error.
+                // fails too, the caller gets the first error, or the resend's
+                // own error when it is one the caller retries (a rate limit,
+                // an overload, a server or network error): the retried call
+                // meets the refusal again and resends.
                 match self.thinking_resend(request, &body, status_code) {
                     None => Err(refusal),
                     Some((resend_body, removed)) => {
@@ -2543,8 +2548,9 @@ impl AnthropicClient {
                             Ok((resent_response, _)) if resent_response.status().is_success() => {
                                 Ok(resent_response.bytes_stream())
                             }
-                            #[cfg(not(target_arch = "wasm32"))]
                             Ok((resent_response, resent_receipt)) => {
+                                let resent_status = resent_response.status().as_u16();
+                                #[cfg(not(target_arch = "wasm32"))]
                                 if let Some(authorizer) = &self.authorizer {
                                     authorizer
                                         .observe_response_with_receipt(
@@ -2552,7 +2558,7 @@ impl AnthropicClient {
                                             &meerkat_core::HttpAuthorizationResponse {
                                                 method: "POST",
                                                 url: &url,
-                                                status: resent_response.status().as_u16(),
+                                                status: resent_status,
                                             },
                                         )
                                         .await
@@ -2560,10 +2566,26 @@ impl AnthropicClient {
                                             message: error.to_string(),
                                         })?;
                                 }
-                                Err(refusal)
+                                #[cfg(target_arch = "wasm32")]
+                                let _ = resent_receipt;
+                                let resent_headers = resent_response.headers().clone();
+                                let mut resent_text =
+                                    resent_response.text().await.unwrap_or_default();
+                                self.redact_diagnostic(&mut resent_text);
+                                let resent_error = self.redacted_error(
+                                    LlmError::from_http_response(
+                                        resent_status,
+                                        resent_text,
+                                        &resent_headers,
+                                    ),
+                                );
+                                if resent_error.is_retryable() {
+                                    Err(resent_error)
+                                } else {
+                                    Err(refusal)
+                                }
                             }
-                            #[cfg(target_arch = "wasm32")]
-                            Ok(_) => Err(refusal),
+                            Err(resent_error) if resent_error.is_retryable() => Err(resent_error),
                             Err(_) => Err(refusal),
                         }
                     }

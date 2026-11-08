@@ -103,7 +103,9 @@ fn backend_supports_automatic_cache_control(backend: AnthropicBackendKind) -> bo
 /// page lists the Claude API, Claude Platform on AWS, Claude Models on Google
 /// Cloud (Anthropic managed and Google managed) and Microsoft Foundry; it does
 /// not list Amazon Bedrock, and the GitHub Copilot route is an unverified
-/// gateway, so neither sends the control.
+/// gateway, so neither sends the control. Their requests replay the thinking
+/// of the turn in progress only, and one refused with a 400 while it replays
+/// thinking is sent once more without it; nothing new reaches either.
 /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
 fn backend_supports_thinking_binding_controls(backend: AnthropicBackendKind) -> bool {
     match backend {

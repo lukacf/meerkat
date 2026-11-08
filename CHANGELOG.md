@@ -1386,8 +1386,9 @@ them.
   (see Changed). To lift it, repair the scope in your store (keep one of the
   two batches at that version by your fixed rule, where a lower fence token
   never beats a higher one, and remove the other), then reopen the realm
-  promptly and retry the restore of each mob quarantined meanwhile
-  (`mob/restore_retry`). A reopen without the repair quarantines it again.
+  promptly and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines it
+  again.
 
 - Hosts with a governed composition whose controller owner supplies clients
   again after a stop or a restart: a governed prompt kept across a graceful

@@ -339,8 +339,10 @@ Core never repairs a scope: the data is your store's. To repair one:
 2. In your store, keep one of the two batches at that version by your fixed
    rule, where a batch carrying a lower fence token never beats one
    carrying a higher token (obligation 4), and remove the other.
-3. Open the realm again promptly (restart the process), then retry the
-   restore of each mob that was quarantined (`mob/restore_retry`). An open
+3. Open the realm again promptly (restart the process), then open again
+   each mob storage your host found quarantined: the realm's mob storage
+   host (`SpiMobStoreHost::stored_mobs`) lists it with
+   `SpiStoredMob::quarantined` until the reopen after the repair. An open
    without the repair quarantines the scope again. Until the reopen, a
    re-acquire lists the repaired scope among the heads and the realm stops
    once, with the same end state as the reopen: the writer cannot tell your

@@ -156,6 +156,21 @@ fn poisoned_scope_refusal(session_id: &SessionId) -> RuntimeStoreError {
     .into_read()
 }
 
+/// The refusal a host store answers for a read of a session whose scope is
+/// quarantined (the store reports a conflict for it), as the session layer
+/// hands it on.
+fn quarantined_session_read(session_id: &SessionId) -> SessionError {
+    SessionError::Store(Box::new(
+        SpiError::ScopeQuarantined {
+            scope: format!("rt:{}", LogicalRuntimeId::for_session(session_id).0),
+            cause: "conflicted in the store at version 2: repair the scope in the store, then \
+                    reopen the realm"
+                .to_string(),
+        }
+        .into_read(),
+    ))
+}
+
 /// A lazy boot over a realm whose runtime scope of one seated member is
 /// poisoned stays observed: it plans the poisoned member as holding work (its
 /// runtime's facts cannot be trusted) and leaves the healthy member dormant.
@@ -445,6 +460,35 @@ async fn a_refused_member_status_is_answered_from_the_recorded_refusal() {
         1,
         "one read of the refused session, then its recorded refusal answers"
     );
+}
+
+/// A member whose session read is refused because its scope is quarantined
+/// (the store reports a conflict for it) reads `store_refused`, as a member
+/// whose scope is poisoned does: no later read brings its preview back
+/// before the scope is repaired and the realm reopened.
+#[tokio::test]
+async fn a_quarantined_member_status_reads_store_refused() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("quarantined-status");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn")
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let refused_session = session_id.clone();
+    service.refuse_status_view_reads(&session_id, move || {
+        quarantined_session_read(&refused_session)
+    });
+    for _ in 0..3 {
+        let snapshot = handle.member_status(&member).await.expect("status");
+        assert_eq!(
+            snapshot.preview_unavailable,
+            Some(crate::runtime::handle::MemberPreviewUnavailable::StoreRefused),
+            "a quarantined member's preview reads store_refused"
+        );
+    }
 }
 
 /// A refusal is recorded for the member's projection target it was read

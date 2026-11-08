@@ -115,6 +115,14 @@ impl MemoryHost {
                 current: Some(*version),
             })
     }
+
+    /// The conflict of the scope named `name` is repaired in the store: one
+    /// of its two batches was kept, and the scope loads and lists as usual.
+    fn repair(&self, name: &str) {
+        self.state()
+            .conflicted
+            .retain(|scope, _| scope.name.as_str() != name);
+    }
 }
 
 #[async_trait]
@@ -746,6 +754,74 @@ async fn a_storage_whose_scope_is_conflicted_is_listed_quarantined() {
     mobs.open("neighbour")
         .await
         .expect("the storage beside it opens");
+}
+
+// A storage whose mob scope the store reports conflicted is listed
+// quarantined and refuses to open, typed with the quarantine. Once the scope
+// is repaired in the store and the realm reopened, the host finds the
+// storage listed as a stored mob again, and it opens with what it held.
+#[tokio::test]
+async fn a_quarantined_storage_lists_and_opens_again_after_a_repair_and_a_reopen() {
+    let host = Arc::new(MemoryHost::default());
+    {
+        let process = start(&host, "mob").await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:rmob~");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    {
+        let realm = SpiRealm::open(Arc::clone(&dyn_host), SpiRealmConfig::default())
+            .await
+            .expect("the realm opens beside the conflicted scope");
+        let mobs = SpiMobStoreHost::for_realm(&realm)
+            .await
+            .expect("the mob families claim");
+        let listed = mobs.stored_mobs();
+        let stored = listed
+            .iter()
+            .find(|stored| stored.storage_key == "mob")
+            .expect("the storage is listed");
+        assert!(
+            stored.quarantined.is_some(),
+            "listed quarantined: {stored:?}"
+        );
+        match mobs.open("mob").await {
+            Err(MobStoreError::ReadFailed(message)) => assert!(
+                message.contains("quarantined") && message.contains(&name),
+                "opening it refuses with the quarantine: {message}"
+            ),
+            other => panic!("opening a quarantined storage refuses: {:?}", other.err()),
+        }
+    }
+
+    host.repair(&name);
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm reopens after the repair");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let stored = listed
+        .iter()
+        .find(|stored| stored.storage_key == "mob")
+        .expect("the storage is listed");
+    assert_eq!(stored.quarantined, None, "{stored:?}");
+    assert_eq!(stored.unreadable, None, "{stored:?}");
+    let opened = mobs.open("mob").await.expect("the repaired storage opens");
+    let events = opened
+        .storage()
+        .events
+        .replay_all()
+        .await
+        .expect("its log replays");
+    assert_eq!(events.len(), 1, "it holds what it held: {events:?}");
 }
 
 // Unrun until the candidate's validation.

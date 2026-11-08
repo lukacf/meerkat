@@ -375,6 +375,149 @@ async fn prepared_close_control(case: CloseCase) {
 async fn prepared_close_before_adoption_joins_entered_canonical_read() {
     prepared_close_control(CloseCase::BeforeAdoption).await;
 }
+
+/// The gateway's close drains custody recovery, the round in flight and its
+/// final round after stop, before the host's settled close ends the custody
+/// of the native grant owner and store those rounds read: while a recovery
+/// read is held, the close waits and both stay leased; once it returns, the
+/// close settles, reports complete and hands both back.
+#[tokio::test]
+async fn gateway_close_drains_custody_recovery_before_releasing_native_custody() {
+    use meerkat_authorization::{
+        clock::HostAuthorizationClock,
+        grants::{FileGrantOwnerStore, GrantDurabilityError, LocalGrantAuthority},
+        publication::LocalAuthorizationPublication,
+    };
+    let (_directory, mut selection) = fixture();
+    provision_fixture(&mut selection);
+    let local: CompiledLocalPolicy =
+        serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
+    let selected = local.native_host.as_ref().unwrap();
+    let directory = state_directory(&selection, selected, NativeOwnerStartup::Restore).unwrap();
+    let scope = StoreScope {
+        realm: selected.realm.to_string(),
+        owner: local.deployment.to_string(),
+    };
+    let originals_path = directory.join("originals.sqlite3");
+    let grants_path = directory.join("grants.jsonl");
+    let restore_grants = || {
+        LocalGrantAuthority::restore(
+            Arc::new(FileGrantOwnerStore::new(&grants_path)),
+            LocalAuthorizationPublication::new(),
+            Arc::new(HostAuthorizationClock),
+        )
+    };
+    let selected_store = Arc::new(OnceLock::<Arc<PausedSourceStore>>::new());
+    let captured_store = selected_store.clone();
+    let captured_scope = scope.clone();
+    let (owner, installed) = InstalledToolkitHost::open_with_source_store(
+        selection.clone(),
+        NativeOwnerStartup::Restore,
+        None,
+        Box::new(move |inner| {
+            let store = Arc::new(PausedSourceStore::new(inner, captured_scope));
+            assert!(captured_store.set(store.clone()).is_ok());
+            store
+        }),
+    )
+    .await
+    .unwrap();
+    let store = selected_store.get().unwrap().clone();
+    let (_signal, closed) = tokio::sync::watch::channel(false);
+    let host = installed.compose(Arc::new(owner), PrivateHostClosed(closed));
+    let configuration = host.native_grant_work_configuration().unwrap().unwrap();
+    let machine = Arc::new(
+        MeerkatMachine::ephemeral()
+            .with_local_grant_authorization(configuration)
+            .unwrap(),
+    );
+    let service = Arc::new(EphemeralSessionService::new(
+        FactoryAgentBuilder::new(AgentFactory::minimal().comms(true), Config::default()),
+        1,
+    ));
+    let spec = MobBootstrapSpec::new(definition(), MobStorage::in_memory(), service.clone())
+        .with_session_runtime_adapter(machine)
+        .unwrap()
+        .with_declared_ephemeral_mob_storage();
+    let spec = host.prepare_bootstrap(spec).await.unwrap();
+    let mut native = UnifiedRuntime::bootstrap(
+        spec,
+        MetaConfig {
+            modules: Vec::new(),
+            discovery: DiscoverySpec {
+                namespace: "factory".into(),
+                modules: Vec::new(),
+            },
+            pre_spawn: Vec::new(),
+        },
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+
+    let checked =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(30), async {
+            host.bind_runtime(&mut native).await.unwrap();
+            native.install_identity_first_context(context(&native, true));
+            store.arm();
+            host.bind_identity_runtime(&mut native).await.unwrap();
+            store.entered.notified().await;
+            assert_eq!(store.started.load(Ordering::SeqCst), 1);
+            host.begin_close(GatewayHostCloseReason::Shutdown).unwrap();
+            let joining = host.join_close();
+            tokio::pin!(joining);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(500), &mut joining)
+                    .await
+                    .is_err(),
+                "the close waits for the held recovery read"
+            );
+            assert!(
+                matches!(
+                    SqliteStore::open_existing(&originals_path),
+                    Err(StoreError::OwnerUnavailable)
+                ),
+                "the native store stays leased while custody recovery drains"
+            );
+            assert!(
+                matches!(
+                    restore_grants(),
+                    Err(GrantDurabilityError::StoreUnavailable)
+                ),
+                "the native grant owner stays leased while custody recovery drains"
+            );
+            store.release.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(15), &mut joining)
+                .await
+                .unwrap()
+                .expect("the close reports complete once recovery drained");
+            assert_eq!(store.completed.load(Ordering::SeqCst), 1);
+            assert_eq!(store.cancelled.load(Ordering::SeqCst), 0);
+            assert!(
+                SqliteStore::open_existing(&originals_path).is_ok(),
+                "the settled close handed the native store back"
+            );
+            assert!(
+                restore_grants().is_ok(),
+                "the settled close handed the native grant owner back"
+            );
+        }))
+        .catch_unwind()
+        .await;
+
+    // Release the held read and join the real owners, also after a failed or
+    // timed-out body.
+    store.release.add_permits(1);
+    let _ = host.begin_close(GatewayHostCloseReason::Shutdown);
+    let report = native.shutdown().await;
+    let _ = host.join_close().await;
+    assert!(report.cleanup_completed());
+    match checked {
+        Ok(Ok(())) => (),
+        Ok(Err(_)) => panic!("bounded gateway custody recovery close control"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
 #[tokio::test]
 async fn failed_prepared_adoption_keeps_entered_recovery_owned_until_join() {
     prepared_close_control(CloseCase::FailedAdoption).await;

@@ -474,6 +474,11 @@ impl GatewayHostComposition for Driver {
             .lock()
             .map(|publication| publication.installed.clone())
             .map_err(|_| GatewayHostError::Unavailable);
+        // The selected source's custody recovery drains first, its final
+        // round after stop included: the installed host's settled close then
+        // ends the custody of the native grant owner and store that round
+        // reads and writes.
+        let source_result = self.runtime.join_custody_close().await;
         let host_close = async {
             match host {
                 Ok(Some(host)) => host.join_close().await,
@@ -483,11 +488,7 @@ impl GatewayHostComposition for Driver {
         };
         // Meta calls this after native transport shutdown. A failed host lookup
         // cannot abandon either the selected source task or local guard owner.
-        let (host_result, source_result, local_result) = tokio::join!(
-            host_close,
-            self.runtime.join_custody_close(),
-            self.join_local_round()
-        );
+        let (host_result, local_result) = tokio::join!(host_close, self.join_local_round());
         host_result.and(source_result).and(local_result)
     }
     async fn wait_closed(&self) {

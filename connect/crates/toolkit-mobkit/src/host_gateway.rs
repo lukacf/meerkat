@@ -942,13 +942,17 @@ impl GatewayHostComposition for ToolkitGatewayHost {
                 tokio::join!(self.acquisition_recovery.join(), custody_close);
             recovered.and(custody)
         };
-        let (recovery, native) = tokio::join!(
-            tokio::time::timeout(std::time::Duration::from_secs(30), recovery_close),
-            native_close,
-        );
+        // Recovery drains first, custody recovery's final round after stop
+        // included: the native host's settled close then ends the custody of
+        // the native grant owner and store those rounds read and write. The
+        // host refuses new work since its close began above, and its join
+        // only waits for work already entered, so this cannot wait on it.
+        let recovery =
+            tokio::time::timeout(std::time::Duration::from_secs(30), recovery_close).await;
+        let native = native_close.await;
         let settled = native.map_err(host_error)?;
         // A timed-out join leaves the same task handle retained for a later
-        // join_close; native closure was still allowed to complete above.
+        // join_close; native closure still completed after it.
         recovery
             .map_err(|_| GatewayHostError::SettlementIncomplete)?
             .map_err(host_error)?;

@@ -1955,6 +1955,7 @@ impl SpiRealm {
         acquired: Result<Result<FenceGrant, HostStoreError>, tokio::time::error::Elapsed>,
     ) -> Result<AcquireNext, SpiError> {
         let installed = self.fence();
+        let own_grant = lock(&self.writer_fence).machine.state().own_grant;
         let (outcome, token, remaining, failure, grant) = match acquired {
             Ok(Ok(grant)) => (
                 WriterFenceAcquireOutcome::Granted,
@@ -2015,11 +2016,19 @@ impl SpiRealm {
                     "fenced out while stopped: token {token} renewed its lease after this writer \
                      waited it out, so another writer holds the realm"
                 ),
-                WriterFenceLostCause::TokenOrder => format!(
-                    "the host store broke its token order: it granted token {token}, not above \
-                     the installed token {installed}, though every grant must answer a token \
-                     above every earlier one; reopen the realm"
-                ),
+                WriterFenceLostCause::TokenOrder => match own_grant {
+                    Some(own) if token.get() <= own => format!(
+                        "the host store broke its token order: it granted token {token}, not \
+                         above token {own}, an earlier grant of this writer whose listing \
+                         failed, though every grant must answer a token above every earlier \
+                         one; reopen the realm"
+                    ),
+                    _ => format!(
+                        "the host store broke its token order: it granted token {token}, not \
+                         above the installed token {installed}, though every grant must answer \
+                         a token above every earlier one; reopen the realm"
+                    ),
+                },
                 other => format!("the re-acquire lost the realm: {other:?}"),
             },
         );

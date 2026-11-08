@@ -418,6 +418,7 @@ AcquireGranted(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Granted")
     /\ (arg_token > token)
+    /\ (IF (own_grant = None) THEN TRUE ELSE (arg_token > (IF "value" \in DOMAIN own_grant THEN own_grant["value"] ELSE None)))
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
     /\ granted' = Some(arg_token)
@@ -430,7 +431,7 @@ AcquireGranted(outcome, arg_token, lease_moved) ==
 AcquireGrantedOutOfOrder(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Granted")
-    /\ (arg_token <= token)
+    /\ (IF (arg_token <= token) THEN TRUE ELSE ((own_grant # None) /\ (arg_token <= (IF "value" \in DOMAIN own_grant THEN own_grant["value"] ELSE None))))
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "TokenOrder"

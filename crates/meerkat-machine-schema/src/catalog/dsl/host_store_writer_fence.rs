@@ -890,13 +890,17 @@ machine! {
         // AcquireAnswered
         // ------------------------------------------------------------------
 
-        // A grant above the installed token is this writer's own until a
-        // listing proves it: no other writer committed since the stop.
+        // A grant above the installed token, and above the writer's own grant
+        // whose listing failed, is this writer's own until a listing proves
+        // it: no other writer committed since the stop.
         transition AcquireGranted {
             on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "granted" { outcome == WriterFenceAcquireOutcome::Granted }
             guard "above_the_installed_token" { token > self.token }
+            guard "above_the_writers_own_grant" {
+                self.own_grant == None || token > self.own_grant.get("value")
+            }
             update {
                 self.granted = Some(token);
                 self.own_grant = Some(token);
@@ -907,13 +911,17 @@ machine! {
             emit GrantReceived { token: token }
         }
 
-        // A grant at or below the installed token breaks the store's token
-        // order: fail closed.
+        // A grant at or below the installed token, or at or below the
+        // writer's own grant whose listing failed (an earlier grant of the
+        // realm), breaks the store's token order: fail closed.
         transition AcquireGrantedOutOfOrder {
             on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "granted" { outcome == WriterFenceAcquireOutcome::Granted }
-            guard "at_or_below_the_installed_token" { token <= self.token }
+            guard "at_or_below_a_known_grant" {
+                token <= self.token
+                    || (self.own_grant != None && token <= self.own_grant.get("value"))
+            }
             update {
                 self.lost_cause = WriterFenceLostCause::TokenOrder;
             }

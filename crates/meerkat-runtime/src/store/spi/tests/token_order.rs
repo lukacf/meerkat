@@ -3,8 +3,9 @@
 //! takeover of the writer's own recorded lease included. A store that grants
 //! a token at or below one already granted lets two writers carry one token,
 //! or a later writer a lower one, so a stopped writer's re-acquire checks its
-//! grant against the token it holds and loses the realm, naming the store's
-//! broken order, when the grant is not above it.
+//! grant against the token it holds, and against a grant of its own whose
+//! listing failed, and loses the realm, naming the store's broken order,
+//! when the grant is not above both.
 
 use super::*;
 

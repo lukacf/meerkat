@@ -360,6 +360,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `granted`
   - `above_the_installed_token`
+  - `above_the_writers_own_grant`
 - Emits: `GrantReceived`
 - To: `Proving`
 
@@ -368,7 +369,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `granted`
-  - `at_or_below_the_installed_token`
+  - `at_or_below_a_known_grant`
 - Emits: `RealmLost`
 - To: `Lost`
 

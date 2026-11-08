@@ -303,10 +303,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # invariant, the generated keep_unregister_only_without_live_input among them.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
 # be reported violated.
-# live_delegation_admitted_start_after_close_audit.sh requires its nine goals
-# violated, and with --mutants its eight bound-only mutants' goal runs to end
-# without an error (the success line above) and its four other mutants'
-# invariants violated.
+# live_delegation_admitted_start_after_close_audit.sh requires its fourteen
+# goals violated, and with --mutants its nine unreachable-goal mutants' runs
+# to end without an error (the success line above) and its five other
+# mutants' invariants violated.
 # live_context_result_barrier_audit.sh with --mutants requires its
 # summary-dropped mutant to violate AuditResultFollowsSummary.
 # peer_request_maps_audit.sh requires its six witnesses reported violated,
@@ -488,6 +488,12 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNeverFreshBlockedSettled is violated."' \
   'echo "Error: Invariant AuditNeverCustodyBlockedSettled is violated."' \
   'echo "Error: Invariant AuditRevokedBlockedIsCancelled is violated."' \
+  'echo "Error: Invariant AuditNeverIntakeClosedWhileBound is violated."' \
+  'echo "Error: Invariant AuditNeverAuthorizedAfterIntakeClose is violated."' \
+  'echo "Error: Invariant AuditNeverRestartBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverRestartFailedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverRestartCancelledSettled is violated."' \
+  'echo "Error: Invariant AuditNoAdmissionAfterIntakeClose is violated."' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \

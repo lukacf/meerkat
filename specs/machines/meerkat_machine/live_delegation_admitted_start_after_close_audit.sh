@@ -5,19 +5,22 @@
 # busy-source requeue and the steer of a continuation held for it resolve
 # through the operation's own retired channel, never through a foreign
 # channel or a stale binding; a worker started after the close settles
-# through the revoked-worker reconciliation; and a blocked hand-back on the
-# unbound channel settles Cancelled.
+# through the revoked-worker reconciliation; a blocked hand-back on the
+# unbound channel settles Cancelled; restart recovery, which passes the
+# completed turn behind a recorded classification, settles it as recorded;
+# and a channel whose delegation intake the coordinator closed admits no
+# delegation.
 #
 # usage: live_delegation_admitted_start_after_close_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
-# model values, its four safety invariants, its step bound and its
+# model values, its five safety invariants, its step bound and its
 # deterministic-prefix constraint. It runs TLC once with every generated
 # invariant (safety), then once per goal with that goal as an extra
 # invariant, and requires TLC to report each goal violated: the bound
 # provably reaches every post-close arm, so the invariants are not vacuously
-# true. With --mutants it then seeds twelve defects into a copy of the
+# true. With --mutants it then seeds fourteen defects into a copy of the
 # generated model and requires the audit to refuse each: eight restore the
 # bound-channel-only guards of one family of arms (reconciliation confirmed;
 # reconciliation as a conflict or missing; worker start; consequential
@@ -26,9 +29,13 @@
 # the close from the worker start's post-close disjunct, which
 # AuditStaleBindingNeverServes must refuse; one counts a worker started after
 # the close against the closed channel, which
-# AuditClosedChannelHoldsNoWorkerCount must refuse; and two leave a blocked
+# AuditClosedChannelHoldsNoWorkerCount must refuse; two leave a blocked
 # hand-back Blocked on the unbound channel (fresh, and from a terminal
-# recorded while bound), which AuditRevokedBlockedIsCancelled must refuse.
+# recorded while bound), which AuditRevokedBlockedIsCancelled must refuse;
+# one lets the restart reconciliation refuse the completed turn behind a
+# recorded classification, which must make every restart goal unreachable;
+# and one drops the closed intake from both admission arms, which
+# AuditNoAdmissionAfterIntakeClose must refuse.
 # Nothing is hand-copied, so a DSL change regenerates ci.cfg and the audit
 # follows it; an anchor this script expects but cannot find fails the run
 # instead of silently narrowing the check.
@@ -80,7 +87,8 @@ write_cfg() {
   AuditForeignChannelNeverServes
   AuditStaleBindingNeverServes
   AuditClosedChannelHoldsNoWorkerCount
-  AuditRevokedBlockedIsCancelled${extra}" "${cfg}"
+  AuditRevokedBlockedIsCancelled
+  AuditNoAdmissionAfterIntakeClose${extra}" "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
@@ -139,6 +147,11 @@ goals=(
   AuditNeverSteerSettledAfterClose
   AuditNeverFreshBlockedSettled
   AuditNeverCustodyBlockedSettled
+  AuditNeverIntakeClosedWhileBound
+  AuditNeverAuthorizedAfterIntakeClose
+  AuditNeverRestartBlockedSettled
+  AuditNeverRestartFailedSettled
+  AuditNeverRestartCancelledSettled
 )
 # Each goal must be reachable within the bound: TLC has to report it violated.
 for goal in "${goals[@]}"; do
@@ -315,6 +328,52 @@ PY
   mutate custody_blocked_stays_blocked violated AuditRevokedBlockedIsCancelled \
     "${blocked_stays_edit}" \
     'ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustody|MapSet(live_delegation_schedule_state_by_operation, operation_id, "Cancelled")|MapSet(live_delegation_schedule_state_by_operation, operation_id, "Blocked")'
-  echo "live delegation admitted start after close audit refused 12 mutants"
+
+  # Restart recovery passes the Mob's completed turn; the terminal-custody
+  # arm refuses it against a recorded classification of that turn, as it did
+  # before, so no restart goal is reachable.
+  mutate restart_refuses_the_completed_turn_behind_a_classification unreachable AuditNeverRestartSettled - <<'PY'
+import os
+path = os.environ["MODEL"]
+text = open(path).read()
+agreement = (
+    "((terminal = \"Completed\") /\\ (IF ((IF (operation_id \\in DOMAIN "
+    "live_delegation_worker_terminal_by_operation)"
+)
+refused = (
+    "(FALSE /\\ (IF ((IF (operation_id \\in DOMAIN "
+    "live_delegation_worker_terminal_by_operation)"
+)
+for phase in ("Idle", "Attached", "Running", "Retired", "Stopped"):
+    name = f"ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustody{phase}("
+    start = text.find("\n" + name)
+    assert start >= 0, f"{name} not found"
+    end = text.find("\n\n", start + 1)
+    block = text[start:end]
+    count = block.count(agreement)
+    assert count == 1, f"expected one completed-turn agreement in {name}, found {count}"
+    text = text[:start] + block.replace(agreement, refused) + text[end:]
+open(path, "w").write(text)
+PY
+
+  # Both admission arms forget the closed intake.
+  mutate admission_ignores_the_closed_intake violated AuditNoAdmissionAfterIntakeClose - <<'PY'
+import os
+path = os.environ["MODEL"]
+text = open(path).read()
+guard = "\n    /\\ ~((channel_id \\in live_delegation_intake_closed_channels))"
+for arm in ("AdmitLiveDelegation", "AdmitLiveInteractionDelegation"):
+    for phase in ("Idle", "Attached", "Running"):
+        name = f"{arm}{phase}("
+        start = text.find("\n" + name)
+        assert start >= 0, f"{name} not found"
+        end = text.find("\n\n", start + 1)
+        block = text[start:end]
+        count = block.count(guard)
+        assert count == 1, f"expected one intake guard in {name}, found {count}"
+        text = text[:start] + block.replace(guard, "") + text[end:]
+open(path, "w").write(text)
+PY
+  echo "live delegation admitted start after close audit refused 14 mutants"
 fi
-echo "live delegation admitted start after close audit passed at model_step_count <= ${max_steps} (9 goals reached)"
+echo "live delegation admitted start after close audit passed at model_step_count <= ${max_steps} (14 goals reached)"

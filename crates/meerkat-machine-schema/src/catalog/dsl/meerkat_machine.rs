@@ -4309,6 +4309,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // sealed when the operation was admitted: a worker that starts
             // after that channel closed still carries it.
             live_delegation_member_turn_reasoning_by_operation: Map<OperationId, Enum<LiveMemberTurnReasoning>>,
+            // Channels whose delegation intake the coordinator closed with the
+            // first step of its close sweep: no delegation is admitted on such a
+            // channel any more. Channel ids are never reused, so, like the revoked
+            // set, it only grows.
+            live_delegation_intake_closed_channels: Set<String>,
             live_delegation_schedule_state_by_operation: Map<OperationId, Enum<LiveDelegationScheduleState>>,
             live_delegation_active_worker_count_by_channel: Map<String, u64>,
             live_delegation_channel_worker_cap: u64,
@@ -5008,6 +5013,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_operation_by_interaction = EmptyMap,
             live_delegation_channel_by_operation = EmptyMap,
             live_delegation_member_turn_reasoning_by_operation = EmptyMap,
+            live_delegation_intake_closed_channels = EmptySet,
             live_delegation_schedule_state_by_operation = EmptyMap,
             live_delegation_active_worker_count_by_channel = EmptyMap,
             live_delegation_channel_worker_cap = 4,
@@ -7386,6 +7392,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             // request it staged, and nothing else
             // (AbortUntilChangedSwitchTurnReconfigure).
             AbortUntilChangedSwitchTurnReconfigure { request_id: String },
+            // The coordinator's close sweep closes the channel's delegation
+            // intake (CloseLiveDelegationIntake).
+            CloseLiveDelegationIntake {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+            },
         }
 
         surface_only [
@@ -29748,6 +29762,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A delegation is admitted only while its channel's delegation intake
+        // is open. The coordinator closes the intake as the first step of the
+        // channel's close sweep (Turbo S S107): a delegation the provider's
+        // lifecycle seam still carries past that sweep is refused, instead of
+        // admitted where no channel loop can claim it and no sweep settles it.
         transition AdmitLiveDelegation {
             per_phase [Idle, Attached, Running]
             on input AdmitLiveDelegation {
@@ -29779,6 +29798,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "operation_not_known" {
                 !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
+            }
+            guard "delegation_intake_open" {
+                !self.live_delegation_intake_closed_channels.contains(channel_id)
             }
             update {
                 if !self.live_conversation_started_channels.contains_key(channel_id) {
@@ -29852,6 +29874,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "identities_are_fresh" {
                 !self.live_interaction_channel_by_id.contains_key(interaction_id)
                 && !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
+            }
+            guard "delegation_intake_open" {
+                !self.live_delegation_intake_closed_channels.contains(channel_id)
             }
             update {
                 self.live_interaction_channel_by_id.insert(interaction_id, channel_id);
@@ -30870,8 +30895,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Crash after generated terminal recording but before physical child
-        // retirement uses the same restart input. Exact durable terminal
-        // equality is required before old result eligibility is fenced.
+        // retirement uses the same restart input. The observed durable terminal
+        // must equal the recorded one before old result eligibility is fenced,
+        // except that a completed Mob turn agrees with a recorded Blocked,
+        // Failed or Cancelled terminal: those are the coordinator's
+        // classification of a completed turn against its work item (a worker
+        // that handed its item back, or an item that failed or was
+        // cancelled), and restart recovery observes only the Mob's completed
+        // turn behind them. The recorded classification stands and settles the
+        // operation as the in-process close settles it.
         transition ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustody {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ReconcileRevokedLiveDelegationWorkerAfterRestart {
@@ -30890,8 +30922,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
                 && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
-                && self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
-                    == Some(terminal)
+                && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                        == Some(terminal)
+                    || (terminal == LiveDelegationWorkerTerminalKind::Completed
+                        && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Blocked)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Failed)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Cancelled))))
                 && (self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                         == Some(LiveDelegationWorkerPhase::Terminal)
                     || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
@@ -30915,7 +30954,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 // A blocked terminal recorded while the channel was bound
                 // settles Cancelled once the channel is unbound: a requeue
                 // needs the binding, so nothing could ever serve it again.
-                if terminal == LiveDelegationWorkerTerminalKind::Blocked
+                // The recorded terminal decides, whether the in-process close
+                // passes it or restart recovery passes the completed turn
+                // behind it.
+                if self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerTerminalKind::Blocked)
                     && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
                         == Some(LiveDelegationScheduleState::Blocked) {
                     self.live_delegation_schedule_state_by_operation.insert(
@@ -30954,8 +30997,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
                 && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
-                && self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
-                    == Some(terminal)
+                && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                        == Some(terminal)
+                    || (terminal == LiveDelegationWorkerTerminalKind::Completed
+                        && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Blocked)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Failed)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Cancelled))))
                 && self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                     == Some(LiveDelegationWorkerPhase::Retired)
                 && self.live_delegation_late_terminal_operations.contains(operation_id)
@@ -31228,6 +31278,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: interaction_id,
                 operation_id: operation_id
             }
+        }
+
+        // The coordinator's close sweep closes the channel's delegation intake
+        // first, under the channel's exact binding: from then on no delegation
+        // is admitted on it (see `AdmitLiveDelegation`). Delegations admitted
+        // before keep their custody and still start, run and settle after the
+        // close. Closing again changes nothing; a channel already unbound
+        // admits nothing anyway.
+        transition CloseLiveDelegationIntake {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CloseLiveDelegationIntake {
+                channel_id, runtime_id, fence_token, generation
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            update {
+                self.live_delegation_intake_closed_channels.insert(channel_id);
+            }
+            to Idle
         }
 
         // Executor state narration is templated by the shell and reaches the

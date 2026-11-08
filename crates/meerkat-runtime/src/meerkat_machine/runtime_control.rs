@@ -12001,6 +12001,56 @@ impl MeerkatMachine {
         }
     }
 
+    /// Close a channel's delegation intake under its exact binding: from
+    /// then on no delegation is admitted on the channel. Delegations admitted
+    /// before keep their custody and still start, run and settle after the
+    /// close. Closing again changes nothing.
+    pub async fn close_live_delegation_intake(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CloseLiveDelegationIntake {
+                channel_id: binding.channel_id().to_string(),
+                runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                    binding.runtime_id(),
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                    binding.fence_token(),
+                ),
+                generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                    binding.generation(),
+                ),
+            },
+            "CloseLiveDelegationIntake",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Whether a channel's delegation intake is closed: the machine admits
+    /// no delegation on it any more.
+    pub async fn live_delegation_intake_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        Ok(state
+            .live_delegation_intake_closed_channels
+            .contains(&channel_id.to_string()))
+    }
+
     /// Mint the one-use authority for a templated executor-state narration.
     /// The machine refuses kinds that do not match the generated schedule
     /// state and repeats of the last released kind.

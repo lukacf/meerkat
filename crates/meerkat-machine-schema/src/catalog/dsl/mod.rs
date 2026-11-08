@@ -3526,6 +3526,10 @@ runtime_internal_inputs!(
         // request it staged: the switch-turn chain applies it beside
         // CompleteUntilChangedSwitchTurnReconfigure. No caller can ask for it.
         AbortUntilChangedSwitchTurnReconfigure,
+        // A channel's close sweep closes its delegation intake under the
+        // channel's exact binding, so nothing is admitted on it past the
+        // close. No caller can ask for it.
+        CloseLiveDelegationIntake,
     ]
 );
 

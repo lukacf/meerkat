@@ -1430,7 +1430,7 @@ mod tests {
                 .with_exclusive_mutation_for(
                     key(),
                     TokenStoreAccess::Unattended,
-                    Box::new(|| Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })),
+                    Box::new(|_guard| Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })),
                 )
                 .await
                 .expect("the mutation under the lock");

@@ -1764,6 +1764,7 @@ mod owner_updates {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
             tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -1775,13 +1776,14 @@ mod owner_updates {
             if let Some(release) = release {
                 let _ = release.await;
             }
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
         async fn list(
             &self,

@@ -627,7 +627,14 @@ impl Peers {
         );
         let issue = |name: &str, grantee: PrincipalRef, bounds: ExecutionRestrictions| {
             grants
-                .issue_root(&principal("grant-owner"), id(name), grantee, None, bounds)
+                .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &principal("grant-owner"),
+                    id(name),
+                    grantee,
+                    None,
+                    bounds,
+                )
                 .expect("issued grant")
         };
         let sender_controller = issue(

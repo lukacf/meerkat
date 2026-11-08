@@ -387,6 +387,7 @@ impl Peers {
         // owner holds it admitted: the requester's delegation as its basis.
         let requester_grant = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 id("requester-delegation"),
                 sender_agent.clone(),
@@ -425,7 +426,14 @@ impl Peers {
             .expect("actual registration");
         let issue = |name: String, bounds| {
             self.grants
-                .issue_root(&self.root, id(&name), principal(agent), None, bounds)
+                .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &self.root,
+                    id(&name),
+                    principal(agent),
+                    None,
+                    bounds,
+                )
                 .expect("the receiving agent's grant")
         };
         let receiver = Receiver {

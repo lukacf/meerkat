@@ -212,8 +212,8 @@ them.
   `RestoreOwnedIdentityEdgeMobNotRunningCompleted` and
   `RestoreOwnedIdentityEdgeMobNotRunningDestroyed`. Every new variant is
   appended last, so no existing variant's discriminant moves. Every enum named
-  here is exhaustive, so a downstream exhaustive match needs the new arms, or
-  a wildcard arm.
+  here is exhaustive: a downstream exhaustive match needs the new arms or a
+  wildcard arm.
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
   MobMachine decides an adoption into store custody (see Added).
   `MobMachineInput` (meerkat-machine-schema and meerkat-mob) and the kernel
@@ -234,8 +234,8 @@ them.
   `AdoptIdentityIntoStoreMobNotRunningCompleted` and
   `AdoptIdentityIntoStoreMobNotRunningDestroyed`. Every new variant is
   appended last, so no existing variant's discriminant moves. Every enum named
-  here is exhaustive, so a downstream exhaustive match needs the new arms, or
-  a wildcard arm.
+  here is exhaustive: a downstream exhaustive match needs the new arms or a
+  wildcard arm.
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
   MobMachine decides the downgrade cycle's purge, a start's reservation of a
   store-owned identity whose row was purged, and the import (see Added).

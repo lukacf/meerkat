@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use super::service::{ToolGrantService, ToolGrantServiceError};
 use crate::decision::{
     DecisionError, DecisionExecution, DecisionExecutionPermit, DecisionExecutor,
-    DecisionExecutorRecordUnavailable, DurableDecisionService,
+    DecisionExecutorRecordUnavailable, DecisionPassOutcome, DurableDecisionService,
 };
 
 /// The decision kind of a tool grant request.
@@ -872,5 +872,12 @@ impl DecisionExecutor for ToolGrantIssueExecutor {
         };
         let notice = ToolGrantRequestNotice::of(decision, &body)?;
         self.notices.deliver(&notice).await
+    }
+
+    /// A grant request's execution leaves nothing outside the decision store
+    /// to undo: the grant it issues is its outcome, and the grant's own
+    /// lifecycle ends it. No outcome.
+    async fn sweep(&self) -> Vec<(DecisionId, DecisionPassOutcome)> {
+        Vec::new()
     }
 }

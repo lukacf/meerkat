@@ -2989,16 +2989,12 @@ async fn a_refused_start_report_after_a_refused_fold_retires_the_start() {
             .any(|schedule| schedule.pending.contains_key(&second)),
         "the retired request left the schedule"
     );
-    wait_until(WAIT, || async {
-        fx.narrations()
-            .await
-            .iter()
-            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Failed)
-    })
-    .await;
+    // The machine refused the report, so it never held the start Failed and
+    // authorizes no Failed narration for it (it refuses a narration that does
+    // not match the item's state); the retirement's own tasks still end.
     let left = delegation_start_holds_left(&fx).await;
     assert!(left.is_empty(), "{left:?}");
-    fx.handle.shutdown().await.expect("shutdown");
+    fx.unbind_and_shut_down().await;
 }
 
 /// A delegation's start meets a busy source at the fork cut, and the machine
@@ -3045,16 +3041,12 @@ async fn a_refused_start_report_after_a_busy_source_retires_the_start() {
             .any(|schedule| schedule.pending.contains_key(&first)),
         "the retired request left the schedule"
     );
-    wait_until(WAIT, || async {
-        fx.narrations()
-            .await
-            .iter()
-            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Failed)
-    })
-    .await;
+    // The machine refused the report, so it never held the start Failed and
+    // authorizes no Failed narration for it (it refuses a narration that does
+    // not match the item's state); the retirement's own tasks still end.
     let left = delegation_start_holds_left(&fx).await;
     assert!(left.is_empty(), "{left:?}");
-    fx.handle.shutdown().await.expect("shutdown");
+    fx.unbind_and_shut_down().await;
 }
 
 impl Fixture {
@@ -3150,6 +3142,17 @@ impl Fixture {
             .expect("custody released");
     }
 
+    /// Unbind the channel in the machine, as a live channel's close does, then
+    /// shut the mob down: a session that still owns a live channel is not
+    /// unregistered without a live cleanup host.
+    async fn unbind_and_shut_down(&self) {
+        self.runtime
+            .abandon_live_open_admission(&self.session_id, self.binding.channel_id())
+            .await
+            .expect("close fixture channel");
+        self.handle.shutdown().await.expect("shutdown");
+    }
+
     /// Whether completed-turn custody of this channel is left behind.
     async fn completed_turn_custody_left(&self) -> bool {
         self.coordinator
@@ -3195,7 +3198,7 @@ async fn a_delegation_reaching_the_seam_after_the_close_sweeps_is_refused_admiss
         admitted.is_err(),
         "the closed channel's delegation intake refused the admission"
     );
-    fx.handle.shutdown().await.expect("shutdown");
+    fx.unbind_and_shut_down().await;
 }
 
 /// The lifecycle seam admitted the delegation while the channel was open, but
@@ -3237,7 +3240,7 @@ async fn a_delegation_whose_custody_lands_after_the_close_sweeps_is_cancelled() 
         Some(State::Cancelled),
         "the admission whose custody landed after the close is settled cancelled"
     );
-    fx.handle.shutdown().await.expect("shutdown");
+    fx.unbind_and_shut_down().await;
 }
 
 #[tokio::test]

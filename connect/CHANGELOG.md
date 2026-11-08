@@ -5,6 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The shared setup owner names each peer whose close failed: one stderr
+  line per peer, `local_setup_connection_diagnostic phase=peer_close
+  peer=<n> exception=<class> errno=<code>`, in the closed categories of its
+  other peer diagnostics and never with exception text or paths. Before, a
+  failed peer close left no trace of the peer or of what failed.
+
 ## [0.9.10] - 2026-11-05
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10

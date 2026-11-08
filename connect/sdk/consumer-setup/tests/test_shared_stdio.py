@@ -1,7 +1,9 @@
 """Real stdio/socket ownership; inert bytes, no MCP or native authority proof."""
 import asyncio
+import contextlib
 import errno
 import importlib.util
+import io
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -576,6 +578,38 @@ class SharedStdio(SelectedFixture, unittest.IsolatedAsyncioTestCase):
         finally:
             await asyncio.gather(*(transport.aclose() for transport in transports))
             await owner.aclose()
+
+    async def test_failed_peer_close_is_reported_by_peer_and_category_never_text(self):
+        from unittest.mock import patch
+        controller = self.controller()
+        selected, refused = asyncio.Future(), asyncio.Event()
+        module = SimpleNamespace(ControllerConnections=adapter.ControllerConnections,
+            backend=backend, _joined=adapter._joined)
+        async def ready(paths): selected.set_result(paths)
+        async def open_refused(**_):
+            refused.set()
+            raise BrokenPipeError(errno.EPIPE, "private body", "/private/credential")
+        async def stopped():
+            # Only the second peer's accepted socket fails to open as a stream;
+            # the host then closes both peers.
+            client = local.socket.socket(local.socket.AF_UNIX, local.socket.SOCK_STREAM)
+            try:
+                client.connect(selected.result()[1])
+                await asyncio.wait_for(refused.wait(), 3)
+                for _ in range(3):
+                    await asyncio.sleep(0)
+            finally:
+                client.close()
+        stderr = io.StringIO()
+        with patch.object(local.asyncio, "open_unix_connection", open_refused), contextlib.redirect_stderr(stderr):
+            with self.assertRaisesRegex(local.LocalSetupError, "local_setup_connection_failed"):
+                await asyncio.wait_for(local.shared_connections(module, controller, 2, stopped, ready), 3)
+        # Each failed peer close is named by its peer and closed categories,
+        # never by its exception text or paths.
+        self.assertEqual(stderr.getvalue(), "local_setup_connection_diagnostic phase=peer_close peer=1 "
+            "exception=BrokenPipeError errno=EPIPE\n")
+        self.assertTrue(controller.closing)
+        self.assertFalse(Path(selected.result()[0]).parent.exists())
 
     async def test_cancelled_serve_before_first_poll_still_joins_socket_and_failed_drain_is_not_joined(self):
         controller = self.controller()

@@ -901,7 +901,11 @@ export class IdentityUnresumableError extends RpcError {
  * `sessionId` is `null`), or `"identity_session_absent"` when a delivery
  * reached a member whose session `sessionId` Core holds no durable copy of:
  * nothing was delivered, and Core settles the member; deliver again. A failed
- * read of the whole roster's history names no `identity`.
+ * read of the whole roster's history names no `identity`. `kind` is
+ * `"governed_input_held"` when every bind of a governed send answered "not
+ * now" until its door's budget ended: nothing was submitted, and the same
+ * input may be sent again (`data` carries the condition, the wait and the
+ * input id).
  * `kind`, `identity` and `sessionId` are `null` when the gateway did not send
  * them.
  */

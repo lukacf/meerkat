@@ -799,6 +799,29 @@ impl Fixture {
         }
     }
 
+    /// Serve `session` as the member's first session is served: its session
+    /// document's destination is bound to the original's target on that
+    /// session's runtime, and the source answers with that target.
+    pub async fn serve_session(&self, session: &SessionId) {
+        let target = association(
+            &LogicalRuntimeId::for_session(session),
+            self.controller.clone(),
+            self.operation.clone(),
+            self.pin.selection().clone(),
+        )
+        .target;
+        *self.adapter.target.lock().expect("fixture") = Some(target.clone());
+        let registration = self
+            .machine
+            .current_session_registration_witness(session)
+            .await
+            .expect("the session's registration");
+        self.machine
+            .bind_scoped_context(&registration, &target)
+            .await
+            .expect("bind the session document's destination");
+    }
+
     /// The original event `event-7`, bound to its final input by the
     /// embedder with `bind_scoped_original` under its own first
     /// authentication.

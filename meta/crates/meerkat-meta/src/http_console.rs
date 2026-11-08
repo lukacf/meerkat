@@ -3252,13 +3252,17 @@ struct CurrentHumanBinder {
 
 #[async_trait::async_trait]
 impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &crate::identity_first::GovernedBindContext,
         input: meerkat_runtime::Input,
-    ) -> Result<crate::identity_first::BoundGovernedInput, String> {
-        human_still_sends(&self.human, self.access.as_ref(), &self.identity)?;
-        let mut bound = self.inner.bind(context, input).await?;
+    ) -> Result<crate::identity_first::BoundGovernedInput, crate::identity_first::GovernedBindError>
+    {
+        // The human is verified again at every bind, a bind after a wait
+        // included.
+        human_still_sends(&self.human, self.access.as_ref(), &self.identity)
+            .map_err(crate::identity_first::GovernedBindRefusal::denied)?;
+        let mut bound = self.inner.try_bind(context, input).await?;
         // Checked again at the final protected entry, after every await
         // between here and native admission, ahead of the host's own fence.
         bound.entry_fence = Some(Arc::new(CurrentHumanFence {
@@ -3270,12 +3274,115 @@ impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
         Ok(bound)
     }
 
+    fn wait_budget(&self) -> crate::identity_first::GovernedWaitBudget {
+        self.inner.wait_budget()
+    }
+
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), crate::identity_first::GovernedBindRefusal> {
+        self.inner.submitting(session_id).await
+    }
+
     fn retain_unresolved(
         &self,
         settlement: Box<dyn crate::identity_first::GovernedSettlement>,
         detail: &str,
     ) {
         self.inner.retain_unresolved(settlement, detail);
+    }
+}
+
+/// A governed Console send's binder, for its one frame: when its bind
+/// answered bound, before the input is submitted, the frame moves to
+/// `submitted` (the send machine's `MarkSubmitted`, from `dispatching`), so
+/// a hold is never recorded over a submitted send. A frame that cannot
+/// record it refuses the send: nothing is submitted. When the submission
+/// answers unresolved, the runtime-owned operation hands the answer here,
+/// and the frame records it (`MarkUnresolved`) whether or not the send's
+/// request is still waiting.
+struct SubmittingSendBinder {
+    inner: Arc<dyn crate::identity_first::GovernedInputBinder>,
+    aggregator: MetaConsoleAggregator,
+    frame_id: String,
+    /// The frame's dispatch ownership, kept for as long as anything holds
+    /// this binder.
+    _owner: Option<Arc<crate::console_aggregator::SendDispatchClaim>>,
+}
+
+impl SubmittingSendBinder {
+    fn new(
+        inner: Arc<dyn crate::identity_first::GovernedInputBinder>,
+        aggregator: MetaConsoleAggregator,
+        frame_id: String,
+        owner: Option<Arc<crate::console_aggregator::SendDispatchClaim>>,
+    ) -> Self {
+        Self {
+            inner,
+            aggregator,
+            frame_id,
+            _owner: owner,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::identity_first::GovernedInputBinder for SubmittingSendBinder {
+    async fn try_bind(
+        &self,
+        context: &crate::identity_first::GovernedBindContext,
+        input: meerkat_runtime::Input,
+    ) -> Result<crate::identity_first::BoundGovernedInput, crate::identity_first::GovernedBindError>
+    {
+        self.inner.try_bind(context, input).await
+    }
+
+    fn wait_budget(&self) -> crate::identity_first::GovernedWaitBudget {
+        self.inner.wait_budget()
+    }
+
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), crate::identity_first::GovernedBindRefusal> {
+        self.inner.submitting(session_id).await?;
+        self.aggregator
+            .mark_interaction_submitted(&self.frame_id, session_id)
+            .await
+            .map_err(|error| {
+                crate::identity_first::GovernedBindRefusal::unavailable(format!(
+                    "the Console could not record the send's submission: {error}"
+                ))
+            })
+    }
+
+    fn retain_unresolved(
+        &self,
+        settlement: Box<dyn crate::identity_first::GovernedSettlement>,
+        detail: &str,
+    ) {
+        self.inner.retain_unresolved(settlement, detail);
+        // Inside the final protected entry: this process notes at once, with
+        // no I/O, that the send's input may still be admitted here, and the
+        // frame's durable record of the answer is written by a task of its
+        // own.
+        self.aggregator.note_submission_unresolved(&self.frame_id);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let aggregator = self.aggregator.clone();
+            let frame_id = self.frame_id.clone();
+            runtime.spawn(async move {
+                match aggregator.mark_interaction_unresolved(&frame_id).await {
+                    // Recorded, or the send settled first.
+                    Ok(()) | Err(ConsoleSendError::State(_)) => {}
+                    Err(error) => tracing::warn!(
+                        frame_id = %frame_id,
+                        %error,
+                        "a governed console send's admission is unresolved but its record failed"
+                    ),
+                }
+            });
+        }
     }
 }
 
@@ -3571,6 +3678,16 @@ async fn console_send_identity_first_governed(
         )
         .into());
     }
+    // A governed send moves through the send machine's own states in the
+    // Console's log store: a store that cannot record them refuses it here,
+    // before anything is reserved, never leaving it accepted with no owner.
+    if governed.is_some() && !aggregator.supports_send_transitions() {
+        return Err(ConsoleSendError::GovernedRefused(format!(
+            "{identity} admits only governed input and this Console's log store does not \
+             record a governed send's states"
+        ))
+        .into());
+    }
     // Refuse a selection the target cannot carry before anything is
     // reserved, so the caller never sees an acceptance for a turn that will
     // be refused at delivery.
@@ -3597,21 +3714,32 @@ async fn console_send_identity_first_governed(
     governance
         .refuse_unless_caller_current()
         .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
-    let (accepted, claim) = match Box::pin(aggregator.reserve_identity_first_interaction_scoped(
-        request.clone(),
-        session_id.as_deref(),
-        &governance.scope,
-        governance.sender.as_ref(),
-    ))
-    .await?
-    {
+    let reservation = if governed.is_some() {
+        Box::pin(aggregator.reserve_governed_interaction_scoped(
+            request.clone(),
+            session_id.as_deref(),
+            &governance.scope,
+            governance.sender.as_ref(),
+        ))
+        .await?
+    } else {
+        Box::pin(aggregator.reserve_identity_first_interaction_scoped(
+            request.clone(),
+            session_id.as_deref(),
+            &governance.scope,
+            governance.sender.as_ref(),
+        ))
+        .await?
+    };
+    // `dispatching`: a replay already began the send's dispatch.
+    let (accepted, claim, dispatching) = match reservation {
         // An idempotent replay of a settled send, or of one whose dispatch
         // runs in this process: the original acceptance is the answer.
         // Dispatching again would run a second turn under this interaction.
         ScopedReservation::Replay(accepted) => return Ok(accepted),
         ScopedReservation::Fresh(accepted, claim) => {
             crate::console_aggregator::faults::after_console_reserve();
-            (accepted, claim)
+            (accepted, claim, false)
         }
         // A replay of a send no live owner settled (the process that
         // accepted it stopped): the runtime's admission evidence decides.
@@ -3624,6 +3752,23 @@ async fn console_send_identity_first_governed(
                 NativeSendObservation::Admitted { .. } => {
                     return aggregator
                         .settle_admitted_send(&frame, &claim)
+                        .await
+                        .map_err(Into::into);
+                }
+                // A submitted send whose input the runtime does not hold in
+                // the session its bind bound, its dispatch owner gone: the
+                // request and the runtime-owned operation share that
+                // ownership, so no operation can still submit it. It is never
+                // dispatched again. The send machine decides on where the
+                // read was made: it fails, its outcome unknown, and its
+                // sender can send it again; in the process that saw its
+                // submission answer unresolved its input may still be
+                // admitted, so it stays submitted.
+                NativeSendObservation::Absent
+                    if frame.status == crate::console_aggregator::ConsoleFrameStatus::Submitted =>
+                {
+                    return aggregator
+                        .settle_absent_submission(&frame, &claim)
                         .await
                         .map_err(Into::into);
                 }
@@ -3648,13 +3793,78 @@ async fn console_send_identity_first_governed(
                         crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
                             .as_ref(),
                     );
-                    (accepted, Some(claim))
+                    (accepted, Some(claim), false)
+                }
+                // A governed send that submitted nothing (see
+                // `governed_send_submitted_nothing`: held, or this version's
+                // send stopped before its submission with no owner left) is
+                // dispatched again by a replay of its key, short of evidence
+                // that its input was admitted (absent, or unknown: no session
+                // to read, no runtime serves it, the read failed or ran late),
+                // as the same input, keyed and identified by its frame. Its
+                // dispatch begins first (`StartDispatch`, a compare-and-set on
+                // the frame), then its hold is taken (a compare-and-set): a
+                // replay that loses either dispatches nothing, and a stop in
+                // between leaves the send `dispatching`, which the next replay
+                // dispatches.
+                NativeSendObservation::Absent | NativeSendObservation::Unknown { .. }
+                    if governed.is_some()
+                        && crate::console_aggregator::governed_send_submitted_nothing(&frame) =>
+                {
+                    aggregator.begin_held_send_redispatch(&frame, &claim)?;
+                    if frame.status != crate::console_aggregator::ConsoleFrameStatus::Dispatching {
+                        match aggregator.mark_interaction_dispatching(&frame.id).await {
+                            Ok(()) => {}
+                            // Another dispatch of it began first.
+                            Err(ConsoleSendError::State(_)) => return Ok(accepted),
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    if frame.payload.get("delivery_hold").is_some()
+                        && !aggregator.take_interaction_delivery_hold(&frame.id).await?
+                    {
+                        return Ok(accepted);
+                    }
+                    // As above: what the send's frame recorded, never the
+                    // live caller's.
+                    attribution = crate::console_aggregator::ConsoleHumanAttribution::of_sender(
+                        crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
+                            .as_ref(),
+                    );
+                    (accepted, Some(claim), true)
                 }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {
                     return Ok(accepted);
                 }
             }
         }
+    };
+
+    // The frame's dispatch ownership: this request's or dispatch task's,
+    // shared with a governed send's binder, which the send's runtime-owned
+    // operation holds until it returns. A free claim means no operation can
+    // still submit the send.
+    let claim = claim.map(Arc::new);
+    // A governed send's dispatch begins (`StartDispatch` from its own
+    // state, unless its replay began it), and its binder records the send's
+    // submission when its bind answers bound: a hold is recorded only on a
+    // dispatch before that.
+    let governed = match governed {
+        Some(inner) => {
+            if !dispatching {
+                aggregator
+                    .mark_interaction_dispatching(&accepted.input_frame_id)
+                    .await?;
+            }
+            Some(Arc::new(SubmittingSendBinder::new(
+                inner,
+                aggregator.clone(),
+                accepted.input_frame_id.clone(),
+                claim.clone(),
+            ))
+                as Arc<dyn crate::identity_first::GovernedInputBinder>)
+        }
+        None => None,
     };
 
     if let Some(events) = console_events {
@@ -3671,7 +3881,8 @@ async fn console_send_identity_first_governed(
     }
 
     if handling_mode == meerkat_core::types::HandlingMode::Steer {
-        // This request owns the frame's dispatch until the steer settles.
+        // This request owns the frame's dispatch until the steer settles,
+        // with the send's binder for as long as its operation runs.
         let _owner = claim;
         let expected_alias =
             if crate::member_comms_id::is_reserved_generated_alias(&requested_identity) {
@@ -3709,6 +3920,45 @@ async fn console_send_identity_first_governed(
                 }
             }
             Err(err) => {
+                if let crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(hold),
+                ) = &err
+                {
+                    // Held, not failed: nothing was submitted.
+                    let _ = aggregator
+                        .mark_interaction_delivery_held(&accepted.input_frame_id, hold)
+                        .await;
+                    return Err(identity_runtime_error_to_console_send_error(
+                        identity.as_str(),
+                        err,
+                    )
+                    .into());
+                }
+                if matches!(
+                    &err,
+                    crate::identity_first::IdentityRuntimeError::GovernedInput(
+                        crate::identity_first::GovernedInputError::AdmissionUnresolved { .. }
+                    )
+                ) {
+                    // Unresolved, not failed: the input may have run. The
+                    // send stays submitted, its answer recorded, until the
+                    // runtime's evidence settles it.
+                    if let Err(mark) = aggregator
+                        .mark_interaction_unresolved(&accepted.input_frame_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            identity = %identity,
+                            error = %mark,
+                            "console identity-first steer's admission is unresolved but its record failed"
+                        );
+                    }
+                    return Err(identity_runtime_error_to_console_send_error(
+                        identity.as_str(),
+                        err,
+                    )
+                    .into());
+                }
                 let _ = aggregator
                     .mark_interaction_delivery_failed(&accepted.input_frame_id)
                     .await;
@@ -3760,7 +4010,8 @@ async fn console_send_identity_first_governed(
     let failed_identity = identity.clone();
     let dispatch_claim = claim;
     let dispatch = tokio::spawn(async move {
-        // The task owns the frame's dispatch until it settles the frame.
+        // The task owns the frame's dispatch until it settles the frame,
+        // with the send's binder for as long as its operation runs.
         let _owner = dispatch_claim;
         let send_result = identity_runtime
             .send_console_human_input_tracked(
@@ -3789,6 +4040,45 @@ async fn console_send_identity_first_governed(
                 }
             }
             Err(err) => {
+                if let crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(hold),
+                ) = &err
+                {
+                    // Held, not failed: nothing was submitted, and a replay
+                    // of the send's key dispatches it again.
+                    if let Err(mark) = dispatch_aggregator
+                        .mark_interaction_delivery_held(&dispatch_accepted.input_frame_id, hold)
+                        .await
+                    {
+                        tracing::warn!(
+                            identity = %dispatch_identity,
+                            error = %mark,
+                            "console identity-first send was held but its hold was not recorded"
+                        );
+                    }
+                    return;
+                }
+                if matches!(
+                    &err,
+                    crate::identity_first::IdentityRuntimeError::GovernedInput(
+                        crate::identity_first::GovernedInputError::AdmissionUnresolved { .. }
+                    )
+                ) {
+                    // Unresolved, not failed: the input may have run. The
+                    // send stays submitted, its answer recorded, until the
+                    // runtime's evidence settles it.
+                    if let Err(mark) = dispatch_aggregator
+                        .mark_interaction_unresolved(&dispatch_accepted.input_frame_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            identity = %dispatch_identity,
+                            error = %mark,
+                            "console identity-first send's admission is unresolved but its record failed"
+                        );
+                    }
+                    return;
+                }
                 let _ = dispatch_aggregator
                     .mark_interaction_delivery_failed(&dispatch_accepted.input_frame_id)
                     .await;
@@ -3889,7 +4179,10 @@ fn identity_runtime_error_to_console_send_error(
         error @ (crate::identity_first::IdentityRuntimeError::AdmissionBacklogFull { .. }
         | crate::identity_first::IdentityRuntimeError::HostHumanInput(_)
         | crate::identity_first::IdentityRuntimeError::ReloadRefused { .. }
-        | crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. }) => {
+        | crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. }
+        // A governed send's typed answer (refused, held, unresolved) keeps
+        // its kind on the Console's answer.
+        | crate::identity_first::IdentityRuntimeError::GovernedInput(_)) => {
             ConsoleSendError::RuntimeOperation(Box::new(error))
         }
         other => ConsoleSendError::Dispatch(other.to_string()),
@@ -4539,6 +4832,14 @@ fn console_send_error_response(err: ConsoleSendError) -> axum::response::Respons
                 crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. } => {
                     (StatusCode::GATEWAY_TIMEOUT, "reload_timed_out")
                 }
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(_),
+                ) => (StatusCode::SERVICE_UNAVAILABLE, "governed_input_held"),
+                // The input may have run: never a refusal. An unknown
+                // upstream outcome, answered as an admission timeout is.
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::AdmissionUnresolved { .. },
+                ) => (StatusCode::GATEWAY_TIMEOUT, "governed_admission_unresolved"),
                 crate::identity_first::IdentityRuntimeError::GovernedInput(_) => {
                     (StatusCode::CONFLICT, "governed_input_refused")
                 }
@@ -4597,6 +4898,17 @@ fn console_send_rpc_code(err: &ConsoleSendError) -> i64 {
         ConsoleSendError::IdempotencyConflict(_) => -32009,
         ConsoleSendError::Retired(_) => -32004,
         ConsoleSendError::UnqualifiedPrincipal(_) | ConsoleSendError::GovernedRefused(_) => -32003,
+        // Held, not failed: retryable, as on the identity RPC.
+        ConsoleSendError::RuntimeOperation(error)
+            if matches!(
+                error.as_ref(),
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(_)
+                )
+            ) =>
+        {
+            crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE
+        }
         ConsoleSendError::State(_)
         | ConsoleSendError::Dispatch(_)
         | ConsoleSendError::Log(_)
@@ -4643,6 +4955,16 @@ fn console_send_public_message(err: &ConsoleSendError) -> String {
                 }
                 crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. } => {
                     "member reload timed out; inspect member health before retrying"
+                }
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(_),
+                ) => "governed input held; nothing was submitted, send it again",
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::AdmissionUnresolved { .. },
+                ) => {
+                    "governed input admission unresolved: the input may have run; retry it only \
+                     with the same idempotency key or meta/console/recover_send, never as a new \
+                     send"
                 }
                 crate::identity_first::IdentityRuntimeError::GovernedInput(_) => {
                     "governed input refused; inspect the typed reason before retrying"

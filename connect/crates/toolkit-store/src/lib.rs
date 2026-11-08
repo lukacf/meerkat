@@ -13,6 +13,8 @@
 mod conditional;
 mod io_custody;
 mod sqlite;
+#[doc(hidden)]
+pub mod write_witness;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

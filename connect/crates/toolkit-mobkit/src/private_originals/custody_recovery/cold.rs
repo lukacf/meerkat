@@ -276,30 +276,35 @@ impl PrivateOriginals {
                 &input,
                 |admitted| {
                     observe!(17);
-                    let _control = self
-                        .custody_recovery
-                        .control
-                        .state
-                        .lock()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    observe!(18);
-                    let readiness = self.custody_recovery.control.readiness();
-                    if !readiness.selected() || readiness.stopped() {
-                        return Err(PrivateOriginalError::Unavailable);
-                    }
-                    observe!(19);
-                    let _writer = self
-                        .owner
-                        .try_source_writer()
-                        .map_err(cold_service_admission::writer_error)?;
-                    observe!(20);
-                    stamp
-                        .check_current()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    observe!(21);
-                    self.owner
-                        .recover_retained_custody(original, admitted)
-                        .map_err(cold_service_admission::writer_error)
+                    // The control lock, then the shared publication: the
+                    // whole publication waits inside the historical
+                    // admission callback.
+                    crate::no_wait::wait_at("custody_recovery.cold_publish", || {
+                        let _control = self
+                            .custody_recovery
+                            .control
+                            .state
+                            .lock()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        observe!(18);
+                        let readiness = self.custody_recovery.control.readiness();
+                        if !readiness.selected() || readiness.stopped() {
+                            return Err(PrivateOriginalError::Unavailable);
+                        }
+                        observe!(19);
+                        let _writer = self
+                            .owner
+                            .try_source_writer()
+                            .map_err(cold_service_admission::writer_error)?;
+                        observe!(20);
+                        stamp
+                            .check_current()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        observe!(21);
+                        self.owner
+                            .recover_retained_custody(original, admitted)
+                            .map_err(cold_service_admission::writer_error)
+                    })
                 },
             )
             .await;

@@ -340,58 +340,260 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
     let audit: Vec<StoredAuthorizationAuditObservation> =
         serde_json::from_value(serde_json::to_value(row).unwrap()["authorization_audit"].clone())
             .unwrap();
+    if let Err(failure) = tool_succeeded_in(&audit, name) {
+        panic!(
+            "{failure}: {}",
+            serde_json::to_string(
+                &audit
+                    .iter()
+                    .map(|row| &row.observation.observation)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
+    }
+}
+
+/// Whether the native tool `name` prepared once in `audit` and returned a
+/// success, with no refused or unavailable answer for its operation but
+/// Core's own refusal to rebuild a preparation that met an owner change
+/// (`ReprepareRequired`, read while the publication changed), recorded
+/// before the operation's preparation: Core waits that change out and
+/// prepares the operation again under the same id.
+fn tool_succeeded_in(
+    audit: &[StoredAuthorizationAuditObservation],
+    name: &str,
+) -> Result<(), String> {
     let operations = audit.iter().filter_map(|row| match &row.observation.observation {
         AuditObservation::Prepared { target, .. }
             if matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == name)
             => Some(row.observation.operation_id.clone()),
         _ => None,
     }).collect::<std::collections::HashSet<_>>();
-    assert_eq!(
-        operations.len(),
-        1,
-        "the actual selected native tool must prepare once"
-    );
-    assert!(
-        audit
-            .iter()
-            .any(|row| operations.contains(&row.observation.operation_id)
-                && matches!(
-                    &row.observation.observation,
-                    AuditObservation::Outcome {
-                        outcome: OperationObservedOutcome::ToolDispatchReturned {
-                            result_is_error: false,
-                            terminal_error: None,
-                            ..
-                        }
+    if operations.len() != 1 {
+        return Err(format!(
+            "the actual selected native tool must prepare once: {} operations",
+            operations.len()
+        ));
+    }
+    if !audit.iter().any(|row| {
+        operations.contains(&row.observation.operation_id)
+            && matches!(
+                &row.observation.observation,
+                AuditObservation::Outcome {
+                    outcome: OperationObservedOutcome::ToolDispatchReturned {
+                        result_is_error: false,
+                        terminal_error: None,
+                        ..
                     }
-                ))
-    );
-    // A prepared check that read the grant publication during a concurrent
-    // owner change is refused ReprepareRequired and prepared again (Core's
-    // re-preparation, not a denial); the call above still dispatched. Any
-    // other refusal, or an unavailable authorization, fails the call.
-    assert!(
-        audit
-            .iter()
-            .all(|row| !operations.contains(&row.observation.operation_id)
-                || match &row.observation.observation {
-                    AuditObservation::Refused { reason, .. } => matches!(
-                        reason,
-                        meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
-                    ),
-                    AuditObservation::AuthorizationUnavailable { .. } => false,
-                    _ => true,
-                }),
-        "{}",
-        serde_json::to_string(
-            &audit
-                .iter()
-                .filter(|row| operations.contains(&row.observation.operation_id))
-                .map(|row| &row.observation.observation)
-                .collect::<Vec<_>>()
-        )
-        .unwrap()
-    );
+                }
+            )
+    }) {
+        return Err("the tool's operation returned no success".to_string());
+    }
+    let prepared_at = audit.iter().position(|row| {
+        operations.contains(&row.observation.operation_id)
+            && matches!(
+                row.observation.observation,
+                AuditObservation::Prepared { .. }
+            )
+    });
+    let refused = audit
+        .iter()
+        .enumerate()
+        .filter(|(at, row)| {
+            operations.contains(&row.observation.operation_id)
+                && match &row.observation.observation {
+                    AuditObservation::Refused { reason, read, .. } => {
+                        // Core's waited re-preparation: refused to rebuild at a
+                        // read the publication changed under, before the
+                        // operation's preparation.
+                        let reprepared = *reason
+                            == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
+                            && read.as_ref().is_some_and(|read| {
+                                matches!(
+                                    read.basis,
+                                    meerkat_authorization_contracts::audit::AuditRefusalBasis::ChangeInProgress
+                                        | meerkat_authorization_contracts::audit::AuditRefusalBasis::PublicationChanged
+                                )
+                            })
+                            && prepared_at.is_some_and(|prepared| *at < prepared);
+                        !reprepared
+                    }
+                    AuditObservation::AuthorizationUnavailable { .. } => true,
+                    _ => false,
+                }
+        })
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
+    if !refused.is_empty() {
+        return Err(format!(
+            "the tool's operation was refused or unavailable before it succeeded: {refused:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// One stored audit row of the checked input, for operation `operation`, as
+/// Core records it for a peer delivery's memory tool (the shape of a run's
+/// recorded rows).
+fn audit_row(operation: &str, observation: serde_json::Value) -> serde_json::Value {
+    const INPUT: &str = "eaed4620-bd71-84db-b5a9-a4d2f8af4e8b";
+    let principal = |id: &str, kind: &str, domain: &str| {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "qualification": {"kind": "qualified", "trust_domain_id": domain},
+        })
+    };
+    let human = principal("uid-1001", "human", "rkat-realm-mob.factory");
+    serde_json::json!({
+        "contributors": [{
+            "input_id": INPUT,
+            "logical_executor": principal("project-one", "shared_agent", "factory-test"),
+            "represented_subject": human.clone(),
+            "requester": human,
+        }],
+        "observation": {
+            "context_revision": null,
+            "execution_scope": {
+                "canonical_input_id": INPUT,
+                "kind": "runtime_input",
+                "owner_session_id": "01a1b7f5-bc68-70ac-9aa8-09068e6e83ff",
+                "runtime_epoch_id": "01a1b7f5-bc6a-77c4-b5e5-5984a414cb05",
+                "submitted_input_id": INPUT,
+            },
+            "observation": observation,
+            "operation_id": operation,
+            "run_id": "01a1b7f5-c1e7-772c-9d18-6c987dd9dc97",
+        },
+    })
+}
+
+/// The memory tool call an audit row of [`audit_row`] names.
+fn memory_tool() -> serde_json::Value {
+    let arguments_digest = vec![0_u8; 32];
+    serde_json::json!({
+        "arguments_digest": arguments_digest,
+        "call_id": "project-read-call",
+        "kind": "tool",
+        "owners": [{"authority_key": "root-dispatcher", "owner_key": "memory"}],
+        "tool_name": "memory",
+    })
+}
+
+const PUBLICATION: &str = "bfd436ef-da2f-496a-8166-b11e090236d4";
+
+/// A refusal of the memory tool's operation, of `reason`, decided while an
+/// owner change was in progress on the publication.
+fn refused_in_a_change(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "refused",
+        "read": {
+            "basis": "change_in_progress",
+            "live_sequence": 65,
+            "observed_at_ms": 1_794_087_699_016_u64,
+            "publication_instance": PUBLICATION,
+            "publication_sequence": 65,
+        },
+        "reason": reason,
+        "target": memory_tool(),
+    })
+}
+
+fn prepared_memory_tool() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "prepared",
+        "policy": {
+            "controller_lineages": [],
+            "observed_at_ms": 1_794_087_699_018_u64,
+            "operation_authorities": [],
+            "publication_instance": PUBLICATION,
+            "publication_sequence": 66,
+        },
+        "target": memory_tool(),
+    })
+}
+
+fn entered(boundary: &str) -> serde_json::Value {
+    serde_json::json!({"boundary": boundary, "kind": "entry"})
+}
+
+fn returned_success() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "outcome",
+        "outcome": {
+            "asynchronous_operations": [],
+            "kind": "tool_dispatch_returned",
+            "result_is_error": false,
+            "terminal_error": null,
+        },
+    })
+}
+
+fn decoded(rows: Vec<serde_json::Value>) -> Vec<StoredAuthorizationAuditObservation> {
+    serde_json::from_value(serde_json::Value::Array(rows)).unwrap()
+}
+
+/// Core's waited re-preparation, as a peer delivery's memory tool met it:
+/// the tool's first preparation met an owner change in progress on the
+/// authorization publication and was refused `ReprepareRequired` before any
+/// preparation was recorded; Core waited the change out and prepared it
+/// again under the same operation id, and the tool ran once and succeeded.
+/// The success check accepts that refusal, and still refuses the same
+/// refusal after the operation's preparation, a refusal of another kind and
+/// an unavailable answer.
+///
+/// RED before the fix: the check refuses Core's own refusal to rebuild.
+#[test]
+fn a_tool_prepared_again_after_an_owner_change_still_succeeded() {
+    const TOOL: &str = "01a1b7f5-c23c-77e9-928e-feb1626e6a75";
+    let row = |observation: serde_json::Value| audit_row(TOOL, observation);
+    let reprepared = vec![
+        row(refused_in_a_change("reprepare_required")),
+        row(prepared_memory_tool()),
+        row(entered("tool_dispatch")),
+        row(entered("tool_execution_policy")),
+        row(returned_success()),
+    ];
+    if let Err(failure) = tool_succeeded_in(&decoded(reprepared), "memory") {
+        panic!("Core's waited re-preparation is a success: {failure}");
+    }
+    let unavailable = serde_json::json!({
+        "kind": "authorization_unavailable",
+        "target": memory_tool(),
+    });
+    for (what, rows) in [
+        (
+            "the same refusal after the operation's preparation",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_in_a_change("reprepare_required")),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a refusal of another kind",
+            vec![
+                row(refused_in_a_change("denied")),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "an unavailable answer",
+            vec![
+                row(unavailable),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+    ] {
+        assert!(
+            tool_succeeded_in(&decoded(rows), "memory").is_err(),
+            "{what} is never a success"
+        );
+    }
 }
 
 /// The input's own retained association, its canonical source row once the
@@ -800,7 +1002,7 @@ async fn replay_exactly(
     offered["header"]["timestamp"] =
         serde_json::to_value(exact.header().timestamp + std::time::Duration::from_secs(1)).unwrap();
     let offered: Input = serde_json::from_value(offered).unwrap();
-    let bound = binder.bind(&context, offered.clone()).await.unwrap();
+    let bound = binder.try_bind(&context, offered.clone()).await.unwrap();
     assert!(bound.entry_fence.is_none());
     assert_eq!(
         serde_json::to_value(&bound.input).unwrap(),
@@ -1502,7 +1704,7 @@ async fn queued_peer_retries_after_actual_held_turn_without_replacing_source_cus
             held: OnceLock::new(), pending: OnceLock::new(), authentication: auth,
             event_key: peer.event_key(), console: None, approved_login: None,
         };
-        let bound = binder.bind(&context, offered.clone()).await.unwrap();
+        let bound = binder.try_bind(&context, offered.clone()).await.unwrap();
         assert!(bound.entry_fence.is_none());
         assert_eq!(serde_json::to_value(&bound.input).unwrap(), serde_json::to_value(&exact).unwrap());
         let current = peer.for_current_offer(bound.input, offered.clone()).unwrap();
@@ -1736,7 +1938,7 @@ async fn fresh_host_restores_exact_peer_delivery_and_admits_new_receiver_work() 
         offered["header"]["timestamp"] = serde_json::to_value(
             exact.header().timestamp + std::time::Duration::from_secs(1)).unwrap();
         let offered: Input = serde_json::from_value(offered).unwrap();
-        let bound = binder.bind(&bind_context, offered.clone()).await.unwrap();
+        let bound = binder.try_bind(&bind_context, offered.clone()).await.unwrap();
         assert!(bound.entry_fence.is_none());
         assert_eq!(serde_json::to_value(&bound.input).unwrap(), serde_json::to_value(&exact).unwrap());
         let current = ingress.for_current_offer(bound.input, offered.clone()).unwrap();
@@ -2005,6 +2207,251 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
     fixture.close().await;
     match checked {
         Ok(result) => result.expect("Recorder ticket control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// How long a peer leg holds the source collection.
+const SOURCE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The sites a probe saw, each with the attempt's effect mark there.
+type SeenSites = Arc<std::sync::Mutex<Vec<(crate::source_hold_probe::Site, Option<&'static str>)>>>;
+
+/// A probe that holds the source collection at each of `sites` on its first
+/// hit there, and records every site with the attempt's effect mark there.
+fn hold_first_at(sites: &'static [crate::source_hold_probe::Site]) -> SeenSites {
+    let seen: SeenSites = Arc::default();
+    let recorder = seen.clone();
+    crate::source_hold_probe::install(Arc::new(move |site, _key| {
+        let mut seen = recorder.lock().unwrap();
+        let first = !seen.iter().any(|(at, _)| *at == site);
+        seen.push((site, meerkat_core::protected_section::effect_recorded()));
+        (first && sites.contains(&site)).then_some(crate::source_hold_probe::Hold {
+            owner_change: false,
+            duration: SOURCE_HOLD,
+        })
+    }));
+    seen
+}
+
+/// From the first hit at the admitted-custody check on: its hits and the
+/// "not now" answers.
+fn from_first_admitted_check(
+    seen: &[(crate::source_hold_probe::Site, Option<&'static str>)],
+) -> (usize, usize) {
+    use crate::source_hold_probe::Site;
+    let tail = seen
+        .iter()
+        .skip_while(|(site, _)| *site != Site::OriginalAdmitted)
+        .collect::<Vec<_>>();
+    (
+        tail.iter()
+            .filter(|(site, _)| *site == Site::OriginalAdmitted)
+            .count(),
+        tail.iter()
+            .filter(|(site, _)| *site == Site::OriginalNotNow)
+            .count(),
+    )
+}
+
+/// One durable peer delivery with the probe installed: the sender's message
+/// is accepted, admitted once and its recorder call succeeds. Answers what
+/// the probe saw.
+async fn deliver_held(
+    fixture: &Fixture,
+    sites: &'static [crate::source_hold_probe::Site],
+) -> Vec<(crate::source_hold_probe::Site, Option<&'static str>)> {
+    let receiver = add(fixture, ADDED).await;
+    let sender = add(fixture, SENDER).await;
+    ready(fixture, &receiver).await;
+    ready(fixture, &sender).await;
+    wire_pair(fixture).await;
+    let recipient = peer(fixture, ADDED).await;
+    *fixture.factory.next_call.lock().unwrap() = Some("memory");
+    *fixture.factory.next_args.lock().unwrap() = serde_json::json!({"action":"remember",
+        "title":"Held source collection", "body":"The delivery is admitted once"});
+    let seen = hold_first_at(sites);
+    let sent = send(fixture, &sender, &recipient).await;
+    assert!(
+        matches!(
+            &sent,
+            Ok(meerkat_core::SendReceipt::PeerMessageSent {
+                delivery: meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved {
+                    outcome: meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted
+                },
+                ..
+            })
+        ),
+        "the delivery is accepted: {sent:?}"
+    );
+    let admitted = completed(fixture, &receiver, 1).await;
+    tool_succeeded(&admitted, "memory");
+    assert_eq!(
+        native_input_states(fixture, &receiver).await.len(),
+        1,
+        "exactly one native admission"
+    );
+    seen.lock().unwrap().clone()
+}
+
+async fn close_held(fixture: Fixture) {
+    tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+        .await
+        .unwrap();
+    fixture.close().await;
+}
+
+/// The peer entry-note leg: the first offer binds its
+/// source (its first-binding writes are marked), then meets the source held
+/// at the input preparation's check and gets the shipped refusal, so the PI
+/// answers pending and Core offers again. A re-offer's bind writes nothing:
+/// the PI's entry note is its only mark. Held again at the admitted-custody
+/// check, it waits there in place and is bound: one hit there, no "not now".
+///
+/// RED with the PI's entry note dropped: the check answers "not now", the PI
+/// maps it to pending, and the next offer binds: two hits, a "not now".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reoffered_peer_delivery_held_at_the_admitted_check_waits_there_and_binds() {
+    use crate::source_hold_probe::Site;
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let seen =
+                deliver_held(&fixture, &[Site::OriginalPrepare, Site::OriginalAdmitted]).await;
+            assert!(
+                seen.iter()
+                    .position(|(site, _)| *site == Site::OriginalPrepare)
+                    < seen
+                        .iter()
+                        .position(|(site, _)| *site == Site::OriginalAdmitted),
+                "the first offer stopped at the input preparation: {seen:?}"
+            );
+            assert_eq!(
+                from_first_admitted_check(&seen),
+                (1, 0),
+                "the re-offer's check waited in place and bound, no not now: {seen:?}"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    close_held(fixture).await;
+    match checked {
+        Ok(result) => result.expect("the re-offered peer leg did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The peer entry-note leg's control: a first peer delivery held at
+/// the admitted-custody check only. Its first-binding writes (the controller
+/// grant, the binding record) are marked before the check, so it waits in
+/// place with or without the PI's entry note: one hit, no "not now". This is
+/// why the leg needs a re-offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_peer_delivery_held_at_the_admitted_check_waits_there_with_or_without_the_note() {
+    use crate::source_hold_probe::Site;
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let seen = deliver_held(&fixture, &[Site::OriginalAdmitted]).await;
+            assert_eq!(
+                from_first_admitted_check(&seen),
+                (1, 0),
+                "the first delivery's check waited in place: {seen:?}"
+            );
+            assert!(
+                seen.iter()
+                    .find(|(site, _)| *site == Site::OriginalAdmitted)
+                    .is_some_and(|(_, mark)| mark.is_some()),
+                "the first binding's marks precede the check: {seen:?}"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    close_held(fixture).await;
+    match checked {
+        Ok(result) => result.expect("the first peer delivery control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+// A peer delivery whose bind meets the source's custody recovery control,
+// held by another actor for 300 ms (within Core's owner-change bound) just
+// before its recovery enrollment. The peer ingress binder waits for it inside
+// the bind, as shipped: the one offer is bound, never declined or refused;
+// the delivery is accepted, admitted once and its turn completes; the source
+// row retains the offered identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_delivery_meeting_a_briefly_held_recovery_control_is_admitted_once() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT * 8, Box::pin(async {
+        let receiver = add(&fixture, ADDED).await;
+        let sender = add(&fixture, SENDER).await;
+        ready(&fixture, &receiver).await;
+        ready(&fixture, &sender).await;
+        wire_pair(&fixture).await;
+        let recipient = peer(&fixture, ADDED).await;
+        *fixture.factory.next_call.lock().unwrap() = Some("memory");
+        *fixture.factory.next_args.lock().unwrap() = serde_json::json!({"action":"remember",
+            "title":"Held recovery control", "body":"The delivery is admitted once"});
+        // The delivery's bind, just before its recovery enrollment: another
+        // actor holds the source's custody recovery control for 300 ms.
+        {
+            let source = fixture.source.clone();
+            let enrollments = AtomicUsize::new(0);
+            crate::source_hold_probe::install(Arc::new(move |site, _key| {
+                if site == crate::source_hold_probe::Site::OriginalEnroll
+                    && enrollments.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    crate::source_hold_probe::retain(
+                        source
+                            .custody_recovery
+                            .hold_control_for_test(std::time::Duration::from_millis(300)),
+                    );
+                }
+                None
+            }));
+        }
+        let sent = send(&fixture, &sender, &recipient).await;
+        let offers = fixture.peer_observer.offers.lock().unwrap().iter()
+            .filter(|(session, _, _)| session == &receiver)
+            .map(|(_, input, declined)| (input.clone(), *declined))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(&sent, Ok(meerkat_core::SendReceipt::PeerMessageSent { delivery:
+                meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved { outcome:
+                    meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted }, .. })),
+            "the bind waited for the briefly held control and the delivery was accepted: {sent:?}"
+        );
+        assert_eq!(offers.len(), 1, "one offer, never offered again");
+        assert!(!offers[0].1, "the offer was never declined");
+        let admitted = completed(&fixture, &receiver, 1).await;
+        tool_succeeded(&admitted, "memory");
+        let (_, after, _) = source_row(&fixture, &admitted, &[]).await;
+        after.peer_ingress.as_ref().unwrap().check_input(&offers[0].0, false).unwrap();
+        assert_eq!(
+            &admitted.state.input_id,
+            offers[0].0.id(),
+            "the offered identity is retained"
+        );
+        let exact = cold_service_admission::decode_source_input(&after,
+            after.bound_service_input.as_ref().unwrap()).unwrap();
+        meerkat_runtime::input_state::verify_exact_replay(&admitted.state, &exact).unwrap();
+        assert_eq!(
+            native_input_states(&fixture, &receiver).await.len(),
+            1,
+            "exactly one native admission"
+        );
+    }))).catch_unwind().await;
+    tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+        .await
+        .unwrap();
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("the peer held-control control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

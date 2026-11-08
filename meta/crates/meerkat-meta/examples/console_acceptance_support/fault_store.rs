@@ -2,7 +2,7 @@ use meerkat_meta::{
     AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleFrame, ConsoleFrameSource,
     ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogResult, ConsoleLogStore,
     ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
-    ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery, NewConsoleFrame,
+    ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery, NewConsoleFrame, SendTransition,
 };
 use std::sync::{
     Arc,
@@ -79,6 +79,22 @@ impl ConsoleLogStore for FaultStore {
         status: ConsoleFrameStatus,
     ) -> ConsoleLogResult<Option<ConsoleFrame>> {
         self.inner.update_frame_status(id, status).await
+    }
+    // The send machine's own transitions pass through, so a governed send
+    // moves through its states on the wrapped store.
+    fn supports_send_transitions(&self) -> bool {
+        self.inner.supports_send_transitions()
+    }
+    async fn transition_send_frame(
+        &self,
+        id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, serde_json::Value)>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.transition_send_frame(id, transition, note).await
+    }
+    async fn take_send_frame_hold(&self, id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.take_send_frame_hold(id).await
     }
     async fn query_frames(
         &self,

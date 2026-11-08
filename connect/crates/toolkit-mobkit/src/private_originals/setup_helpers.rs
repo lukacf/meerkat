@@ -14,8 +14,9 @@ use meerkat_authorization_contracts::{
 };
 use meerkat_core::{ControllerModelClient, SessionId, ToolDispatchContext};
 use meerkat_mobkit::identity_first::{
-    BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityRuntimeError, TurnTracking,
+    BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedBindError,
+    GovernedInputBinder, GovernedInputError, GovernedSettlement, GovernedWaitBudget,
+    IdentityRuntimeError, TurnTracking,
 };
 use meerkat_runtime::{Input, PromptInput};
 use meerkat_workgraph::{CreateWorkItemRequest, WorkAdmissionKey, WorkGraphService};
@@ -495,18 +496,19 @@ impl PrivateOriginals {
     }
 
     /// The real native identity lease supplies its client and session. The
-    /// binder returns the typed Bind branch before submitting any native input.
+    /// binder answers its typed `withheld` refusal before submitting any
+    /// native input.
     /// This is called only after fenced work admission, so a cold helper is
     /// never created before acquisition coalescing has selected its one item.
     ///
     /// The binder runs inside Core's governed bind, where it never waits. A
     /// source collection held there by another owner's short section makes
-    /// it refuse before it captures anything; the preparation then waits for
-    /// the collection outside the bind, until its one deadline (from its
-    /// start, never past the source deadline), and binds again. Nothing is
-    /// captured or submitted by a refused bind: every preparation's own bind
-    /// refuses (after its capture), so Core keeps no input, settlement or
-    /// custody of one, and binding again is the same first bind.
+    /// it answer "not now" before it captures anything; Meta's send then
+    /// waits for the collection outside the bind, within the preparation's
+    /// one deadline (from its start, never past the source deadline), and
+    /// binds the same binder again. Nothing is captured or submitted by such
+    /// a bind: every preparation's own bind refuses (`withheld`, after its
+    /// capture), so Core keeps no input, settlement or custody of one.
     pub(crate) async fn prepare_setup_helper(
         self: &Arc<Self>,
         admitted: Arc<AdmittedHelperWork>,
@@ -540,47 +542,36 @@ impl PrivateOriginals {
             .owned_identity_for_member_alias(&alias)
             .await
             .ok_or(PrivateOriginalError::Unavailable)?;
-        loop {
-            let binder = Arc::new(PrepareHelperBinder {
-                source: Arc::downgrade(self),
-                admitted: admitted.clone(),
-                captured: Mutex::new(None),
-                contended: std::sync::atomic::AtomicBool::new(false),
-            });
-            let outcome = runtime
-                .dispatch_governed_with_turn_ticket(
-                    &identity,
-                    Some(&alias),
-                    Input::Prompt(PromptInput::new(content.clone(), None)),
-                    review.bind(binder.clone()),
-                )
-                .await;
-            if !matches!(
-                outcome,
-                Err(IdentityRuntimeError::GovernedInput(
-                    GovernedInputError::Bind(_)
-                ))
-            ) {
-                return Err(PrivateOriginalError::Unavailable);
-            }
-            let captured = binder
-                .captured
-                .lock()
-                .map_err(|_| PrivateOriginalError::Unavailable)?
-                .take();
-            if let Some(captured) = captured {
-                return Ok(captured);
-            }
-            if !binder.contended.load(std::sync::atomic::Ordering::SeqCst)
-                || tokio::time::Instant::now() >= contended_until
-            {
-                return Err(PrivateOriginalError::Unavailable);
-            }
-            self.owner
-                .check_admitted_helper_until(&admitted, contended_until)
-                .await
-                .map_err(helper_error)?;
+        let binder = Arc::new(PrepareHelperBinder {
+            source: Arc::downgrade(self),
+            admitted: admitted.clone(),
+            captured: Mutex::new(None),
+            contended_until,
+        });
+        let outcome = runtime
+            .dispatch_governed_with_turn_ticket(
+                &identity,
+                Some(&alias),
+                Input::Prompt(PromptInput::new(content, None)),
+                review.bind(binder.clone()),
+            )
+            .await;
+        // The capture's own refusal (`withheld`) is its success. A hold past
+        // the deadline, and every other answer, is unavailable.
+        if !matches!(
+            &outcome,
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                if refusal.kind
+                    == meerkat_mobkit::identity_first::GovernedBindRefusalKind::Withheld
+        ) {
+            return Err(PrivateOriginalError::Unavailable);
         }
+        binder
+            .captured
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .take()
+            .ok_or(PrivateOriginalError::Unavailable)
     }
 
     /// Recover only a previously retained source for this exact work and
@@ -639,6 +630,13 @@ impl PrivateOriginals {
     /// denial: it is waited out with `churn`, the step's one churn, holding
     /// nothing, and the resolution made again. Past the churn's bounds it
     /// stays typed, unavailable. Only the owner's own refusal is a denial.
+    ///
+    /// The first binding write checks the issued lineages again before it
+    /// writes. An owner change in progress there is unavailable, with
+    /// nothing written: Core names that change, so it is waited out with the
+    /// same churn, holding nothing, and the bind made again (a bind whose
+    /// write was done is only replayed). Past the bounds it stays typed,
+    /// unavailable.
     pub(crate) async fn retain_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
@@ -722,19 +720,30 @@ impl PrivateOriginals {
         // The bind's one budget, from its start: its waits for a held source
         // collection before the write, and after it, for the contributors'
         // check and the publication.
-        let source = self
-            .owner
-            .bind_admitted_helper_until(
-                self.store.as_ref(),
-                &prepared.admitted,
-                binding,
-                Some(
-                    tokio::time::Instant::now()
-                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
-                ),
-            )
-            .await
-            .map_err(helper_error)?;
+        let bind_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let source = loop {
+            let bound = self
+                .owner
+                .bind_admitted_helper_until(
+                    self.store.as_ref(),
+                    &prepared.admitted,
+                    binding.clone(),
+                    Some(bind_until),
+                )
+                .await;
+            if matches!(bound, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.helper.first_binding_check",
+                )
+                .await
+            {
+                continue;
+            }
+            break bound.map_err(helper_error)?;
+        };
         let mut held = self
             .helper_sources
             .lock()
@@ -1354,8 +1363,13 @@ mod reprepare_tests {
         for error in [
             GovernedInputError::AdmissionUnresolved {
                 detail: "acceptance answer unavailable".into(),
+                receipt: None,
             },
-            GovernedInputError::Bind("binding unavailable".into()),
+            GovernedInputError::Refused(
+                meerkat_mobkit::identity_first::GovernedBindRefusal::unavailable(
+                    "binding unavailable",
+                ),
+            ),
             GovernedInputError::Unsupported("no governed controller".into()),
             GovernedInputError::BindingChanged,
             GovernedInputError::Unbound,
@@ -1372,19 +1386,42 @@ struct PrepareHelperBinder {
     source: Weak<PrivateOriginals>,
     admitted: Arc<AdmittedHelperWork>,
     captured: Mutex<Option<PreparedHelperController>>,
-    // Set when the bind met the source collection held by another owner's
-    // short section and refused before capturing anything; the preparation
-    // waits for the collection outside the bind and binds again.
-    contended: std::sync::atomic::AtomicBool,
+    // The preparation's one deadline for its binds' "not now" answers (from
+    // its start, never past the source deadline).
+    contended_until: tokio::time::Instant,
 }
 
 #[async_trait]
 impl GovernedInputBinder for PrepareHelperBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         _input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.capture(context)
+            .await
+            .map_err(super::governed_submit::BindFailure::into_error)
+    }
+
+    /// The preparation's one deadline bounds its waits.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        GovernedWaitBudget::Bounded(
+            self.contended_until
+                .saturating_duration_since(tokio::time::Instant::now()),
+        )
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
+        // bind never returns input or settlement, so there is no custody here.
+    }
+}
+
+impl PrepareHelperBinder {
+    async fn capture(
+        &self,
+        context: &GovernedBindContext,
+    ) -> Result<BoundGovernedInput, super::governed_submit::BindFailure> {
+        use super::governed_submit::BindFailure;
         let source = self
             .source
             .upgrade()
@@ -1396,15 +1433,15 @@ impl GovernedInputBinder for PrepareHelperBinder {
         ) {
             crate::source_hold_probe::retain(source.hold_sources_for_test(hold));
         }
-        // Never wait inside Core's bind: a held collection refuses here, with
-        // nothing captured, and the preparation waits outside it.
+        // Never wait inside Core's bind: a held collection answers "not now"
+        // here, with nothing captured; Meta waits outside the bind and binds
+        // this binder again.
         match source.owner.try_check_admitted_helper(&self.admitted) {
             Ok(true) => {}
-            Ok(false) => {
-                self.contended
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                return Err("Toolkit helper source is held".into());
+            Ok(false) if crate::no_wait::may_answer_not_now() => {
+                return Err(helper_source_held(&source, "prepare"));
             }
+            Ok(false) => return Err("Toolkit helper source is held".into()),
             Err(_) => return Err("Toolkit helper source is unavailable".into()),
         }
         source
@@ -1435,7 +1472,9 @@ impl GovernedInputBinder for PrepareHelperBinder {
             .lock()
             .map_err(|_| "Toolkit helper preparation is unavailable")?;
         if captured.is_some() {
-            return Err("Toolkit helper preparation was already captured".into());
+            return Err(BindFailure::denied(
+                "Toolkit helper preparation was already captured",
+            ));
         }
         *captured = Some(PreparedHelperController {
             source: self.source.clone(),
@@ -1444,12 +1483,30 @@ impl GovernedInputBinder for PrepareHelperBinder {
             target,
             controller: context.controller.clone(),
         });
-        Err("Toolkit helper controller preparation precedes input submission".into())
+        // Captured: this preparation binds nothing by design.
+        Err(BindFailure::withheld(
+            "Toolkit helper controller preparation precedes input submission",
+        ))
     }
+}
 
-    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
-        // bind never returns input or settlement, so there is no custody here.
-    }
+/// "Not now" at a helper binder's source check (`binder`: `prepare` or
+/// `submit`): another owner's short section holds the source collection, and
+/// nothing was captured or written. Meta waits, outside the identity's lock,
+/// until it clears, then binds the same binder again.
+fn helper_source_held(
+    source: &PrivateOriginals,
+    binder: &'static str,
+) -> super::governed_submit::BindFailure {
+    #[cfg(any(test, feature = "test-support"))]
+    let _ = crate::source_hold_probe::observe(crate::source_hold_probe::Site::HelperNotNow, binder);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = binder;
+    let owner = source.owner.clone();
+    super::governed_submit::BindFailure::NotNow(meerkat_mobkit::identity_first::GovernedNotNow {
+        condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+        until: meerkat_core::authorization::NotNowWait::until_clear(move || owner.sources_held()),
+    })
 }
 
 struct SubmitHelperBinder {
@@ -1480,16 +1537,16 @@ impl Drop for SubmitHelperBinder {
     }
 }
 
-#[async_trait]
-impl GovernedInputBinder for SubmitHelperBinder {
-    async fn bind(
+impl SubmitHelperBinder {
+    async fn submit(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, super::governed_submit::BindFailure> {
+        use super::governed_submit::BindFailure;
         self.source
             .with_new_work_admission(|| ())
-            .map_err(|_| "Toolkit helper admission is stopped".to_owned())?;
+            .map_err(|_| BindFailure::closed("Toolkit helper admission is stopped"))?;
         if tokio::time::Instant::now() >= self.source_deadline {
             return Err("Toolkit helper submission deadline elapsed".into());
         }
@@ -1498,16 +1555,42 @@ impl GovernedInputBinder for SubmitHelperBinder {
         {
             #[cfg(test)]
             crate::aa1_failure("helper.bind.placement", "PlacementChanged");
-            return Err("Toolkit helper native placement changed".into());
+            return Err(BindFailure::denied(
+                "Toolkit helper native placement changed",
+            ));
         }
-        self.source
-            .owner
-            .check_admitted_helper(&self.admitted)
-            .map_err(|_| {
-                #[cfg(test)]
-                crate::aa1_failure("helper.bind.source", "Unavailable");
-                "Toolkit helper source is unavailable"
-            })?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitBind,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        // The source check: before the attempt's first durable effect a held
+        // source answers "not now"; past it, the shipped refusal.
+        let source_unavailable = |_: OriginalWriterError| {
+            #[cfg(test)]
+            crate::aa1_failure("helper.bind.source", "Unavailable");
+            "Toolkit helper source is unavailable"
+        };
+        if crate::no_wait::may_answer_not_now() {
+            if !self
+                .source
+                .owner
+                .try_check_admitted_helper(&self.admitted)
+                .map_err(source_unavailable)?
+            {
+                return Err(helper_source_held(&self.source, "submit"));
+            }
+        } else {
+            self.source
+                .owner
+                .check_admitted_helper(&self.admitted)
+                .map_err(source_unavailable)?;
+        }
+        // The decision point: this binder answers no "not now" after its
+        // source check, so the writes below need no effect mark.
+        meerkat_core::protected_section::note_decided("helper.source");
         self.source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| {
@@ -1561,6 +1644,8 @@ impl GovernedInputBinder for SubmitHelperBinder {
                     )
                     .map_err(|_| "Toolkit could not rebind the exact first helper input")?;
             }
+            // A bind attempt's durable effect, kept marked past the decision.
+            meerkat_core::protected_section::note_effect("helper.custody_attempt");
             self.source
                 .owner
                 .persist_helper_custody_attempt(
@@ -1680,6 +1765,29 @@ impl GovernedInputBinder for SubmitHelperBinder {
             settlement: Box::new(settlement),
             entry_fence: self.entry_fence.clone(),
         })
+    }
+}
+
+#[async_trait]
+impl GovernedInputBinder for SubmitHelperBinder {
+    async fn try_bind(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.submit(context, input)
+            .await
+            .map_err(super::governed_submit::BindFailure::into_error)
+    }
+
+    /// The helper's own source deadline bounds its waits as well.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        let remaining = self
+            .source_deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        GovernedWaitBudget::Bounded(
+            remaining.min(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND),
+        )
     }
 
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -1831,7 +1939,8 @@ fn aa1_helper_send_failure(error: &IdentityRuntimeError) {
         IdentityRuntimeError::GovernedInput(error) => match error {
             GovernedInputError::Unsupported(_) => "GovernedInputError::Unsupported",
             GovernedInputError::BindingChanged => "GovernedInputError::BindingChanged",
-            GovernedInputError::Bind(_) => "GovernedInputError::Bind",
+            GovernedInputError::Refused(_) => "GovernedInputError::Refused",
+            GovernedInputError::Held(_) => "GovernedInputError::Held",
             GovernedInputError::Unbound => "GovernedInputError::Unbound",
             GovernedInputError::EntryRefused(_) => "GovernedInputError::EntryRefused",
             GovernedInputError::AdmissionUnresolved { .. } => {

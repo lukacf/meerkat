@@ -46,6 +46,8 @@ pub(super) struct Found {
     pub(super) concurrent_change: Option<Duration>,
     /// Whether the original's turn completed (its native ticket answered).
     pub(super) turn_completed: bool,
+    /// Every "not now" a binder answered (its site and key), in order.
+    pub(super) not_now: Vec<(Site, String)>,
 }
 
 fn helper_scope(fixture: &Fixture) -> toolkit_store::StoreScope {
@@ -161,7 +163,13 @@ pub(super) async fn finds_with_hold_at(
     let owner = fixture.source.owner.clone();
     let concurrent: Arc<Mutex<Option<Duration>>> = Arc::default();
     let measured = concurrent.clone();
-    source_hold_probe::install(Arc::new(move |at, _key| {
+    let not_now: Arc<Mutex<Vec<(Site, String)>>> = Arc::default();
+    let answered_not_now = not_now.clone();
+    source_hold_probe::install(Arc::new(move |at, key| {
+        if matches!(at, Site::OriginalNotNow | Site::HelperNotNow) {
+            answered_not_now.lock().unwrap().push((at, key.to_owned()));
+            return None;
+        }
         if at != site {
             return None;
         }
@@ -255,6 +263,7 @@ pub(super) async fn finds_with_hold_at(
                 rows,
                 concurrent_change: None,
                 turn_completed,
+                not_now: not_now.lock().unwrap().clone(),
             }
         }),
     ))

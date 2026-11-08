@@ -67,12 +67,19 @@ pub trait ConsoleGovernedIngress: Send + Sync {
     /// outside any identity lease or lifecycle lock and BEFORE the Console
     /// reserves anything for the send (its acceptance and transcript frame).
     /// An `Err` refuses the send there: nothing is reserved, bound or
-    /// submitted. The returned binder's [`GovernedInputBinder::bind`] runs
-    /// later, in the send's delivery, under the identity's lifecycle lock and
-    /// lease, for the member's exact current session (the target may be
-    /// materialized inside the send, after this call). A refusal in `bind`
-    /// admits nothing and fails the accepted send; its idempotency key then
-    /// replays that failure, it never resubmits the input.
+    /// submitted. The returned binder's [`GovernedInputBinder::try_bind`]
+    /// runs later, in the send's delivery, under the identity's lifecycle
+    /// lock and lease, for the member's exact current session (the target may
+    /// be materialized inside the send, after this call). A refusal in
+    /// `try_bind` admits nothing and fails the accepted send; its idempotency
+    /// key then replays that failure, it never resubmits the input. A "not
+    /// now" answer is waited out outside the lock, within the binder's
+    /// [`GovernedInputBinder::wait_budget`], and the send binds again. A send
+    /// still answered "not now" when that budget ends (at once for a binder
+    /// with no budget) is held, not failed: nothing is submitted, its frame
+    /// stays accepted with a `delivery_hold`, and a replay of its key
+    /// dispatches the same input again, unless the runtime's evidence shows
+    /// it admitted, which settles it delivered.
     ///
     /// The context is a correlation handle, NOT an authority: its
     /// `idempotency_key` is chosen by the client, so any caller allowed to
@@ -85,16 +92,16 @@ pub trait ConsoleGovernedIngress: Send + Sync {
     /// [`GovernedBindContext::session_id`](crate::identity_first::GovernedBindContext::session_id)
     /// (not a session read before the send), and the actual input content
     /// (for example its digest against the reviewed digest). Any mismatch
-    /// refuses in `bind`, before admission.
+    /// refuses in `try_bind`, before admission.
     ///
-    /// The input `bind` receives is the stock Console input: created after
-    /// the Console's acceptance and reservation, with a fresh `InputId` and
-    /// the Console's own idempotency key
-    /// (`console:{interaction_id}:{input_frame_id}`) in its header. The
-    /// binder binds exactly that input and must not replace it; a host that
-    /// ties its preparation to one admitted input records that input's actual
-    /// `InputId` itself (for example with its own first-bind
-    /// compare-and-set).
+    /// The input `try_bind` receives is the stock Console input: created
+    /// after the Console's acceptance and reservation, with the Console's own
+    /// idempotency key (`console:{interaction_id}:{input_frame_id}`) in its
+    /// header and an `InputId` derived from that key, so a held send
+    /// dispatched again carries the same input. The binder binds exactly that
+    /// input and must not replace it; a host that ties its preparation to one
+    /// admitted input records that input's actual `InputId` itself (for
+    /// example with its own first-bind compare-and-set).
     fn binder_for_send(
         &self,
         identity: &AgentIdentity,

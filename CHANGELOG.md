@@ -1215,6 +1215,37 @@ them.
   model, is a catalog image generation model. Select it by model; it runs on
   the hosted Responses image tool, as the default does.
 
+- `meerkat_core::protected_section`: protected sections, the places where code
+  must not wait because its caller holds what other actors need: a governed
+  bind under the identity's lifecycle lock, the governed entry, native
+  admission reads, the historical admission callback and a host's store
+  transaction. A debug build panics when code inside one waits outside a
+  listed known wait (`assert_may_wait`, `known_wait`). An asynchronous section
+  carries its attempt's effect mark (`note_effect`, `effect_recorded`,
+  `within_marked`, `effect_mark`, `EffectMark::enter` for a blocking writer
+  the attempt hands work to) and its decision point (`note_decided`); the
+  write witness `assert_effect_marked` reports a durable write inside a
+  governed bind attempt that neither passed its decision point nor recorded an
+  effect. Release builds check nothing.
+- `authorization::NotNowWait` and `OwnerChangeChurn::wait_until_clear`: a
+  "not now" answer's wait, bounded by the caller's deadline;
+  `ControllerReadinessFailure::SourceHeld` and `PreparationStale`, and
+  `ControllerReadinessFailure::as_str`.
+- `meerkat_authorization_contracts::work_association::AssociationDigest`
+  (`ASSOCIATION_DIGEST_VERSION`, `AssociationDigestError`) and
+  `InputAuthorityAssociation::digest`: a versioned digest of an association's
+  canonical bytes, re-exported by `meerkat-runtime`.
+- `MeerkatMachine::governed_input_by_key`: read a governed submission's
+  outcome by its raw idempotency key and its association, through Core's own
+  key qualification (a deduplicated submission answers with its canonical
+  input).
+- `PeerIngressBindRequest::not_now_waiter` (`PeerIngressWaiter`): a peer
+  binder waits out a "not now" inside its bind, outside every protected
+  section, within the request's deadline.
+- `OwnerChangeChurn::reporting_to` and `OperationRefusalSurface::GovernedInput`:
+  a host reports its own operation's waits (a governed input's "not now"
+  waits) to the operation refusal observer it installed.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -1483,6 +1514,18 @@ them.
   on the default; the `generate_image` tool description and the docs no
   longer advise against it. With `jpeg`, which cannot carry one, the
   request is denied with `projection_unsupported` before the provider call.
+
+- A volatile peer delivery whose binding stays pending is offered again with
+  backoff within the owner-change bound, then dropped with a warning, instead
+  of being dropped at its first pending answer. A durable claim keeps its
+  path.
+- A durable grant change (`LocalGrantAuthority`) calls the write witness
+  (debug builds only).
+- Debug builds only: reserving `LocalAuthorizationPublication`'s writer for
+  an owner change inside a protected section (Core's native admission reads,
+  its historical admission callback) panics, naming `publication.writer`, so
+  a host whose admission callback takes it there fails in a debug build.
+  Release builds check nothing.
 
 ### Deprecated
 

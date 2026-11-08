@@ -41,6 +41,7 @@ impl ObservedBridge {
             return Err(BridgeAdmissionError::GovernedInput(
                 GovernedInputError::AdmissionUnresolved {
                     detail: "injected refusal before second native lookup".into(),
+                    receipt: None,
                 },
             ));
         }
@@ -111,6 +112,7 @@ impl ObservedBridge {
                 return Err(BridgeAdmissionError::GovernedInput(
                     GovernedInputError::AdmissionUnresolved {
                         detail: "injected loss after native fresh acceptance".into(),
+                        receipt: None,
                     },
                 ));
             }
@@ -269,6 +271,7 @@ impl ObservedBridge {
             return Err(BridgeAdmissionError::GovernedInput(
                 GovernedInputError::AdmissionUnresolved {
                     detail: "injected loss after actual helper fresh acceptance".into(),
+                    receipt: None,
                 },
             ));
         }
@@ -582,12 +585,6 @@ impl SessionBridge for ObservedBridge {
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         self.inner.release_member(identity).await
-    }
-
-    async fn broken_members(
-        &self,
-    ) -> Result<std::collections::BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        self.inner.broken_members().await
     }
 
     async fn capture_queued_member_inputs(

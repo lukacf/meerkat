@@ -279,6 +279,8 @@ impl PrivateOriginals {
         };
         self.check_class_selection(reference, &selected)?;
         current.class_input = Some(selected.clone());
+        // A bind attempt's durable effect: no "not now" may follow it.
+        meerkat_core::protected_section::note_effect("original.class_input");
         self.store
             .compare_and_swap(Transition {
                 key: stored.key.clone(),

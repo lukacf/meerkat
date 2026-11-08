@@ -707,6 +707,9 @@ fn nightly_covers_the_deferred_heavy_lanes() {
         "make test-unit",
         "make test-int",
         "make e2e-fast",
+        // The TLC lane's machine-verify part (the bounded adaptive witness
+        // and the `machine-verify --all` sweep): ci.yml's tlc-audits job
+        // runs the lane's audit shards on every machine-authority change.
         "make machine-verify",
         "test-sdk-python test-sdk-typescript",
         "uses: ./.github/workflows/mob-dense-topology.yml",

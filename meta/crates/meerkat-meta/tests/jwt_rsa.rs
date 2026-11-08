@@ -674,3 +674,145 @@ fn jwt_development_provider_keeps_its_historical_principal_fallback() {
     .expect("jwt auth config");
     assert!(!state.trusted_oidc.require_verified_email);
 }
+
+// ---------------------------------------------------------------------------
+// The Forge console front's `auth_config` for OIDC sign-in: the front's own
+// issuer and one ES256 key, the console's audience, the operator and the
+// people the front admits. The identity provider's person is in `sub`; only
+// the front signs.
+// ---------------------------------------------------------------------------
+
+const FRONT_ISSUER: &str = "urn:forge-console:00112233445566778899aabbccddeeff";
+const FRONT_AUDIENCE: &str = "persistent-gateway";
+const FRONT_KID: &str = "front-key";
+const PROVIDER_ISSUER: &str = "https://login.example.test";
+const PROVIDER_PERSON: &str = r#"["https://login.example.test","provider-subject-0001"]"#;
+
+/// A P-256 key made for one test: its PKCS#8 DER and its public point's JWK
+/// coordinates.
+fn generated_ec_key() -> (Vec<u8>, String, String) {
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 =
+        EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random).expect("p-256 key");
+    let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &random)
+        .expect("p-256 key pair");
+    let point = pair.public_key().as_ref();
+    (
+        pkcs8.as_ref().to_vec(),
+        URL_SAFE_NO_PAD.encode(&point[1..33]),
+        URL_SAFE_NO_PAD.encode(&point[33..65]),
+    )
+}
+
+fn sign_es256_der(kid: &str, claims: &Value, der: &[u8]) -> String {
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(kid.to_string());
+    encode(&header, claims, &EncodingKey::from_ec_der(der)).expect("es256 token")
+}
+
+fn front_claims(email: &str) -> Value {
+    json!({
+        "iss": FRONT_ISSUER,
+        "aud": FRONT_AUDIENCE,
+        "sub": PROVIDER_PERSON,
+        "email": email,
+        "email_verified": true,
+        "sid": "front-login-scope",
+        "host_scope": "native-console",
+        "iat": 1_700_000_000_u64,
+        "exp": 4_000_000_000_u64
+    })
+}
+
+#[test]
+fn a_forge_front_oidc_configuration_admits_only_tokens_the_front_signed() {
+    let (front_key, x, y) = generated_ec_key();
+    let (other_key, _, _) = generated_ec_key();
+    let state = meerkat_meta::console_auth_config::parse_console_auth_config(&json!({
+        "provider": "oidc",
+        "issuer": FRONT_ISSUER,
+        "audience": FRONT_AUDIENCE,
+        "jwks_json": {"keys": [{"kty": "EC", "crv": "P-256", "x": x, "y": y,
+            "kid": FRONT_KID, "alg": "ES256", "use": "sig"}]},
+        "email_allowlist": ["operator@example.test", "alice@example.test"],
+        "accounts": "personal",
+    }))
+    .expect("the front's oidc auth config");
+    assert!(state.trusted_oidc.require_verified_email);
+    assert!(!state.trusted_oidc.shared_account_tokens);
+    let refusal = |token: &str| {
+        let response = route_with_token(&state, token);
+        (response.status, response.body["reason"].clone())
+    };
+    let alice = front_claims("alice@example.test");
+    // The front's own token for a listed person, and its health token, which
+    // names the operator and no person.
+    assert_eq!(
+        route_with_token(&state, &sign_es256_der(FRONT_KID, &alice, &front_key)).status,
+        200
+    );
+    let mut health = front_claims("operator@example.test");
+    health.as_object_mut().expect("object").remove("sub");
+    health.as_object_mut().expect("object").remove("sid");
+    assert_eq!(
+        route_with_token(&state, &sign_es256_der(FRONT_KID, &health, &front_key)).status,
+        200
+    );
+    // Any other key, under the front's kid.
+    assert_eq!(
+        refusal(&sign_es256_der(FRONT_KID, &alice, &other_key)),
+        (401, json!("invalid_token"))
+    );
+    // The front's key naming another issuer, the provider's included.
+    let mut provider_issuer = alice.clone();
+    provider_issuer["iss"] = json!(PROVIDER_ISSUER);
+    assert_eq!(
+        refusal(&sign_es256_der(FRONT_KID, &provider_issuer, &front_key)),
+        (401, json!("invalid_token"))
+    );
+    // The provider's own ID token, as issued and re-addressed to the console
+    // under the front's kid.
+    let id_token = json!({
+        "iss": PROVIDER_ISSUER,
+        "aud": "forge-console",
+        "sub": "provider-subject-0001",
+        "email": "alice@example.test",
+        "email_verified": true,
+        "nonce": "sign-in-nonce",
+        "iat": 1_700_000_000_u64,
+        "exp": 4_000_000_000_u64
+    });
+    assert_eq!(
+        refusal(&sign_rs256("provider-key", &id_token, RSA_A_PRIVATE_PEM)),
+        (401, json!("jwks_key_not_found"))
+    );
+    let mut readdressed = id_token;
+    readdressed["iss"] = json!(FRONT_ISSUER);
+    readdressed["aud"] = json!(FRONT_AUDIENCE);
+    assert_eq!(
+        refusal(&sign_rs256(FRONT_KID, &readdressed, RSA_A_PRIVATE_PEM)),
+        (401, json!("jwks_key_not_found"))
+    );
+    // An unverified or missing email, or a person not on the list.
+    let mut unverified = alice.clone();
+    unverified["email_verified"] = json!(false);
+    assert_eq!(
+        refusal(&sign_es256_der(FRONT_KID, &unverified, &front_key)),
+        (401, json!("email_not_verified"))
+    );
+    let mut no_email = alice;
+    no_email.as_object_mut().expect("object").remove("email");
+    assert_eq!(
+        refusal(&sign_es256_der(FRONT_KID, &no_email, &front_key)),
+        (401, json!("missing_token_identity"))
+    );
+    assert_eq!(
+        refusal(&sign_es256_der(
+            FRONT_KID,
+            &front_claims("mallory@example.test"),
+            &front_key
+        )),
+        (401, json!("email_not_allowlisted"))
+    );
+}

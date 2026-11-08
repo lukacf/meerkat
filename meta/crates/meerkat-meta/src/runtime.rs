@@ -78,10 +78,10 @@ pub use console_ingress::{
     validate_console_token_under_session_fences,
 };
 pub(crate) use console_ingress::{
-    ConsoleCallerVerification, ResolvedConsoleCaller, authorize_console_rest_json_route,
-    console_member_access_attributes, fold_console_member_attributes,
-    render_console_rest_json_route, resolve_authorized_console_caller_from_token,
-    session_fence_first_accepted_iat,
+    ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
+    ResolvedConsoleCaller, authorize_console_rest_json_route, console_member_access_attributes,
+    fold_console_member_attributes, render_console_rest_json_route,
+    resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
 pub(crate) use gating::is_legacy_sequential_pending_id;
@@ -1072,6 +1072,15 @@ pub struct GatingDecider {
     pub principal: String,
     /// Approver identities the principal currently holds.
     pub held_approver_ids: BTreeSet<String>,
+}
+
+/// What the caller established about a decider's authentication, recorded
+/// with the decision: the assurance and a digest of the login the decision
+/// was made in. Never the token or the login itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatingDecisionEvidence {
+    pub(crate) assurance: meerkat_core::ApprovalAssurance,
+    pub(crate) login_scope_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

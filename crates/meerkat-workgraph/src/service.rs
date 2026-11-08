@@ -20,18 +20,19 @@ use crate::types::{
     AttentionProjectionParentContext, AttentionProjectionRequest, AttentionProjectionResult,
     AttentionProjectionText, AttentionPruneRequest, AttentionPruneResult, AttentionReassignRequest,
     AttentionReassignResult, AttentionResumeRequest, BreakGlassAttentionReassignRequest,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
-    GoalBindExistingRequest, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
-    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
-    GoalStatusResult, LinkWorkItemsRequest, ObserveLeaseExpiryRequest, ObserveReadinessRequest,
-    PolicyEscalateRequest, ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus,
-    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef,
-    WorkExecutionBinding, WorkExecutionBindingFilter, WorkExecutionBindingId,
-    WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphEventsResponse, WorkGraphItemsResponse, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
+    BreakGlassReleaseWorkItemRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, GoalAttentionTarget, GoalBindExistingRequest, GoalConfirmRequest,
+    GoalConfirmResult, GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest,
+    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, LinkWorkItemsRequest,
+    ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
+    ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkExecutionBinding,
+    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionEvidenceKind,
+    WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse,
+    WorkGraphItemsResponse, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use crate::{
     ChildJoinDisposition, WorkExecutionLifecycleEffect, WorkExecutionMachine,
@@ -1415,6 +1416,62 @@ impl WorkGraphService {
             .await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::release_item(item, request, now)?;
+        self.store
+            .update_item_cas(item, expected_previous_revision, event)
+            .await
+    }
+
+    /// Break-glass release: a host-plane operator hands back a claim it does
+    /// not own, such as one whose owner is gone or one with no lease to end.
+    /// The same transition as [`Self::release`], bound to the request's
+    /// revision, with mandatory attribution: the Released event records the
+    /// operator and the claim it released (`break_glass`), and a WARN log
+    /// names them. Never exposed on the agent tool surface or wire catalogs.
+    pub async fn break_glass_release(
+        &self,
+        request: BreakGlassReleaseWorkItemRequest,
+    ) -> Result<WorkItem, WorkGraphError> {
+        let principal = request.principal.trim().to_string();
+        if principal.is_empty() {
+            return Err(WorkGraphError::InvalidInput(
+                "break-glass release requires a non-empty principal".to_string(),
+            ));
+        }
+        let now = self.store.get_store_time_utc().await?;
+        let item = self
+            .get(
+                request.realm_id.clone(),
+                request.namespace.clone(),
+                request.id.clone(),
+            )
+            .await?;
+        let released_claim = item.claim.clone();
+        let expected_previous_revision = item.revision;
+        let (item, event) = WorkGraphMachine::release_item(
+            item,
+            ReleaseWorkItemRequest {
+                id: request.id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+                expected_revision: request.expected_revision,
+            },
+            now,
+        )?;
+        tracing::warn!(
+            item_id = %item.id,
+            principal = %principal,
+            "break-glass work item release (host-plane, audit-logged)"
+        );
+        let event = WorkGraphEvent {
+            payload: json!({
+                "item": &item,
+                "break_glass": {
+                    "principal": principal,
+                    "released_claim": released_claim,
+                },
+            }),
+            ..event
+        };
         self.store
             .update_item_cas(item, expected_previous_revision, event)
             .await
@@ -5429,6 +5486,114 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&goal.item.evidence_refs).expect("evidence refs"),
             ordered
+        );
+    }
+
+    /// A break-glass release hands back a claim its operator does not own:
+    /// the item returns to the pool, and the Released event records the
+    /// operator and the claim released. It is bound to the request's
+    /// revision and refuses a blank principal; the owner's plain release
+    /// records no break-glass.
+    #[tokio::test]
+    async fn break_glass_release_records_the_operator_and_the_released_claim() {
+        use crate::types::{BreakGlassReleaseWorkItemRequest, ReleaseWorkItemRequest};
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let claim = |item: &WorkItem| ClaimWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+            owner: WorkOwner::new(
+                WorkOwnerKey::principal("owner@example.test").expect("owner key"),
+            ),
+            lease_seconds: None,
+            lease_expires_at: None,
+        };
+        let break_glass =
+            |item: &WorkItem, revision: u64, principal: &str| BreakGlassReleaseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: revision,
+                principal: principal.to_string(),
+            };
+        let created = service
+            .create(create_req("break glass"))
+            .await
+            .expect("create");
+        let claimed = service.claim(claim(&created)).await.expect("claim");
+
+        let blank = service
+            .break_glass_release(break_glass(&claimed, claimed.revision, "  "))
+            .await;
+        assert!(
+            matches!(blank, Err(crate::WorkGraphError::InvalidInput(_))),
+            "{blank:?}"
+        );
+        let stale = service
+            .break_glass_release(break_glass(
+                &claimed,
+                created.revision,
+                "admin@example.test",
+            ))
+            .await;
+        assert!(
+            matches!(stale, Err(crate::WorkGraphError::StaleRevision { .. })),
+            "{stale:?}"
+        );
+        let released = service
+            .break_glass_release(break_glass(
+                &claimed,
+                claimed.revision,
+                "admin@example.test",
+            ))
+            .await
+            .expect("break-glass release");
+        assert_eq!(released.status, crate::WorkStatus::Open);
+        assert!(released.claim.is_none(), "{released:?}");
+
+        let reclaimed = service.claim(claim(&released)).await.expect("claim again");
+        service
+            .release(ReleaseWorkItemRequest {
+                id: reclaimed.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: reclaimed.revision,
+            })
+            .await
+            .expect("the owner's release");
+
+        let releases = service
+            .events(WorkGraphEventFilter::default())
+            .await
+            .expect("events")
+            .into_iter()
+            .filter(|event| event.kind == WorkGraphEventKind::Released)
+            .collect::<Vec<WorkGraphEvent>>();
+        assert_eq!(releases.len(), 2, "{releases:?}");
+        assert_eq!(
+            releases[0].payload["break_glass"],
+            json!({
+                "principal": "admin@example.test",
+                "released_claim": serde_json::to_value(&claimed.claim).expect("claim json"),
+            })
+        );
+        assert_eq!(
+            releases[0].payload["break_glass"]["released_claim"]["owner"]["key"],
+            json!({ "kind": "principal", "id": "owner@example.test" })
+        );
+        assert_eq!(
+            releases[0].payload["item"]["id"],
+            json!(released.id.to_string())
+        );
+        assert!(
+            releases[1].payload.get("break_glass").is_none(),
+            "{:?}",
+            releases[1]
         );
     }
 }

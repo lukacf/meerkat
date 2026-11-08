@@ -243,11 +243,11 @@ LANE_INPUTS = (
     ("crates/meerkat-meta/src/bin/meta_flow_editor.rs", {"flow_editor"}),
     ("crates/meerkat-meta/src/http_flow_editor.rs", {"flow_editor"}),
     ("crates/meerkat-meta/src/mobpack.rs", {"flow_editor"}),
-    # The RPC gateway the Python SDK tests drive. The flow editor's source
-    # contract test reads rpc.rs too.
+    # The RPC gateway the Python SDK tests drive. The flow editor's and the
+    # console's source contract tests read rpc.rs too.
     ("crates/meerkat-meta/src/bin/rpc_gateway.rs", {"python"}),
     ("crates/meerkat-meta/src/rpc_gateway.rs", {"python", "extension_state"}),
-    ("crates/meerkat-meta/src/rpc.rs", {"python", "flow_editor"}),
+    ("crates/meerkat-meta/src/rpc.rs", {"python", "flow_editor", "console"}),
     ("crates/meerkat-meta/src/rpc/", {"python"}),
     # Other sources the console and flow editor contract tests read.
     ("crates/meerkat-meta/src/mcp_apps_sandbox.rs", {"console"}),

@@ -39,7 +39,7 @@ def _source_contents(files, runtime_target):
     """Read the accepted protected choices before creating private projections."""
     from . import compiler
     from .templates_v2.application_configuration import validate_application_fields
-    from .templates_v2.console_configuration import console_authentication
+    from .templates_v2.console_configuration import console_authentication, console_operator
     spec = Blueprint.model_validate(_json(files["blueprint.json"][0]))
     if not compiler._product_application_supported(spec, runtime_target=runtime_target):
         raise CustodyError(_missing_source_input(spec))
@@ -60,20 +60,21 @@ def _source_contents(files, runtime_target):
     console = _json(files["application/console.json"][0])
     authentication = console_authentication(console, fields)
     access = tomllib.loads(files["config/access.toml"][0].decode("utf-8"))
-    admins = access.get("admins")
     # This is the original explicit protected source operator, not a Google
-    # account, SSH identity, discovered user or inferred native grant.
-    if (authentication != "local-password" or access.get("enabled") is not True
-            or not isinstance(admins, list) or len(admins) != 1
-            or type(admins[0]) is not str or not admins[0] or admins[0].strip() != admins[0]
-            or any(ord(char) < 32 or ord(char) == 127 for char in admins[0])
+    # account, SSH identity, discovered user or inferred native grant: the
+    # first admin. Further admins are other people's accounts.
+    try:
+        operator = console_operator(access)
+    except ValueError:
+        operator = None
+    if (authentication not in ("local-password", "local-accounts") or operator is None
             or not any(row["key"] == "CONSOLE_USER_ID" and row.get("required") is True for row in fields)):
-        raise CustodyError("Destination defaults need the original single protected Console operator choice.")
+        raise CustodyError("Destination defaults need the original protected Console operator first among the access admins.")
     contents = {"blueprint.json": files["blueprint.json"][0], "mob.toml": definition,
         "application-inventory-input.json": inventory_bytes, "tool-policy.json": policy,
         "configuration.json": files["application/configuration.json"][0],
         "console.json": files["application/console.json"][0], "access.toml": files["config/access.toml"][0]}
-    return contents, {"subject": admins[0], "private_configuration_key": "CONSOLE_USER_ID"}
+    return contents, {"subject": operator, "private_configuration_key": "CONSOLE_USER_ID"}
 
 
 class DestinationApplicationInputs:

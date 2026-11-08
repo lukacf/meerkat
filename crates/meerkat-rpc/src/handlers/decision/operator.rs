@@ -3,21 +3,22 @@
 //! A stdio connection of a Unix build with local authorization has an
 //! operator: the process's operating-system user (on a governed pipe, the
 //! composition's operator), device trusted, in an authentication scope of the
-//! connection's own. The connection presents decisions to it only when its
-//! client lists them (`decision/list`, the client's explicit ask): each
-//! decision of the returned page that is open, waits for a human, is held for
-//! an approver id the realm's configuration lists for the operator
-//! (`[governance.decisions] operator_approver_ids`) and was not presented on
-//! this connection yet, in page order. For each, the connection reads the
-//! clock, writes a `decision/notice` carrying the whole rendering, waits
-//! until the notice is on the pipe, and only then records the presentation
-//! through the decision owner: to the approver, on the connection's own
-//! channel, under the notice's id, at that clock reading. A crash or a closed
-//! pipe between the notice and the record leaves a shown but unrecorded
-//! presentation, which a decide refuses; never the reverse. The answered
-//! page carries each presented decision as recorded. When the realm's
-//! configuration cannot be read, the list presents nothing and answers its
-//! page as plain dispatch does.
+//! connection's own. The connection presents it each decision that is open,
+//! waits for a human, is held for an approver id the realm's configuration
+//! lists for the operator (`[governance.decisions] operator_approver_ids`)
+//! and was not presented on this connection yet: when the runtime's decision
+//! owner opens it while the connection is open, and when the connection's
+//! client lists it (`decision/list`, the client's explicit ask), in page
+//! order. For each, the connection reads the clock, writes a
+//! `decision/notice` carrying the whole rendering, waits until the notice is
+//! on the pipe, and only then records the presentation through the decision
+//! owner: to the approver, on the connection's own channel, under the
+//! notice's id, at that clock reading. A crash or a closed pipe between the
+//! notice and the record leaves a shown but unrecorded presentation, which a
+//! decide refuses; never the reverse. The answered page carries each
+//! presented decision as recorded. When the realm's configuration cannot be
+//! read, nothing is presented, and a list answers its page as plain dispatch
+//! does.
 //!
 //! The operator decides through `decision/decide` only a decision this
 //! connection presented, while the connection is open and the decision's
@@ -50,7 +51,10 @@ use meerkat_core::connection::RealmId;
 use meerkat_runtime::decision::wire::{
     wire_canonical_part, wire_decision_listing, wire_decision_phase,
 };
-use meerkat_runtime::decision::{DecisionClock, DurableDecisionService, SystemDecisionClock};
+use meerkat_runtime::decision::{
+    DecisionClock, DecisionError, DecisionOpening, DecisionOpenings, DurableDecisionService,
+    SystemDecisionClock,
+};
 use serde_json::value::RawValue;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -67,6 +71,12 @@ use crate::session_runtime::SessionRuntime;
 /// How a decision the operator decides on a stdio connection reached the
 /// host.
 const DECISION_INGRESS: &str = "rkat-rpc-stdio";
+
+/// How many times a presentation record the store could not take now is
+/// tried again, and the wait before the first retry (each later one waits
+/// once more as long).
+const PRESENTATION_RECORD_RETRIES: u32 = 5;
+const PRESENTATION_RECORD_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The prefix of the channel and event references this connection names.
 const REFERENCE_PREFIX: &str = "rkat-rpc";
@@ -145,7 +155,8 @@ impl DecisionOperator {
     }
 
     /// The connection ended: no decide on it is eligible any more, a decide
-    /// in flight included when it commits.
+    /// in flight included when it commits, and no opened decision is
+    /// presented on it.
     pub(crate) fn close(&self) {
         self.open.store(false, Ordering::SeqCst);
     }
@@ -208,6 +219,78 @@ impl DecisionOperator {
         RpcResponse::success(id, wire_decision_listing(&listing))
     }
 
+    /// Present to the operator each decision the runtime's decision owner
+    /// opens from the subscription `openings` on ([`Self::present_opened`]),
+    /// until the connection can show nothing more. The connection subscribes
+    /// before it reads its first request and aborts the task when it ends.
+    pub(crate) async fn present_openings(
+        self: Arc<Self>,
+        mut openings: DecisionOpenings,
+        runtime: Arc<SessionRuntime>,
+    ) {
+        while let Some(opening) = openings.next().await {
+            match opening {
+                DecisionOpening::Opened(row) => {
+                    if !self.present_opened(&row, &runtime).await {
+                        return;
+                    }
+                }
+                DecisionOpening::Missed { missed } => tracing::warn!(
+                    missed,
+                    "the connection fell behind the decisions its runtime opened; a list presents them"
+                ),
+                // An opening of a kind this version does not know shows
+                // nothing.
+                _ => {}
+            }
+        }
+    }
+
+    /// `row` was opened by the runtime's decision owner while the
+    /// connection is open: present it as a list does when the operator
+    /// decides it (open, waiting for a human, held for an approver id the
+    /// configuration lists for the operator now, not presented on this
+    /// connection yet). Any other opening is not shown. Answers `false` once
+    /// the connection can show nothing more.
+    pub(crate) async fn present_opened(
+        &self,
+        row: &StoredDecision,
+        runtime: &SessionRuntime,
+    ) -> bool {
+        if !self.open.load(Ordering::SeqCst) {
+            return false;
+        }
+        if !awaits_the_operator(row) {
+            return true;
+        }
+        let mut presented = self.presented.lock().await;
+        if presented.contains(&row.decision_id) {
+            return true;
+        }
+        let listed = match operator_approver_ids(runtime).await {
+            Ok(listed) => listed,
+            Err(error_value) => {
+                tracing::warn!(
+                    error = %error_value.message,
+                    "the realm's configuration cannot be read; an opened decision is not presented"
+                );
+                return true;
+            }
+        };
+        if !listed.lists(row.descriptor.approver_id.as_str()) {
+            return true;
+        }
+        let owner = runtime.decision_service();
+        match self.present(&owner, row).await {
+            Presented::Recorded(recorded) => {
+                presented.insert(recorded.decision_id.clone());
+                true
+            }
+            Presented::Skipped => true,
+            Presented::Stopped => false,
+        }
+    }
+
     /// Show `row` to the operator and record that it was shown: the clock is
     /// read first, the notice is written and acknowledged on the pipe, and
     /// only then is the presentation recorded, at that reading.
@@ -260,11 +343,22 @@ impl DecisionOperator {
             message_ref,
             at_ms,
         );
-        match owner.present(&row.decision_id, &record) {
-            Ok(recorded) => Presented::Recorded(Box::new(recorded)),
-            Err(error) => {
-                tracing::warn!(%error, "a decision shown to the operator was not recorded");
-                Presented::Skipped
+        let mut retries = 0;
+        loop {
+            match owner.present(&row.decision_id, &record) {
+                Ok(recorded) => return Presented::Recorded(Box::new(recorded)),
+                // The store answers unavailable, writing nothing, while
+                // another call of this process or another holds it (each
+                // call opens its own connection and never waits): the same
+                // record is tried again, a few times, at the same reading.
+                Err(DecisionError::Unavailable(_)) if retries < PRESENTATION_RECORD_RETRIES => {
+                    retries += 1;
+                    tokio::time::sleep(PRESENTATION_RECORD_BACKOFF * retries).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "a decision shown to the operator was not recorded");
+                    return Presented::Skipped;
+                }
             }
         }
     }

@@ -593,10 +593,10 @@ operator_approver_ids = ["operator", "team:owners"]
 
 A plain stdio connection reads the list from the realm's effective
 configuration each time it presents or decides, so a change applies to the
-next `decision/list` and `decision/decide`; a decision already presented is
-refused once its approver id is no longer listed. The stock governed pipe
-reads its host's configuration as the pipe started, so a change reaches it at
-its next start.
+next presentation (a decision that opens, or a `decision/list`) and the next
+`decision/decide`; a decision already presented is refused once its approver
+id is no longer listed. The stock governed pipe reads its host's
+configuration as the pipe started, so a change reaches it at its next start.
 
 Governance is administered by the realm's trusted host in the realm's own
 config document. An ordinary config write (`config/set`, `config/patch`,

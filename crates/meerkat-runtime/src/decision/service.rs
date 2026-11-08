@@ -15,9 +15,16 @@
 //! A row that cannot be decoded, or that is torn (its machine state, its
 //! descriptor and its evidence do not agree), is unreadable for that
 //! decision only: it is listed as unreadable and nothing executes it.
+//!
+//! A hold that opens a decision (the machine's `Held`) announces the row it
+//! wrote to the owner's subscribers once the row is written
+//! ([`DurableDecisionService::subscribe_openings`]); nothing else is
+//! announced, and nothing reads an announcement back.
 
 use std::fmt;
 use std::sync::Arc;
+
+use crate::tokio::sync::broadcast;
 
 use meerkat_core::approval::consent::{ConsentEligibility, ConsentEligibilityAnswer};
 use meerkat_core::approval::decision::{
@@ -245,15 +252,62 @@ enum Backing {
     Unavailable(String),
 }
 
+/// How many openings a subscription may fall behind before it misses some.
+pub(super) const DECISION_OPENINGS_CAPACITY: usize = 256;
+
+/// What a subscription to the decisions an owner opens reads next
+/// ([`DurableDecisionService::subscribe_openings`]). More variants may be
+/// added.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum DecisionOpening {
+    /// The owner opened this decision: the row its hold wrote.
+    Opened(Arc<StoredDecision>),
+    /// The subscription fell behind and missed this many openings. The
+    /// subscriber lists the open decisions to catch up.
+    Missed { missed: u64 },
+}
+
+/// The decisions an owner opens from the subscription on
+/// ([`DurableDecisionService::subscribe_openings`]).
+pub struct DecisionOpenings {
+    openings: broadcast::Receiver<Arc<StoredDecision>>,
+}
+
+impl fmt::Debug for DecisionOpenings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecisionOpenings").finish_non_exhaustive()
+    }
+}
+
+impl DecisionOpenings {
+    /// The next opening, waiting for one: a decision the owner opened, or
+    /// how many openings the subscription missed when it fell behind.
+    /// `None` once the owner and every clone of it are gone.
+    pub async fn next(&mut self) -> Option<DecisionOpening> {
+        match self.openings.recv().await {
+            Ok(row) => Some(DecisionOpening::Opened(row)),
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                Some(DecisionOpening::Missed { missed })
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+}
+
 /// The owner of durable decisions over one [`DecisionStore`].
 ///
 /// Opened once per persistence, beside its approval issuer, and shared by
-/// every surface of that persistence. Cloning shares the store.
+/// every surface of that persistence. Cloning shares the store, and the
+/// subscribers of the decisions the owner opens.
 #[derive(Clone)]
 pub struct DurableDecisionService {
     backing: Backing,
     clock: Arc<dyn DecisionClock>,
     mode: DecisionWriteMode,
+    /// Where the decisions this owner (and every clone of it) opens are
+    /// announced.
+    openings: broadcast::Sender<Arc<StoredDecision>>,
 }
 
 impl fmt::Debug for DurableDecisionService {
@@ -696,6 +750,7 @@ impl DurableDecisionService {
             backing: Backing::Store(store),
             clock,
             mode: DecisionWriteMode::Admitted,
+            openings: broadcast::channel(DECISION_OPENINGS_CAPACITY).0,
         }
     }
 
@@ -708,6 +763,7 @@ impl DurableDecisionService {
             backing: Backing::Unavailable(reason.into()),
             clock: Arc::new(SystemDecisionClock),
             mode: DecisionWriteMode::Admitted,
+            openings: broadcast::channel(DECISION_OPENINGS_CAPACITY).0,
         }
     }
 
@@ -824,7 +880,11 @@ impl DurableDecisionService {
     /// shows recorded. The subject digest is computed from the rendering.
     /// The first hold creates the store's file; nothing before it does. A
     /// requester that can be told the decision's end (`notice_routable`) is
-    /// owed one notice when the decision ends.
+    /// owed one notice when the decision ends. A hold that opens the decision
+    /// announces the row it wrote to the owner's subscribers
+    /// ([`Self::subscribe_openings`]) once the row is written; a replay, a
+    /// refused hold and a hold whose row another owner wrote first announce
+    /// nothing.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `InvalidWindow`, `SelfReview` or
@@ -874,9 +934,23 @@ impl DurableDecisionService {
                             refusal,
                         });
                     }
+                    let opened = effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            DurableDecisionEffect::Held { decision_id: held, .. }
+                                if held.as_str() == decision_id.as_str()
+                        )
+                    });
                     let row = StoredDecision::held(descriptor, stored_state(authority.state())?);
                     match store.insert_if_absent(&row) {
-                        Ok(()) => return Ok(row),
+                        Ok(()) => {
+                            if opened {
+                                // Nobody may be subscribed: an announcement
+                                // nobody receives is dropped.
+                                let _ = self.openings.send(Arc::new(row.clone()));
+                            }
+                            return Ok(row);
+                        }
                         // Another owner held it first: answer this hold as a
                         // replay of, or a conflict with, that row.
                         Err(ApprovalStoreError::Conflict) if !raced => raced = true,
@@ -884,6 +958,21 @@ impl DurableDecisionService {
                     }
                 }
             }
+        }
+    }
+
+    /// Subscribe to the decisions this owner opens from now on: each hold
+    /// that opens a decision (the machine's `Held`) announces the row it
+    /// wrote, once the row is written ([`DecisionOpening::Opened`]). Every
+    /// clone of the owner announces to the same subscribers. A replay or a
+    /// refused hold announces nothing, a candidate launch opens nothing, and
+    /// a decision another process holds in the same store is not announced:
+    /// a subscriber lists the open decisions when it starts, and when it
+    /// reads [`DecisionOpening::Missed`].
+    #[must_use]
+    pub fn subscribe_openings(&self) -> DecisionOpenings {
+        DecisionOpenings {
+            openings: self.openings.subscribe(),
         }
     }
 

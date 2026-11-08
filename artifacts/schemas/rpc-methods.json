@@ -1138,7 +1138,7 @@
       "name": "approval/consent_notice"
     },
     {
-      "description": "One durable decision this stdio connection presented to its operator, with the whole rendering, written before the decision/list answer that caused it",
+      "description": "One durable decision this stdio connection presented to its operator, with the whole rendering: when the decision opened while the connection was open, or before the decision/list answer that caused it",
       "name": "decision/notice"
     },
     {

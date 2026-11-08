@@ -2303,6 +2303,18 @@ binds; a request that names an approver, actor, assurance or scope is invalid
 params. Plain dispatch answers `decision/decide` method not found, except on a
 stdio connection whose operator decides (below).
 
+A host's adapter learns that a decision opened without polling:
+`DurableDecisionService::subscribe_openings`, on the owner
+`SessionRuntime::decision_service` returns, yields each decision the owner
+opens from then on (`DecisionOpening::Opened`), as the hold wrote it, with the
+rendering to show. The adapter shows it to the person and relays their
+authenticated answer through `MethodRouter::dispatch_with_decision_event`. A
+subscriber that falls behind reads `DecisionOpening::Missed` and lists the
+open decisions to catch up, as it does when it starts; a decision another
+process holds in the same store is not announced. Only a connection whose
+operator decides a decision is told when it opens (below): a connection
+without an operator, a TCP connection among them, gets no `decision/notice`.
+
 ### The operator of a stdio connection
 
 On a Unix build with local authorization, an `rkat-rpc` stdio connection has
@@ -2313,20 +2325,28 @@ for it, `["operator"]` unless
 [`[governance.decisions] operator_approver_ids`](/concepts/configuration#governance-settings)
 says otherwise.
 
-The connection presents decisions to its operator only when its client lists
-them. Before it answers a `decision/list`, it presents each decision of the
+The connection presents decisions to its operator when they open and when its
+client lists them. A decision the runtime's decision owner opens while the
+connection is open, that waits for a human and is addressed to an approver id
+the operator acts for, is presented at once, without a request. Before it
+answers a `decision/list`, the connection presents each decision of the
 returned page that is open, waits for a human, is addressed to an approver id
 the operator acts for and was not presented on this connection yet, in page
-order. Starting the connection presents nothing, and the client's own paging
-(`after`, `limit`) reaches every decision, each presented once. For each, the
-connection reads its clock, writes a `decision/notice` notification carrying
-the whole rendering as one canonical part, waits until the notice is on the
-pipe, and only then records the presentation: to the approver, on the
-connection's own channel (a `channel_ref` that starts with `rkat-rpc:stdio:`),
-under the notice's id (`message_ref` equals `notice_id`), at that clock
-reading. The notices precede the list's answer, and the answered page carries
-each presented decision as recorded. A notice that could not be written
-records nothing. The `channel_ref` is an opaque string; nothing parses it.
+order: one held before the connection started or by another process, or one
+that reached its human stage later. Starting the connection presents nothing,
+and the client's own paging (`after`, `limit`) reaches every decision. A
+decision is presented once per connection: a list does not present again a
+decision the connection presented when it opened. For each, the connection
+reads its clock, writes a `decision/notice` notification carrying the whole
+rendering as one canonical part, waits until the notice is on the pipe, and
+only then records the presentation: to the approver, on the connection's own
+channel (a `channel_ref` that starts with `rkat-rpc:stdio:`), under the
+notice's id (`message_ref` equals `notice_id`), at that clock reading. A
+list's notices precede its answer, and the answered page carries each decision
+it presented as recorded. A notice that could not be written records nothing,
+and a decision whose presentation was not recorded is presented again by a
+later list, so a client keys notices by `decision_id`. The `channel_ref` is an
+opaque string; nothing parses it.
 
 ```json Notification
 {
@@ -2373,15 +2393,16 @@ refused as invalid params with `data.kind = "decision_refused"` and
 `decision/present` records a host presenter's showing; it never makes a
 decision decidable on the connection.
 
-A connection without an operator presents nothing on `decision/list` and
-answers `decision/decide` method not found (`-32601`, no `data.kind`): a TCP
-connection, a build for another platform or without local authorization, and
-a router an embedder dispatches to directly.
+A connection without an operator presents nothing on `decision/list`, is told
+nothing when a decision opens, and answers `decision/decide` method not found
+(`-32601`, no `data.kind`): a TCP connection, a build for another platform or
+without local authorization, and a router an embedder dispatches to directly.
 
 The stock governed stdio pipe serves the same two methods for its operator, in
-its consent surface's scope, and lists them in its `initialize` answer. Its
-approver ids are the host's configuration as the pipe started; a change
-reaches the pipe at its next start.
+its consent surface's scope, presents to it in the same way, and lists the
+methods in its `initialize` answer. Its approver ids are the host's
+configuration as the pipe started; a change reaches the pipe at its next
+start.
 
 ## Schedules, WorkGraph, and multi-host mobs
 

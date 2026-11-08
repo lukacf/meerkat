@@ -9655,7 +9655,7 @@
       },
       "DecisionGovernanceConfig": {
         "additionalProperties": false,
-        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when its client lists them, and it decides only a\ndecision the connection presented, while the decision's approver id is\nstill listed here.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
+        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when they open while the connection is open and\nwhen its client lists them, and it decides only a decision the\nconnection presented, while the decision's approver id is still listed\nhere.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
         "properties": {
           "operator_approver_ids": {
             "default": [

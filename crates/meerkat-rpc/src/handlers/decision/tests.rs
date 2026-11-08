@@ -1429,8 +1429,9 @@ mod operator_connections {
         );
         assert!(other.notices().is_empty(), "{:?}", other.notices());
 
-        // Held after the list, this one was never presented on the
-        // presenting connection either.
+        // Held after the list and never shown on the presenting connection
+        // (no server loop runs here to present its opening), this one is
+        // not decidable there either.
         let unshown = decisions
             .hold(hold_request("release", "build-2", "operator"), false)
             .expect("hold");
@@ -1445,6 +1446,75 @@ mod operator_connections {
             result(&decided)["decision"]["phase"],
             "approved",
             "{decided:?}"
+        );
+    }
+
+    /// A decision is presented to the operator once per connection,
+    /// whichever presents it first: its opening or a list. An opening that
+    /// arrives after a list presented the decision writes no second notice,
+    /// a list after an opening presented it writes none either, and the
+    /// operator decides the decision its opening presented. An opening the
+    /// operator does not act for is not presented.
+    #[tokio::test]
+    async fn an_opening_is_presented_once_whatever_presents_it_first() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let connection = Connection::open("stdio:operator:openings");
+
+        let listed_first = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        connection.list(&runtime).await;
+        assert_eq!(connection.notices().len(), 1, "{:?}", connection.notices());
+        assert!(
+            connection
+                .operator
+                .present_opened(&listed_first, &runtime)
+                .await
+        );
+        assert_eq!(connection.notices().len(), 1, "{:?}", connection.notices());
+
+        let opened_first = decisions
+            .hold(hold_request("release", "build-2", "operator"), false)
+            .expect("hold");
+        assert!(
+            connection
+                .operator
+                .present_opened(&opened_first, &runtime)
+                .await
+        );
+        let notices = connection.notices();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert_eq!(
+            notices[1]["decision_id"],
+            opened_first.decision_id.to_string()
+        );
+        let presented = decisions.get(&opened_first.decision_id).expect("read");
+        assert_eq!(
+            presented.presentations[0].message_ref.as_str(),
+            notices[1]["notice_id"]
+        );
+        connection.list(&runtime).await;
+        assert_eq!(connection.notices().len(), 2, "{:?}", connection.notices());
+        let decided = connection.decide(&runtime, &opened_first.decision_id).await;
+        assert_eq!(
+            result(&decided)["decision"]["phase"],
+            "approved",
+            "{decided:?}"
+        );
+
+        let owners = decisions
+            .hold(hold_request("release", "build-3", "team:owners"), false)
+            .expect("hold");
+        assert!(connection.operator.present_opened(&owners, &runtime).await);
+        assert_eq!(connection.notices().len(), 2, "{:?}", connection.notices());
+        assert!(
+            decisions
+                .get(&owners.decision_id)
+                .expect("read")
+                .presentations
+                .is_empty()
         );
     }
 

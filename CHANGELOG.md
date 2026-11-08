@@ -393,29 +393,48 @@ them.
 - The operator of an `rkat-rpc` stdio connection decides durable decisions
   (Unix builds with local authorization): the operating-system user who
   started it, device trusted, in an authentication scope of the
-  connection's own. When its client lists (`decision/list`), the connection
-  presents each decision of the returned page that is open, waits for a
-  human and is addressed to an approver id the operator acts for, once per
-  connection, in page order: it writes a `decision/notice` notification
-  with the whole rendering, records the presentation once the notice is on
-  the pipe, and answers the page as recorded. Starting a connection
-  presents nothing. `decision/decide` on the connection decides as the
-  operator (ingress `rkat-rpc-stdio`): the request names only the decision,
-  the answer, the presented digest and a reason, and only a decision the
+  connection's own. A decision that opens while the connection is open,
+  waits for a human and is addressed to an approver id the operator acts
+  for is presented at once; when its client lists (`decision/list`), the
+  connection presents each decision of the returned page that is open,
+  waits for a human and is addressed to an approver id the operator acts
+  for, in page order. Each decision is presented once per connection: the
+  connection writes a `decision/notice` notification with the whole
+  rendering, records the presentation once the notice is on the pipe, and
+  answers a listed page as recorded. Starting a connection presents
+  nothing. `decision/decide` on the connection decides as the operator
+  (ingress `rkat-rpc-stdio`): the request names only the decision, the
+  answer, the presented digest and a reason, and only a decision the
   connection presented, whose approver id the configuration still lists,
   is eligible, and only while the connection is open; any other decide is
-  refused `not_eligible`. A TCP
-  connection, plain dispatch and other builds keep answering
+  refused `not_eligible`. A TCP connection, plain dispatch and other builds
+  are told nothing when a decision opens and keep answering
   `decision/decide` method not found. The stock governed stdio pipe serves
-  both methods for its operator, in its consent surface's scope, with its
-  host's configuration as the pipe started. `meerkat-core`:
-  `[governance.decisions] operator_approver_ids`
+  both methods for its operator and presents to it the same way, in its
+  consent surface's scope, with its host's configuration as the pipe
+  started. `meerkat-core`: `[governance.decisions] operator_approver_ids`
   (`DecisionGovernanceConfig`) names the approver ids the operator acts for,
   `["operator"]` when absent; it is administered by the host like the rest
   of `[governance]`. `meerkat-contracts`: `DECISION_NOTICE_NOTIFICATION`,
   `WireDecisionNotice`, `WireDecisionNoticeEvent` (an event this version
   does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
   and the `decision/notice` entry of the RPC notification catalog.
+
+- `meerkat-runtime`: a host learns that a durable decision opened without
+  polling. `DurableDecisionService::subscribe_openings` returns a
+  `DecisionOpenings` that yields each decision the owner opens from then on
+  (`DecisionOpening::Opened`, the row its hold wrote), or
+  `DecisionOpening::Missed` with the number of openings a subscriber that
+  fell behind missed; it lists the open decisions to catch up, as it does
+  when it starts. Every clone of the owner announces to the same
+  subscribers, so a host subscribes through
+  `SessionRuntime::decision_service` or `PersistenceBundle::decision_owner`.
+  Its trusted adapter shows the decision to the person and relays their
+  authenticated answer through `MethodRouter::dispatch_with_decision_event`.
+  A decision another process holds in the same store is not announced. No
+  connection without an operator is told, so plain approval records and
+  unauthenticated connections are unchanged: a client polls
+  `approval/list`, `approval/get` or `decision/list`. (#2115, thanks @zond)
 
 - Credential and configuration administration admissions settle a typed
   record to a recorder the host supplies. A host's `AdministrationEntry`
@@ -588,6 +607,12 @@ them.
   and asks for its claim again, and the loop takes the kind over once that
   executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
   whatever kinds it registers. See Breaking for the change to `start`.
+
+- `meerkat-runtime`: `DurableDecisionService::hold` announces the decision
+  it opens to the owner's subscribers once the decision's row is written
+  (`subscribe_openings`, see Added); a replayed or refused hold, and a hold
+  whose row another owner wrote first, announce nothing. (#2115, thanks
+  @zond)
 
 - Consent decisions record a digest of the login they were decided in:
   `consent.approver.authentication_scope_digest`, the digest of the decision

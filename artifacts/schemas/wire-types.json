@@ -97035,7 +97035,7 @@
       },
       "DecisionGovernanceConfig": {
         "additionalProperties": false,
-        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when its client lists them, and it decides only a\ndecision the connection presented, while the decision's approver id is\nstill listed here.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
+        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when they open while the connection is open and\nwhen its client lists them, and it decides only a decision the\nconnection presented, while the decision's approver id is still listed\nhere.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
         "properties": {
           "operator_approver_ids": {
             "default": [
@@ -168627,7 +168627,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`decision/notice` parameters: what an `rkat-rpc` stdio connection showed\nits operator about one durable decision. When its client lists\n(`decision/list`), the connection presents each open decision of the\nreturned page that is addressed to an approver id its operator acts for\nand that it has not presented yet: it writes a `presented` notice\ncarrying the whole rendering, then records that presentation (to the\napprover, with this notice's id as its message reference) before it\nanswers the list. A notice grants nothing: the operator decides with\n`decision/decide` on the same connection.",
+    "description": "`decision/notice` parameters: what an `rkat-rpc` stdio connection showed\nits operator about one durable decision. The connection presents each\nopen decision addressed to an approver id its operator acts for that it\nhas not presented yet: when the decision opens while the connection is\nopen, and when its client lists (`decision/list`) a page that holds it.\nIt writes a `presented` notice carrying the whole rendering, then records\nthat presentation (to the approver, with this notice's id as its message\nreference); a listed page's notices precede the list's answer. A notice\ngrants nothing: the operator decides with `decision/decide` on the same\nconnection.",
     "properties": {
       "approver_id": {
         "description": "The approver id the decision is held for.",

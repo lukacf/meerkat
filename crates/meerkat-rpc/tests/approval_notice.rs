@@ -50,7 +50,9 @@ use meerkat_rpc::protocol::{RpcId, RpcRequest};
 use meerkat_rpc::router::{DECISION_DECIDE_METHOD, MethodRouter, NotificationSink};
 use meerkat_rpc::server::serve_tcp_connection;
 use meerkat_rpc::session_runtime::SessionRuntime;
-use meerkat_runtime::decision::DurableDecisionService;
+use meerkat_runtime::decision::{
+    DecisionError, DecisionOpening, DecisionOpenings, DurableDecisionService,
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
@@ -79,6 +81,11 @@ const APPROVER: &str = "team:owners";
 const METHOD_NOT_FOUND: i64 = -32601;
 /// The JSON-RPC code of a refused decision.
 const INVALID_PARAMS: i64 = -32602;
+/// The JSON-RPC code of a decision store another call holds: nothing was
+/// written, and the call may be made again.
+const STORE_UNAVAILABLE: i64 = -32033;
+/// How many times a call the decision store could not take is made again.
+const STORE_RETRIES: usize = 50;
 
 /// Calls the gated tool once, then ends the turn after its result.
 struct GatedToolProvider {
@@ -232,10 +239,16 @@ impl meerkat_core::ToolDispatchAdmission for DecisionGate {
             .map_err(|error| ToolError::other(error.to_string()))?;
         let _ = self.raised.send(held.decision_id.to_string());
         loop {
-            let current = self
-                .decisions
-                .get(&held.decision_id)
-                .map_err(|error| ToolError::other(error.to_string()))?;
+            let current = match self.decisions.get(&held.decision_id) {
+                Ok(current) => current,
+                // The store was held by another call (each opens its own
+                // connection and never waits): read again on the next poll.
+                Err(DecisionError::Unavailable(_)) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                Err(error) => return Err(ToolError::other(error.to_string())),
+            };
             match current.state.phase {
                 DecisionPhase::Open => tokio::time::sleep(Duration::from_millis(20)).await,
                 DecisionPhase::Approved => return Ok(()),
@@ -361,29 +374,39 @@ impl HostAdapter {
             method: DECISION_DECIDE_METHOD.into(),
             params: Some(serde_json::value::to_raw_value(&params).expect("raw params")),
         };
-        let response = self
-            .router
-            .dispatch_with_decision_event(request, event)
-            .await;
-        serde_json::to_value(&response).expect("a JSON-RPC response")
+        // The store answers unavailable, writing nothing, while another call
+        // holds it (the gate polls the decision): the adapter sends the same
+        // event again.
+        for _ in 0..STORE_RETRIES {
+            let response = self
+                .router
+                .dispatch_with_decision_event(request.clone(), event.clone())
+                .await;
+            let response = serde_json::to_value(&response).expect("a JSON-RPC response");
+            if response["error"]["code"] != STORE_UNAVAILABLE {
+                return response;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the decision store stayed unavailable to the host adapter")
     }
 }
 
 /// The host adapter's subscription to the decisions its runtime's decision
-/// owner opens. Stand-in until the owner offers one.
-struct HostOpenings;
+/// owner opens.
+struct HostOpenings(DecisionOpenings);
 
 impl HostOpenings {
-    fn subscribe(_decisions: &DurableDecisionService) -> Self {
-        panic!(
-            "no subscription to the decisions a runtime's decision owner opens exists \
-             (proposed: DurableDecisionService::subscribe_openings)"
-        )
+    fn subscribe(decisions: &DurableDecisionService) -> Self {
+        Self(decisions.subscribe_openings())
     }
 
     /// The next decision the owner opened, waiting at most [`LIMIT`].
     async fn next_opened(&mut self) -> Arc<StoredDecision> {
-        std::future::pending().await
+        match tokio::time::timeout(LIMIT, self.0.next()).await {
+            Ok(Some(DecisionOpening::Opened(row))) => row,
+            other => panic!("the host's subscription yields the decision that opened: {other:?}"),
+        }
     }
 }
 
@@ -473,6 +496,21 @@ impl Connection {
     async fn request(&mut self, method: &str, params: Value) -> Value {
         let id = self.send(method, params).await;
         self.response(id).await
+    }
+
+    /// The result of `method`, asked again while the decision store answers
+    /// unavailable: another call held it, and nothing was written.
+    async fn request_past_contention(&mut self, method: &str, params: Value) -> Value {
+        for _ in 0..STORE_RETRIES {
+            let id = self.send(method, params.clone()).await;
+            let frame = self.answer(id).await;
+            if frame["error"]["code"] != STORE_UNAVAILABLE {
+                assert!(frame["error"].is_null(), "request {id} failed: {frame}");
+                return frame["result"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the decision store stayed unavailable to {method}")
     }
 
     /// Keeps every frame that arrives within `window`.
@@ -747,7 +785,7 @@ async fn a_durable_decision_a_gated_call_holds_is_announced_to_the_host() {
     assert_eq!(opened.descriptor.rendering.as_str(), SUMMARY);
     // Setup took effect: the member's call waits on the open decision.
     let open = client
-        .request("decision/get", json!({"decision_id": decision_id}))
+        .request_past_contention("decision/get", json!({"decision_id": decision_id}))
         .await;
     assert_eq!(open["decision"]["phase"], "open", "{open}");
 

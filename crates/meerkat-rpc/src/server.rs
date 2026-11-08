@@ -1335,6 +1335,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // the connection is idle, preventing stale leaks.
         let mut callback_sweep = tokio::time::interval(tokio::time::Duration::from_secs(30));
         callback_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // A connection whose operator decides durable decisions presents to
+        // it each decision the runtime opens from now on, before the first
+        // request is read. A connection without an operator is told nothing.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        let decision_presentations = self.router.spawn_decision_presentations();
 
         let connection_result: Result<(), ServerError> = async {
             loop {
@@ -1619,8 +1624,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
         .await;
 
-        // The connection is closed. A governed pipe's consent scope retires
-        // here, first, so no eligibility observed for the pipe stays current
+        // The connection is closed: it presents no opened decision any more.
+        // A presentation whose notice was not written records nothing, and
+        // a list or a decide waiting for the presentation's pass goes on.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(presentations) = decision_presentations {
+            presentations.abort();
+            let _ = presentations.await;
+        }
+        // A governed pipe's consent scope retires next, before anything
+        // drains, so no eligibility observed for the pipe stays current
         // while the handlers and sessions below drain.
         #[cfg(feature = "local-authorization")]
         self.router.close_governed_connection();
@@ -4807,6 +4820,17 @@ mod tests {
             assert_eq!(notice["approver_id"], "operator", "{notice}");
             assert_eq!(notice["phase"], "open", "{notice}");
             assert_eq!(notice["presentation"]["rendering"], RENDERING, "{notice}");
+
+            // The operator decides it without a list: the decide waits for
+            // the presentation in flight, and it was recorded under the
+            // notice's id.
+            let decided = operator
+                .call("decision/decide", decide_params(&opened))
+                .await;
+            assert_eq!(
+                decided["result"]["decision"]["phase"], "approved",
+                "{decided}"
+            );
             let shown = decisions.get(&opened.decision_id).expect("read");
             assert_eq!(shown.presentations.len(), 1, "{shown:?}");
             assert_eq!(
@@ -4817,14 +4841,6 @@ mod tests {
             assert!(
                 shown.state.first_presented_to_approver_at_ms.is_some(),
                 "{shown:?}"
-            );
-
-            let decided = operator
-                .call("decision/decide", decide_params(&opened))
-                .await;
-            assert_eq!(
-                decided["result"]["decision"]["phase"], "approved",
-                "{decided}"
             );
             let listed = operator.call("decision/list", serde_json::json!({})).await;
             assert!(listed.get("error").is_none(), "{listed}");

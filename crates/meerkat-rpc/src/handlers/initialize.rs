@@ -37,7 +37,8 @@ pub fn handle_initialize(
         // Only the stock governed stdio pipe delivers consent notices.
         consent_enabled: false,
         // Only a stdio connection with an operator delivers decision
-        // notices, and only when its client lists decisions.
+        // notices: when a decision its operator acts for opens, and when
+        // its client lists decisions.
         decision_notices_enabled: false,
     };
     let caps = ServerCapabilities {

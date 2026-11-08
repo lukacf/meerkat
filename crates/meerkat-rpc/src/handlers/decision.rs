@@ -8,9 +8,10 @@
 //! adapter decides through its authenticated event
 //! ([`crate::router::MethodRouter::dispatch_with_decision_event`]). A stdio
 //! connection whose operator decides durable decisions (a Unix build with
-//! local authorization) routes it to that operator, and presents the
-//! decisions of each `decision/list` page the operator acts for before it
-//! answers (the `operator` module).
+//! local authorization) routes it to that operator, and presents to the
+//! operator each decision it acts for when the decision opens and before it
+//! answers a `decision/list` page that holds it (the `operator` module). No
+//! other connection is told that a decision opened.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;

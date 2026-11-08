@@ -13,7 +13,8 @@
 //!   [`DecisionStore`](meerkat_core::approval::decision::DecisionStore). Every
 //!   call reads the one row it needs, reads the clock once (after its reads),
 //!   rebuilds the generated machine from the row, applies one input and
-//!   decides from the input's effects alone.
+//!   decides from the input's effects alone. A hold that opens a decision
+//!   announces it to the owner's subscribers ([`DecisionOpenings`]).
 //! - [`permit`]: [`DecisionExecutionPermit`], the machine-authorized right to
 //!   execute one approved decision's held request.
 //! - [`executor`]: [`DecisionExecutorLoop`], the one executor of a store's
@@ -50,8 +51,8 @@ pub use executor::{
 };
 pub use permit::DecisionExecutionPermit;
 pub use service::{
-    APPROVER_NOT_CURRENT_REFUSAL, DecisionError, DecisionListing, DecisionRefusal,
-    DecisionWithdrawer, DurableDecisionService,
+    APPROVER_NOT_CURRENT_REFUSAL, DecisionError, DecisionListing, DecisionOpening,
+    DecisionOpenings, DecisionRefusal, DecisionWithdrawer, DurableDecisionService,
 };
 
 /// Whether a decision owner may write.

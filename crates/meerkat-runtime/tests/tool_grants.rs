@@ -2570,6 +2570,181 @@ async fn an_agents_repeated_request_for_a_target_answers_its_open_request() {
     }
 }
 
+/// An agent's ask of `target` for ten minutes, from the call `call_id` of
+/// the run `run_id`.
+fn agent_ask<'a>(
+    target: &'a ToolGrantTarget,
+    run_id: &'a RunId,
+    call_id: &'a str,
+) -> ToolGrantAgentRequest<'a> {
+    ToolGrantAgentRequest {
+        target,
+        duration: REQUESTED_FOR,
+        reason: Some("rotate the logs"),
+        run_id,
+        call_id,
+    }
+}
+
+/// A machine over `durable` at `clock` that takes its agents' grant
+/// requests into a decision owner of its own, at the same clock.
+fn machine_taking_requests(
+    durable: &Durable,
+    clock: &Arc<FakeClock>,
+) -> (Arc<MeerkatMachine>, DurableDecisionService) {
+    let machine = durable.machine(clock);
+    let decisions = DurableDecisionService::with_clock(
+        Arc::new(InMemoryDecisionStore::new()),
+        Arc::clone(clock) as Arc<dyn DecisionClock>,
+    );
+    machine.set_tool_grant_request_host(Some(ToolGrantRequestHost {
+        decisions: decisions.clone(),
+        policy: ToolGrantRequestPolicy::default(),
+        requester: agent_requester(),
+    }));
+    (machine, decisions)
+}
+
+/// An agent that asks again after its open request's deadline passed, before
+/// the host's executor recorded the expiry, holds a new request: the request
+/// that ran out is not the answer.
+#[tokio::test]
+async fn an_ask_after_the_open_requests_deadline_holds_a_new_one() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let (machine, _decisions) = machine_taking_requests(&durable, &clock);
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(bindings.tool_grants().expect("the session's grants"));
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let run_id = RunId::new();
+        let first = grants
+            .request_grant(agent_ask(&shell, &run_id, "call-1"))
+            .await
+            .expect("the request is held");
+        clock.set(first.deadline_at_ms + 1);
+        let again = grants
+            .request_grant(agent_ask(&shell, &run_id, "call-2"))
+            .await
+            .expect("the second ask answers");
+        assert_ne!(
+            again.decision_id, first.decision_id,
+            "{backend:?}: an ask after the open request ran out is answered with it ({:?})",
+            again.phase
+        );
+        assert_eq!(again.phase, DecisionPhase::Open, "{backend:?}");
+    }
+}
+
+/// An agent's ask is never answered with another subject's request: two
+/// sessions asking for the same target each hold a request of their own.
+#[tokio::test]
+async fn an_agents_ask_never_joins_another_subjects_request() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let (machine, decisions) = machine_taking_requests(&durable, &clock);
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let bindings_a = machine
+            .prepare_bindings(session_a.clone())
+            .await
+            .expect("bindings prepare");
+        let bindings_b = machine
+            .prepare_bindings(session_b.clone())
+            .await
+            .expect("bindings prepare");
+        let grants_a = Arc::clone(bindings_a.tool_grants().expect("A's grants"));
+        let grants_b = Arc::clone(bindings_b.tool_grants().expect("B's grants"));
+        let run_id = RunId::new();
+
+        let of_b = grants_b
+            .request_grant(agent_ask(&shell, &run_id, "b-1"))
+            .await
+            .expect("B's request is held");
+        let of_a = grants_a
+            .request_grant(agent_ask(&shell, &run_id, "a-1"))
+            .await
+            .expect("A's request is held");
+        assert_ne!(
+            of_a.decision_id, of_b.decision_id,
+            "{backend:?}: A's ask is answered with B's request"
+        );
+        for (receipt, session_id) in [(&of_a, &session_a), (&of_b, &session_b)] {
+            let held = decisions.get(&receipt.decision_id).expect("the decision");
+            let body = ToolGrantIssueBody::of(&held).expect("the body");
+            assert_eq!(
+                body.subject,
+                ToolGrantSubject::session(session_id.clone()),
+                "{backend:?}"
+            );
+        }
+    }
+}
+
+/// An agent's ask is never answered with a run-scoped request of its
+/// subject: a host's open request for one run's use of the target leaves the
+/// agent's ask to hold a window request of its own.
+#[tokio::test]
+async fn an_agents_ask_never_joins_a_run_scoped_request() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let (machine, decisions) = machine_taking_requests(&durable, &clock);
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(bindings.tool_grants().expect("the session's grants"));
+        let run_scoped = hold_tool_grant_request(
+            &decisions,
+            &ToolGrantRequestPolicy::default(),
+            machine.tool_grant_service().policy().max_lifetime_ms(),
+            T0,
+            ToolGrantIssueRequest {
+                subject: ToolGrantSubject::session(session_id.clone()),
+                target: shell.clone(),
+                duration: REQUESTED_FOR,
+                run_scope: Some(RunId::new()),
+                reason: None,
+                origin: ToolGrantRequestOrigin::Host {
+                    request_id: "host-run-scoped".to_owned(),
+                },
+                requester: host_requester(),
+            },
+        )
+        .expect("the host's run-scoped request is held");
+
+        let asked = grants
+            .request_grant(agent_ask(&shell, &RunId::new(), "call-1"))
+            .await
+            .expect("the agent's request is held");
+        assert_ne!(
+            asked.decision_id, run_scoped.decision_id,
+            "{backend:?}: the agent's ask is answered with a run-scoped request"
+        );
+        let held = decisions.get(&asked.decision_id).expect("the decision");
+        let body = ToolGrantIssueBody::of(&held).expect("the body");
+        assert_eq!(body.run_scope, None, "{backend:?}: a window request");
+    }
+}
+
 /// A list shows a declined request only while its deadline is within the
 /// grant policy's maximum lifetime of now: it reads the recent requests
 /// through the store's phase and deadline index, never the whole decision

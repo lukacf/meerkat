@@ -8337,6 +8337,46 @@ mod tests {
             );
         }
 
+        /// A subject's list shows its own requests only: two sessions that
+        /// each request the same target list one request each, their own.
+        #[tokio::test]
+        async fn each_session_lists_only_its_own_requests() {
+            let temp = tempfile::tempdir().unwrap();
+            let (router, _runtime) = persistent_router(temp.path()).await;
+            let mut requested = Vec::new();
+            for _ in 0..2 {
+                let session_id = shell_gated_session(&router).await;
+                let answer = call(
+                    &router,
+                    "tool_grants/request",
+                    serde_json::json!({
+                        "subject": session_subject(&session_id),
+                        "target": {"kind": "family", "family": "shell"},
+                        "duration_ms": 600_000,
+                    }),
+                )
+                .await;
+                let grant_id = result_value(&answer)["grant"]["grant_id"]
+                    .as_str()
+                    .expect("the grant id")
+                    .to_owned();
+                requested.push((session_id, grant_id));
+            }
+            for (session_id, grant_id) in &requested {
+                for include_ended in [false, true] {
+                    let shown = listed(&router, session_id, include_ended).await;
+                    assert_eq!(shown.len(), 1, "{session_id}: {shown:?}");
+                    assert_eq!(shown[0]["status"], "requested", "{shown:?}");
+                    assert_eq!(shown[0]["grant_id"], grant_id.as_str(), "{shown:?}");
+                    assert_eq!(
+                        shown[0]["subject"],
+                        session_subject(session_id),
+                        "{shown:?}"
+                    );
+                }
+            }
+        }
+
         #[tokio::test]
         async fn an_approved_tool_grant_request_issues_its_grant_through_the_executor() {
             let temp = tempfile::tempdir().unwrap();

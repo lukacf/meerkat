@@ -199,9 +199,9 @@ impl RecoverableMob {
 /// A respawn whose replacement fails after the old member's archive, when
 /// the live abandonment cannot end the identity's grants (the grant store
 /// fails, a failure of no busy class), stops the mob's actor before the
-/// abandonment's row is written: the mob waits for its resume. The resume
-/// abandons the respawn itself, which ends the identity, and it ends the
-/// identity's grants before the mob serves.
+/// abandonment's row is written: the mob serves nothing until its resume.
+/// The resume abandons the respawn itself, which ends the identity, and it
+/// ends the identity's grants before the mob serves.
 #[tokio::test]
 async fn a_respawn_a_resume_abandons_ends_the_identitys_grants() {
     let mob = RecoverableMob::new();
@@ -219,6 +219,24 @@ async fn a_respawn_a_resume_abandons_ends_the_identitys_grants() {
     mob.runtime_store.fail_tool_grant_store_for_test(None);
     mob.events.allow_appends_for("MemberSpawned").await;
     assert!(respawned.is_err(), "the respawn fails: {respawned:?}");
+    // A failure of no busy class fails the abandonment's step: the actor
+    // stops for cold recovery instead of serving with the grants live.
+    let after_stop = tokio::time::timeout(
+        STEP,
+        handle.spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("after-stop"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        ),
+    )
+    .await
+    .expect("the spawn answers within the bound");
+    assert!(
+        after_stop.is_err(),
+        "the stopped mob serves nothing: {after_stop:?}"
+    );
     let before = mob
         .runtime
         .list_tool_grants(&subject, None)

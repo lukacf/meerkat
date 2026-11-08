@@ -9443,25 +9443,30 @@ impl MobBuilder {
                 )?;
                 // An identity a replayed respawn abandonment ended loses its
                 // scoped tool grants, and those of the sessions MobMachine
-                // held for it, before the mob serves. A failure fails the
-                // resume; the next resume replays the abandonment and ends
-                // them again (a grant already ended is left as it stands).
+                // held for it, before the mob serves. A busy answer is
+                // retried within the abandonment's bound; another failure
+                // fails the resume, and the next resume replays the
+                // abandonment and ends them again (a grant already ended is
+                // left as it stands).
                 #[cfg(feature = "runtime-adapter")]
                 if let Some(runtime) = runtime_adapter.as_deref() {
                     let live_incarnation =
                         meerkat_core::service::LiveMobIncarnation::witnessed(incarnation);
                     for end in &recovered_ends {
-                        super::actor::end_member_identity_tool_grants(
-                            runtime,
-                            definition.id.as_str(),
-                            &live_incarnation,
-                            &end.identity,
-                            &end.sessions,
-                            &format!(
-                                "the identity '{}' ended: a resume abandoned its respawn",
-                                end.identity
-                            ),
-                        )
+                        let reason = format!(
+                            "the identity '{}' ended: a resume abandoned its respawn",
+                            end.identity
+                        );
+                        super::actor::end_within_abandonment_bound(|| {
+                            super::actor::end_member_identity_tool_grants(
+                                runtime,
+                                definition.id.as_str(),
+                                &live_incarnation,
+                                &end.identity,
+                                &end.sessions,
+                                &reason,
+                            )
+                        })
                         .await?;
                     }
                 }

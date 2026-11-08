@@ -480,8 +480,10 @@ pub(super) fn is_transcript_revision_conflict(error: &meerkat_core::service::Ses
 /// The mob's answer to a failure to end `identity`'s scoped tool grants: a
 /// concurrent writer that changed one of them twice meanwhile answers the
 /// busy class ([`MobError::LifecycleOperationPending`], `SESSION_BUSY` on
-/// the wire), so the step that ends the identity is retried; any other
-/// failure is internal.
+/// the wire); any other failure is internal. A respawn abandonment retries
+/// the busy class within its bound ([`ABANDONMENT_GRANT_END_ATTEMPTS`]); the
+/// other steps that end an identity answer it to their caller, which may
+/// retry the step.
 #[cfg(feature = "runtime-adapter")]
 pub(super) fn tool_grant_end_failure(
     identity: &AgentIdentity,
@@ -522,6 +524,37 @@ pub(super) fn held_sessions_of(
             })
         })
         .collect()
+}
+
+/// How many times a respawn abandonment attempts the end of an identity's
+/// scoped tool grants while it answers the busy class (a concurrent writer
+/// changed one of the grants twice meanwhile; each attempt already retries a
+/// conflict once itself). Only another failure, or a busy class that
+/// outlasts the bound, fails the abandonment's step.
+pub(super) const ABANDONMENT_GRANT_END_ATTEMPTS: usize = 3;
+
+/// Run a respawn abandonment's grant end, `attempt_end`, retrying a busy
+/// answer ([`MobError::LifecycleOperationPending`]) within
+/// [`ABANDONMENT_GRANT_END_ATTEMPTS`]. A repeated end changes nothing it
+/// already made: a grant already ended is left as it stands.
+pub(super) async fn end_within_abandonment_bound<Fut>(
+    mut attempt_end: impl FnMut() -> Fut,
+) -> Result<(), MobError>
+where
+    Fut: std::future::Future<Output = Result<(), MobError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match attempt_end().await {
+            Ok(()) => return Ok(()),
+            Err(MobError::LifecycleOperationPending { .. })
+                if attempt < ABANDONMENT_GRANT_END_ATTEMPTS =>
+            {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// End every live scoped tool grant of `identity` in the mob `mob_id`'s
@@ -52411,12 +52444,16 @@ impl MobActor {
         }
         // An abandonment after the old member's archive ends the identity
         // the respawn hold kept (MobMachine names it, `IdentityEnded`): its
-        // scoped tool grants end before the step's journal row, so a replay
-        // that finds the row finds them ended. A failure fails the step.
-        self.end_tool_grants_of_ended_identities(
-            prepared.transition.effects(),
-            "its respawn was abandoned",
-        )
+        // scoped tool grants end before the step's journal row. A busy answer
+        // (a concurrent writer) is retried within the abandonment's bound;
+        // another failure fails the step, which stops the actor for cold
+        // recovery, and the resume that abandons the respawn ends them.
+        end_within_abandonment_bound(|| {
+            self.end_tool_grants_of_ended_identities(
+                prepared.transition.effects(),
+                "its respawn was abandoned",
+            )
+        })
         .await?;
 
         let cursor_floor = self.events.latest_cursor().await?;
@@ -65244,9 +65281,10 @@ impl MobActor {
     /// a runtime there are no grants.
     ///
     /// # Errors
-    /// A concurrent writer that changed one of the grants twice answers the
-    /// busy class ([`MobError::LifecycleOperationPending`]): the step that
-    /// ends the identity is retried. Any other failure is internal.
+    /// As [`tool_grant_end_failure`] maps them: a concurrent writer that
+    /// changed one of the grants twice answers the busy class
+    /// ([`MobError::LifecycleOperationPending`]), any other failure is
+    /// internal.
     #[cfg(feature = "runtime-adapter")]
     async fn end_identity_tool_grants(
         &self,

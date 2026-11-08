@@ -1253,6 +1253,257 @@ async fn identity_first_builder_reset_reprofiles_with_roster_context() {
     let _ = runtime.mob_handle().stop().await;
 }
 
+/// The mob of the warm-after-reset row: its profiles name no runtime mode, so
+/// each member is autonomous (the default) and owes its kickoff turn.
+fn autonomous_domain_security_definition() -> meerkat_mob::MobDefinition {
+    meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "identity-builder-reset-warm-test-{}"
+
+[profiles.domain]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.domain.tools]
+comms = true
+shell = false
+
+[profiles.security]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.security.tools]
+comms = true
+shell = true
+"#,
+        NEXT_TEST_MOB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+    .unwrap()
+}
+
+/// A roster spec under `profile` with the profile's runtime mode.
+fn autonomous_spec(identity: &AgentIdentity, profile: &str) -> DurableAgentSpec {
+    DurableAgentSpec {
+        runtime_mode_override: None,
+        ..durable_spec_with_profile(identity.as_str(), profile)
+    }
+}
+
+/// Holds the member build Core's wake asks for under `profile`. The first
+/// build of `profile` passes: a reset composes its fresh life's build before
+/// Core rotates the member. Every later one waits until the test opens the
+/// gate, and `held` says one is waiting.
+struct WakeBuildGate {
+    profile: &'static str,
+    builds: AtomicUsize,
+    held: tokio::sync::watch::Sender<bool>,
+    open: tokio::sync::watch::Sender<bool>,
+}
+
+impl WakeBuildGate {
+    fn new(profile: &'static str) -> Self {
+        Self {
+            profile,
+            builds: AtomicUsize::new(0),
+            held: tokio::sync::watch::channel(false).0,
+            open: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    async fn wait_held(&self) {
+        let mut held = self.held.subscribe();
+        tokio::time::timeout(Duration::from_secs(60), held.wait_for(|held| *held))
+            .await
+            .expect("Core's wake of the fresh life asks for its build")
+            .expect("the gate's channel stays open");
+    }
+
+    fn open(&self) {
+        self.open.send_replace(true);
+    }
+}
+
+#[async_trait]
+impl AgentCustomizer for WakeBuildGate {
+    async fn customize_build(
+        &self,
+        _context: &AgentBuildContext,
+        spec: &DurableAgentSpec,
+        _draft: &mut AgentBuildDraft,
+    ) -> Result<(), CustomizerError> {
+        if spec.profile.as_str() != self.profile || self.builds.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Ok(());
+        }
+        self.held.send_replace(true);
+        let mut open = self.open.subscribe();
+        let _ = open.wait_for(|open| *open).await;
+        Ok(())
+    }
+}
+
+/// What the identity runtime logs when a door's declaration meets a lifecycle
+/// operation of its member in flight and waits for it to end.
+const DOOR_WAITS_FOR_LIFECYCLE: &str = "waits for the lifecycle operation of its member in flight";
+
+/// Signals when an event's message names [`DOOR_WAITS_FOR_LIFECYCLE`].
+struct DoorWaitSignal(tokio::sync::watch::Sender<bool>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DoorWaitSignal {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        if message.0.contains(DOOR_WAITS_FOR_LIFECYCLE) {
+            self.0.send_replace(true);
+        }
+    }
+}
+
+/// A warm right after a reset that moved an autonomous identity to another
+/// profile answers the woken member under the new profile, as the warm did
+/// before registrations declared identities in Core's mob.
+///
+/// The reset seats the fresh life, and the kickoff the fresh life owes wakes
+/// it: that wake is in flight when the reset answers (here its build is held
+/// until the warm has asked). Core leaves a declaration of the identity to its
+/// next apply while the wake runs, so the warm's door waits for the wake to
+/// end, declares the identity again and wakes it, which finds it live. The
+/// warm goes through the gateway's RPC dispatch, so a refusal is the code the
+/// SDKs map. The door's wait is observed through its log line (this test runs
+/// on one thread, so a thread-local subscriber sees every task's events), and
+/// only then is the held build let through: a door that answered at once
+/// answers while the build is still held.
+#[tokio::test]
+async fn a_warm_after_a_reprofiling_reset_waits_out_the_kickoff_wake_in_flight() {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let (door_waits, mut door_waited) = tokio::sync::watch::channel(false);
+    let _log_signal = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(
+            DoorWaitSignal(door_waits).with_filter(
+                tracing_subscriber::filter::Targets::new()
+                    .with_target("meerkat_meta::identity_first", tracing::Level::DEBUG),
+            ),
+        ),
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let identity = AgentIdentity::parse("kickoff:security").unwrap();
+    let roster = Arc::new(StubRosterProvider::new(vec![autonomous_spec(
+        &identity, "domain",
+    )]));
+    let gate = Arc::new(WakeBuildGate::new("security"));
+    let definition = autonomous_domain_security_definition();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(definition.clone())
+            .persistent_state(tmp.path().join("state"))
+            .roster_provider(roster.clone())
+            .agent_customizer(gate.clone())
+            .identity_runtime_instance_id("builder-reset-warm-kickoff-test")
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("builder should bootstrap the identity-first runtime");
+    let identity_runtime = runtime
+        .identity_runtime()
+        .expect("identity runtime should be exposed");
+
+    roster
+        .set(vec![autonomous_spec(&identity, "security")])
+        .await;
+    let fresh = identity_runtime
+        .reset(&identity)
+        .await
+        .expect("the reset seats the fresh life under the current roster profile");
+    let fresh_session = fresh
+        .session_id()
+        .cloned()
+        .expect("the fresh life is bound to its session");
+    gate.wait_held().await;
+    assert_eq!(
+        identity_runtime
+            .status(&identity)
+            .await
+            .expect("the reset identity's status")
+            .profile
+            .expect("the reset identity's profile")
+            .as_str(),
+        "security"
+    );
+
+    let ctx = meerkat_meta::rpc::IdentityFirstContext {
+        runtime: identity_runtime.clone(),
+        roster_provider: roster.clone(),
+        topology_provider: None,
+        customizer: None,
+        agent_memory_provider: None,
+        mob_definition: Some(definition),
+        transcript_edit_service: None,
+        compaction_floors: None,
+    };
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "warm",
+        "method": "meta/identity/warm",
+        "params": { "identity": identity.as_str() },
+    })
+    .to_string();
+    let warm = handle_unified_rpc_json(
+        &runtime,
+        &request,
+        Duration::from_secs(120),
+        None,
+        Some(&ctx),
+    );
+    tokio::pin!(warm);
+    let reply = tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::select! {
+            reply = &mut warm => reply,
+            waited = door_waited.wait_for(|waited| *waited) => {
+                waited.expect("the log signal's channel stays open");
+                gate.open();
+                (&mut warm).await
+            }
+        }
+    })
+    .await
+    .expect("the warm answers, or its door waits for the wake in flight");
+    let reply: serde_json::Value = serde_json::from_str(&reply).expect("a JSON-RPC reply");
+    assert_eq!(
+        reply["error"],
+        serde_json::Value::Null,
+        "the warm answers the woken fresh life once the kickoff wake in flight ends: {reply}"
+    );
+    assert_eq!(
+        reply["result"]["session_id"],
+        json!(fresh_session.to_string()),
+        "the warm woke the fresh life on its own session: {reply}"
+    );
+    assert!(
+        reply["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "shell")),
+        "the warmed member resolves the new profile's tools: {reply}"
+    );
+
+    runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn identity_first_send_does_not_park_mob_actor_until_turn_completion() {
     // The discriminator is the RATIO, not either number. A parked actor blocks

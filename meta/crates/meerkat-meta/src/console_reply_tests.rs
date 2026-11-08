@@ -1018,10 +1018,17 @@ async fn private_reply_to_person_thread_appends_there() -> TestResult {
         "the reply answers her request"
     );
 
+    // Bob may not know of Alice's private side chat: his read of it is
+    // answered as a read of an identity no member holds, and shows him
+    // nothing of it.
     let hidden = timeline(&fixture.app, &bob, Some("alpha-side")).await;
+    let absent = timeline(&fixture.app, &bob, Some("no-such-side-chat")).await;
     assert_eq!(
-        hidden.as_ref().err().map(|error| error["code"].clone()),
-        Some(json!(-32001)),
+        hidden, absent,
+        "Bob reads Alice's side chat as a member that does not exist"
+    );
+    assert!(
+        hidden.iter().flatten().next().is_none(),
         "Bob cannot read Alice's side chat: {hidden:?}"
     );
     let bobs = timeline(&fixture.app, &bob, None)

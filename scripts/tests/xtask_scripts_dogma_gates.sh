@@ -1083,10 +1083,12 @@ printf '%s\n' \
   'echo "Error: Invariant AuditLatestSupersessionAcksAreKept is violated."' \
   'for action in ResolveMemberDispatchAdmissionAskHostRunning ResolveMemberDispatchAdmissionInheritRunning ResolveMemberDispatchAdmissionRefusedRunning ResolveMemberDispatchAdmissionNoneRequiredRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Invariant NotAuditWitnessRunning is violated by the initial state:"' \
-  'echo "Error: Invariant AuditHostAskedOnlyForGatedLineage is violated by the initial state:"' \
+  'echo "Error: Invariant AuditHostAskedOnlyForGatedOrUnknownLineage is violated by the initial state:"' \
   'echo "Error: Invariant AuditInheritNeedsDerived is violated by the initial state:"' \
   'echo "Error: Invariant AuditVerdictTable is violated by the initial state:"' \
   'echo "Error: Invariant AuditGatedLineageNeverBuiltUngated is violated by the initial state:"' \
+  'echo "Error: Invariant AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRefusedOnlyForGatedNoneDerived is violated by the initial state:"' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

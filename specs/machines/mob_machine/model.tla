@@ -26795,7 +26795,7 @@ ResolveMemberCustodyRestoredUnrecordedDestroyed(agent_identity) ==
 
 ResolveMemberDispatchAdmissionAskHostRunning(lineage, host_answer) ==
     /\ phase = "Running"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "NotAsked")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -26804,7 +26804,7 @@ ResolveMemberDispatchAdmissionAskHostRunning(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionAskHostStopped(lineage, host_answer) ==
     /\ phase = "Stopped"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "NotAsked")
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
@@ -26813,7 +26813,7 @@ ResolveMemberDispatchAdmissionAskHostStopped(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionAskHostCompleted(lineage, host_answer) ==
     /\ phase = "Completed"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "NotAsked")
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
@@ -26822,7 +26822,7 @@ ResolveMemberDispatchAdmissionAskHostCompleted(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionAskHostDestroyed(lineage, host_answer) ==
     /\ phase = "Destroyed"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "NotAsked")
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
@@ -26831,7 +26831,7 @@ ResolveMemberDispatchAdmissionAskHostDestroyed(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionInheritRunning(lineage, host_answer) ==
     /\ phase = "Running"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "Derived")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -26840,7 +26840,7 @@ ResolveMemberDispatchAdmissionInheritRunning(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionInheritStopped(lineage, host_answer) ==
     /\ phase = "Stopped"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "Derived")
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
@@ -26849,7 +26849,7 @@ ResolveMemberDispatchAdmissionInheritStopped(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionInheritCompleted(lineage, host_answer) ==
     /\ phase = "Completed"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "Derived")
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
@@ -26858,7 +26858,7 @@ ResolveMemberDispatchAdmissionInheritCompleted(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionInheritDestroyed(lineage, host_answer) ==
     /\ phase = "Destroyed"
-    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (lineage = "SourceRebuildGated") THEN TRUE ELSE (lineage = "Unknown"))))
     /\ (host_answer = "Derived")
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
@@ -26903,7 +26903,7 @@ ResolveMemberDispatchAdmissionRefusedDestroyed(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionNoneRequiredRunning(lineage, host_answer) ==
     /\ phase = "Running"
-    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (lineage = "SourceRebuildUngated") THEN TRUE ELSE ((lineage = "Unknown") /\ (host_answer = "NoneDerived")))))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0
@@ -26911,7 +26911,7 @@ ResolveMemberDispatchAdmissionNoneRequiredRunning(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionNoneRequiredStopped(lineage, host_answer) ==
     /\ phase = "Stopped"
-    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (lineage = "SourceRebuildUngated") THEN TRUE ELSE ((lineage = "Unknown") /\ (host_answer = "NoneDerived")))))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0
@@ -26919,7 +26919,7 @@ ResolveMemberDispatchAdmissionNoneRequiredStopped(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionNoneRequiredCompleted(lineage, host_answer) ==
     /\ phase = "Completed"
-    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (lineage = "SourceRebuildUngated") THEN TRUE ELSE ((lineage = "Unknown") /\ (host_answer = "NoneDerived")))))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0
@@ -26927,7 +26927,7 @@ ResolveMemberDispatchAdmissionNoneRequiredCompleted(lineage, host_answer) ==
 
 ResolveMemberDispatchAdmissionNoneRequiredDestroyed(lineage, host_answer) ==
     /\ phase = "Destroyed"
-    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (lineage = "SourceRebuildUngated") THEN TRUE ELSE ((lineage = "Unknown") /\ (host_answer = "NoneDerived")))))
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_cfdef6b57e7dfed0

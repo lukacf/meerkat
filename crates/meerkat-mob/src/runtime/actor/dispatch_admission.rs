@@ -10,8 +10,8 @@
 use super::*;
 use crate::runtime::fork_build::{
     DerivedDispatchAdmission, SeatDispatchAdmission, customizer_dispatch_admission,
-    derive_member_dispatch_admission, dispatch_admission_verdict, load_resumed_member_view,
-    rebuild_seat_resume_spec,
+    customizer_own_identity_dispatch_admission, derive_member_dispatch_admission,
+    dispatch_admission_verdict, load_resumed_member_view, rebuild_seat_resume_spec,
 };
 
 impl MobActor {
@@ -37,8 +37,11 @@ impl MobActor {
     /// for a fork of it taken from its session `source_session_id`: whether
     /// its build in this process runs under an admission; for a source this
     /// process has not built, its lineage record, or else whether the host's
-    /// answer for its next build would carry one (its rebuild request, made
-    /// as its restore makes it, without waking it). A source with no session
+    /// answer for its next build would carry one, without waking it (an
+    /// ordinary source's rebuild request, made as its restore makes it; a
+    /// fork-derived source whose spawn row records no lineage asks the host
+    /// for its own identity, as its rebuild does: see
+    /// `fork_build::rebuild_dispatch_admission`). A source with no session
     /// of this process (`None`: a placed member, whose admission cannot
     /// cross placement) has no build here that could run under one.
     pub(super) async fn observe_fork_source_dispatch_lineage(
@@ -73,19 +76,29 @@ impl MobActor {
         let Some(source_session_id) = source_session_id else {
             return Ok(Lineage::SourceRebuildUngated);
         };
-        let view = if entry.fork_source.is_none() && self.spawn_member_customizer.is_some() {
-            load_resumed_member_view(self.session_service.as_ref(), source_session_id).await?
+        let next_build_admission = if entry.fork_source.is_some() {
+            customizer_own_identity_dispatch_admission(
+                &self.definition.id,
+                self.spawn_member_customizer.as_ref(),
+                &entry,
+                source_session_id,
+            )?
         } else {
-            super::super::handle::ResumedMemberView::new(source_session_id.clone(), None)
+            let view = if self.spawn_member_customizer.is_some() {
+                load_resumed_member_view(self.session_service.as_ref(), source_session_id).await?
+            } else {
+                super::super::handle::ResumedMemberView::new(source_session_id.clone(), None)
+            };
+            rebuild_seat_resume_spec(
+                &self.definition.id,
+                self.spawn_member_customizer.as_ref(),
+                &entry,
+                &view,
+                seat_build.as_deref(),
+            )?
+            .tool_dispatch_admission
         };
-        let next_build = rebuild_seat_resume_spec(
-            &self.definition.id,
-            self.spawn_member_customizer.as_ref(),
-            &entry,
-            &view,
-            seat_build.as_deref(),
-        )?;
-        Ok(if next_build.tool_dispatch_admission.is_some() {
+        Ok(if next_build_admission.is_some() {
             Lineage::SourceRebuildGated
         } else {
             Lineage::SourceRebuildUngated

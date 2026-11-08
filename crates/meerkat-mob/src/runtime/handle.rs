@@ -7044,8 +7044,13 @@ impl ResumedMemberView {
 ///
 /// # Which spawns ask it
 ///
-/// - Every fresh spawn, helper, batch item, flow provisioning, policy spawn,
-///   respawn and fork request: [`customize_spawn`](Self::customize_spawn).
+/// - Every fresh spawn, helper, batch item, flow provisioning, respawn and
+///   fork request: [`customize_spawn`](Self::customize_spawn).
+/// - A policy spawn (`SpawnSource::PolicySpawn`):
+///   [`customize_spawn`](Self::customize_spawn), for its
+///   [`SpawnMemberSpec::tool_dispatch_admission`] alone. The rest of its
+///   build is the spawn policy's material MobMachine recorded, and nothing
+///   else the answer installs is applied.
 /// - Rebuilding an ordinary member on its durable session (process-restart
 ///   restore and [`MobHandle::resume`]):
 ///   [`customize_resume`](Self::customize_resume), with what the session
@@ -7083,7 +7088,9 @@ impl ResumedMemberView {
 /// siblings, a local temporary-council branch, a live-delegation worker), the
 /// customizer is asked through `customize_spawn` for the child (in
 /// `SpawnSource::PersistedForkResume`, or `SpawnSource::AttachedForkedParticipant`
-/// for a council branch) before anything is forked, and only the
+/// for a council branch) before the child is seated (for a handle fork,
+/// before anything is forked; a council branch's source is forked for it
+/// first), and only the
 /// `tool_dispatch_admission` of its answer is used; every later build of such
 /// a member asks again (a fork-derived member's as above, with a
 /// `SpawnSource::Resume` request; any other through `customize_resume`). A
@@ -7092,7 +7099,10 @@ impl ResumedMemberView {
 /// which it installs none is refused with
 /// [`MobError::DispatchAdmissionRequired`]: such a member never runs without
 /// an admission. Install the admission on these requests as on any other to
-/// keep forks of gated members.
+/// keep forks of gated members. A fork-derived member whose spawn row
+/// records no lineage (one an earlier release seated) is asked the same way
+/// on each rebuild and runs under the admission the answer installs, or
+/// under none when it installs none.
 pub trait SpawnMemberCustomizer: Send + Sync {
     fn customize_spawn(
         &self,

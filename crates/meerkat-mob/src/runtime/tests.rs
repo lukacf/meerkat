@@ -86252,7 +86252,8 @@ async fn test_policy_auto_spawn_ignores_customized_effective_profile_after_autho
 }
 
 #[tokio::test]
-async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn_builds() {
+async fn test_spawn_member_customizer_answers_only_the_admission_of_a_policy_auto_spawn_and_covers_respawn_builds()
+ {
     let customizer = RecordingSpawnCustomizer::new();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
@@ -86332,11 +86333,14 @@ async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn
     );
 
     let calls = customizer.calls();
-    assert!(
+    assert_eq!(
         calls
             .iter()
-            .all(|ctx| ctx.spawn_source != SpawnSource::PolicySpawn),
-        "policy auto-spawn must not invoke the build customizer after generated resolution"
+            .filter(|ctx| ctx.spawn_source == SpawnSource::PolicySpawn)
+            .count(),
+        1,
+        "a policy auto-spawn asks the customizer once, for its tool dispatch admission alone: \
+         nothing else it installs (the tools and the prompt above) is applied"
     );
     assert!(
         calls

@@ -4659,6 +4659,8 @@ pub enum MemberDispatchAdmissionLineage {
     SourceRebuildGated,
     #[serde(rename = "SourceRebuildUngated")]
     SourceRebuildUngated,
+    #[serde(rename = "Unknown")]
+    Unknown,
 }
 impl MemberDispatchAdmissionLineage {
     pub fn as_str(&self) -> &'static str {
@@ -4669,6 +4671,7 @@ impl MemberDispatchAdmissionLineage {
             Self::SourceBuiltUngated => "SourceBuiltUngated",
             Self::SourceRebuildGated => "SourceRebuildGated",
             Self::SourceRebuildUngated => "SourceRebuildUngated",
+            Self::Unknown => "Unknown",
         }
     }
 }
@@ -4682,6 +4685,7 @@ impl std::convert::TryFrom<&str> for MemberDispatchAdmissionLineage {
             "SourceBuiltUngated" => Ok(Self::SourceBuiltUngated),
             "SourceRebuildGated" => Ok(Self::SourceRebuildGated),
             "SourceRebuildUngated" => Ok(Self::SourceRebuildUngated),
+            "Unknown" => Ok(Self::Unknown),
             other => Err(format!(
                 "invalid MemberDispatchAdmissionLineage value `{other}`"
             )),

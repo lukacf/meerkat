@@ -20166,7 +20166,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_not_asked`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Running`
@@ -20175,7 +20175,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_not_asked`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Stopped`
@@ -20184,7 +20184,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_not_asked`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Completed`
@@ -20193,7 +20193,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_not_asked`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Destroyed`
@@ -20202,7 +20202,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_derived_admission`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Running`
@@ -20211,7 +20211,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_derived_admission`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Stopped`
@@ -20220,7 +20220,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_derived_admission`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Completed`
@@ -20229,7 +20229,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_admission`
+  - `lineage_may_carry_admission`
   - `host_derived_admission`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Destroyed`
@@ -20274,7 +20274,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_none`
+  - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Running`
 
@@ -20282,7 +20282,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_none`
+  - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Stopped`
 
@@ -20290,7 +20290,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_none`
+  - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Completed`
 
@@ -20298,7 +20298,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
 - Guards:
-  - `lineage_carries_none`
+  - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Destroyed`
 

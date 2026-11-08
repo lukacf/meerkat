@@ -2,8 +2,10 @@
 # TLC audit of the generated MobMachine member dispatch admission verdict:
 # the four ResolveMemberDispatchAdmission* arms partition the observation
 # pairs (a build's lineage and the host's answer), each pair takes the
-# verdict the shell mirrors, and a lineage that runs under a tool dispatch
-# admission is never built without one.
+# verdict the shell mirrors, a lineage that runs under a tool dispatch
+# admission is never built without one, and an Unknown lineage (a
+# fork-derived member whose spawn row records none) is built without one
+# only when the host was asked and derived none.
 #
 # usage: member_dispatch_admission_audit.sh [--mutants] [extra tlc args...]
 #
@@ -24,13 +26,18 @@
 #   invariant is checked with -continue, and AuditReportGaps names the pairs
 #   the defect leaves with no arm or several):
 #     ask_host_after_answer (AskHost's not-yet-asked guard dropped) by
-#       AuditHostAskedOnlyForGatedLineage;
+#       AuditHostAskedOnlyForGatedOrUnknownLineage;
 #     inherit_without_admission (Inherit taken whenever the host was asked)
 #       by AuditInheritNeedsDerived;
 #     refused_never_reached (Refused's guard never holds) by
 #       AuditVerdictTable;
 #     none_required_for_any_lineage (NoneRequired's lineage guard dropped)
-#       by AuditGatedLineageNeverBuiltUngated.
+#       by AuditGatedLineageNeverBuiltUngated;
+#     unknown_built_without_asking (NoneRequired taken for an Unknown
+#       lineage whatever the host answered) by
+#       AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone;
+#     unknown_refused (Refused taken for an Unknown lineage the host derived
+#       none for) by AuditRefusedOnlyForGatedNoneDerived.
 # Each TLC run is held to the canonical lane's per-run cap (tlc_run_cap.sh)
 # and fails closed as TLC INCOMPLETE. An anchor this script expects but
 # cannot find fails the run.
@@ -119,7 +126,8 @@ audit_invariants="  AuditVerdictIsTotalAndDisjoint
   AuditGatedLineageNeverBuiltUngated
   AuditInheritNeedsDerived
   AuditRefusedOnlyForGatedNoneDerived
-  AuditHostAskedOnlyForGatedLineage"
+  AuditHostAskedOnlyForGatedOrUnknownLineage
+  AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone"
 
 # usage: write_cfg <file> <spec> <extra invariant lines>; the step run
 # (AuditStepSpec) takes the audit's one-step constraint.
@@ -271,7 +279,7 @@ print("; ".join(" ".join(item.split()) for item in found))
   N='ResolveMemberDispatchAdmissionNoneRequiredRunning'
 
   # AskHost: the host is asked again after it answered.
-  mutate ask_host_after_answer AuditHostAskedOnlyForGatedLineage \
+  mutate ask_host_after_answer AuditHostAskedOnlyForGatedOrUnknownLineage \
     "${A}" '(host_answer = "NotAsked")' 'TRUE'
   # Inherit: the build inherits whenever the host was asked, an admission
   # derived or not.
@@ -283,6 +291,14 @@ print("; ".join(" ".join(item.split()) for item in found))
   # NoneRequired: any lineage builds with what its request carries, a gated
   # one included.
   mutate none_required_for_any_lineage AuditGatedLineageNeverBuiltUngated \
-    "${N}" '(IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))' 'TRUE'
+    "${N}" '(IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (lineage = "SourceRebuildUngated") THEN TRUE ELSE ((lineage = "Unknown") /\ (host_answer = "NoneDerived")))))' 'TRUE'
+  # NoneRequired: an Unknown lineage is built with what its request carries
+  # whatever the host answered, before it is asked included.
+  mutate unknown_built_without_asking AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone \
+    "${N}" '((lineage = "Unknown") /\ (host_answer = "NoneDerived"))' '(lineage = "Unknown")'
+  # Refused: an Unknown lineage the host derived none for is refused, so a
+  # host without a customizer could no longer rebuild it.
+  mutate unknown_refused AuditRefusedOnlyForGatedNoneDerived \
+    "${R}" '(lineage = "SourceRebuildGated")' '((lineage = "SourceRebuildGated") \/ (lineage = "Unknown"))'
 fi
 echo "member dispatch admission audit passed over every observation pair"

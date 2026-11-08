@@ -1011,22 +1011,33 @@ them.
 
 - `meerkat-mob`, `meerkat-mob-mcp`: a member created by `fork_off`, by a
   `council` branch or by another fork (`MobHandle::fork_member` and its
-  siblings, a live delegation), or rebuilt by a resume or a reload, ran
-  without the tool dispatch admission its host installed for the source
-  member (`SpawnMemberSpec::tool_dispatch_admission`, which a
+  siblings, a live delegation), a member a spawn policy seated, and a member
+  rebuilt by a resume or a reload ran without the tool dispatch admission
+  its host installs (`SpawnMemberSpec::tool_dispatch_admission`, which a
   `SpawnMemberCustomizer` sets): its tool calls reached the host's tools
   without passing the host's gate. MobMachine now decides each such build's
   admission. A fork of a member whose build runs under one asks the host's
   customizer for the child and runs under what it installs, or is refused
-  with the new `MobError::DispatchAdmissionRequired` before anything is
-  forked; the child's spawn row records this, so each later build of it (a
-  wake, a restore after a restart, a reload, an explicit resume, a respawn)
-  asks again and is refused when the customizer installs none. A
-  `fork_helper` child of such a member, whose spawn asks the customizer as
-  before, is refused the same way when it installs none. An ordinary
-  member's reload and explicit resume run under the admission the
-  customizer gives the rebuild. Affects 0.9.8 through 0.9.10. Until you
-  upgrade, do not offer `fork_off` or `council` to members you gate.
+  with the new `MobError::DispatchAdmissionRequired` before the child is
+  seated (a refused `fork_off` or handle fork forks nothing; a refused
+  council branch is refused after the council forked its source for it, and
+  the council's cleanup removes that fork). The child's spawn row records
+  this, so each later build of it (a wake, a restore after a restart, a
+  reload, an explicit resume, a respawn) asks again and is refused when the
+  customizer installs none. A fork child seated by an earlier release, whose
+  spawn row records nothing, is gated by the host's customizer when it is
+  rebuilt: it runs under the admission the customizer installs for it, and
+  as before when it installs none. A `fork_helper` child of such a member,
+  whose spawn asks the customizer as before, is refused the same way when it
+  installs none. A member a spawn policy seats now asks the customizer for
+  its admission alone (`SpawnSource::PolicySpawn`) and runs under what it
+  installs. An ordinary member's reload and explicit resume run under the
+  admission the customizer gives the rebuild. Affects 0.8.42 through 0.9.10.
+  Until you upgrade, do not offer `fork_off` or `council` to members you
+  gate, and do not combine a spawn policy with a customizer that gates.
+  Downgrade: an earlier release ignores the record on spawn rows and
+  rebuilds those fork children without the admission again, and seats
+  policy members without one.
 
 ### Upgrade notes
 
@@ -1074,6 +1085,22 @@ them.
   `SpiRealmConfig::renew_timeout` to the renew interval first, then lengthen
   the timing as the host store SPI reference describes (Core's Timeouts And
   The Safety Condition).
+
+- Forks of gated members fail closed. A host that sets
+  `SpawnMemberSpec::tool_dispatch_admission` on its spawn requests itself,
+  with no `SpawnMemberCustomizer`, can no longer fork those members: a fork
+  of a member whose build runs under an admission asks the customizer for
+  the child, and with no customizer the fork is refused with
+  `MobError::DispatchAdmissionRequired`. Install a customizer that sets the
+  admission (it is asked with `SpawnSource::PersistedForkResume` for a
+  fork's child, `SpawnSource::AttachedForkedParticipant` for a council
+  branch) to keep forking them.
+
+- A fork of a live-delegation worker, the worker's own `fork_off`
+  included, is refused on a host without a `SpawnMemberCustomizer`: the
+  worker runs under its delegation's gate, so a fork of it needs an
+  admission from the host's customizer, which runs after the delegation's
+  gate.
 
 ### Known limitations
 

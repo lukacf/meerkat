@@ -40771,6 +40771,22 @@ impl MobActor {
                 identity: member_spec.identity.clone(),
             });
         }
+        // The one thing asked of the host's spawn customizer is this spawn's
+        // tool dispatch admission (`SpawnSource::PolicySpawn`), which no
+        // policy material carries: the member is built under what it
+        // installs, and a host without a customizer builds it with none, as
+        // before. Nothing else of its answer is applied.
+        let policy_dispatch_admission = super::fork_build::customizer_dispatch_admission(
+            self.spawn_member_customizer.as_ref(),
+            &super::handle::SpawnCustomizationContext {
+                mob_id: self.definition.id.clone(),
+                spawn_source: super::handle::SpawnSource::PolicySpawn,
+                spawner_identity: None,
+                spawner_runtime_id: None,
+                requested_profile: member_spec.role_name.clone(),
+            },
+            &member_spec,
+        )?;
         let super::handle::SpawnMemberSpec {
             role_name: profile_name,
             identity: _,
@@ -40813,7 +40829,8 @@ impl MobActor {
             fork_overlay: _,
             fork_build_inheritance: _,
             resume_provider_params: _,
-            // Nor a ceiling: customizers never run on a policy auto-spawn.
+            // Nor a ceiling: only the customizer's admission is taken on a
+            // policy auto-spawn.
             operator_authority_ceiling: _,
             inherited_operator_authority_bound: _,
             // Set only by a dormant seat, whose spawns are local.
@@ -40938,6 +40955,7 @@ impl MobActor {
         config.keep_alive = runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         config.override_web_search = tool_category_overrides.web_search;
         build::apply_application_tool_policy_choice(&mut config, application_tool_policy);
+        config.tool_dispatch_admission = policy_dispatch_admission.clone();
         config.tool_consequence_policy_registry = self.tool_consequence_policy_registry.clone();
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
@@ -41059,8 +41077,13 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
-            // Fresh, and built with no dispatch admission.
-            dispatch_admission: Default::default(),
+            // Fresh, and built under the admission the host's customizer
+            // installed for it (none without a customizer): a fork of it
+            // follows that build.
+            dispatch_admission: super::fork_build::SpawnDispatchAdmissionFacts {
+                lineage: false,
+                present: policy_dispatch_admission.is_some(),
+            },
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,

@@ -891,6 +891,46 @@ fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
     }
 }
 
+/// MobMachine's member dispatch admission arms (0.9.11) sit on the machine's
+/// late tail after every variant 0.9.10 published, so no published
+/// `TransitionId` discriminant moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
+/// the variant 0.9.10 published last, keeps index 1902. The arms are
+/// rendered as one block, each verdict in every phase, in this order.
+#[test]
+fn mob_dispatch_admission_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.10 published.
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    let arms = ["AskHost", "Inherit", "Refused", "NoneRequired"]
+        .into_iter()
+        .flat_map(|verdict| {
+            ["Running", "Stopped", "Completed", "Destroyed"]
+                .into_iter()
+                .map(move |phase| format!("ResolveMemberDispatchAdmission{verdict}{phase}"))
+        })
+        .collect::<Vec<_>>();
+    let first = index(&arms[0]);
+    assert!(
+        first > 1902,
+        "`{}` must follow every variant 0.9.10 published",
+        arms[0]
+    );
+    for (offset, arm) in arms.iter().enumerate() {
+        assert_eq!(
+            index(arm),
+            first + offset,
+            "`{arm}` keeps its place in the dispatch admission block"
+        );
+    }
+}
+
 #[test]
 fn generated_meerkat_operation_status_is_closed_enum() {
     let rendered = render_machine_kernel_module(&meerkat_machine());

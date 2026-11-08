@@ -5000,6 +5000,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SourceBuiltUngated",
                     "SourceRebuildGated",
                     "SourceRebuildUngated",
+                    "Unknown",
                 ],
             ),
             NamedTypeBinding::string_enum(

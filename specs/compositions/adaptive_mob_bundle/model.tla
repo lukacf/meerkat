@@ -55765,7 +55765,7 @@ control_mob_ResolveMemberDispatchAdmissionAskHostRunning(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ control_mob_phase' = "Running"
        /\ UnchangedFrame_a364531b7feab712
@@ -55787,7 +55787,7 @@ control_mob_ResolveMemberDispatchAdmissionAskHostStopped(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ control_mob_phase' = "Stopped"
        /\ UnchangedFrame_a364531b7feab712
@@ -55809,7 +55809,7 @@ control_mob_ResolveMemberDispatchAdmissionAskHostCompleted(arg_lineage, arg_host
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Completed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ control_mob_phase' = "Completed"
        /\ UnchangedFrame_a364531b7feab712
@@ -55831,7 +55831,7 @@ control_mob_ResolveMemberDispatchAdmissionAskHostDestroyed(arg_lineage, arg_host
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Destroyed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ control_mob_phase' = "Destroyed"
        /\ UnchangedFrame_a364531b7feab712
@@ -55853,7 +55853,7 @@ control_mob_ResolveMemberDispatchAdmissionInheritRunning(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ control_mob_phase' = "Running"
        /\ UnchangedFrame_a364531b7feab712
@@ -55875,7 +55875,7 @@ control_mob_ResolveMemberDispatchAdmissionInheritStopped(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ control_mob_phase' = "Stopped"
        /\ UnchangedFrame_a364531b7feab712
@@ -55897,7 +55897,7 @@ control_mob_ResolveMemberDispatchAdmissionInheritCompleted(arg_lineage, arg_host
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Completed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ control_mob_phase' = "Completed"
        /\ UnchangedFrame_a364531b7feab712
@@ -55919,7 +55919,7 @@ control_mob_ResolveMemberDispatchAdmissionInheritDestroyed(arg_lineage, arg_host
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Destroyed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ control_mob_phase' = "Destroyed"
        /\ UnchangedFrame_a364531b7feab712
@@ -56029,7 +56029,7 @@ control_mob_ResolveMemberDispatchAdmissionNoneRequiredRunning(arg_lineage, arg_h
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ control_mob_phase' = "Running"
        /\ UnchangedFrame_a364531b7feab712
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -56050,7 +56050,7 @@ control_mob_ResolveMemberDispatchAdmissionNoneRequiredStopped(arg_lineage, arg_h
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ control_mob_phase' = "Stopped"
        /\ UnchangedFrame_a364531b7feab712
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -56071,7 +56071,7 @@ control_mob_ResolveMemberDispatchAdmissionNoneRequiredCompleted(arg_lineage, arg
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Completed"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ control_mob_phase' = "Completed"
        /\ UnchangedFrame_a364531b7feab712
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -56092,7 +56092,7 @@ control_mob_ResolveMemberDispatchAdmissionNoneRequiredDestroyed(arg_lineage, arg
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Destroyed"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ control_mob_phase' = "Destroyed"
        /\ UnchangedFrame_a364531b7feab712
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -110403,7 +110403,7 @@ layer_mob_ResolveMemberDispatchAdmissionAskHostRunning(arg_lineage, arg_host_ans
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ layer_mob_phase' = "Running"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110425,7 +110425,7 @@ layer_mob_ResolveMemberDispatchAdmissionAskHostStopped(arg_lineage, arg_host_ans
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ layer_mob_phase' = "Stopped"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110447,7 +110447,7 @@ layer_mob_ResolveMemberDispatchAdmissionAskHostCompleted(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Completed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ layer_mob_phase' = "Completed"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110469,7 +110469,7 @@ layer_mob_ResolveMemberDispatchAdmissionAskHostDestroyed(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Destroyed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "NotAsked")
        /\ layer_mob_phase' = "Destroyed"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110491,7 +110491,7 @@ layer_mob_ResolveMemberDispatchAdmissionInheritRunning(arg_lineage, arg_host_ans
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ layer_mob_phase' = "Running"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110513,7 +110513,7 @@ layer_mob_ResolveMemberDispatchAdmissionInheritStopped(arg_lineage, arg_host_ans
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ layer_mob_phase' = "Stopped"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110535,7 +110535,7 @@ layer_mob_ResolveMemberDispatchAdmissionInheritCompleted(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Completed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ layer_mob_phase' = "Completed"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110557,7 +110557,7 @@ layer_mob_ResolveMemberDispatchAdmissionInheritDestroyed(arg_lineage, arg_host_a
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Destroyed"
-       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))
        /\ (packet.payload.host_answer = "Derived")
        /\ layer_mob_phase' = "Destroyed"
        /\ UnchangedFrame_ef0e3da3d045825e
@@ -110667,7 +110667,7 @@ layer_mob_ResolveMemberDispatchAdmissionNoneRequiredRunning(arg_lineage, arg_hos
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ layer_mob_phase' = "Running"
        /\ UnchangedFrame_ef0e3da3d045825e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -110688,7 +110688,7 @@ layer_mob_ResolveMemberDispatchAdmissionNoneRequiredStopped(arg_lineage, arg_hos
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ layer_mob_phase' = "Stopped"
        /\ UnchangedFrame_ef0e3da3d045825e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -110709,7 +110709,7 @@ layer_mob_ResolveMemberDispatchAdmissionNoneRequiredCompleted(arg_lineage, arg_h
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Completed"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ layer_mob_phase' = "Completed"
        /\ UnchangedFrame_ef0e3da3d045825e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -110730,7 +110730,7 @@ layer_mob_ResolveMemberDispatchAdmissionNoneRequiredDestroyed(arg_lineage, arg_h
        /\ packet.payload.host_answer = arg_host_answer
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Destroyed"
-       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived")))))
        /\ layer_mob_phase' = "Destroyed"
        /\ UnchangedFrame_ef0e3da3d045825e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -113107,22 +113107,22 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (control_mob_phase = "Completed") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (control_mob_phase = "Destroyed") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_custody_unrestored) = FALSE))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
 
 layer_mob__entry_packet__operator_instruction_write_well_formed(revision, digest, kind, profile, member) == ((revision >= 1) /\ (digest # "") /\ (IF ((kind = "Mob") /\ (profile = "") /\ (member = None)) THEN TRUE ELSE (IF ((kind = "Profile") /\ (profile # "") /\ (member = None)) THEN TRUE ELSE ((kind = "Member") /\ (profile = "") /\ (member # None)))))
 
@@ -115383,22 +115383,22 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (layer_mob_phase = "Completed") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (layer_mob_phase = "Destroyed") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_custody_unrestored) = FALSE))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildGated") THEN TRUE ELSE (packet.payload.lineage = "Unknown"))))) /\ ((packet.payload.host_answer = "Derived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
     \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
-    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceRebuildUngated") THEN TRUE ELSE ((packet.payload.lineage = "Unknown") /\ (packet.payload.host_answer = "NoneDerived"))))))
 
 EntryPacketAdmissible(packet) ==
     CASE

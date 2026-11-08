@@ -51,7 +51,11 @@
 //! ([`customizer_dispatch_admission`]), and the child runs under the admission
 //! it derives, after any admission its request carries itself (a live
 //! delegation's gate); a child it derives none for is refused with
-//! [`MobError::DispatchAdmissionRequired`] before anything is forked. This
+//! [`MobError::DispatchAdmissionRequired`] before it is seated: a handle fork
+//! (`fork_off`, `MobHandle::fork_member` and its siblings, a live delegation)
+//! before anything is forked, and a local temporary-council branch when it
+//! is seated, after the council has forked its source for it (the council's
+//! cleanup removes that fork; nothing runs in it). This
 //! holds for every fork seat, live-delegation workers included, for a
 //! prompt-context fork (a spawn whose launch mode forks its source's
 //! history, which asks the customizer as any spawn does), and for a respawn
@@ -63,8 +67,13 @@
 //! asks the host again ([`customizer_own_identity_dispatch_admission`] for a
 //! fork-derived member, the customizer's resume answer for any other) and is
 //! refused when the host derives none ([`rebuild_dispatch_admission`]): such a
-//! member never runs ungated. An ordinary member's rebuild runs under the
-//! admission the customizer's resume answer carries.
+//! member never runs ungated. A fork-derived member whose spawn row records
+//! nothing (a row an earlier release wrote reads so) has an unknown lineage:
+//! each rebuild of it asks the host the same way and runs under what it
+//! derives, as a fresh spawn the customizer answers does, and under none when
+//! it derives none, so a host without a customizer rebuilds it as before. An
+//! ordinary member's rebuild runs under the admission the customizer's
+//! resume answer carries.
 //!
 //! # Rebuilds
 //!
@@ -1507,10 +1516,11 @@ pub(crate) fn resolve_dispatch_admission_on(
 
 /// How one member build's tool dispatch admission was decided.
 pub(crate) enum DerivedDispatchAdmission {
-    /// The lineage carries none: the build takes what its request carries.
+    /// The lineage carries none, or is not known and the host derived none:
+    /// the build takes what its request carries.
     NoneRequired,
-    /// The lineage carries one, and the host derived it: the build runs
-    /// under it.
+    /// The lineage carries one, or is not known, and the host derived it:
+    /// the build runs under it.
     Inherit(Arc<dyn meerkat_core::ToolDispatchAdmission>),
     /// The lineage carries one, and the host derived none: the build is
     /// refused.
@@ -1552,6 +1562,11 @@ pub(crate) fn derive_member_dispatch_admission(
             Ok(DerivedDispatchAdmission::Inherit(admission))
         }
         (MemberDispatchAdmissionVerdict::Refused, _) => Ok(DerivedDispatchAdmission::Refused),
+        // A lineage that is not known runs under none when the host derived
+        // none, as a fresh spawn the customizer answers does.
+        (MemberDispatchAdmissionVerdict::NoneRequired, None) => {
+            Ok(DerivedDispatchAdmission::NoneRequired)
+        }
         (verdict, _) => Err(MobError::Internal(format!(
             "MobMachine answered the host's dispatch admission answer {host_answer:?} with {verdict:?}"
         ))),
@@ -1599,14 +1614,20 @@ pub(crate) fn customizer_own_identity_dispatch_admission(
 /// given `restore_spec`, its rebuild request ([`rebuild_resume_spec`]), with
 /// MobMachine's verdict decided by `classify`:
 ///
-/// - a member whose lineage carries no admission keeps what its request
-///   carries (an ordinary member: the customizer's answer to its resume
-///   request);
+/// - an ordinary member whose spawn row records no lineage that carries an
+///   admission keeps what its request carries (the customizer's answer to
+///   its resume request);
 /// - a member whose spawn row records a lineage that carries one runs under
 ///   the admission the host derives for this build (an ordinary-roster
 ///   member's resume request already asked the customizer; a fork-derived
 ///   member's did not, so it is asked here, for the admission alone), or the
-///   rebuild is refused with [`MobError::DispatchAdmissionRequired`].
+///   rebuild is refused with [`MobError::DispatchAdmissionRequired`];
+/// - a fork-derived member whose spawn row records none (a row written
+///   before spawn rows recorded the lineage reads so: its lineage is not
+///   known) runs under the admission the host derives for this build, as a
+///   fresh spawn the customizer answers does, and under none when it derives
+///   none. It is never refused, so a host without a customizer rebuilds it
+///   as before.
 pub(crate) fn rebuild_dispatch_admission(
     mob_id: &MobId,
     customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
@@ -1620,6 +1641,8 @@ pub(crate) fn rebuild_dispatch_admission(
 ) -> Result<Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>, MobError> {
     let lineage = if entry.dispatch_admission_lineage {
         MemberDispatchAdmissionLineage::Recorded
+    } else if entry.fork_source.is_some() {
+        MemberDispatchAdmissionLineage::Unknown
     } else {
         MemberDispatchAdmissionLineage::NoneRecorded
     };

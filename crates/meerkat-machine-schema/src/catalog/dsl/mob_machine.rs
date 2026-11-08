@@ -35208,17 +35208,23 @@ macro_rules! mob_catalog_machine_dsl {
         // Such a build is never made without an admission: the host's spawn
         // customizer is asked first (AskHost), the admission it derives is
         // the build's (Inherit), and a build it derives none for is refused
-        // (Refused). Any other lineage needs none (NoneRequired), and the
-        // build takes what its request carries. Pure classification across
-        // all phases: no state changes.
+        // (Refused). A lineage that is not known (a fork-derived member whose
+        // spawn row records none, as rows written before they recorded one
+        // read) is built as a fresh spawn the customizer answers: the host is
+        // asked first, the build runs under what it derives (Inherit), and
+        // under none when it derives none (NoneRequired), never refused, so a
+        // host without a customizer builds it as before. Any other lineage
+        // needs none (NoneRequired), and the build takes what its request
+        // carries. Pure classification across all phases: no state changes.
 
         transition ResolveMemberDispatchAdmissionAskHost {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input ResolveMemberDispatchAdmission { lineage, host_answer }
-            guard "lineage_carries_admission" {
+            guard "lineage_may_carry_admission" {
                 lineage == MemberDispatchAdmissionLineage::Recorded
                 || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
                 || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+                || lineage == MemberDispatchAdmissionLineage::Unknown
             }
             guard "host_not_asked" { host_answer == MemberDispatchAdmissionHostAnswer::NotAsked }
             update {}
@@ -35229,10 +35235,11 @@ macro_rules! mob_catalog_machine_dsl {
         transition ResolveMemberDispatchAdmissionInherit {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input ResolveMemberDispatchAdmission { lineage, host_answer }
-            guard "lineage_carries_admission" {
+            guard "lineage_may_carry_admission" {
                 lineage == MemberDispatchAdmissionLineage::Recorded
                 || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
                 || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+                || lineage == MemberDispatchAdmissionLineage::Unknown
             }
             guard "host_derived_admission" { host_answer == MemberDispatchAdmissionHostAnswer::Derived }
             update {}
@@ -35257,10 +35264,11 @@ macro_rules! mob_catalog_machine_dsl {
         transition ResolveMemberDispatchAdmissionNoneRequired {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input ResolveMemberDispatchAdmission { lineage, host_answer }
-            guard "lineage_carries_none" {
+            guard "lineage_needs_none" {
                 lineage == MemberDispatchAdmissionLineage::NoneRecorded
                 || lineage == MemberDispatchAdmissionLineage::SourceBuiltUngated
                 || lineage == MemberDispatchAdmissionLineage::SourceRebuildUngated
+                || (lineage == MemberDispatchAdmissionLineage::Unknown && host_answer == MemberDispatchAdmissionHostAnswer::NoneDerived)
             }
             update {}
             to Running
@@ -39773,11 +39781,13 @@ impl Default for PlacedKickoffObligation {
 /// What the shell observed of the lineage one member build answers to
 /// ([`MobMachineInput::ResolveMemberDispatchAdmission`]): the lineage
 /// carries a tool dispatch admission when it is `Recorded`,
-/// `SourceBuiltGated` or `SourceRebuildGated`.
+/// `SourceBuiltGated` or `SourceRebuildGated`, and may carry one when it is
+/// `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MemberDispatchAdmissionLineage {
     /// The member's records name no lineage that ran under an admission (a
-    /// rebuild of a member no fork of a gated source seated).
+    /// rebuild of an ordinary member: its build takes the customizer's
+    /// answer to its resume request).
     #[default]
     NoneRecorded,
     /// A durable lineage record names a lineage that ran under an
@@ -39793,6 +39803,12 @@ pub enum MemberDispatchAdmissionLineage {
     SourceRebuildGated,
     /// As `SourceRebuildGated`, and the host's answer carries none.
     SourceRebuildUngated,
+    /// A rebuild of a fork-derived member whose spawn row records no lineage
+    /// that runs under an admission: a row written before spawn rows
+    /// recorded one reads so, so whether its lineage runs under one is not
+    /// known. The host is asked, and the build runs under what it derives,
+    /// an admission or none, as a fresh spawn the customizer answers does.
+    Unknown,
 }
 
 /// What the host's spawn customizer derived for one member build's tool
@@ -39812,18 +39828,20 @@ pub enum MemberDispatchAdmissionHostAnswer {
 /// ([`MobMachineEffect::MemberDispatchAdmissionResolved`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MemberDispatchAdmissionVerdict {
-    /// The lineage carries an admission and the host was not asked yet: ask
-    /// the host's spawn customizer for the build, then resolve again with
-    /// its answer.
+    /// The lineage carries an admission and the host was not asked yet, or
+    /// is `Unknown` and the host was not asked yet: ask the host's spawn
+    /// customizer for the build, then resolve again with its answer.
     #[default]
     AskHost,
-    /// The lineage carries an admission and the host derived one: the build
-    /// runs under it (with any admission its request carries).
+    /// The lineage carries an admission, or is `Unknown`, and the host
+    /// derived one: the build runs under it (with any admission its request
+    /// carries).
     Inherit,
     /// The lineage carries an admission and the host derived none: the
     /// build is refused; it never runs without one.
     Refused,
-    /// The lineage carries none: the build takes what its request carries.
+    /// The lineage carries none, or is `Unknown` and the host derived none:
+    /// the build takes what its request carries.
     NoneRequired,
 }
 

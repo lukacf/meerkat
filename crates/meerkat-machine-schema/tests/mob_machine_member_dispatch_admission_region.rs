@@ -7,9 +7,12 @@
 //! shell observed of the build's lineage and what the host's spawn
 //! customizer derived for it: a lineage that carries an admission asks the
 //! host first, inherits what it derived, and is refused when it derived
-//! none; any other lineage needs none. The verdict is a pure classification:
-//! it changes no state, in any phase. These rows drive the schema crate's
-//! own instantiation of the machine through every phase.
+//! none; a lineage that is not known (a fork-derived member whose spawn row
+//! records none, as rows written before they recorded one read) asks the
+//! host first and takes what it derived, an admission or none, and is never
+//! refused; any other lineage needs none. The verdict is a pure
+//! classification: it changes no state, in any phase. These rows drive the
+//! schema crate's own instantiation of the machine through every phase.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use meerkat_machine_schema::catalog::dsl::dsl_mob_machine;
@@ -35,13 +38,14 @@ const PHASES: [MobPhase; 4] = [
     MobPhase::Destroyed,
 ];
 
-const LINEAGES: [Lineage; 6] = [
+const LINEAGES: [Lineage; 7] = [
     Lineage::NoneRecorded,
     Lineage::Recorded,
     Lineage::SourceBuiltGated,
     Lineage::SourceBuiltUngated,
     Lineage::SourceRebuildGated,
     Lineage::SourceRebuildUngated,
+    Lineage::Unknown,
 ];
 
 const HOST_ANSWERS: [HostAnswer; 3] = [
@@ -62,6 +66,13 @@ fn carries_admission(lineage: Lineage) -> bool {
 
 /// The verdict the shell mirrors for one pair.
 fn expected(lineage: Lineage, host_answer: HostAnswer) -> Verdict {
+    if lineage == Lineage::Unknown {
+        return match host_answer {
+            HostAnswer::NotAsked => Verdict::AskHost,
+            HostAnswer::Derived => Verdict::Inherit,
+            HostAnswer::NoneDerived => Verdict::NoneRequired,
+        };
+    }
     if !carries_admission(lineage) {
         return Verdict::NoneRequired;
     }
@@ -210,7 +221,7 @@ fn an_ungated_lineage_needs_no_admission() {
     let mut authority = Authority::new();
     for lineage in LINEAGES
         .into_iter()
-        .filter(|lineage| !carries_admission(*lineage))
+        .filter(|lineage| !carries_admission(*lineage) && *lineage != Lineage::Unknown)
     {
         for host_answer in HOST_ANSWERS {
             assert_eq!(
@@ -220,6 +231,30 @@ fn an_ungated_lineage_needs_no_admission() {
             );
         }
     }
+}
+
+/// A lineage that is not known is built as a fresh spawn the host's
+/// customizer answers: the host is asked first, the build runs under the
+/// admission it derived, and under none when it derived none. It is never
+/// refused, so a host without a customizer builds it as before.
+#[test]
+fn an_unknown_lineage_asks_the_host_and_runs_under_its_answer() {
+    let mut authority = Authority::new();
+    assert_eq!(
+        resolve(&mut authority, Lineage::Unknown, HostAnswer::NotAsked).0,
+        Verdict::AskHost,
+        "the host is asked before the build"
+    );
+    assert_eq!(
+        resolve(&mut authority, Lineage::Unknown, HostAnswer::Derived).0,
+        Verdict::Inherit,
+        "the build runs under the admission the host derived"
+    );
+    assert_eq!(
+        resolve(&mut authority, Lineage::Unknown, HostAnswer::NoneDerived).0,
+        Verdict::NoneRequired,
+        "a build the host derived none for runs under none, and is not refused"
+    );
 }
 
 #[test]

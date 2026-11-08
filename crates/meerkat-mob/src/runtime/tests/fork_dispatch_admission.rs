@@ -2,13 +2,15 @@
 //! of a member. A host's admission (its approval gate) is process-local: no
 //! fork copies one. A fork of a member whose build runs under one asks the
 //! host's spawn customizer for the child and runs under what it derives, or
-//! is refused before anything is forked; every later build of such a child
+//! is refused before it is seated; every later build of such a child
 //! (a reload's warm revival, a restore after a restart, a wake, an explicit
 //! resume, a respawn successor) asks again and is refused when the host
 //! derives none. An ordinary member's rebuild runs under the admission the
-//! customizer's resume answer carries. These rows run on the mock durable
-//! session service, which records the exact admission each build carries,
-//! and drive a call through it to see which gates it passes.
+//! customizer's resume answer carries, and so does a rebuild of a fork child
+//! whose spawn row carries no lineage marker (one seated before spawn rows
+//! recorded it), when the customizer installs one. These rows run on the
+//! mock durable session service, which records the exact admission each
+//! build carries, and drive a call through it to see which gates it passes.
 
 use super::*;
 
@@ -131,13 +133,16 @@ struct GatedMob {
     customizer: Arc<GatingCustomizer>,
     log: AdmissionLog,
     storage: MobStorage,
+    /// The mob's stored event log, to rewrite a row as an older build wrote
+    /// it.
+    event_log: crate::store::InMemoryEventLogForTest,
 }
 
 impl GatedMob {
     async fn new(label: &str) -> Self {
         let service = Arc::new(MockSessionService::new());
         let _ = service.enable_runtime_adapter();
-        let storage = MobStorage::in_memory();
+        let (storage, event_log) = MobStorage::in_memory_with_event_log_for_test();
         let log = AdmissionLog::default();
         let customizer = GatingCustomizer::new(&log);
         let handle = MobBuilder::new(
@@ -155,6 +160,7 @@ impl GatedMob {
             customizer,
             log,
             storage,
+            event_log,
         }
     }
 
@@ -178,6 +184,18 @@ impl GatedMob {
         customizer: Arc<GatingCustomizer>,
         policy: Option<MemberRestorePolicy>,
     ) -> (MobHandle, Arc<MockSessionService>) {
+        self.crash_and_resume_with(stop_first, Some(customizer), policy)
+            .await
+    }
+
+    /// [`Self::crash_and_resume`] for a restarted host that composes
+    /// `customizer`, or no spawn customizer at all.
+    async fn crash_and_resume_with(
+        self,
+        stop_first: bool,
+        customizer: Option<Arc<GatingCustomizer>>,
+        policy: Option<MemberRestorePolicy>,
+    ) -> (MobHandle, Arc<MockSessionService>) {
         let sessions = self
             .handle
             .list_all_members()
@@ -198,8 +216,10 @@ impl GatedMob {
             self.storage.events.clone(),
             self.storage.runtime_metadata.clone(),
         ))
-        .with_session_service(self.service.clone())
-        .with_spawn_member_customizer(customizer);
+        .with_session_service(self.service.clone());
+        if let Some(customizer) = customizer {
+            builder = builder.with_spawn_member_customizer(customizer);
+        }
         if let Some(policy) = policy {
             builder = builder.with_member_restore_policy(policy);
         }
@@ -866,4 +886,206 @@ async fn a_fork_of_a_dormant_gated_member_runs_under_the_hosts_admission() {
     );
     assert_built_under_the_host_gate(&service, &fork.session_id, &log, "dormant-child-call").await;
     assert!(lineage(&resumed, &child).await);
+}
+
+/// Seat a gated source and a fork child of it, then drop the dispatch
+/// admission lineage marker from the child's spawn row, as a fork child
+/// seated before spawn rows recorded it reads back. Answers the child's
+/// session.
+async fn unmarked_fork_child(
+    mob: &GatedMob,
+    source: &AgentIdentity,
+    child: &AgentIdentity,
+) -> SessionId {
+    let child_session = gated_source_and_child(mob, source, child).await;
+    assert_eq!(
+        mob.event_log.strip_dispatch_admission_lineage(child).await,
+        1,
+        "the child's spawn row carried the marker"
+    );
+    child_session
+}
+
+/// The upgrade row: a fork child whose spawn row carries no lineage marker
+/// (seated before spawn rows recorded one) is not taken to run under none.
+/// Each rebuild of it asks the host's customizer for its own identity and
+/// runs under what it installs, as a fresh spawn would: here, the restore
+/// after a restart and a reload's warm revival.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_child_seated_before_lineage_records_is_gated_when_it_is_rebuilt() {
+    let mob = GatedMob::new("fork-admission-unmarked-rebuild").await;
+    let source = AgentIdentity::from("zz-gated-source");
+    let child = AgentIdentity::from("aa-gated-child");
+    let child_session = unmarked_fork_child(&mob, &source, &child).await;
+    let builds = member_build_count(&mob.service, &child).await;
+    let log = AdmissionLog::default();
+    let restarted_host = GatingCustomizer::new(&log);
+    let (resumed, service) = mob
+        .crash_and_resume(
+            false,
+            restarted_host.clone(),
+            Some(MemberRestorePolicy::Eager),
+        )
+        .await;
+    assert!(
+        !lineage(&resumed, &child).await,
+        "the replayed spawn row records no lineage"
+    );
+    assert_eq!(
+        member_build_count(&service, &child).await,
+        builds + 1,
+        "the child is restored"
+    );
+    assert!(
+        restarted_host
+            .asked_for(&child)
+            .contains(&SpawnSource::Resume),
+        "the restarted host is asked for the child: {:?}",
+        restarted_host.asked_for(&child)
+    );
+    assert_built_under_the_host_gate(&service, &child_session, &log, "restored-call").await;
+
+    MobSessionService::discard_live_session(service.as_ref(), &child_session)
+        .await
+        .expect("discard the child's live session");
+    resumed
+        .member(&child)
+        .await
+        .expect("the child's handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("the warm revival rebuilds the child");
+    assert_eq!(member_build_count(&service, &child).await, builds + 2);
+    assert_built_under_the_host_gate(&service, &child_session, &log, "revived-call").await;
+}
+
+/// The same unmarked child as a fork source, before this process builds it
+/// (a fork the `fork_off` tool takes goes through the same seat): its next
+/// build would ask the host for its own identity, so the fork's child is
+/// seated from a lineage that runs under an admission and runs under the
+/// host's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_of_a_fork_child_seated_before_lineage_records_runs_under_the_hosts_admission() {
+    let mob = GatedMob::new("fork-admission-unmarked-source").await;
+    let source = AgentIdentity::from("gated-source");
+    let child = AgentIdentity::from("gated-child");
+    unmarked_fork_child(&mob, &source, &child).await;
+    let log = AdmissionLog::default();
+    let restarted_host = GatingCustomizer::new(&log);
+    let (resumed, service) = mob
+        .crash_and_resume(false, restarted_host.clone(), None)
+        .await;
+    let child_builds = member_build_count(&service, &child).await;
+    let grandchild = AgentIdentity::from("unmarked-child-fork");
+    let fork = resumed
+        .fork_member(&child, worker_spec(&grandchild), None)
+        .await
+        .expect("fork the unmarked child");
+    assert_eq!(
+        member_build_count(&service, &child).await,
+        child_builds,
+        "the unmarked child is not woken"
+    );
+    assert_eq!(
+        restarted_host.asked_for(&grandchild),
+        [SpawnSource::PersistedForkResume],
+        "the host is asked for the fork's child at its seat"
+    );
+    assert_built_under_the_host_gate(&service, &fork.session_id, &log, "grandchild-call").await;
+    assert!(lineage(&resumed, &grandchild).await);
+}
+
+/// A host whose customizer installs no admission for the same unmarked
+/// child, or a host without a spawn customizer, rebuilds it as before:
+/// nothing refuses it, and it runs under no admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_that_derives_no_admission_rebuilds_a_fork_child_seated_before_lineage_records_as_before()
+ {
+    for with_customizer in [true, false] {
+        let mob = GatedMob::new("fork-admission-unmarked-ungated").await;
+        let source = AgentIdentity::from("zz-gated-source");
+        let child = AgentIdentity::from("aa-gated-child");
+        let child_session = unmarked_fork_child(&mob, &source, &child).await;
+        let builds = member_build_count(&mob.service, &child).await;
+        let restarted_host = with_customizer.then(|| {
+            let host = GatingCustomizer::new(&AdmissionLog::default());
+            host.leave_ungated(&child);
+            host
+        });
+        let (resumed, service) = mob
+            .crash_and_resume_with(false, restarted_host, Some(MemberRestorePolicy::Eager))
+            .await;
+        assert_eq!(
+            member_build_count(&service, &child).await,
+            builds + 1,
+            "the child is restored (customizer: {with_customizer})"
+        );
+        assert!(
+            resumed
+                .restore_diagnostics
+                .read()
+                .await
+                .get(&child)
+                .is_none(),
+            "nothing refuses the child (customizer: {with_customizer})"
+        );
+        assert!(
+            last_admission(&service, &child_session).await.is_none(),
+            "the child runs under no admission, as before (customizer: {with_customizer})"
+        );
+    }
+}
+
+/// A policy auto-spawn of a host that gates its members through its spawn
+/// customizer: a `SubmitWork` to an identity no member holds seats it from
+/// the spawn policy, and the customizer is asked for its tool dispatch
+/// admission (`SpawnSource::PolicySpawn`). The member runs under what it
+/// installs, and so does a fork of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_policy_auto_spawn_runs_under_the_hosts_admission_and_so_does_its_fork() {
+    let mob = GatedMob::new("policy-spawn-admission").await;
+    mob.handle
+        .set_spawn_policy(Some(Arc::new(StaticLeadSpawnPolicy)))
+        .await
+        .expect("set the spawn policy");
+    let target = AgentIdentity::from("policy-spawned");
+    mob.handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for a policy spawn".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await
+        .expect("the policy auto-spawn seats the member");
+    let session = mob
+        .handle
+        .resolve_bridge_session_id(&target)
+        .await
+        .expect("the member's session");
+    assert_eq!(
+        mob.customizer.asked_for(&target),
+        [SpawnSource::PolicySpawn],
+        "the host is asked for the member once, at its policy spawn"
+    );
+    assert_built_under_the_host_gate(&mob.service, &session, &mob.log, "policy-call").await;
+
+    wait_for_fork_source_settled(&mob.handle, &session).await;
+    let child = AgentIdentity::from("policy-spawned-fork");
+    let fork = mob
+        .handle
+        .fork_member(&target, worker_spec(&child), None)
+        .await
+        .expect("fork the policy-spawned member");
+    assert_eq!(
+        mob.customizer.asked_for(&child),
+        [SpawnSource::PersistedForkResume],
+        "the host is asked for the fork's child at its seat"
+    );
+    assert_built_under_the_host_gate(&mob.service, &fork.session_id, &mob.log, "policy-fork-call")
+        .await;
+    assert!(lineage(&mob.handle, &child).await);
 }

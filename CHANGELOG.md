@@ -938,6 +938,19 @@ them.
   requester, never for the requester of the model run whose result the app
   shows, and an ingress that names an unqualified principal is refused.
 
+- `meerkat-mob`: `MobHandle::wait_member_lifecycle_settled(identity,
+  timeout)` waits until MobMachine holds no lifecycle operation of the
+  member in flight (its spawn, a wake, its retirement, its identity entry's
+  removal or archive, or its held construction): the facts on which the
+  declared apply leaves the identity's declaration to the next apply
+  (`DeclaredEntryOutcome::Deferred`), so a host that waits and declares the
+  identity again is answered on the settled facts. It reads the machine
+  state the actor publishes (`MobMachineState::member_lifecycle_in_flight_for_identity`,
+  the `List` scope) and wakes on each state the actor publishes, with no
+  actor command and no polling, and answers the new
+  `MemberLifecycleSettlement`: `NothingInFlight`, `Settled`, or
+  `StillInFlight` when the timeout ran out.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the

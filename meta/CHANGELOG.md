@@ -545,6 +545,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sign-out, or a new sign-in in the same browser), the review stays open
   but nobody can read or answer it, and a new one starts only after the
   application restarts.
+- Members of an ephemeral mob spec keep the route they were built with for
+  `delegate`: after an in-place model, provider, endpoint or auth-binding
+  switch, the member's helper still runs on its build-time route and
+  resolves its credentials through the realm. Their session service keeps
+  no retained session metadata, which is where `delegate` reads the
+  current identity (Meerkat's known limitation for `EphemeralSessionService`).
 
 ## [0.9.10] - 2026-11-04
 

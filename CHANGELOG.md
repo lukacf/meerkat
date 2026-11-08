@@ -42,7 +42,11 @@ them.
   through, so code that builds a `Profile` literally must set it (`None`
   keeps the realm's resolution for the provider, as before). A spawn that
   names its own binding wins over the profile's. A `[profiles.<name>]`
-  table may name it. The adaptive layer-decision schema does not offer it,
+  table in an operator's own definition may name it; a mob pack's
+  `definition.json` and a Connect application setup definition may not:
+  `meerkat-mob-pack` validation refuses such a pack
+  (`PackValidationError::BadDefinition`) and Connect refuses such a setup
+  definition. The adaptive layer-decision schema does not offer it,
   and an adaptive layer refuses a profile that names one. A member placed
   on a member host does not carry it there.
 
@@ -786,13 +790,18 @@ them.
   resolved its credentials through the realm's default binding. The
   session's implicit delegation mob records that route, binding included,
   on its `delegate` profile, and the first `delegate` after the route
-  changed replaces the mob, as a model change did. A session with no auth
+  changed replaces the mob, as a model change did. Replacing the mob
+  destroys everything in it, members the model spawned there included, and
+  that now also happens after an in-place switch. A session with no auth
   binding leaves its helpers to the realm's resolution, as before. An
   implicit mob made by an earlier release records no binding, so a session
-  that has one gets its implicit mob replaced at its next `delegate`. The
-  current identity is read from the session's retained metadata; a session
-  on `EphemeralSessionService`, which keeps none, still delegates on the
-  route it was built with. (#2102, thanks @zond)
+  that has one gets its implicit mob replaced, once, at its next
+  `delegate`. Two cases are left as they were: a `delegate` given an inline
+  `tooling` profile builds its helper on that profile, which names no
+  binding, and a helper placed on another host resolves its credentials on
+  that host. The current identity is read from the session's retained
+  metadata; a session on `EphemeralSessionService`, which keeps none, still
+  delegates on the route it was built with. (#2102, thanks @zond)
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends

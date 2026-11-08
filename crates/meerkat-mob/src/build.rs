@@ -1794,6 +1794,53 @@ mod tests {
         );
     }
 
+    /// An operator's own TOML definition keeps the field: a
+    /// `[profiles.<name>]` table that names an `auth_binding` parses, and its
+    /// member builds on that binding. (A pack's or an application setup's
+    /// definition that names one is refused where it is read.)
+    #[tokio::test]
+    async fn test_an_operator_toml_profile_auth_binding_builds_on_that_binding() {
+        let def = crate::definition::MobDefinition::from_toml(
+            "[mob]\nid = \"operator\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-5\"\nauth_binding = { realm = \"tenant_a\", binding = \"team_key\" }\n\n[profiles.worker.tools]\ncomms = true\n",
+        )
+        .expect("an operator definition names a profile binding");
+        let profile_name = ProfileName::from("worker");
+        let agent_identity = AgentIdentity::from("worker-1");
+        let profile = def.profiles[&profile_name]
+            .as_inline()
+            .expect("inline worker profile");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("team_key").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        assert_eq!(profile.auth_binding.as_ref(), Some(&binding));
+
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &profile_name,
+            agent_identity: &agent_identity,
+            profile,
+            definition: &def,
+            realm_profile_store: None,
+            external_tools: None,
+            compaction_curator_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            mob_incarnation: Some(crate::tests::fresh_live_incarnation()),
+            tool_access_policy: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+        assert_eq!(config.auth_binding, Some(binding));
+    }
+
     /// Spawn-site threading: the spec's `tool_access_policy` must reach
     /// `AgentBuildConfig.tool_access_policy` (the seam the factory gates on).
     #[tokio::test]

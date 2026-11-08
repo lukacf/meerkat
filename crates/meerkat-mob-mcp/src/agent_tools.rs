@@ -210,8 +210,8 @@ pub struct AgentMobToolSurface {
     owner_bridge_session_id: SessionId,
     /// The model the owning agent was built on. A `delegate` runs its helper
     /// on the session's current route ([`Self::current_route`]); this one
-    /// stands in only where the session service records no durable identity
-    /// for the session, which then has not switched in place.
+    /// stands in only where the session service has no retained metadata for
+    /// the session to read that route from.
     model: String,
     /// The provider the owning agent's build resolved for `model`, named with
     /// it on the build-time route. `None` on a surface built by [`Self::new`]
@@ -1106,11 +1106,14 @@ impl AgentMobToolSurface {
     /// session runs, on the session's credentials.
     ///
     /// The read goes through the service's retained metadata, never through
-    /// the session's own task, which is waiting for this tool. A service that
-    /// keeps no durable metadata, or has none recorded for the session yet,
-    /// has not switched it in place, so the route the session was built with
-    /// is still its route. Any other failed read refuses the delegate: the
-    /// helper never runs on a route the session may have left.
+    /// the session's own task, which is waiting for this tool. A session the
+    /// service has recorded no metadata for yet has not switched in place (a
+    /// switch commits the session first), so the route it was built with is
+    /// still its route. A service that keeps no retained metadata (the
+    /// ephemeral session service) answers `Unsupported`: its sessions
+    /// delegate on the route they were built with, without a binding, even
+    /// after a switch. Any other failed read refuses the delegate rather than
+    /// guess the route.
     async fn current_route(&self) -> Result<DelegateRoute, MobError> {
         let service = self.state.session_service();
         let session_id = self.owner_bridge_session_id.clone();

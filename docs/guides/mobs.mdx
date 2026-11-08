@@ -102,7 +102,10 @@ next `delegate` follows the switch. The helper also resolves its credentials
 through the session's auth binding; a session with none leaves the helper to
 the realm's resolution. A `delegate` whose session's route changed since the
 last one replaces the session's implicit mob, and its result says it created
-the mob.
+the mob. The current identity is read from the session's stored metadata,
+which `rkat` and the JSON-RPC, REST and MCP servers keep; a session on the
+in-memory ephemeral session service, which keeps none, delegates on the route
+it was built with.
 
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 

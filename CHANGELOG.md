@@ -789,7 +789,10 @@ them.
   changed replaces the mob, as a model change did. A session with no auth
   binding leaves its helpers to the realm's resolution, as before. An
   implicit mob made by an earlier release records no binding, so a session
-  that has one gets its implicit mob replaced at its next `delegate`.
+  that has one gets its implicit mob replaced at its next `delegate`. The
+  current identity is read from the session's retained metadata; a session
+  on `EphemeralSessionService`, which keeps none, still delegates on the
+  route it was built with.
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends

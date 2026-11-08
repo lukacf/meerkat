@@ -316,11 +316,11 @@ them.
 
 ### Added
 
-- `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-rpc`,
-  `meerkat-contracts`, the Python and TypeScript SDKs: a host can ask a
-  live session to compact now, without a rebuild and without changing any
-  compaction threshold. `MeerkatMachine::request_compaction` records the
-  request on the session's runtime registration (MeerkatMachine
+- `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-mob-mcp`,
+  `meerkat-rpc`, `meerkat-contracts`, the Python and TypeScript SDKs: a host
+  can ask a live session to compact now, without a rebuild and without
+  changing any compaction threshold. `MeerkatMachine::request_compaction`
+  records the request on the session's runtime registration (MeerkatMachine
   `RequestCompaction`) and answers `CompactionRequestReceipt::Requested`, or
   `AlreadyRequested` when a request no check consumed yet was already
   recorded. The session's next compaction check consumes it
@@ -343,7 +343,8 @@ them.
   answers `outcome` `requested` or `already_requested`
   (`WireCompactionRequestOutcome`); a session with no live runtime in the
   server is refused `-32003`. `mob/compact_member` (`MobCompactMemberParams`,
-  `MobCompactMemberResult`, `MobHandle::compact_member`, `SendCommand`-scoped)
+  `MobCompactMemberResult`, `MobHandle::compact_member`,
+  `MobMcpState::mob_compact_member`, `SendCommand`-scoped)
   asks the same of a live mob member without a respawn: a dormant or waking
   member is refused `MemberSessionNotLive` and never woken, a placed member
   `UnsupportedForMode`. Python `Session.compact()` and `Mob.compact_member()`,

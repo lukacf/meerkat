@@ -4775,7 +4775,10 @@ where
                     }
                     if compact_on_request || compactor.should_compact(&ctx) {
                         // A writer past its self-fence window sends no
-                        // summarization request either.
+                        // summarization request either. A host's request
+                        // this check consumed goes with a refusal here: the
+                        // run stops (or is suspended) at this check, and
+                        // nothing is compacted or published for it.
                         self.check_dispatch_fence().await?;
                         // A run in flight keeps its request and its newest
                         // round verbatim: the rows before it are folded
@@ -4791,6 +4794,17 @@ where
                                 run_id = ?self.runtime_started_run_id,
                                 "compaction skipped: nothing to fold outside the open run's request and newest round"
                             );
+                            // A host's request this check consumed is
+                            // answered first, so a failed cadence save below
+                            // still reports it: nothing was compacted.
+                            if let Some(run_id) = request_consumed_by {
+                                self.publish_requested_compaction_skipped(
+                                    run_id,
+                                    crate::event::RequestedCompactionSkipReason::NothingToFold,
+                                    event_tx,
+                                )
+                                .await;
+                            }
                             self.compaction_cadence
                                 .last_compaction_attempt_boundary_index =
                                 Some(current_boundary_index);
@@ -4808,16 +4822,6 @@ where
                                     "failed to persist session compaction cadence metadata: {error}"
                                 ))
                             })?;
-                            // A host's request this check consumed is
-                            // answered: nothing was compacted.
-                            if let Some(run_id) = request_consumed_by {
-                                self.publish_requested_compaction_skipped(
-                                    run_id,
-                                    crate::event::RequestedCompactionSkipReason::NothingToFold,
-                                    event_tx,
-                                )
-                                .await;
-                            }
                             continue;
                         };
                         self.tool_application_observations.invalidate();

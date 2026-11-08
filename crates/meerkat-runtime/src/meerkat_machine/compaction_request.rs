@@ -25,8 +25,19 @@ impl MeerkatMachine {
     /// consumed there). The compaction publishes the session's ordinary
     /// `CompactionStarted`, then `CompactionCompleted` or `CompactionFailed`;
     /// a check that consumes the request and compacts nothing publishes
-    /// `RequestedCompactionSkipped` with the reason instead. A session built
-    /// without a compactor has no check to consume the request.
+    /// `RequestedCompactionSkipped` with the reason instead. A
+    /// `nothing_to_fold` skip records a compaction attempt like any other,
+    /// so the compactor's ordinary trigger may then wait up to
+    /// `min_turns_between_compactions` checks. A check whose store fence
+    /// refuses the writer (or suspends the run) after it consumed the
+    /// request stops there: the request is dropped, nothing is compacted or
+    /// published for it, and the host asks again.
+    ///
+    /// Only an agent with a compactor consumes a request. A session whose
+    /// agent has none (built without the `session-compaction` feature of the
+    /// facade, or composed by a host without a compactor) never consumes it:
+    /// the request stays held, and every later request answers
+    /// [`CompactionRequestReceipt::AlreadyRequested`].
     ///
     /// The request is a fact of this registration only: it is never
     /// persisted. A re-registration of the same session keeps it; an

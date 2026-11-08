@@ -1281,12 +1281,19 @@ consumes the request compacts nothing, it publishes
 check it was and the `reason`: `first_model_request` (the check came before
 the session's first model request) or `nothing_to_fold` (the turn in flight
 keeps its request and newest round, and nothing else was left to fold).
+A `nothing_to_fold` skip records a compaction attempt like any other, so the
+ordinary trigger may then wait up to `min_turns_between_compactions` checks.
+If a store fence gap stops the run at the check that consumed the request,
+the request is dropped: nothing is compacted or published for it, and a host
+asks again.
 
 The request lives in the session's runtime registration only. It is never
 persisted: a restart of the server, an unload or a reload of the session
 drops it, and a per-build threshold override is neither read nor changed. A
-server built without compaction (the `session-compaction` feature) has no
-check to consume it, and it stays requested.
+session whose agent has no compactor (a server built without the
+`session-compaction` feature, or a host that composes its agents without
+one) never consumes a request: it stays requested, and every later request
+answers `already_requested`.
 
 <CodeGroup>
 ```json Request
@@ -1304,9 +1311,16 @@ compacts once). A request never loads or wakes a session. Refusals:
 
 - an unknown or archived session: `-32001` (session not found);
 - a session with no live runtime in this server (not opened since the server
-  started, unloaded, or a mob member's session its mob has not woken):
-  `-32003` (session not running);
-- a retired or stopped session runtime: `-32600`.
+  started, unloaded, a deferred session before its first turn, or a mob
+  member's session its mob has not woken): `-32003` (session not running);
+- a session runtime that is initializing, retired or stopped: `-32600`;
+- a session runtime that is being unregistered: `-32002` (session busy,
+  retryable; `data.code` is `SESSION_BUSY`);
+- a session runtime that needs a durability reload: `-32603`.
+
+A request that races the session's unregister can answer `-32600` where a
+later one answers `-32003`: the runtime went between the server's check and
+the request. No refusal records anything.
 
 `mob/compact_member` (`mob_id`, `agent_identity`) asks the same of a live mob
 member, without a respawn, and answers the same `outcome` with the member's

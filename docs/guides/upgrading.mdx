@@ -137,6 +137,17 @@ so every run admitted more than 15 minutes before a graceful restart ended
 be when it runs: a kept input now runs after a restart shorter than
 `max_age`, whenever it was admitted.
 
+### Upgrade the SDKs with the server
+
+A Python, TypeScript or Web SDK of 0.9.10 or earlier refuses the new
+`requested_compaction_skipped` event type, as it does any event type newer
+than its contract. A session publishes it when a host's compaction request
+(`session/compact`, `mob/compact_member`) is consumed by a check that has
+nothing to compact.
+
+**Do:** upgrade the SDKs together with the server, before any host asks a
+session to compact.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

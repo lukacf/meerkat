@@ -387,15 +387,16 @@ export class DeferredSession {
   }
 
   /**
-   * Ask this live session's next compaction check to compact. The session
-   * is not rebuilt and its compaction thresholds do not change: the check
-   * before its next model request (in the running turn, or in the next one)
+   * Ask this session's next compaction check to compact. The session is not
+   * rebuilt and its compaction thresholds do not change: the check before
+   * its next model request (in the running turn, or in the next one)
    * compacts. The outcome is `requested`, or `already_requested` when a
    * request no check consumed yet was already recorded. A check that
    * consumes the request and has nothing to compact publishes the
    * `requested_compaction_skipped` event with its `reason` instead of
-   * `compaction_started`. A session with no live runtime in the server is
-   * refused, never loaded or woken.
+   * `compaction_started`. A deferred session has no runtime until its first
+   * turn registers it: until then the call is refused with `-32003`
+   * (session not running), and it never loads or wakes the session.
    */
   async compact(): Promise<CompactSessionResult> {
     return this._client._compact(this._id);

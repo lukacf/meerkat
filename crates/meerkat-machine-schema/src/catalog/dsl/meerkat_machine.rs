@@ -8820,7 +8820,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // The verdict for a host's compaction request.
             CompactionRequestResolved { verdict: Enum<CompactionRequestVerdict> },
             // The compaction check of `run_id` consumed the host's request:
-            // the check compacts without asking the compactor's trigger.
+            // the check compacts without asking the compactor's trigger, or,
+            // with nothing to compact, skips and says so.
             CompactionRequestConsumed { run_id: RunId },
         }
 
@@ -40768,7 +40769,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // - Taken: the run is current, its turn calls the model and a
         //   request is held: the request is consumed, and the check compacts
         //   without asking the compactor's trigger (its thresholds and
-        //   cadence).
+        //   cadence), or, with nothing to compact (before the session's first
+        //   model request, or nothing to fold), skips and says so.
         // - None: the same with no request held: nothing changes, and the
         //   compactor's trigger decides as before.
         // - Every other case (another run is current, the turn is not

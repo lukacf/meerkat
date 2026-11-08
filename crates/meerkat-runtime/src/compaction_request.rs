@@ -23,7 +23,9 @@ pub enum CompactionRequestReceipt {
     /// the reason.
     Requested,
     /// The registration already held a request that no check consumed yet:
-    /// nothing changed, and the next check compacts once.
+    /// nothing changed, and the next check compacts once. A session whose
+    /// agent has no compactor never consumes a request, so it keeps
+    /// answering this after its first request.
     AlreadyRequested,
 }
 

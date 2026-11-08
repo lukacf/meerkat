@@ -1553,12 +1553,14 @@ pub trait TurnStateHandle: Send + Sync {
     /// Consume a host's compaction request at the compaction check of
     /// `run_id`: `Ok(true)` when the authority held one and this check
     /// consumed it, so the check compacts without asking the compactor's
-    /// trigger. The runtime authority decides (MeerkatMachine
+    /// trigger, or, with nothing to compact, skips and says so
+    /// ([`crate::event::AgentEvent::RequestedCompactionSkipped`]). The
+    /// runtime authority decides (MeerkatMachine
     /// `ConsumeCompactionRequest`): only the current run's check, while its
     /// turn calls the model, consumes a request; any other call leaves a held
-    /// request in place and answers `Ok(false)`. The default answers
-    /// `Ok(false)`: an authority that no host can ask for a compaction holds
-    /// no request.
+    /// request in place and answers `Ok(false)`. An agent without a
+    /// compactor never asks. The default answers `Ok(false)`: an authority
+    /// that no host can ask for a compaction holds no request.
     fn consume_compaction_request(&self, run_id: RunId) -> Result<bool, DslTransitionError> {
         let _ = run_id;
         Ok(false)

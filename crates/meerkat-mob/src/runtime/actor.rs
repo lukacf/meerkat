@@ -42648,7 +42648,8 @@ impl MobActor {
     /// `MemberSessionNotLive`, and nothing wakes it. A placed member's
     /// runtime lives on its member host (`UnsupportedForMode`). A member
     /// runtime that needs a durability reload is `MemberReloadRequired`. The
-    /// request runs on a DETACHED task (ADJ-P4-12).
+    /// request runs on a detached task, so the actor loop never waits on the
+    /// member's runtime.
     async fn handle_request_member_compaction(
         &mut self,
         agent_identity: AgentIdentity,

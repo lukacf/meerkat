@@ -1636,7 +1636,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         ([("content-type", "text/event-stream")], payload)
     }
 
@@ -2408,6 +2408,63 @@ mod tests {
             }
             server.abort();
         }
+    }
+
+    /// A refusal the model streams on a Copilot Chat Completions route ends
+    /// the turn as a refusal at `[DONE]`, with no finish reason: it is the
+    /// response's own ending, not an incomplete stream.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn copilot_chat_stream_refusal_without_a_finish_reason_is_a_refusal() {
+        let refusal = r#"{"choices":[{"index":0,"delta":{"refusal":"I can't help with that."}}]}"#;
+        let (base, server) = spawn_copilot_chat_stub(&[refusal, "[DONE]"]).await;
+        for (route, client) in copilot_chat_clients(&base) {
+            let events = copilot_chat_events(&client).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Ok(meerkat_llm_core::LlmEvent::Done {
+                        outcome: meerkat_llm_core::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::Refusal,
+                            ..
+                        }
+                    }))
+                ),
+                "{route}: the refusal ends the turn: {:?}",
+                events.last()
+            );
+        }
+        server.abort();
+    }
+
+    /// Copilot's chat stream discipline stays on its own routes: a plain
+    /// compatible Chat Completions client still completes a stream that
+    /// ends at `[DONE]` without a finish reason.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn a_plain_compatible_chat_stream_without_a_finish_reason_completes() {
+        let (base, server) = spawn_copilot_chat_stub(&[COPILOT_CHAT_TEXT, "[DONE]"]).await;
+        let client: Arc<dyn LlmClient> = Arc::new(crate::OpenAiCompatibleClient::new(
+            crate::client_compatible::OpenAiCompatibleMode::ChatCompletions,
+            "gpt-test".to_string(),
+            base,
+            None,
+            true,
+            false,
+            false,
+        ));
+        let events = copilot_chat_events(&client).await;
+        server.abort();
+        assert!(
+            matches!(
+                events.last(),
+                Some(Ok(meerkat_llm_core::LlmEvent::Done {
+                    outcome: meerkat_llm_core::LlmDoneOutcome::Success { .. }
+                }))
+            ),
+            "{:?}",
+            events.last()
+        );
     }
 }
 

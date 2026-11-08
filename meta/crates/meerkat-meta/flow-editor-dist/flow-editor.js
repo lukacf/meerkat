@@ -8316,6 +8316,12 @@ ${JSON.stringify(document2)}`;
       controllerConfig.rpcUrl = rpcUrl;
     }
   }
+  function configureCallerScope(capabilities) {
+    const scope = capabilities?.auth?.caller_scope;
+    controllerConfig.callerScope = typeof scope === "string" ? scope.trim() : "";
+    controllerConfig.callerScopeStale = false;
+    return controllerConfig.callerScope;
+  }
   function rpcPath() {
     return controllerConfig.rpcUrl || "/flow-editor/rpc";
   }
@@ -8481,6 +8487,11 @@ ${JSON.stringify(document2)}`;
     return { ...controllerConfig.rpcMethods };
   }
   async function callRpc(method, params, options = {}) {
+    if (controllerConfig.callerScopeStale && method !== CAPABILITIES_METHOD) {
+      configureCallerScope(await callRpc(CAPABILITIES_METHOD, {}, options));
+    }
+    const requestParams = params || {};
+    const scopedParams = controllerConfig.callerScope && typeof requestParams === "object" && !Array.isArray(requestParams) && requestParams.expected_caller_scope === void 0 ? { ...requestParams, expected_caller_scope: controllerConfig.callerScope } : requestParams;
     const response = await fetch(rpcPath(), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -8489,26 +8500,40 @@ ${JSON.stringify(document2)}`;
         jsonrpc: "2.0",
         id: ++requestId,
         method,
-        params: params || {}
+        params: scopedParams
       })
     });
     if (!response.ok) {
+      if (response.status === 401) controllerConfig.callerScopeStale = true;
       throw new Error(`Meta API ${response.status}`);
     }
     const payload = await response.json();
     if (payload.error) {
+      if (payload.error.code === CALLER_REFUSED_CODE) controllerConfig.callerScopeStale = true;
       throw new Error(payload.error.message || "Meta API error");
     }
     return payload.result;
   }
-  var controllerConfig, requestId;
+  var controllerConfig, CAPABILITIES_METHOD, CALLER_REFUSED_CODE, requestId;
   var init_client = __esm({
     "../packages/flow-editor-core/src/rpc/client.ts"() {
       init_constants();
       controllerConfig = {
         rpcUrl: "/flow-editor/rpc",
-        rpcMethods: { ...RPC_METHODS }
+        rpcMethods: { ...RPC_METHODS },
+        // The caller this editor acts for, as its Meta surface's capabilities
+        // named it (`auth.caller_scope`). Every request carries it as
+        // `expected_caller_scope`, so Meta refuses a change made after another
+        // caller signed in to this browser. Empty until the capabilities load,
+        // and on a surface that names no caller.
+        callerScope: "",
+        // Whether the caller must be read again before the next request: an
+        // answer said it may have changed (a 401, or Meta's refusal of the
+        // caller). A capabilities read clears it.
+        callerScopeStale: false
       };
+      CAPABILITIES_METHOD = "meta/capabilities";
+      CALLER_REFUSED_CODE = -32056;
       requestId = 0;
     }
   });
@@ -9934,7 +9959,9 @@ ${JSON.stringify(document2)}`;
     return callRpc(rpcMethod("schema"), {}, options);
   }
   async function loadCapabilities(options = {}) {
-    return callRpc("meta/capabilities", {}, options);
+    const capabilities = await callRpc("meta/capabilities", {}, options);
+    configureCallerScope(capabilities);
+    return capabilities;
   }
   async function loadCatalogs(options = {}) {
     return callRpc(rpcMethod("catalogs"), {}, options);

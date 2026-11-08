@@ -244,21 +244,31 @@ fn copilot_item_kind(item_type: &str) -> &str {
     }
 }
 
-/// The kind of item a Responses stream event of `event_type` that names its
-/// item by `item_id` belongs to; `None` for events that name no item.
-fn copilot_event_kind(event_type: &str) -> Option<&'static str> {
+/// What a Responses stream event that names its item by `item_id` says
+/// about that item's kind.
+enum NamedItem {
+    /// An event of one kind of item.
+    Of(&'static str),
+    /// A content part (`response.content_part.*`): a message's and a
+    /// reasoning item's content share these events, which name the item but
+    /// not its kind.
+    Part,
+}
+
+/// What a Responses stream event of `event_type` says about the kind of the
+/// item it names by `item_id`; `None` for events that name no item.
+fn copilot_event_kind(event_type: &str) -> Option<NamedItem> {
     let event = event_type.strip_prefix("response.")?;
-    if event.starts_with("output_text.")
-        || event.starts_with("content_part.")
-        || event.starts_with("refusal.")
-    {
-        Some("message")
+    if event.starts_with("content_part.") {
+        Some(NamedItem::Part)
+    } else if event.starts_with("output_text.") || event.starts_with("refusal.") {
+        Some(NamedItem::Of("message"))
     } else if event.starts_with("reasoning") {
-        Some("reasoning")
+        Some(NamedItem::Of("reasoning"))
     } else if event.starts_with("function_call_arguments.") {
-        Some("function_call")
+        Some(NamedItem::Of("function_call"))
     } else if event.starts_with("web_search_call.") {
-        Some("web_search_call")
+        Some(NamedItem::Of("web_search_call"))
     } else {
         None
     }
@@ -334,7 +344,8 @@ pub(crate) fn copilot_coverage_mismatch(error: LlmError) -> LlmError {
 /// moved or merged.
 ///
 /// The terminal output is paired with the slots by each item's own
-/// `output_index`, else by its array position, and is taken only when it
+/// `output_index` (one that is not an unsigned integer is a mismatch), else
+/// by its array position, and is taken only when it
 /// lines up with them: exactly one terminal item for every slot the stream
 /// announced and none for another, each of its slot's kind and, where the
 /// stream completed the slot, the same item apart from its id
@@ -379,9 +390,11 @@ impl CopilotSlots {
             .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
         {
-            Some(item_type) => copilot_item_kind(item_type).to_owned(),
+            Some(item_type) => Some(copilot_item_kind(item_type).to_owned()),
             None => match copilot_event_kind(event_type) {
-                Some(kind) => kind.to_owned(),
+                Some(NamedItem::Of(kind)) => Some(kind.to_owned()),
+                // A content part names its item's slot, not its kind.
+                Some(NamedItem::Part) => None,
                 None => return Ok(()),
             },
         };
@@ -415,13 +428,13 @@ impl CopilotSlots {
             return Ok(());
         };
         for id in carried_item_id.iter().chain(named_item_id.iter()) {
-            self.place(index, id, &kind)?;
+            self.place(index, id, kind.as_deref())?;
         }
         let Some(slot) = self.slots.get_mut(&index) else {
             // An event that carries no id cannot open a slot.
             return Ok(());
         };
-        if let Some(slot_kind) = slot.kind.as_deref()
+        if let (Some(slot_kind), Some(kind)) = (slot.kind.as_deref(), kind.as_deref())
             && slot_kind != kind
         {
             return Err(copilot_mismatch(format!(
@@ -436,6 +449,10 @@ impl CopilotSlots {
         if let Some(item_id) = item_id {
             item_id.clone_from(&slot.id);
         }
+        // An added or completed item states its kind (its `type`).
+        let Some(kind) = kind else {
+            return Ok(());
+        };
         let (first, again) = match event_type {
             "response.output_item.added" => (&mut slot.added, "added"),
             "response.output_item.done" => (&mut slot.completed, "completed"),
@@ -455,9 +472,10 @@ impl CopilotSlots {
         Ok(())
     }
 
-    /// Record `id`, carried by an event of a `kind` item at `index`: the
-    /// first id a slot sees is its identity.
-    fn place(&mut self, index: u64, id: &str, kind: &str) -> Result<(), LlmError> {
+    /// Record `id`, carried by an event at `index` of a `kind` item (`None`:
+    /// an event that does not say which kind): the first id a slot sees is
+    /// its identity, and the first kind stated is its kind.
+    fn place(&mut self, index: u64, id: &str, kind: Option<&str>) -> Result<(), LlmError> {
         if let Some(&other) = self.seen.get(id)
             && other != index
         {
@@ -472,10 +490,27 @@ impl CopilotSlots {
             completed: None,
         });
         if slot.kind.is_none() {
-            slot.kind = Some(kind.to_owned());
+            slot.kind = kind.map(str::to_owned);
         }
         self.seen.entry(id.to_owned()).or_insert(index);
         Ok(())
+    }
+
+    /// The first slot the stream announced whose item never completed (no
+    /// `response.output_item.done`), if any. A stream that ends without a
+    /// terminal response commits only what it completed, so such a slot (a
+    /// started tool call included) is a mismatch, never dropped.
+    pub(crate) fn first_uncompleted(&self) -> Option<u64> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.completed.is_none())
+            .map(|(index, _)| *index)
+    }
+
+    /// Whether a slot holds `output_index`: an event named the item there
+    /// with an id. An item no event names with one has no slot.
+    pub(crate) fn holds(&self, output_index: u64) -> bool {
+        self.slots.contains_key(&output_index)
     }
 
     /// Pair the terminal `response`'s output with the slots, give each item
@@ -493,10 +528,17 @@ impl CopilotSlots {
         };
         let mut paired: BTreeMap<u64, Value> = BTreeMap::new();
         for (position, mut item) in output.into_iter().enumerate() {
-            let index = item
-                .get("output_index")
-                .and_then(Value::as_u64)
-                .unwrap_or(position as u64);
+            // An item's own output_index pairs it; an absent one, its array
+            // position. One that is present but not an unsigned integer is
+            // evidence the pairing must not trust.
+            let index = match item.get("output_index") {
+                None | Some(Value::Null) => position as u64,
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    copilot_mismatch(format!(
+                        "the terminal output's item at position {position} has an output_index that is not an unsigned integer"
+                    ))
+                })?,
+            };
             let Some(slot) = self.slots.get(&index) else {
                 return Err(copilot_mismatch(format!(
                     "the terminal output has an item at output_index {index} the stream never announced"
@@ -1546,6 +1588,190 @@ mod tests {
         ));
     }
 
+    /// A stream whose message completed and whose function call was added
+    /// and started its arguments, then ended without completing the call.
+    fn a_call_started_but_never_completed() -> Vec<Value> {
+        let answer = message("msg_1", "final_answer", "Done.");
+        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"","status":"in_progress"});
+        vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":0,"item":answer}),
+            json!({"type":"response.output_item.added","output_index":1,"item":call}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"q\":"}),
+        ]
+    }
+
+    /// Without a terminal response a stream commits only what it completed,
+    /// so on the Copilot route a slot the stream announced and never
+    /// completed (here a started tool call) ends the response with the
+    /// retryable mismatch, and nothing is committed. (Fails-old: the call
+    /// was dropped and the turn ended as complete.)
+    #[tokio::test]
+    async fn copilot_done_without_a_terminal_response_refuses_an_uncompleted_slot() {
+        let events = copilot_events(a_call_started_but_never_completed(), true).await;
+        assert_copilot_mismatch(
+            &events,
+            "output_index 1 was announced but never completed",
+            "a started call at [DONE]",
+        );
+    }
+
+    /// The plain OpenAI route keeps the same rule: an item the stream added
+    /// that never completed before `[DONE]` ends the response as the
+    /// retryable incomplete response, and nothing is committed. (Fails-old:
+    /// the call was dropped and the turn ended as complete.)
+    #[tokio::test]
+    async fn plain_openai_done_without_a_terminal_response_refuses_an_uncompleted_item() {
+        let data: Vec<String> = a_call_started_but_never_completed()
+            .iter()
+            .map(Value::to_string)
+            .chain(["[DONE]".to_owned()])
+            .collect();
+        let (client, server) = raw_stub(data).await;
+        let request = LlmRequest::new("gpt-5.5", vec![]);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(LlmEvent::AssistantOutput { .. }))),
+            "nothing is committed"
+        );
+        let Some(Ok(LlmEvent::Done {
+            outcome: LlmDoneOutcome::Error { error },
+        })) = events.last()
+        else {
+            panic!("the request ends with an error, not {:?}", events.last());
+        };
+        assert!(
+            matches!(
+                error,
+                LlmError::IncompleteResponse { message }
+                    if message.contains("output_index 1 was announced but never completed")
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_retryable());
+    }
+
+    /// On the Copilot route an item the stream added with no id, which no
+    /// event names with one (so no slot holds it), and which never completed
+    /// before `[DONE]` ends the response as the retryable mismatch too, as on
+    /// the plain route, and nothing is committed. (Fails-old: the Copilot
+    /// route checked only its slots, so the call was dropped and the turn
+    /// ended as complete.)
+    #[tokio::test]
+    async fn copilot_done_without_a_terminal_response_refuses_an_uncompleted_item_without_an_id() {
+        let mut events = a_call_started_but_never_completed();
+        // The call is added with an empty id and nothing names it after.
+        events[4]["item"]["id"] = json!("");
+        events.truncate(5);
+        let events = copilot_events(events, true).await;
+        assert_copilot_mismatch(
+            &events,
+            "output_index 1 was announced but never completed",
+            "an id-less call at [DONE]",
+        );
+    }
+
+    /// A Responses stub that sends `payload` as the whole body, as given.
+    async fn body_stub(payload: String) -> (OpenAiClient, tokio::task::JoinHandle<()>) {
+        async fn respond(State(payload): State<String>) -> impl axum::response::IntoResponse {
+            ([("content-type", "text/event-stream")], payload)
+        }
+        let app = Router::new()
+            .route("/v1/responses", post(respond))
+            .with_state(payload);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            OpenAiClient::new_with_base_url("unused".into(), url),
+            server,
+        )
+    }
+
+    /// A body that ends cleanly in the middle of an event (part of its data,
+    /// no blank line after it) ends the response as the retryable incomplete
+    /// response on every Responses route, as a body cut anywhere else does:
+    /// the event the end cut is no malformed event. (Fails-old: the cut
+    /// event's data was parsed as a whole event and failed as a
+    /// non-retryable parse error.)
+    #[tokio::test]
+    async fn a_body_cut_mid_event_is_an_incomplete_response() {
+        let answer = message("msg_1", "final_answer", "Done.");
+        let payload = format!(
+            "data: {}\n\ndata: {}\n\ndata: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"delta\":\"Do",
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":answer}),
+        );
+        for copilot in [false, true] {
+            let (client, server) = body_stub(payload.clone()).await;
+            let client = if copilot {
+                client.with_copilot_responses_item_identity()
+            } else {
+                client
+            };
+            let request = LlmRequest::new("gpt-5.5", vec![]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let Some(Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            })) = events.last()
+            else {
+                panic!(
+                    "copilot {copilot}: the request ends with an error, not {:?}",
+                    events.last()
+                );
+            };
+            assert!(
+                matches!(error, LlmError::IncompleteResponse { .. }) && error.is_retryable(),
+                "copilot {copilot}: {error:?}"
+            );
+        }
+    }
+
+    /// A reasoning item may carry its text in content parts
+    /// (`response.content_part.added/done` with a `reasoning_text` part), as
+    /// the Responses event schema allows: on the Copilot route such a part
+    /// names no other kind of item at its slot, and the response completes.
+    /// (Fails-old: every content part was taken as a message's, so the
+    /// response failed as a slot mismatch.)
+    #[tokio::test]
+    async fn copilot_reasoning_content_parts_complete_the_response() {
+        let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"cipher"});
+        let part = json!({"type":"reasoning_text","text":"Plan"});
+        let answer = message("msg_1", "final_answer", "Done.");
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
+            json!({"type":"response.content_part.added","item_id":"rs_1","output_index":0,"content_index":0,"part":part}),
+            json!({"type":"response.content_part.done","item_id":"rs_1","output_index":0,"content_index":0,"part":part}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            json!({"type":"response.output_item.added","output_index":1,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":1,"item":answer}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":[reasoning, answer],
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
+        ];
+        let events = copilot_events(events, false).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. }
+                }))
+            ),
+            "{:?}",
+            events.last()
+        );
+    }
+
     /// Copilot rotates a function call's item id on every event while its
     /// call_id stays: the call keeps its call_id, and its argument deltas,
     /// whose item ids are those of the call's slot, stream live.
@@ -1767,6 +1993,25 @@ mod tests {
                     completed(json!([message("message-g", "final_answer", "Done.")])),
                 ],
                 "omitted streamed assistant message 'stray'",
+            ),
+            (
+                "a terminal item whose output_index is not an unsigned integer",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    completed(json!([{"type":"reasoning","id":"I","output_index":"seven",
+                        "summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"c2"}])),
+                ],
+                "an output_index that is not an unsigned integer",
+            ),
+            (
+                "an argument delta at a message's slot",
+                vec![
+                    added_at(0, &message("A", "final_answer", "Done.")),
+                    json!({"type":"response.function_call_arguments.delta","item_id":"X","output_index":0,"delta":"{}"}),
+                    done_at(0, &message("F", "final_answer", "Done.")),
+                    completed(json!([message("G", "final_answer", "Done.")])),
+                ],
+                "a function_call at output_index 0, which holds a message",
             ),
             (
                 "two terminal items at one output_index",

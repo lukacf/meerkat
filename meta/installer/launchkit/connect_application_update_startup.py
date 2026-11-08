@@ -219,11 +219,15 @@ class ReplacementApplicationStartup:
         # builder returns. Resolve them here so its unchanged writes remain valid
         # while all selected configuration values can be fenced as one object.
         for field, relative in (("gating_config_path", "config/gating.toml"),
-                ("access_config_path", "config/access.toml"),
                 ("routing_config_path", "deployment/routing.toml")):
             path = self.root / relative
             if path.is_file() and options.get(field) is None:
                 options[field] = str(path)
+        # The console's live access file in private state, which the host
+        # seeds once from the package's config/access.toml.
+        if (self.root / "config/access.toml").is_file() and options.get("access_config_path") is None:
+            from .templates_v2.console_configuration import CONSOLE_ACCESS_FILE
+            options["access_config_path"] = str(self.root / CONSOLE_ACCESS_FILE)
         from meerkat_meta.builder import MetaBuilderConfig
         self.config = MetaBuilderConfig(**options)
         self._config_values = _config_stamp(vars(self.config))

@@ -4,7 +4,7 @@ description: "Setups and the guide, blueprints, agent teams and custom applicati
 icon: "diagram-project"
 ---
 
-*Mirrored from Meerkat Meta main at [cd9c2ea5f07b](https://github.com/lukacf/meerkat/commit/cd9c2ea5f07b5056f580427033a3b07198a1b2b5) on 2026-11-07; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 This page explains what Forge saves, what it builds and checks, and how an
 installation is kept, changed and recovered.
@@ -192,7 +192,13 @@ enter model prompts or browser storage, and are written directly to the
 installation's mode-600 `.env`. Reusing the provider keys you gave Forge is an
 explicit choice in the form. If setup asks for a **Console user**, that is the
 local identity for this installation; the **Console password** opens its
-private Console and is separate from your provider keys.
+private Console and is separate from your provider keys. Applications Forge
+builds have named Console accounts: the operator adds one account per further
+person on the deployment computer, so each person signs in as themselves. A
+single shared Console password, as in applications built earlier, lets
+everyone who knows it chat, but approves nothing; such an installation moves
+to named accounts at its next update, whose Build declares them, except on
+the older ordinary route and the MobKit runtime.
 
 **Readiness.** Forge reports an installation ready when the application
 reports startup, the expected identities exist and its loopback Console is

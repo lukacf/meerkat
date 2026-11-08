@@ -423,7 +423,7 @@ impl MeerkatMachine {
 
     /// The committed terminal of one contributor: the live ledger first, then
     /// the durable row an archived input left in the store.
-    async fn committed_input_terminal(
+    pub(crate) async fn committed_input_terminal(
         &self,
         session_id: &SessionId,
         input_id: &meerkat_core::lifecycle::InputId,

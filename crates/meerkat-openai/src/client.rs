@@ -2125,6 +2125,13 @@ impl OpenAiClient {
         else {
             return Ok(None);
         };
+        Self::parse_responses_sse_data(data)
+    }
+
+    /// Parse the data of one event of the Responses API stream: `Ok(None)`
+    /// for the `[DONE]` sentinel, and `Err(LlmError::StreamParseError)` for
+    /// data that is not the event's JSON (an empty data field included).
+    fn parse_responses_sse_data(data: &str) -> Result<Option<ResponsesStreamEvent>, LlmError> {
         if data == "[DONE]" {
             return Ok(None);
         }
@@ -2816,7 +2823,10 @@ impl OpenAiClient {
             for diagnostic in diagnostics { yield diagnostic; }
             let response = response?;
             let mut stream = response.bytes_stream();
-            let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
+            // The body read as the SSE format defines its events: an event
+            // ends at its blank line and its `data:` lines join; at the end of
+            // the body its last line and its last event count.
+            let mut events = meerkat_llm_core::streaming::SseEventReader::with_capacity(512);
             let mut usage = Usage::default();
             let mut active_response_id: Option<String> = None;
             let mut saw_stream_text_delta = false;
@@ -2840,22 +2850,67 @@ impl OpenAiClient {
             let mut streamed_web_search_ids: HashSet<String> = HashSet::new();
             let mut done_emitted = false;
             let mut saw_terminal_fallback_output = false;
+            // The output_index of every item the stream added: one ended by
+            // `[DONE]` without a terminal response must have completed.
+            let mut announced_items: std::collections::BTreeSet<u64> =
+                std::collections::BTreeSet::new();
             // A refusal the model streams (`response.refusal.delta`/`.done`):
             // never answer text, it ends the response as a refusal.
             let mut streamed_refusal = String::new();
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                lines.push(&chunk);
+            let mut body_ended = false;
+            while !body_ended {
+                match stream.next().await {
+                    Some(chunk) => {
+                        let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                        events.push(&chunk);
+                    }
+                    None => {
+                        body_ended = true;
+                        events.end();
+                    }
+                }
 
                 let chunk_yielded = std::cell::Cell::new(false);
                 let mut chunk_consumed_line = false;
-                while let Some(line) = lines.next_line() {
+                while let Some(step) = events.next_step() {
                     chunk_consumed_line = true;
-                    let line = line?;
-                    let line = line.trim();
-                    if line == "data: [DONE]" {
+                    let meerkat_llm_core::streaming::SseStep::Event(data) = step? else {
+                        continue;
+                    };
+                    if data == "[DONE]" {
                         if !done_emitted && saw_terminal_fallback_output {
+                            // Without a terminal response only what completed
+                            // is committed: an item the stream announced and
+                            // never completed (a started tool call included)
+                            // ends the response as incomplete, never dropped.
+                            // An item is announced by its `output_item.added`
+                            // at an `output_index` and completed by its
+                            // `output_item.done` there. On the Copilot route
+                            // the slots answer for every item an event named
+                            // with an id, and the indices for one no event
+                            // named so (no slot holds it).
+                            let announced_uncompleted = announced_items
+                                .iter()
+                                .copied()
+                                .filter(|index| !copilot_item_identity || !copilot_slots.holds(*index))
+                                .find(|index| !completed_items.contains_key(&ResponsesOutputIndex(*index)));
+                            if copilot_item_identity {
+                                if let Some(index) = copilot_slots
+                                    .first_uncompleted()
+                                    .or(announced_uncompleted)
+                                {
+                                    Err::<(), _>(crate::responses_output::copilot_mismatch(format!(
+                                        "output_index {index} was announced but never completed"
+                                    )))?;
+                                }
+                            } else if let Some(index) = announced_uncompleted {
+                                Err::<(), _>(LlmError::IncompleteResponse {
+                                    message: format!(
+                                        "OpenAI Responses stream ended without a terminal response: output_index {index} was announced but never completed"
+                                    ),
+                                })?;
+                            }
                             if !completed_items.is_empty() {
                                 let blocks = crate::responses_output::lower_items(completed_items.values(), active_response_id.as_deref())?;
                                 crate::responses_output::validate_coverage(
@@ -2888,12 +2943,20 @@ impl OpenAiClient {
                         }
                         continue;
                     }
-                    let should_process = !line.is_empty() && !line.starts_with(':');
-                    let parsed_event = if should_process {
-                        Self::parse_responses_sse_line(line)?
-                    } else {
-                        None
-                    };
+                    // At the end of the body every complete event was read in
+                    // its own chunk's pass, so data that does not parse here
+                    // is the event the end cut: the response is incomplete, as
+                    // for a body cut anywhere else, not a malformed event. A
+                    // complete event that does not parse stays a parse error.
+                    let parsed_event = Self::parse_responses_sse_data(&data).map_err(|error| {
+                        if body_ended {
+                            LlmError::IncompleteResponse {
+                                message: "OpenAI Responses stream ended mid-event".to_string(),
+                            }
+                        } else {
+                            error
+                        }
+                    })?;
 
                     if let Some(mut event) = parsed_event {
                         let terminal_event = event.event_type == "response.completed"
@@ -3158,6 +3221,9 @@ impl OpenAiClient {
                         }
                         // Handle streaming delta events
                         else if event.event_type == "response.output_item.added" {
+                            if let Some(index) = event.output_index {
+                                announced_items.insert(index);
+                            }
                             if let Some(item) = &event.item {
                                 crate::responses_output::validate_item(item)?;
                                 if item.get("type").and_then(Value::as_str) == Some("message")
@@ -5578,7 +5644,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n")
+        .join("\n\n")
     }
 
     /// The streamed Responses text and terminal outcome of one paced byte
@@ -5639,6 +5705,60 @@ mod tests {
         payload[marker] = 0xFF;
         let (text, done) = stream_responses_paced_bytes(vec![payload]).await;
         assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(
+            matches!(
+                &done,
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{done:?}"
+        );
+    }
+
+    /// A Responses `response.completed` event line, without its line break.
+    const RESPONSES_COMPLETED_EVENT: &str = r#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":3}}}"#;
+
+    /// A Responses body whose last line ends without a line break is read to
+    /// its end: the event on that line counts. (Fails-old: the bytes after the
+    /// last line break were dropped, so the stream ended without its terminal
+    /// event.)
+    #[tokio::test]
+    async fn a_responses_body_whose_last_line_has_no_line_break_is_read() {
+        let payload = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}}\n\n{RESPONSES_COMPLETED_EVENT}"
+        );
+        let (text, done) = stream_responses_paced_bytes(vec![payload.into_bytes()]).await;
+        assert_eq!(text, "ok");
+        assert!(
+            matches!(done, Some(LlmDoneOutcome::Success { .. })),
+            "{done:?}"
+        );
+    }
+
+    /// One Responses event whose data spans several `data:` lines is one
+    /// event: its lines are joined with a line break, as the SSE format says.
+    /// (Fails-old: each `data:` line was parsed on its own, so the event
+    /// failed as invalid JSON.)
+    #[tokio::test]
+    async fn a_responses_event_whose_data_spans_lines_is_one_event() {
+        let payload = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\ndata: \"delta\":\"ok\"}}\n\n{RESPONSES_COMPLETED_EVENT}\n\n"
+        );
+        let (text, done) = stream_responses_paced_bytes(vec![payload.into_bytes()]).await;
+        assert_eq!(text, "ok");
+        assert!(
+            matches!(done, Some(LlmDoneOutcome::Success { .. })),
+            "{done:?}"
+        );
+    }
+
+    /// A Responses event whose `data:` field is empty is a parse error: an
+    /// empty string is no event.
+    #[tokio::test]
+    async fn an_empty_responses_data_field_is_a_parse_error() {
+        let payload = format!("data:\n\n{RESPONSES_COMPLETED_EVENT}\n\n");
+        let (_, done) = stream_responses_paced_bytes(vec![payload.into_bytes()]).await;
         assert!(
             matches!(
                 &done,
@@ -7051,7 +7171,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (base_url, server) = spawn_chatgpt_stub_server(payload, seen.clone()).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url)
@@ -7106,7 +7226,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (base_url, server) =
             spawn_openai_fallback_stub_server(payload, seen.clone(), false).await;
@@ -7166,7 +7286,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (base_url, server) = spawn_openai_fallback_stub_server(payload, seen, true).await;
         let authorizer = Arc::new(RetryAuthorizer {
@@ -7221,7 +7341,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_headers = Arc::new(Mutex::new(Vec::new()));
         let (base_url, server) =
@@ -8808,7 +8928,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -8832,8 +8952,8 @@ mod tests {
 
     /// Every event of one stubbed Responses stream, through the first `Done`.
     async fn responses_stream_events(lines: &[&str]) -> Vec<LlmEvent> {
-        let mut payload = lines.join("\n");
-        payload.push('\n');
+        let mut payload = lines.join("\n\n");
+        payload.push_str("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9053,7 +9173,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9084,7 +9204,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (base_url, server) =
             spawn_openai_stub_server_with_body(payload, Arc::clone(&seen)).await;
@@ -9144,7 +9264,7 @@ mod tests {
             r#"data: {"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","incomplete_details":{"reason":"provider_policy_changed"},"output":[],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9185,7 +9305,7 @@ mod tests {
         ];
 
         for terminal in cases {
-            let payload = [terminal, "data: [DONE]", ""].join("\n");
+            let payload = [terminal, "data: [DONE]", ""].join("\n\n");
             let (base_url, server) = spawn_openai_stub_server(payload).await;
             let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
             let request = LlmRequest::new(
@@ -9225,7 +9345,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9255,7 +9375,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9295,7 +9415,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9335,7 +9455,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9381,7 +9501,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_done_marker_without_output_still_fails_incomplete() {
-        let payload = ["data: [DONE]", ""].join("\n");
+        let payload = ["data: [DONE]", ""].join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9417,7 +9537,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -9471,7 +9591,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10004,7 +10124,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10039,7 +10159,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10073,7 +10193,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10127,7 +10247,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10157,7 +10277,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = Arc::new(OpenAiClient::new_with_base_url(
             "test-key".to_string(),
@@ -10200,7 +10320,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = Arc::new(OpenAiClient::new_with_base_url(
             "test-key".to_string(),
@@ -10239,7 +10359,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10278,7 +10398,7 @@ mod tests {
             r#"data: {"type":"response.failed","response":{"id":"resp_fail","status":"failed","error":{"code":"server_error","message":"reasoning decryption failed"}}}"#,
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(
@@ -10320,7 +10440,7 @@ mod tests {
             r#"data: {"type":"response.failed","response":{"id":"resp_overloaded","status":"failed","error":{"code":"server_is_overloaded","message":"The server is overloaded. Please retry later."}}}"#,
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         let (base_url, server) = spawn_openai_stub_server(payload).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let request = LlmRequest::new(

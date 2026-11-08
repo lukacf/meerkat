@@ -7,7 +7,8 @@
 \* and its member invariants hold there only vacuously. This audit keeps the
 \* generated model unchanged and drives the region in two runs, each over a
 \* small, fixed domain and its whole reachable space: a VIEW leaves out the
-\* two counters no guard reads (model_step_count and topology_epoch), and a
+\* four counters no guard reads (model_step_count, topology_epoch and the
+\* identity life marker, identity_life_resets and identity_life_ends), and a
 \* state constraint bounds the mob's generation.
 \*
 \*   write (AuditWriteSpec): two members seated and bound (Dormant) under two

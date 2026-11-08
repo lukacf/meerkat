@@ -7,10 +7,11 @@
 # generated constant and invariant, unchanged), then adds the audit's finite
 # model values (one identity, two runtime ids, two fence tokens, generations
 # 0..1, two sessions, the audit's strings) and its VIEW, which leaves out the
-# two counters no guard, other variable's update or invariant of the
-# generated model reads (model_step_count and topology_epoch). The runner
-# first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. With the counters left out the reachable space is finite,
+# four counters no guard, other variable's update or invariant of the
+# generated model reads (model_step_count, topology_epoch and the identity
+# life marker, identity_life_resets and identity_life_ends). The runner first
+# checks that the model still reads none of them anywhere else, and fails
+# otherwise. With the counters left out the reachable space is finite,
 # so each run explores all of it, with no step bound. It checks two runs over
 # their whole space with TLC coverage:
 # - the lifecycle run (AuditSpec) with its four action properties and the two

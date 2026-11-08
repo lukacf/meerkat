@@ -32,12 +32,14 @@
 \* tokens.
 \*
 \* Each run explores the whole reachable state space of these domains, with
-\* no step bound. The TLC VIEW (AuditView) leaves out the two counters that
+\* no step bound. The TLC VIEW (AuditView) leaves out the four counters that
 \* no guard, no other variable's update and no invariant reads:
-\* model_step_count, which every arm increments, and topology_epoch, which
-\* many arms increment. States that differ only in them are one state, so
-\* the space is finite and TLC finishes it. The runner checks on every run
-\* that the generated model still reads neither counter anywhere else.
+\* model_step_count, which every arm increments, topology_epoch, which
+\* many arms increment, and the identity life marker (identity_life_resets,
+\* identity_life_ends), which every end of an identity moves. States that
+\* differ only in them are one state, so the space is finite and TLC finishes
+\* it. The runner checks on every run that the generated model still reads
+\* none of the counters anywhere else.
 \*
 \* Input shapes: the audit gives each arm the shapes the shell sends, so a
 \* guard refusal outside them is not explored. A Retire arm's (releasing,

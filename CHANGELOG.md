@@ -269,7 +269,10 @@ them.
   and `RecoverIdentityLifeResetsDestroyed`, each after every published
   variant; exhaustive matches must add them. Behaviour: the arms that end
   an identity (`UnlistIdentityEntryRemoved`, `RemoveIdentityEntryRemoved`,
-  the terminal abandonments of a respawn) and the reset move the marker.
+  the terminal abandonments of a respawn), the end of a retirement that
+  ends its identity (`EndIdentityLife`, applied on the retirement's terminal
+  step and again when the journal replays that step) and the reset move
+  the marker.
 - `meerkat-runtime`, `meerkat-machine-kernels`, `meerkat-machine-schema`:
   the generated `ToolGrantLifecycleMachine`'s `ToolGrantEndReason` and
   `ToolGrantUseRefusal` gain `SubjectEnded`, its `ToolGrantLifecycleInput`

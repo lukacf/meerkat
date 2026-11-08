@@ -101,7 +101,8 @@
 \* Domains are fixed per run (see the runner). Each run explores its whole
 \* reachable space under a state constraint that caps the machine's wake
 \* attempt mint (member_wake_attempt_sequence <= AuditMaxAttempts, set per run)
-\* and a VIEW that leaves out model_step_count and topology_epoch, which no
+\* and a VIEW that leaves out model_step_count, topology_epoch and the
+\* identity life marker (identity_life_resets, identity_life_ends), which no
 \* guard reads.
 \*
 \* Properties, in every run:

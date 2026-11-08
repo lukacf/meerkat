@@ -44,7 +44,8 @@
 \* single run checked (the runner checks that shape of the generated model).
 \*
 \* Each run explores its whole reachable space under a VIEW that leaves out
-\* model_step_count and topology_epoch, which no guard reads, with TLC
+\* model_step_count, topology_epoch and the identity life marker
+\* (identity_life_resets, identity_life_ends), which no guard reads, with TLC
 \* coverage. Properties:
 \*   every generated invariant of ci.cfg (kept), among them the entry ones:
 \*     entry_is_seated_or_has_an_unseated_cause (an entry is seated, or

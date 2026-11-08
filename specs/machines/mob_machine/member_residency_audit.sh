@@ -13,10 +13,11 @@
 # values (two identities, three runtime ids, fence tokens 1..3, generations
 # 0..1, three sessions, the audit's strings), each run's wake-attempt cap
 # (AuditMaxAttempts, held by AuditStateConstraint) and its VIEW, which leaves
-# out the two counters no guard, other variable's update or invariant of the
-# generated model reads (model_step_count and topology_epoch). The runner
-# first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. It checks eleven small runs over their whole space with TLC
+# out the four counters no guard, other variable's update or invariant of the
+# generated model reads (model_step_count, topology_epoch and the identity
+# life marker, identity_life_resets and identity_life_ends). The runner first
+# checks that the model still reads none of them anywhere else, and fails
+# otherwise. It checks eleven small runs over their whole space with TLC
 # coverage (see member_residency_audit.tla):
 # - seed (AuditSeedSpec): one identity, its seat session unborn or born,
 #   through every build seed, every boot verdict, the seal and the host

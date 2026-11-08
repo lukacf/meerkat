@@ -7,10 +7,11 @@
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
 # (every generated constant and invariant, unchanged), then adds the run's
-# model values and its VIEW, which leaves out the two counters no guard,
+# model values and its VIEW, which leaves out the four counters no guard,
 # other variable's update or invariant of the generated model reads
-# (model_step_count and topology_epoch). The runner first checks that the
-# model still reads neither counter anywhere else, and fails otherwise. It
+# (model_step_count, topology_epoch and the identity life marker,
+# identity_life_resets and identity_life_ends). The runner first checks that
+# the model still reads none of them anywhere else, and fails otherwise. It
 # checks ten runs, each over its whole space with TLC coverage, in eight
 # parts (--part listed: the entry_listed run's space; unlisted: the
 # entry_unlisted run's space; entry: the lifecycle run and the witnesses and

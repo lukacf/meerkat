@@ -718,8 +718,9 @@ fi
 # Destroyed only through a destroy it admitted) and two
 # invariants that check why the remaining member arms cannot fire. It
 # explores the whole reachable space, with no step bound: its TLC VIEW
-# leaves out the two counters the model never reads
-# (model_step_count, topology_epoch), which it checks first. It runs with
+# leaves out the four counters no guard reads (model_step_count,
+# topology_epoch and the identity life marker, identity_life_resets and
+# identity_life_ends), which it checks first. It runs with
 # TLC coverage and requires every listed arm to fire and a floor of distinct
 # states, requires its six witnesses reached (one recovers an archived
 # identity's next incarnation, one replays a delayed final of an older

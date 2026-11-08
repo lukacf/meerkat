@@ -8,9 +8,10 @@
 # Derives each run's TLC config from the generated ci.cfg next to this script
 # (its SPECIFICATION, its generated invariants and its domains), as
 # identity_entry_audit.sh does for the declared apply, with the VIEW of
-# member_residency_audit that leaves out the two counters no guard reads
-# (model_step_count and topology_epoch); the runner first checks that the
-# model reads neither anywhere else. It checks fourteen runs of
+# member_residency_audit that leaves out the four counters no guard reads
+# (model_step_count, topology_epoch and the identity life marker,
+# identity_life_resets and identity_life_ends); the runner first checks that
+# the model reads none of them anywhere else. It checks fourteen runs of
 # created_identity_audit.tla, each over its whole space with TLC coverage, in
 # two parts (every part by default; --part <run>,<run>... checks those runs,
 # as a CI shard does). Its recovery part (--part recovery):

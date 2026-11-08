@@ -7,12 +7,13 @@
 #
 # Derives the TLC configs from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's
-# properties, its generation bounds and its VIEW, which leaves out the two
-# counters no guard reads (model_step_count and topology_epoch); each run
+# properties, its generation bounds and its VIEW, which leaves out the four
+# counters no guard reads (model_step_count, topology_epoch and the identity
+# life marker, identity_life_resets and identity_life_ends); each run
 # explores its whole reachable space under its generation bound. It first
 # checks that the generated model defines every arm the audit drives with the
-# parameters it passes, and still reads neither counter anywhere else, so a
-# renamed arm or field fails the run instead of a vacuous pass. Then:
+# parameters it passes, and still reads none of the counters anywhere else,
+# so a renamed arm or field fails the run instead of a vacuous pass. Then:
 # - the write run (AuditWriteSpec) and the seat run (AuditSeatSpec) each over
 #   their whole space with TLC coverage: each must finish without an error and
 #   fire every action of its covered list (each generated at least one

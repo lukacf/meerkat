@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -232,6 +233,65 @@ class PayloadScan(unittest.TestCase):
         (copies / ENGINE.name).write_bytes(ENGINE.read_bytes() + b"\n# changed\n")
         code, report = self.scan(self.payload(product_bytes({"notes.txt": b"public\n"})), wrapper=copies / WRAPPER.name)
         self.assertEqual((code, report), (4, None))
+
+    def test_a_tar_is_cut_at_member_boundaries_into_pieces_that_keep_every_byte(self):
+        wrapper = load("payload_scan_split", WRAPPER)
+        members = {f"pkg/file-{n}.bin": bytes([n]) * (700 + 300 * n) for n in range(1, 7)}
+        members["pkg/notes.txt"] = b"notes " + MARKER + b"\n"
+        raw = tar_bytes(members, compressed=False)
+        source = self.root / "big.tar"
+        source.write_bytes(raw)
+        pieces, zero_tail = wrapper.split_tar(source, 3000, self.root / "big")
+        self.assertTrue(zero_tail)
+        self.assertGreater(len(pieces), 2)
+        bodies = [piece.read_bytes() for piece in pieces]
+        for body in bodies:
+            self.assertEqual(body[-1024:], b"\x00" * 1024)
+        joined = b"".join(body[:-1024] for body in bodies)
+        self.assertEqual(raw[:len(joined)], joined)
+        self.assertEqual(raw[len(joined):].count(0), len(raw) - len(joined))
+        seen = {}
+        for piece in pieces:
+            with tarfile.open(piece, "r:") as archive:
+                for member in archive:
+                    seen[member.name] = archive.extractfile(member).read()
+        self.assertEqual(seen, members)
+        (self.root / "tail.tar").write_bytes(raw + b"trailing bytes")
+        self.assertFalse(wrapper.split_tar(self.root / "tail.tar", 3000, self.root / "tail")[1])
+
+    @unittest.skipUnless(os.environ.get("RELEASE_PAYLOAD_SCAN_LARGE") == "1",
+                         "writes and scans about 1.3 GiB; set RELEASE_PAYLOAD_SCAN_LARGE=1")
+    def test_a_product_stream_past_the_engine_bound_is_cut_and_scanned(self):
+        payload = self.root / "payload-large" / "meerkat-connect-gateway-0.0.0-linux-x86_64.tar.gz"
+        payload.parent.mkdir()
+        block = 250 << 20
+
+        class Zeros:
+            def __init__(self, size):
+                self.left = size
+
+            def read(self, n=-1):
+                n = self.left if n is None or n < 0 else min(n, self.left)
+                self.left -= n
+                return bytes(n)
+
+        with gzip.open(payload, "wb", compresslevel=1) as stream:
+            with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                for n in range(5):
+                    info = tarfile.TarInfo(f"pkg/zeros-{n}.bin")
+                    info.size = block
+                    archive.addfile(info, Zeros(block))
+                info = tarfile.TarInfo("pkg/notes.txt")
+                info.size = len(b"notes " + MARKER + b"\n")
+                archive.addfile(info, io.BytesIO(b"notes " + MARKER + b"\n"))
+        code, report = self.engine_alone(payload)
+        self.assertEqual((code, report["hit_total"]), (2, 0))
+        self.assertEqual([row["kind"] for row in report["errors"]], ["member-too-large"])
+        code, report = self.scan(payload)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["hits"]["refused"], {"synthetic_marker": 1})
+        self.assertEqual(report["errors"], {"accepted": {}, "covered": {"member-too-large": 1}, "refused": {}})
+        self.assertEqual(report["reroots"]["split"], 1)
 
 
 class CandidatePrivacyScan(unittest.TestCase):

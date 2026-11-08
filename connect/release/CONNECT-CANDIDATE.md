@@ -164,10 +164,13 @@ Every release file is scanned for private text before it is attested or
 uploaded. One engine does the matching and the container checks:
 `scripts/release-evidence-privacy-scan.py`, kept unchanged and pinned by its
 sha256 in `scripts/release-payload-privacy-scan.py`. The engine decodes nested
-containers four levels deep and does not unpack zstd. The wrapper walks each
-payload file with the engine's own traversal, and every container the engine
-does not enter (nested deeper than four levels, or zstd) becomes an extra
-artifact of the same engine run. The scan therefore reaches every level: a
+containers four levels deep, does not unpack zstd and reads no member or stream
+larger than 1 GiB. The wrapper walks each payload file with the engine's own
+traversal, and every container the engine does not enter becomes an extra
+artifact of the same engine run: one nested deeper than four levels, a zstd
+container (decompressed), and a compressed tar past the 1 GiB bound, such as a
+large product archive (cut at member boundaries into pieces below the bound,
+keeping every original byte). The scan therefore reaches every level: a
 product archive, the integration library inside it, the wheels, crates and
 source archives inside the library, and what they hold.
 

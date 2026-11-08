@@ -1559,4 +1559,5 @@ fn controller_current(fixture: &Fixture, decision: &DecisionId) -> bool {
 
 mod binding;
 mod cleanup;
+mod effect;
 mod reply;

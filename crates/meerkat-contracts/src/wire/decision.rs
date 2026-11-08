@@ -643,6 +643,58 @@ mod tests {
         }
     }
 
+    /// A decision's effect is optional and read tolerantly: a decision
+    /// without one omits it, an executed decision's effect keeps the grant
+    /// id it names through a read and a write, a field of the effect this
+    /// version does not know is ignored, and an effect that names nothing
+    /// this version knows still reads.
+    #[test]
+    fn a_decision_effect_is_optional_and_read_tolerantly() {
+        let decision = serde_json::json!({
+            "decision_id": "decision:0",
+            "kind": "grant.child",
+            "subject_key": "subject:0",
+            "operation_id": "grant.child:decision:0",
+            "request_digest": "sha256:0",
+            "requester": "principal:0",
+            "approver_id": "data-owner",
+            "phase": "executed",
+            "stage": "human",
+            "notice": "owed",
+            "deadline_at_ms": 2,
+            "created_at_ms": 1,
+            "subject_digest": "sha256:1",
+            "renderer": "grant.render-v1",
+            "permit_issued": false,
+            "revision": 5,
+        });
+        let without: WireDecision =
+            serde_json::from_value(decision.clone()).expect("a decision without an effect reads");
+        let written = serde_json::to_value(&without).expect("encodes");
+        assert!(written.get("effect").is_none(), "{written}");
+
+        let mut with_effect = decision.clone();
+        with_effect["effect"] = serde_json::json!({
+            "grant_id": "decision:0/approval-grant",
+            "issued_at_ms": 3,
+        });
+        let read: WireDecision =
+            serde_json::from_value(with_effect).expect("a decision with an effect reads");
+        let written = serde_json::to_value(&read).expect("encodes");
+        assert_eq!(
+            written["effect"],
+            serde_json::json!({"grant_id": "decision:0/approval-grant"}),
+            "{written}"
+        );
+
+        let mut later = decision;
+        later["effect"] = serde_json::json!({"answer_id": "answer:0"});
+        let read: WireDecision =
+            serde_json::from_value(later).expect("an effect of a later version reads");
+        let written = serde_json::to_value(&read).expect("encodes");
+        assert_eq!(written["effect"], serde_json::json!({}), "{written}");
+    }
+
     /// A presented notice carries the whole rendering as one canonical
     /// part; an event this version does not know reads as unknown, and a
     /// notice without a presentation omits it.

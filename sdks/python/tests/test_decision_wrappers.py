@@ -4,6 +4,7 @@ serve a method answers method not found, raised naming the method."""
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -170,6 +171,46 @@ async def test_an_unknown_phase_is_kept_raw() -> None:
     assert listing == {"decisions": [dict(DECISION, phase="archived")], "unreadable": []}
     assert read == {"decision": dict(DECISION, phase="archived")}
     assert read["decision"]["phase"] == "archived"
+
+
+EXECUTED = dict(
+    DECISION,
+    kind="grant.child",
+    phase="executed",
+    effect={"grant_id": DECISION_ID + "/approval-grant"},
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision",
+    [
+        DECISION,
+        EXECUTED,
+        dict(EXECUTED, effect=dict(EXECUTED["effect"], issued_at_ms=3_000)),
+    ],
+    ids=["without_effect", "with_effect", "effect_with_an_unknown_field"],
+)
+async def test_a_decision_effect_reaches_the_caller_as_the_server_wrote_it(
+    decision: dict[str, Any],
+) -> None:
+    # An executed decision may name its effect: a decision without one, one
+    # with one, and one whose effect carries a field this SDK does not know
+    # all reach the caller unchanged.
+    expected = copy.deepcopy(decision)
+    client, _ = fake_client(
+        {
+            "decision/get": {"decision": decision},
+            "decision/list": {"decisions": [decision], "unreadable": []},
+        }
+    )
+
+    read = await client.get_decision(DECISION_ID)
+    listing = await client.list_decisions()
+
+    assert read == {"decision": expected}
+    assert listing == {"decisions": [expected], "unreadable": []}
+    assert read["decision"].get("effect") == expected.get("effect")
 
 
 DECISION_CALLS: list[tuple[str, Callable[[MeerkatClient], Awaitable[Any]]]] = [

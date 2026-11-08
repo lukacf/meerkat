@@ -294,9 +294,12 @@ confinement all still apply to every call it opens.
   `request_tool_grant`, itself ungated, through which the agent asks for one
   of its gated names or families: it names the target, `duration_ms` and a
   `reason`, never the session or the approver, and the call returns at once
-  with the pending request (a replayed call answers the same request, and a
+  with the pending request (a replayed call answers the request it held; a
   call for a target the session's subject already has an open or approved
-  window request for answers that request). The
+  window request for joins that request while it is open, and holds a new
+  one after it ends; a joined request keeps its own duration, which can
+  differ from the one asked, and the answer says the call joined and gives
+  that `duration_ms`). The
   session's host holds it with what it takes requests with
   (`MeerkatMachine::set_tool_grant_request_host`: the decision owner, the
   approver policy and the requester its agents are named by; `rkat-rpc`

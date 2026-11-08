@@ -492,9 +492,14 @@ them.
   `ToolGrantGate::requested_target` and `ToolGrantGate::request_grant`),
   keyed by the call's run and id, so a replayed call answers the request it
   held. A call for a target its subject already has an open or approved
-  window request for answers that request instead of holding another, so an
-  agent that asks again and again leaves one request per target with its
-  approver. A runtime takes its agents' requests through `ToolGrantRequestHost`
+  window request for joins that request instead of holding another: it
+  answers that request while it is open, and holds a new one after it ends,
+  so an agent that asks again and again leaves one request per target with
+  its approver. A joined request keeps its own duration, which can differ
+  from the one the call asked: the tool's answer says the call joined
+  (`joined`) and gives the request's `duration_ms`
+  (`ToolGrantRequestReceipt::joined` and `duration_ms`). A runtime takes its
+  agents' requests through `ToolGrantRequestHost`
   (`MeerkatMachine::set_tool_grant_request_host`,
   `ToolGrantService::set_request_host` and `request_host`): the decision
   owner, the request policy and the requester its agents are named by.

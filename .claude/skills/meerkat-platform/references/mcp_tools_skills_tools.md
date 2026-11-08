@@ -231,8 +231,10 @@ and confinement still applies to a call it opens.
   Every gated build also mounts the ungated tool `request_tool_grant`
   (`tool`/`family`, `duration_ms`, `reason`): the agent asks the same way,
   never naming its session or the approver, and a replayed call answers the
-  same request, as does a call for a target with an open or approved window
-  request; the host holds it with what it takes requests with
+  request it held; a call for a target with an open or approved window
+  request joins it while it is open (the answer says so and gives that
+  request's `duration_ms`, which can differ from the one asked), and holds a
+  new one after it ends; the host holds it with what it takes requests with
   (`MeerkatMachine::set_tool_grant_request_host`; `rkat-rpc` names the
   realm's agent `rkat-agent`), or the call fails when the host takes none.
   Once a person approved it, the kind's executor (`ToolGrantIssueExecutor`,

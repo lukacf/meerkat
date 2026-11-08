@@ -2205,9 +2205,13 @@ no method loads, registers or wakes the session or the member.
   session's agent asks the same way through its `request_tool_grant` tool
   (see [scoped tool grants](/concepts/tools#scoped-tool-grants)); while the
   server runs the executor of the kind, its agents' requests name the
-  realm's agent `rkat-agent` as their requester, and an agent's call for a
-  target its subject already has an open or approved window request for
-  answers that request instead of holding another.
+  realm's agent `rkat-agent` as their requester. A replayed agent call
+  answers the request it held; an agent's call for a target its subject
+  already has an open or approved window request for joins that request
+  while it is open instead of holding another, and holds a new one after it
+  ends. A joined request keeps its own duration, which can differ from the
+  one asked: the tool's answer says the call joined and gives that
+  request's `duration_ms`.
 
 List and audit read the subject's grant rows without checking that the
 session or the member exists: an archived session's grants and a retired

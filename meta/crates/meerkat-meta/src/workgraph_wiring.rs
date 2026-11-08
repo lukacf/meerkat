@@ -1402,11 +1402,11 @@ comms = true
             .await
             .expect("list attention");
         assert!(
-            bindings.attention.iter().all(|binding| {
+            !bindings.attention.iter().any(|binding| {
                 binding
                     .target
                     .owner_key()
-                    .is_none_or(|key| !key.canonical().contains("private-helper"))
+                    .is_ok_and(|key| key.canonical().contains("private-helper"))
             }),
             "no binding names the private member"
         );

@@ -973,7 +973,12 @@ fn release_while_referenced(opener: impl Fn() -> Arc<dyn GrantOwnerStore>) {
         Err(GrantRefusal::Unavailable)
     );
     assert_eq!(
-        straggler.revoke(&who("root"), &kept, &mut IsolatedGrantTestCustody),
+        straggler.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &kept,
+            &mut IsolatedGrantTestCustody
+        ),
         Err(GrantRefusal::Unavailable)
     );
     assert!(matches!(
@@ -1015,7 +1020,10 @@ fn a_released_owner_frees_its_lease_while_a_reference_is_still_held() {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("grant-owner.jsonl");
     release_while_referenced(|| -> Arc<dyn GrantOwnerStore> {
-        Arc::new(FileGrantOwnerStore::new(&path))
+        Arc::new(FileGrantOwnerStore::new(
+            &path,
+            crate::grants::GrantLogFence::NotAdmissionRead,
+        ))
     });
 }
 
@@ -1089,12 +1097,22 @@ fn a_released_owner_refuses_every_revoke_before_the_controller_custody() {
         .release_custody()
         .expect("the host's close releases custody");
     assert_eq!(
-        owner.revoke(&who("stranger"), &kept, &mut NeverEntered),
+        owner.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("stranger"),
+            &kept,
+            &mut NeverEntered
+        ),
         Err(GrantRefusal::Unavailable),
         "a caller who could not revoke learns only that the owner is unavailable"
     );
     assert_eq!(
-        owner.revoke(&who("root"), &kept, &mut NeverEntered),
+        owner.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &kept,
+            &mut NeverEntered
+        ),
         Err(GrantRefusal::Unavailable),
         "the configured root never enters the controller custody"
     );

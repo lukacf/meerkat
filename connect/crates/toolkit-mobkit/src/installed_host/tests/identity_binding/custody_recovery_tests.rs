@@ -418,7 +418,10 @@ async fn gateway_close_drains_custody_recovery_before_releasing_native_custody()
     let grants_path = directory.join("grants.jsonl");
     let restore_grants = || {
         LocalGrantAuthority::restore(
-            Arc::new(FileGrantOwnerStore::new(&grants_path)),
+            Arc::new(FileGrantOwnerStore::new(
+                &grants_path,
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+            )),
             LocalAuthorizationPublication::new(),
             Arc::new(HostAuthorizationClock),
         )
@@ -565,7 +568,10 @@ async fn gateway_join_keeps_native_custody_for_an_admitted_access_decision() {
     let grants_path = directory.join("grants.jsonl");
     let restore_grants = || {
         LocalGrantAuthority::restore(
-            Arc::new(FileGrantOwnerStore::new(&grants_path)),
+            Arc::new(FileGrantOwnerStore::new(
+                &grants_path,
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+            )),
             LocalAuthorizationPublication::new(),
             Arc::new(HostAuthorizationClock),
         )

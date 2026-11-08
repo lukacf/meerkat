@@ -1412,7 +1412,12 @@ async fn a_settled_join_keeps_the_bound_grant_owner_until_the_final_release() {
 
     let mut f = Fixture::new();
     let path = f._directory.path().join("close-release-grants");
-    let store = || -> Arc<dyn GrantOwnerStore> { Arc::new(FileGrantOwnerStore::new(&path)) };
+    let store = || -> Arc<dyn GrantOwnerStore> {
+        Arc::new(FileGrantOwnerStore::new(
+            &path,
+            meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+        ))
+    };
     let restore = || {
         LocalGrantAuthority::restore(
             store(),
@@ -1425,6 +1430,7 @@ async fn a_settled_join_keeps_the_bound_grant_owner_until_the_final_release() {
     let application = principal(PrincipalKind::ServiceAccount, "application");
     let grants = Arc::new(
         LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             LocalGrantConfiguration {
                 root: root.clone(),
                 namespace: id("close-release-test"),
@@ -1438,6 +1444,7 @@ async fn a_settled_join_keeps_the_bound_grant_owner_until_the_final_release() {
     );
     let kept = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &root,
             id("kept"),
             application.clone(),
@@ -1478,6 +1485,7 @@ async fn a_settled_join_keeps_the_bound_grant_owner_until_the_final_release() {
         "admitted work still uses the owner after the settled join"
     );
     let admitted = straggler.issue_root(
+        &meerkat_core::AdmissionGuard::none(),
         &root,
         id("admitted"),
         application.clone(),
@@ -1500,6 +1508,7 @@ async fn a_settled_join_keeps_the_bound_grant_owner_until_the_final_release() {
     ));
     assert_eq!(
         straggler.issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &root,
             id("late"),
             application.clone(),
@@ -1699,6 +1708,7 @@ impl BoundCustody {
         let application = principal(PrincipalKind::ServiceAccount, "application");
         let grants = Arc::new(
             LocalGrantAuthority::new_durable(
+                &meerkat_core::AdmissionGuard::none(),
                 LocalGrantConfiguration {
                     root: root.clone(),
                     namespace: id("bound-custody"),
@@ -1706,6 +1716,7 @@ impl BoundCustody {
                 },
                 Arc::new(FileGrantOwnerStore::new(
                     f._directory.path().join("bound-grants"),
+                    meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
                 )),
                 publication.clone(),
                 Arc::new(HostAuthorizationClock),
@@ -1714,6 +1725,7 @@ impl BoundCustody {
         );
         let kept = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 id("kept"),
                 application.clone(),

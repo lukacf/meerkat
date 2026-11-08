@@ -208,7 +208,10 @@ them.
   the fields `adopted_marker_generation` and `released_publication_at_millis`,
   and the input variant `AuthMachineInput::RestoreCredentialLifecycleSnapshot`
   gains the fields `adopted_marker_generation` and
-  `released_publication_at_millis`.
+  `released_publication_at_millis`. `meerkat-machine-kernels` (the generated
+  AuthMachine kernel): `generated::auth::State` and
+  `generated::auth::inputs::RestoreCredentialLifecycleSnapshot` gain the same
+  two fields.
 
 ### Added
 

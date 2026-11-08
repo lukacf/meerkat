@@ -20224,138 +20224,174 @@ async fn a_queued_cancel_point_whose_first_archival_fails_keeps_the_error_and_te
     );
 }
 
-/// #1471: a boundary cancel taken after the runtime loop started a run but
-/// before the executor entered it (here: blocked at the top of `apply`) is not
-/// lost. The executor receives a cooperative cancel bound to that exact run
-/// while the run is still in flight, nothing reaches the ambient
-/// executor-wide cancel, and nothing hard-cancels the run.
-#[tokio::test]
-async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
-    struct ExactBoundaryHandle {
-        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
-        exact_cancel_seen: Arc<Notify>,
+/// A boundary-cancel probe executor. Its first `apply` parks until the row
+/// releases it; every later `apply` returns at once. It records the exact-run
+/// cancels its boundary handle receives (when it has a handle), the
+/// executor-wide cancels the runtime loop applies, and the hard cancels. With
+/// `refuse_idle_cancel`, its executor-wide cancel refuses when no run is in
+/// `apply`, as an executor that forwards `SessionError::NotRunning` does.
+#[derive(Clone, Default)]
+struct BoundaryCancelProbe {
+    apply_started: Arc<Notify>,
+    allow_apply: Arc<Notify>,
+    applies: Arc<AtomicUsize>,
+    in_apply: Arc<AtomicBool>,
+    exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
+    exact_cancel_seen: Arc<Notify>,
+    executor_wide_cancels: Arc<AtomicUsize>,
+    hard_cancels: Arc<AtomicUsize>,
+}
+
+impl BoundaryCancelProbe {
+    fn exact_cancels(&self) -> Vec<RunId> {
+        self.exact_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
-    #[async_trait::async_trait]
-    impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for ExactBoundaryHandle {
-        async fn cancel_after_boundary(
-            &self,
-            expected_run_id: &RunId,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            self.exact_cancels
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(expected_run_id.clone());
-            self.exact_cancel_seen.notify_one();
-            Ok(())
-        }
+    fn executor_wide_cancels(&self) -> usize {
+        self.executor_wide_cancels.load(Ordering::SeqCst)
     }
 
-    struct CountingInterruptHandle {
-        hard_cancels: Arc<AtomicUsize>,
+    fn hard_cancels(&self) -> usize {
+        self.hard_cancels.load(Ordering::SeqCst)
+    }
+}
+
+struct BoundaryCancelProbeHandle {
+    probe: BoundaryCancelProbe,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for BoundaryCancelProbeHandle {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
+        self.probe
+            .exact_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(expected_run_id.clone());
+        self.probe.exact_cancel_seen.notify_one();
+        Ok(())
+    }
+}
+
+struct BoundaryCancelProbeInterrupt {
+    probe: BoundaryCancelProbe,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for BoundaryCancelProbeInterrupt {
+    async fn hard_cancel_run_if_current(
+        &self,
+        _expected_run_id: &RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.probe.hard_cancels.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+}
+
+struct BoundaryCancelProbeExecutor {
+    probe: BoundaryCancelProbe,
+    with_boundary_handle: bool,
+    refuse_idle_cancel: bool,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for BoundaryCancelProbeExecutor {
+    fn boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
+        self.with_boundary_handle.then(|| {
+            Arc::new(BoundaryCancelProbeHandle {
+                probe: self.probe.clone(),
+            }) as Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>
+        })
     }
 
-    #[async_trait::async_trait]
-    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
-        async fn hard_cancel_run_if_current(
-            &self,
-            _expected_run_id: &RunId,
-            _reason: String,
-        ) -> Result<bool, CoreExecutorError> {
-            self.hard_cancels.fetch_add(1, Ordering::SeqCst);
-            Ok(true)
-        }
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(BoundaryCancelProbeInterrupt {
+            probe: self.probe.clone(),
+        }))
     }
 
-    struct GatedExecutor {
-        apply_started: Arc<Notify>,
-        allow_apply: Arc<Notify>,
-        ambient_cancels: Arc<AtomicUsize>,
-        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
-        exact_cancel_seen: Arc<Notify>,
-        hard_cancels: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl CoreExecutor for GatedExecutor {
-        fn boundary_handle(
-            &self,
-        ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
-            Some(Arc::new(ExactBoundaryHandle {
-                exact_cancels: Arc::clone(&self.exact_cancels),
-                exact_cancel_seen: Arc::clone(&self.exact_cancel_seen),
-            }))
-        }
-
-        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
-            Some(Arc::new(CountingInterruptHandle {
-                hard_cancels: Arc::clone(&self.hard_cancels),
-            }))
-        }
-
-        async fn apply(
-            &mut self,
-            run_id: RunId,
-            primitive: RunPrimitive,
-        ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            let allowed = self.allow_apply.notified();
-            self.apply_started.notify_one();
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let first = self.probe.applies.fetch_add(1, Ordering::SeqCst) == 0;
+        self.probe.in_apply.store(true, Ordering::SeqCst);
+        if first {
+            let allowed = self.probe.allow_apply.notified();
+            self.probe.apply_started.notify_one();
             allowed.await;
-            Ok(CoreApplyOutput::with_untyped_snapshot(
-                RunBoundaryReceiptDraft {
-                    run_id,
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                },
-                None,
-                None,
-            ))
         }
-
-        async fn cancel_after_boundary(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            self.ambient_cancels.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn stop_runtime_executor(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            Ok(())
-        }
+        self.probe.in_apply.store(false, Ordering::SeqCst);
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            None,
+        ))
     }
 
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.probe
+            .executor_wide_cancels
+            .fetch_add(1, Ordering::SeqCst);
+        if self.refuse_idle_cancel && !self.probe.in_apply.load(Ordering::SeqCst) {
+            return Err(CoreExecutorError::control_failed_runtime(
+                "session not running: no run is active",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+/// Register a session served by a [`BoundaryCancelProbeExecutor`], admit one
+/// prompt, and wait until its run is parked at the top of the executor's
+/// `apply`. Returns the machine, the session, the parked run and the prompt's
+/// completion.
+async fn a_run_parked_before_the_probe_executor_enters(
+    probe: &BoundaryCancelProbe,
+    with_boundary_handle: bool,
+    refuse_idle_cancel: bool,
+) -> (
+    Arc<MeerkatMachine>,
+    SessionId,
+    RunId,
+    crate::completion::CompletionHandle,
+) {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    let apply_started = Arc::new(Notify::new());
-    let allow_apply = Arc::new(Notify::new());
-    let ambient_cancels = Arc::new(AtomicUsize::new(0));
-    let exact_cancels = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let exact_cancel_seen = Arc::new(Notify::new());
-    let hard_cancels = Arc::new(AtomicUsize::new(0));
     adapter
         .register_session_with_executor(
             session_id.clone(),
-            Box::new(GatedExecutor {
-                apply_started: Arc::clone(&apply_started),
-                allow_apply: Arc::clone(&allow_apply),
-                ambient_cancels: Arc::clone(&ambient_cancels),
-                exact_cancels: Arc::clone(&exact_cancels),
-                exact_cancel_seen: Arc::clone(&exact_cancel_seen),
-                hard_cancels: Arc::clone(&hard_cancels),
+            Box::new(BoundaryCancelProbeExecutor {
+                probe: probe.clone(),
+                with_boundary_handle,
+                refuse_idle_cancel,
             }),
         )
         .await
-        .expect("register the gated executor");
-
-    let started = apply_started.notified();
-    let (outcome, _completion) = adapter
+        .expect("register the probe executor");
+    let started = probe.apply_started.notified();
+    let (outcome, completion) = adapter
         .accept_input_with_completion(&session_id, make_prompt("cancelled before entry"))
         .await
         .expect("admit the prompt");
@@ -20370,9 +20406,66 @@ async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
         .expect("machine state")
         .current_run_id
         .expect("the started run");
+    let run_id = RunId::from_uuid(uuid::Uuid::parse_str(&run_id.0).expect("run id"));
+    (
+        adapter,
+        session_id,
+        run_id,
+        completion.expect("the admitted prompt has a completion"),
+    )
+}
+
+/// Wait for one input's completion (hang guard only) and require that it
+/// completed.
+async fn expect_input_completed(completion: crate::completion::CompletionHandle, context: &str) {
+    let outcome = tokio::time::timeout(Duration::from_secs(30), completion.wait())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: the input's completion arrives"))
+        .unwrap_or_else(|error| panic!("{context}: the input's completion resolves: {error:?}"));
+    assert!(
+        matches!(
+            outcome,
+            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult
+        ),
+        "{context}: the input completes: {outcome:?}"
+    );
+}
+
+/// Admit one more prompt on `session_id` and wait until it completed: the
+/// session still serves input, and every runtime-loop effect queued before it
+/// has been realized.
+async fn expect_the_session_serves_a_next_input(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    context: &str,
+) {
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(session_id, make_prompt("the next turn"))
+        .await
+        .unwrap_or_else(|error| panic!("{context}: the session admits its next input: {error:?}"));
+    assert!(outcome.is_accepted(), "{context}: {outcome:?}");
+    expect_input_completed(
+        completion.unwrap_or_else(|| panic!("{context}: the next input has a completion")),
+        context,
+    )
+    .await;
+}
+
+/// #1471: a boundary cancel taken after the runtime loop started a run but
+/// before the executor entered it (here: parked at the top of `apply`) is not
+/// lost. The executor receives a cooperative cancel bound to that exact run
+/// while the run is in flight, and nothing hard-cancels the run. Nothing
+/// reaches the executor-wide cancel either, while the run is in flight or
+/// after it: the row checks once the run and a next input have completed, so
+/// every runtime-loop effect the cancel could have left has been realized.
+#[tokio::test]
+async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
+    let probe = BoundaryCancelProbe::default();
+    let (adapter, session_id, run_id, first) =
+        a_run_parked_before_the_probe_executor_enters(&probe, true, false).await;
 
     // The cancel lands while the executor has not entered the run yet.
-    let delivered = exact_cancel_seen.notified();
+    let delivered = probe.exact_cancel_seen.notified();
     adapter
         .cancel_after_boundary(&session_id)
         .await
@@ -20380,28 +20473,107 @@ async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
     tokio::time::timeout(Duration::from_secs(30), delivered)
         .await
         .expect("the run-bound cancel reaches the executor while the run is in flight");
-    allow_apply.notify_one();
-
-    let exact = exact_cancels
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     assert_eq!(
-        exact,
-        vec![RunId::from_uuid(
-            uuid::Uuid::parse_str(&run_id.0).expect("run id")
-        )],
+        probe.executor_wide_cancels(),
+        0,
+        "nothing reaches the executor-wide cancel while the run is in flight"
+    );
+    probe.allow_apply.notify_one();
+    expect_input_completed(first, "the cancelled run").await;
+    expect_the_session_serves_a_next_input(&adapter, &session_id, "after the cancelled run").await;
+
+    assert_eq!(
+        probe.exact_cancels(),
+        vec![run_id],
         "the cancel is bound to that exact run"
     );
     assert_eq!(
-        ambient_cancels.load(Ordering::SeqCst),
+        probe.executor_wide_cancels(),
         0,
-        "nothing reaches the ambient executor-wide cancel"
+        "nothing reaches the executor-wide cancel, after the run either"
+    );
+    assert_eq!(probe.hard_cancels(), 0, "nothing hard-cancels the run");
+}
+
+/// A boundary cancel taken while a run is current leaves the session
+/// serving. The executor here refuses an executor-wide cancel when no run is
+/// active, as an executor that forwards `SessionError::NotRunning` does; it is
+/// never asked for one, so after the cancelled run the runtime keeps running
+/// and admits and completes the next input.
+#[tokio::test]
+async fn a_boundary_cancelled_run_leaves_the_session_serving_its_next_input() {
+    let probe = BoundaryCancelProbe::default();
+    let (adapter, session_id, run_id, first) =
+        a_run_parked_before_the_probe_executor_enters(&probe, true, true).await;
+
+    let delivered = probe.exact_cancel_seen.notified();
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("cancel after boundary");
+    tokio::time::timeout(Duration::from_secs(30), delivered)
+        .await
+        .expect("the run-bound cancel reaches the executor while the run is in flight");
+    probe.allow_apply.notify_one();
+    expect_input_completed(first, "the cancelled run").await;
+
+    expect_the_session_serves_a_next_input(&adapter, &session_id, "after the cancelled run").await;
+    let state = adapter.existing_session_runtime_state(&session_id).await;
+    assert!(
+        !matches!(
+            state,
+            Some(RuntimeState::Stopped | RuntimeState::Destroyed) | None
+        ),
+        "the runtime keeps running after a boundary-cancelled run: {state:?}"
+    );
+    assert_eq!(probe.exact_cancels(), vec![run_id]);
+    assert_eq!(
+        probe.executor_wide_cancels(),
+        0,
+        "the executor-wide cancel is never asked for"
+    );
+}
+
+/// An exact-run boundary cancel taken before the executor enters the run, on
+/// an executor with no boundary handle, is held by the run's turn state
+/// (#1471) until the run enters, and nothing reaches the executor-wide
+/// cancel, while the run is in flight or after it.
+#[tokio::test]
+async fn an_exact_boundary_cancel_without_a_boundary_handle_is_held_by_the_runs_turn() {
+    let probe = BoundaryCancelProbe::default();
+    let (adapter, session_id, run_id, first) =
+        a_run_parked_before_the_probe_executor_enters(&probe, false, false).await;
+
+    let admitted = adapter
+        .cancel_after_boundary_run_if_current(&session_id, &run_id)
+        .await
+        .expect("an exact-run cancel of the current run");
+    assert!(admitted, "the parked run is current");
+    let held = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state")
+        .cancel_after_boundary;
+    assert!(held, "the run's turn holds the cancel until the run enters");
+    assert_eq!(
+        probe.executor_wide_cancels(),
+        0,
+        "nothing reaches the executor-wide cancel while the run is in flight"
+    );
+    probe.allow_apply.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(30), first.wait())
+        .await
+        .expect("the cancelled run's completion arrives");
+    expect_the_session_serves_a_next_input(&adapter, &session_id, "after the cancelled run").await;
+
+    assert!(
+        probe.exact_cancels().is_empty(),
+        "the executor has no boundary handle"
     );
     assert_eq!(
-        hard_cancels.load(Ordering::SeqCst),
+        probe.executor_wide_cancels(),
         0,
-        "nothing hard-cancels the run"
+        "nothing reaches the executor-wide cancel, after the run either"
     );
 }
 

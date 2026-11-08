@@ -27989,6 +27989,275 @@ default_model = "gemma"
         );
     }
 
+    /// A session service for the boundary-cancel rows. Its first turn parks
+    /// until the row releases it and every later turn completes at once. Its
+    /// session-wide boundary cancel reports `NotRunning` when no turn runs,
+    /// as the CLI's own session services do; its exact-run cancel accepts.
+    struct BoundaryCancelTurnService {
+        session_id: SessionId,
+        turns: std::sync::atomic::AtomicUsize,
+        running: std::sync::atomic::AtomicBool,
+        turn_started: Arc<tokio::sync::Notify>,
+        allow_turn: Arc<tokio::sync::Notify>,
+    }
+
+    impl BoundaryCancelTurnService {
+        fn new(session_id: SessionId) -> Self {
+            Self {
+                session_id,
+                turns: std::sync::atomic::AtomicUsize::new(0),
+                running: std::sync::atomic::AtomicBool::new(false),
+                turn_started: Arc::new(tokio::sync::Notify::new()),
+                allow_turn: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+
+        fn run_result(&self, text: &str, turns: u32) -> RunResult {
+            RunResult {
+                text: text.to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for BoundaryCancelTurnService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            Ok(self.run_result("", 0))
+        }
+
+        async fn start_turn(
+            &self,
+            id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            let first = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            self.running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if first {
+                let allowed = self.allow_turn.notified();
+                self.turn_started.notify_one();
+                allowed.await;
+            }
+            self.running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.run_result("done", 1))
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+            if self.running.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(SessionError::NotRunning { id: id.clone() })
+            }
+        }
+
+        async fn cancel_after_boundary_for_run(
+            &self,
+            _id: &SessionId,
+            _expected_run_id: &meerkat_core::RunId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(SessionView {
+                state: SessionInfo {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::now(),
+                    updated_at: std::time::SystemTime::now(),
+                    message_count: 0,
+                    is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    last_assistant_text: None,
+                    labels: Default::default(),
+                },
+                billing: SessionUsage {
+                    total_tokens: 0,
+                    usage: Usage::default(),
+                },
+            })
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            Ok(Vec::new())
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    /// Register a session served by the CLI runtime executor over a
+    /// [`BoundaryCancelTurnService`].
+    async fn a_cli_served_boundary_cancel_session() -> (
+        Arc<meerkat_runtime::MeerkatMachine>,
+        SessionId,
+        Arc<BoundaryCancelTurnService>,
+    ) {
+        let session_id = SessionId::new();
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let service = Arc::new(BoundaryCancelTurnService::new(session_id.clone()));
+        let executor = Box::new(CliRuntimeExecutor {
+            service: Arc::clone(&service) as Arc<dyn meerkat_core::service::SessionService>,
+            #[cfg(feature = "session-store")]
+            persistent_service: None,
+            #[cfg(feature = "session-store")]
+            publication_actor_witness: None,
+            session_id: session_id.clone(),
+            runtime_adapter: Arc::clone(&runtime_adapter),
+            workgraph_service: None,
+            event_tx: None,
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await
+            .expect("the CLI runtime executor registers");
+        (runtime_adapter, session_id, service)
+    }
+
+    /// Admit a prompt on a CLI-served session and return its completion.
+    async fn admit_cli_prompt(
+        runtime_adapter: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        text: &str,
+        context: &str,
+    ) -> meerkat_runtime::completion::CompletionHandle {
+        let (outcome, completion) = runtime_adapter
+            .accept_input_with_completion(
+                session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(text, None)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{context}: the session admits the prompt: {error:?}"));
+        assert!(outcome.is_accepted(), "{context}: {outcome:?}");
+        completion.unwrap_or_else(|| panic!("{context}: the admitted prompt has a completion"))
+    }
+
+    /// Wait for a prompt's completion (hang guard only) and require that it
+    /// completed.
+    async fn expect_cli_prompt_completed(
+        completion: meerkat_runtime::completion::CompletionHandle,
+        context: &str,
+    ) {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), completion.wait())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: the prompt's completion arrives"))
+            .unwrap_or_else(|error| panic!("{context}: the prompt completes: {error:?}"));
+        assert!(
+            matches!(
+                outcome,
+                meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                    | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+            ),
+            "{context}: the prompt completes: {outcome:?}"
+        );
+    }
+
+    /// The supervisor bridge paths into a session the CLI runtime executor
+    /// serves (an external mob member started by `rkat run
+    /// --comms-listen-tcp`): a cancel taken while its turn runs leaves the
+    /// session serving its next input. `exact_run` takes the HoldRunStarts
+    /// path (`cancel_after_boundary_run_if_current`), otherwise the
+    /// InterruptMember path (`cancel_after_boundary_for_optional_member_incarnation`).
+    async fn a_supervisor_cancel_leaves_the_cli_session_serving(exact_run: bool) {
+        let (runtime_adapter, session_id, service) = a_cli_served_boundary_cancel_session().await;
+        let started = service.turn_started.notified();
+        let first = admit_cli_prompt(
+            &runtime_adapter,
+            &session_id,
+            "a turn to cancel",
+            "first prompt",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(30), started)
+            .await
+            .expect("the first turn starts");
+        if exact_run {
+            let run_id = runtime_adapter
+                .current_run(&session_id)
+                .await
+                .expect("the parked turn's run is current");
+            let admitted = runtime_adapter
+                .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                .await
+                .expect("the held run's cancel");
+            assert!(admitted, "the parked run is current");
+        } else {
+            runtime_adapter
+                .cancel_after_boundary_for_optional_member_incarnation(&session_id, None)
+                .await
+                .expect("the interrupt's boundary cancel");
+        }
+        service.allow_turn.notify_one();
+        expect_cli_prompt_completed(first, "the cancelled turn").await;
+
+        let next = admit_cli_prompt(
+            &runtime_adapter,
+            &session_id,
+            "the next turn",
+            "after the cancel",
+        )
+        .await;
+        expect_cli_prompt_completed(next, "after the cancel").await;
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_interrupt_leaves_a_cli_served_session_serving() {
+        a_supervisor_cancel_leaves_the_cli_session_serving(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_held_run_cancel_leaves_a_cli_served_session_serving() {
+        a_supervisor_cancel_leaves_the_cli_session_serving(true).await;
+    }
+
+    /// The executor contract for the CLI runtime executor: a boundary cancel
+    /// the runtime loop applies while no run is active is a no-op.
+    #[tokio::test]
+    async fn cli_runtime_executor_idle_boundary_cancel_conformance() {
+        let (runtime_adapter, session_id, service) = a_cli_served_boundary_cancel_session().await;
+        // The check's prompt is the session's first turn: let it run.
+        service.allow_turn.notify_one();
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime_adapter,
+            &session_id,
+        )
+        .await;
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
     #[tokio::test]
     async fn test_cli_output_pipeline_shutdown_drops_stream_sender_before_awaiting_tasks() {
         let pipeline = CliOutputPipeline::new(

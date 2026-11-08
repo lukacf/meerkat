@@ -21210,6 +21210,34 @@ mod tests {
         )
     }
 
+    /// The executor contract for the RPC session executor: a boundary cancel
+    /// the runtime loop applies while no run is active is a no-op, so the
+    /// session keeps serving input.
+    #[tokio::test]
+    async fn rpc_session_executor_idle_boundary_cancel_conformance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .expect("create the session without a turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("attach the RPC runtime executor");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime.runtime_adapter(),
+            &session_id,
+        )
+        .await;
+    }
+
     fn mock_build_config() -> AgentBuildConfig {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(MockLlmClient)),

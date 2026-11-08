@@ -10362,3 +10362,106 @@ async fn a_lease_ahead_serves_a_login_from_another_process() {
         );
     }
 }
+
+/// Store `tokens` for `target` under a publication of `lease`, as a login
+/// in another process does: every process has its own lease handle.
+async fn publish_in_process(
+    store: &EphemeralTokenStore,
+    target: &McpServerIdentity,
+    lease: &TestAuthAuthority,
+    tokens: &PersistedTokens,
+) {
+    let key = target.token_key().unwrap();
+    let transition = lease
+        .acquire_lease(
+            &target.lease_key().unwrap(),
+            meerkat_core::persisted_token_expires_at_epoch_secs(tokens),
+        )
+        .unwrap();
+    let published =
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, tokens, &transition)
+            .unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &published)
+        .await
+        .unwrap();
+}
+
+/// A failed refresh after this process adopted another process's login
+/// leaves that login's publication as it was. This process logs in
+/// (generation 1); another process logs the target out and in again (its
+/// own generation 1, a credential that has expired). This process adopts
+/// it, refreshes it, and the refresh's save fails. The rollback stores the
+/// other login's credential again, and both processes still name it their
+/// current publication.
+#[tokio::test]
+async fn a_failed_refresh_after_adopting_another_login_keeps_its_publication() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let inner = Arc::new(EphemeralTokenStore::new());
+    let store = Arc::new(FailNextSaveStore {
+        inner: Arc::clone(&inner),
+        fail_next_save: AtomicBool::new(false),
+    });
+    let lease = test_auth_lease();
+    let authority = FixtureAuthority::with_fixture_http(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        lease.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let key = target.token_key().unwrap();
+    let lease_key = target.lease_key().unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+
+    let mut tokens = inner.load(&key).await.unwrap().unwrap();
+    inner
+        .clear(&meerkat_core::AdmissionGuard::none(), &key)
+        .await
+        .unwrap();
+    // A publication time later than this process's.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokens.primary_secret = Some("credential-of-the-other-login".to_owned());
+    tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    let other = test_auth_lease();
+    publish_in_process(inner.as_ref(), &target, &other, &tokens).await;
+
+    store.fail_next_save.store(true, Ordering::SeqCst);
+    authority
+        .stored_bearer_token(&target)
+        .await
+        .expect_err("the refresh's save fails");
+    assert!(
+        !store.fail_next_save.load(Ordering::SeqCst),
+        "the injected save failure was consumed by the refresh"
+    );
+
+    let restored = inner.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        restored.primary_secret.as_deref(),
+        Some("credential-of-the-other-login")
+    );
+    assert_eq!(
+        durable_marker::marker_relation_for_tokens_and_snapshot(
+            &restored,
+            &other.snapshot(&lease_key),
+            &key
+        ),
+        durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+        "the process that published the credential still names it its current publication"
+    );
+    assert_eq!(
+        durable_marker::marker_relation_for_tokens_and_snapshot(
+            &restored,
+            &lease.snapshot(&lease_key),
+            &key
+        ),
+        durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+        "so does this process"
+    );
+}

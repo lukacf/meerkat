@@ -2805,3 +2805,95 @@ async fn connector_commit_whose_owner_is_lost_before_the_consume_publishes_nothi
         "the retired attempt never completes"
     );
 }
+
+/// Another process's connector authority over the same store, with its own
+/// lease and flow owner, as a separate `rkat` process has.
+fn another_process(fx: &Fixture) -> ConnectorOAuthAuthority {
+    let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
+        std::time::Duration::from_mins(5),
+        Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
+    ));
+    ConnectorOAuthAuthority::with_http(
+        fx.persistence.clone(),
+        flows,
+        ConnectorStrategies::default().with(fx.strategy.clone()),
+        reqwest::Client::new(),
+    )
+    .unwrap()
+}
+
+/// A connector lease ahead of another process's login serves that login's
+/// credential. This process logs in twice (its lease publishes generation
+/// 2); another process logs the slot out and a further process logs it in
+/// again (its own generation 1). This process's next read serves that
+/// login's credential, and so does the read after it.
+#[tokio::test]
+async fn a_connector_lease_ahead_serves_a_login_from_another_process() {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-ahead");
+    fx.grant("code-a", "access-a", "subject-a", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-a")
+        .await
+        .unwrap();
+    fx.grant("code-a2", "access-a2", "subject-a", Some("files.read"));
+    fx.login(
+        &work,
+        AccountSelection::Known("subject-a".into()),
+        "code-a2",
+    )
+    .await
+    .expect("this process logs in again");
+    assert_eq!(
+        fx.authority.bearer_token(&work).await.unwrap().as_deref(),
+        Some("access-a2")
+    );
+    assert_eq!(
+        meerkat_core::tokens_lifecycle_published_generation(&fx.stored(&work).await.unwrap()),
+        Some(2),
+        "this process's lease is ahead of a first login"
+    );
+
+    another_process(&fx)
+        .logout(&work)
+        .await
+        .expect("another process logs the slot out");
+    // A publication time later than this process's.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    fx.grant("code-b", "access-b", "subject-a", Some("files.read"));
+    let other = another_process(&fx);
+    let start = other
+        .login_start(
+            &fx.target(&work, AccountSelection::Discover),
+            &redirect(41002),
+        )
+        .await
+        .expect("admit");
+    other
+        .login_complete(
+            &work,
+            ConnectorOAuthCallback {
+                redirect_uri: redirect(41002),
+                state: start.state,
+                code: "code-b".to_owned(),
+                host_attempt_handle: None,
+            },
+        )
+        .await
+        .expect("another process logs the slot in again");
+    assert_eq!(
+        meerkat_core::tokens_lifecycle_published_generation(&fx.stored(&work).await.unwrap()),
+        Some(1),
+        "the other login publishes its process's generation 1"
+    );
+
+    for read in ["first", "second"] {
+        assert_eq!(
+            fx.authority
+                .bearer_token(&work)
+                .await
+                .map_err(|error| error.to_string()),
+            Ok(Some("access-b".to_owned())),
+            "the {read} read serves the other login's credential"
+        );
+    }
+}

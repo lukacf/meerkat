@@ -1407,7 +1407,10 @@ them.
   as before. A plain retirement (`MobHandle::retire`) does not settle the
   member's session either, since the session can be resumed: a compaction
   projection it owes (one a stop committed, or the retirement's own cancel
-  of a running run) stays owed until the session's next wake.
+  of a running run) stays owed until the session's next wake. A member the
+  roster unlisted while its run carried an owed compaction projection, and
+  that is then deleted or reset before any wake, loses that batch: its fresh
+  life lets the archived session go without a settle.
 
 ## [0.9.10] - 2026-11-04
 

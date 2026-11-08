@@ -1149,10 +1149,18 @@ impl Display for ErrorEvent {
                     Some(session_id) => format!(" on session {session_id}"),
                     None => String::new(),
                 };
+                // A compaction harvest's error says itself whether a
+                // fallback harvest follows; any other side effect is not run
+                // again.
+                let settled = if effect == "compaction_harvest" {
+                    ""
+                } else {
+                    ", and is not run again"
+                };
                 write!(
                     f,
                     "lifecycle_effect_failed: the {effect} of {identity} ({agent_runtime_id}\
-                     {session}) failed after {attempts} attempts, and is not run again: {error}"
+                     {session}) failed after {attempts} attempts{settled}: {error}"
                 )
             }
             Self::LifecycleProjectionOff { detail } => {

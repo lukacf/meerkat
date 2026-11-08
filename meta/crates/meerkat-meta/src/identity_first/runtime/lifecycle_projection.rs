@@ -13,12 +13,12 @@
 //! | Journal fact | Side effects |
 //! |---|---|
 //! | the seat of an identity's member, while Core still holds that incarnation | the customizer's `after_create`, with the session the seat names |
-//! | a retirement the roster's unlisting asked for, or Core's seal unlisted | the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
-//! | a reset's rotation onto a fresh session (online, or a first-boot `Fresh` row's) | the distillation of the retired session behind its reset boundary, the retirement hook (`reset`) |
-//! | a delete's rotation onto a fresh session | the drop of the retired session's semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
-//! | a role move's rotation onto a fresh session, or one no Meta verb asked for (a host's legacy respawn included) that seated another role | the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
-//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own, or its legacy respawn whose retirement no Meta verb's record answered) | the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
-//! | the fresh life a reset or a delete seats after an incarnation Core had already retired | that verb's memory side effects of the session the retired incarnation left, and no retirement hook |
+//! | a retirement the roster's unlisting asked for, or Core's seal unlisted | the harvest of the compactions the retired session holds, the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
+//! | a reset's rotation onto a fresh session (online, or a first-boot `Fresh` row's) | the harvest of the compactions the retired session holds and the distillation of the retired session, both behind its reset boundary, the retirement hook (`reset`) |
+//! | a delete's rotation onto a fresh session | the harvest of the compactions the retired session holds, then the drop of its semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
+//! | a role move's rotation onto a fresh session, or one no Meta verb asked for (a host's legacy respawn included) that seated another role | the harvest of the compactions the retired session holds, the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
+//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own, or its legacy respawn whose retirement no Meta verb's record answered) | the harvest of the compactions the retired session holds, the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
+//! | the fresh life a reset or a delete seats after an incarnation Core had already retired | that verb's memory side effects of the session the retired incarnation left (the harvest of its compactions included), and no retirement hook |
 //! | any other retirement: a reload's, a respawn on the same session, Core's own | none |
 //!
 //! A release (`retire`, a scoped retire, a reprofile) is no journaled step:

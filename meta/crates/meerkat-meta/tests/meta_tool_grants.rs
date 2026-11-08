@@ -876,14 +876,13 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
         identity: AgentIdentity::parse("keeper").unwrap(),
         ..spec()
     };
-    let registered = identities.runtime().register(keeper_spec).await;
+    let registered = identities.register(keeper_spec).await;
     assert!(
         registered.is_ok(),
         "Core answers the registration: {registered:?}"
     );
     assert!(
         identities
-            .runtime()
             .registered_spec(&AgentIdentity::parse("keeper").unwrap())
             .await
             .is_ok(),

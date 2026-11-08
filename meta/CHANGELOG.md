@@ -94,6 +94,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
   and the exported bridge implement it.
 
+- `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
+  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
+  step owed the session it ended failed. Its record has its own key, apart
+  from the retirement's distillation, and goes once the fallback read of
+  the session's memory harvested them. Earlier releases neither write nor
+  read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
+  (provided, removes nothing by default) removes such a record; the SQLite,
+  in-memory and host store placements implement it.
+
 ### Fixed
 
 - `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
@@ -156,12 +165,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   asks Core to end the session, and the distiller reads the settled
   discards before it distills the transcript (and, for a delete, before the
   session's memory scope is dropped). When the settle answers no discards
-  (an earlier finalization published them), fails or is busy, the
-  distiller reads the compaction's discards from the session's memory
-  instead, once Core ended the session. A harvest that times out, is
-  denied by the realm's budget or fails is recorded as the retirement's
-  failed distillation (`lifecycle_effect_failed`) and attempted again
-  through that read, bounded like the other side effects.
+  (an earlier finalization published them), the distiller reads the
+  compaction's discards from the session's memory instead. When the
+  settle fails or is busy, it reads them there once Core ended the
+  session, which publishes them only for a reset, a role move or a delete
+  (Core's rotation settles the session it leaves) and only when that
+  settle succeeds; the roster's unlisting leaves them owed in Core, as
+  before, for the session's next settle or wake. A harvest that times out,
+  is denied by the realm's budget or fails is recorded as a failed
+  compaction harvest (`lifecycle_effect_failed`, effect
+  `compaction_harvest`) and attempted again through that read, bounded
+  like the other side effects; the record goes once that read harvested
+  the discards. A step Core refuses before any of it reaches Core harvests
+  the discards it settled, or those the session's memory already holds, as
+  the session's live compaction's would be.
 
 ### Known limitations
 

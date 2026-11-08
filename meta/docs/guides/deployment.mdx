@@ -304,13 +304,19 @@ A compaction a dormant member still owed is distilled only when one of
 Meta's verbs ends its session. A delete distills the discards it settles in
 Core at once; a reset, a role move or the roster's unlisting keeps them in
 process until the retirement's side effects run. When Core's settle answers
-no discards or fails, those side effects read the compaction's discards from
-the session's memory instead, and a harvest that fails is recorded
-(`lifecycle_effect_failed`) and attempted again through that read, bounded
-like the other side effects. A kill before the side effects ran leaves the
-discards searchable in the old session's memory but never distilled. A
-rotation a host starts directly on the mob finalizes the projection without
-distilling its discards.
+no discards, those side effects read the compaction's discards from the
+session's memory instead. When the settle fails, they read them there once
+Core ended the session, which publishes them only for a reset, a role move
+or a delete, and only when Core's own settle of the session it leaves
+succeeds; the roster's unlisting leaves them owed in Core for the session's
+next settle or wake. A harvest that fails is recorded
+(`lifecycle_effect_failed`, effect `compaction_harvest`) and attempted again
+through that read, bounded like the other side effects, and its record goes
+once that read harvested the discards. A step Core refuses keeps its
+session, and harvests what of the compaction is already published. A kill
+before the side effects ran leaves the discards searchable in the old
+session's memory but never distilled. A rotation a host starts directly on
+the mob finalizes the projection without distilling its discards.
 
 What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)

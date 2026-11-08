@@ -2033,26 +2033,22 @@ impl DistillerEngine {
         Err(timeout)
     }
 
-    /// [`Self::harvest_compaction_within_bound`] of an answered batch,
-    /// detached: for a session that goes on (Core refused the step that
+    /// [`Self::harvest_compaction_within_bound`], detached: of an answered
+    /// batch, or, with none, of the session's compaction discards read from
+    /// its memory, for a session that goes on (Core refused the step that
     /// would have ended it), off every critical path.
-    pub(crate) fn spawn_settled_discards_harvest(
+    pub(crate) fn spawn_compaction_harvest(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
-        discards: Vec<DiscardEntry>,
+        discards: Option<Vec<DiscardEntry>>,
     ) {
         let engine = self.clone();
         let identity = identity.to_string();
         let session_key = session_key.to_string();
         tokio::spawn(async move {
             engine
-                .distill_now_with(
-                    &identity,
-                    &session_key,
-                    DistillCause::Compaction,
-                    Some(discards),
-                )
+                .distill_now_with(&identity, &session_key, DistillCause::Compaction, discards)
                 .await;
         });
     }

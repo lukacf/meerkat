@@ -40263,25 +40263,37 @@ mod cli_mcp_host_auth_resolver_tests {
 /// compaction unsettled when its mob rotates it.
 #[cfg(test)]
 mod owed_compaction_forward_guard {
-    /// The body of the impl block `header` opens, up to its closing brace.
-    fn impl_block<'a>(source: &'a str, header: &str) -> Option<&'a str> {
-        let start = source.find(header)?;
-        let body = &source[start..];
+    /// The `MobSessionService` impl block of `wrapper` in `source`, up to
+    /// its closing brace, whatever form its header takes (the trait's path
+    /// with or without a leading `::`, or an imported name). Only the source
+    /// before this module is read, so the guard's own text never stands for
+    /// a wrapper's.
+    fn wrapper_impl<'a>(source: &'a str, wrapper: &str) -> Option<&'a str> {
+        let source = &source[..source
+            .find("mod owed_compaction_forward_guard")
+            .unwrap_or(source.len())];
+        let at = source.find(&format!("MobSessionService for {wrapper} {{"))?;
+        let line = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if !source[line..at].trim_start().starts_with("impl") {
+            return None;
+        }
+        let body = &source[at..];
         Some(&body[..body.find("\n}\n")?])
     }
 
     #[test]
     fn both_cli_wrappers_forward_the_owed_compaction_settle() {
         let source = include_str!("main.rs");
-        for header in [
-            "impl meerkat_mob::MobSessionService for RunMobSessionService {",
-            "impl meerkat_mob::MobSessionService for MobCliSessionService {",
-        ] {
-            let block = impl_block(source, header);
-            assert!(block.is_some(), "{header} is in the CLI's source");
+        for wrapper in ["RunMobSessionService", "MobCliSessionService"] {
+            let block = wrapper_impl(source, wrapper);
+            assert!(
+                block.is_some(),
+                "the MobSessionService impl for {wrapper} is in the CLI's source"
+            );
             assert!(
                 block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
-                "{header} forwards the owed compaction settle to the service it wraps"
+                "the MobSessionService impl for {wrapper} forwards the owed compaction settle to \
+                 the service it wraps"
             );
         }
     }

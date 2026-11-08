@@ -971,12 +971,14 @@ pub enum ErrorEvent {
         cursor: u64,
     },
     /// A lifecycle side effect Core's journal owed an identity's
-    /// incarnation failed: `effect` (`after_create`, `exit_interview` or
-    /// `distillation`) answered an error, or did not answer or land within
-    /// its deadline on each of its `attempts`. The identity runtime recorded
-    /// the failure durably and went on; the side effect is not run again,
-    /// and it delayed later ones by at most its bound. A retirement hook's
-    /// failure is a [`Self::RetiredMemberReleaseFailed`].
+    /// incarnation failed: `effect` (`after_create`, `exit_interview`,
+    /// `distillation` or `compaction_harvest`) answered an error, or did
+    /// not answer or land within its deadline on each of its `attempts`.
+    /// The identity runtime recorded the failure durably and went on; the
+    /// side effect is not run again (a compaction harvest's fallback read
+    /// runs after it, and removes the record once it harvested the
+    /// discards), and it delayed later ones by at most its bound. A
+    /// retirement hook's failure is a [`Self::RetiredMemberReleaseFailed`].
     LifecycleEffectFailed {
         identity: String,
         /// The incarnation the side effect was owed for.

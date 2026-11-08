@@ -704,15 +704,17 @@ impl AgentMemoryRuntimeInjector {
         }
     }
 
-    /// The same harvest, detached. A no-op without a Distiller.
-    pub(crate) fn spawn_settled_discards_harvest(
+    /// The same harvest, detached: of `discards`, or, with none, of the
+    /// session's compaction discards read from its memory. A no-op without
+    /// a Distiller.
+    pub(crate) fn spawn_compaction_harvest(
         &self,
         identity: &AgentIdentity,
         session_key: &str,
-        discards: Vec<crate::memory::distiller::DiscardEntry>,
+        discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
     ) {
         if let Some(distiller) = self.distiller.as_ref() {
-            distiller.spawn_settled_discards_harvest(identity.as_str(), session_key, discards);
+            distiller.spawn_compaction_harvest(identity.as_str(), session_key, discards);
         }
     }
 

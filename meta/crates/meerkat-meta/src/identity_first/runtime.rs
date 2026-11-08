@@ -14566,8 +14566,14 @@ impl IdentityRuntime {
         let previous = last
             .clone()
             .filter(|binding| binding_spawned_for_identity(binding, identity));
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Reset, last)
-            .await?;
+        self.start_fresh_life_locked(
+            identity,
+            &mut foreground_shutdown,
+            FreshLife::Reset,
+            last,
+            &mut None,
+        )
+        .await?;
 
         // The fresh life is committed in Core from here. The bookkeeping that
         // needs only the old binding runs first, so a failed read of the
@@ -14674,12 +14680,19 @@ impl IdentityRuntime {
     /// between (another lifecycle operation of the member ended) refuses the
     /// step, retryable (`IdentityWakeRetryable`), with nothing recorded and
     /// nothing asked of Core.
+    ///
+    /// `owed_compaction` is the compaction harvest a delete still owes the
+    /// session it ends (its own harvest failed, or Core's settle failed): it
+    /// is handed to the retirement once that is prepared, as a reset's
+    /// settle hands its own, and stays with the caller when the step is
+    /// refused before then.
     async fn start_fresh_life_locked(
         &self,
         identity: &AgentIdentity,
         foreground_shutdown: &mut watch::Receiver<bool>,
         life: FreshLife,
         last: Option<meerkat_mob::MemberBinding>,
+        owed_compaction: &mut Option<lifecycle_projection::OwedCompaction>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
         // An identity a held pass did not publish owes its host a fresh held
@@ -14781,10 +14794,13 @@ impl IdentityRuntime {
         // A reset ends the live incarnation's session for good: a compaction
         // projection it still owes is settled before Core is asked, and its
         // batch waits for the retirement's side effects. A delete settled
-        // its own in its distillation, before this step.
+        // its own in its distillation, before this step, and hands the
+        // retirement what it still owes now that the retirement is prepared.
         if life == FreshLife::Reset {
             self.settle_owed_compaction_for_retirement(identity, retiring.as_ref())
                 .await;
+        } else if let Some(owed) = owed_compaction.take() {
+            self.owe_compaction(identity, retiring.as_ref(), owed);
         }
         let session_id = match bridge.rotate_member(identity, &spec, &draft).await {
             Ok(session_id) => session_id,
@@ -15021,6 +15037,9 @@ impl IdentityRuntime {
         // the outgoing session before its fresh life starts. Bounded; the
         // delete proceeds at the pre-rotation timeout.
         let injector = self.agent_memory.read().await.clone();
+        // What the delete still owes the session it ends of a compaction:
+        // handed to the retirement once the step prepared it.
+        let mut owed_compaction = None;
         if let (Some(injector), Some(session_key)) =
             (injector.as_ref(), previous_session_key.as_ref())
         {
@@ -15028,12 +15047,15 @@ impl IdentityRuntime {
             // settled first, and its discards harvested before the
             // transcript is distilled: no wake will finalize it, and the
             // delete drops the session's scope once Core ended it. A
-            // harvest that fails here, and a batch Core finalizes only as
-            // it ends the session (the settle failed), are owed to the
-            // retirement's side effects, which harvest the session's
-            // memory before the scope drop.
+            // harvest that fails here (the batch is published in the
+            // session's memory then), and a batch Core publishes only as its
+            // rotation ends the session (the settle failed), are owed to the
+            // retirement's side effects, which harvest the session's memory
+            // before the scope drop; if the delete is refused before
+            // anything of it reaches Core, a published batch is harvested as
+            // the session's live compaction's would be.
             if previous.is_live() {
-                use self::lifecycle_projection::OwedSettle;
+                use self::lifecycle_projection::{OwedCompaction, OwedSettle};
                 let owed = match self.settle_owed_compaction(identity).await {
                     OwedSettle::Nothing => None,
                     OwedSettle::Batch {
@@ -15043,17 +15065,16 @@ impl IdentityRuntime {
                         .harvest_compaction_within_bound(identity, &session_key, Some(discards))
                         .await
                         .err()
-                        .map(Some),
+                        .map(|error| (Some(error), Some(session_key))),
                     OwedSettle::Published { session_key } => injector
                         .harvest_compaction_within_bound(identity, &session_key, None)
                         .await
                         .err()
-                        .map(Some),
-                    OwedSettle::Unsettled => Some(None),
+                        .map(|error| (Some(error), Some(session_key))),
+                    OwedSettle::Unsettled => Some((None, None)),
                 };
-                if let Some(failed) = owed {
-                    self.owe_compaction_fallback(identity, previous.generation().get(), failed);
-                }
+                owed_compaction =
+                    owed.map(|(failed, published)| OwedCompaction::Fallback { failed, published });
             }
             injector
                 .distill_before_rotation(
@@ -15067,8 +15088,30 @@ impl IdentityRuntime {
         let mut foreground_shutdown = self.foreground_cancel.subscribe();
         // The rotation's record reads the binding the delete read, live or
         // retired.
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete, last)
-            .await?;
+        let started = self
+            .start_fresh_life_locked(
+                identity,
+                &mut foreground_shutdown,
+                FreshLife::Delete,
+                last,
+                &mut owed_compaction,
+            )
+            .await;
+        if let Err(error) = started {
+            // Refused before the retirement was prepared, so before anything
+            // of the delete reached Core: the session goes on, and a batch
+            // its memory already holds is harvested as its live compaction's
+            // would be. One still owed in Core stays owed.
+            if let Some(lifecycle_projection::OwedCompaction::Fallback {
+                published: Some(session_key),
+                ..
+            }) = owed_compaction
+                && let Some(injector) = injector.as_ref()
+            {
+                injector.spawn_compaction_harvest(identity, &session_key, None);
+            }
+            return Err(error);
+        }
 
         // The fresh life is committed in Core from here. The drop of the old
         // session's semantic-memory scope (Ask 2 GC: the identity never

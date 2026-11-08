@@ -2901,6 +2901,19 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
         "the queue refused the write",
         1_700_000_000_001,
     );
+    // A compaction harvest's failure of the same incarnation: a document of
+    // its own, apart from the other failures' prefix.
+    let harvest_failure = LifecycleEffectFailure::new(
+        mob_id.clone(),
+        "incarnation-1",
+        40,
+        ALICE,
+        3,
+        LifecycleEffectKind::CompactionHarvest,
+        1,
+        "the harvest failed",
+        1_700_000_000_003,
+    );
     {
         let provider = fixture.open(&fixture.process()).await.expect("open");
         let store = SpiMetadataStore::new(provider.realm.documents().clone());
@@ -2927,6 +2940,10 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .record_lifecycle_effect_failure(&failure)
             .await
             .expect("record the failure");
+        store
+            .record_lifecycle_effect_failure(&harvest_failure)
+            .await
+            .expect("record the harvest's failure");
     }
 
     fixture.lapse();
@@ -2988,7 +3005,20 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
             .await
             .expect("list the failures"),
-        vec![failure]
+        vec![failure.clone(), harvest_failure],
+        "the listing holds the harvest's failure beside the exit interview's"
+    );
+    store
+        .clear_lifecycle_effect_failure(&mob_id, 3, LifecycleEffectKind::CompactionHarvest, ALICE)
+        .await
+        .expect("clear the harvest's failure");
+    assert_eq!(
+        store
+            .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
+            .await
+            .expect("list the failures"),
+        vec![failure],
+        "clearing the harvest's failure keeps the others"
     );
     assert_eq!(
         store

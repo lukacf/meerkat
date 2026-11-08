@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated composition model for adaptive_mob_bundle.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InputIdValues, InstructionEffectValues, InstructionTargetKindValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveWsEndpointUrlValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, OperatorInstructionRefusalValues, PeerAddressValues, PeerIdValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerSigningKeyValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, RecoveredPresenceValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RunIdValues, RuntimeEpochIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnseatedEntryCauseValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InputIdValues, InstructionEffectValues, InstructionTargetKindValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveWsEndpointUrlValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberDispatchAdmissionHostAnswerValues, MemberDispatchAdmissionLineageValues, MemberDispatchAdmissionVerdictValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, OperatorInstructionRefusalValues, PeerAddressValues, PeerIdValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerSigningKeyValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, RecoveredPresenceValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RunIdValues, RuntimeEpochIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnseatedEntryCauseValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -55757,6 +55757,354 @@ control_mob_ResolveMemberCustodyRestoredUnrecordedDestroyed(arg_agent_identity) 
        /\ model_step_count' = model_step_count + 1
 
 
+control_mob_ResolveMemberDispatchAdmissionAskHostRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionAskHostStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionAskHostCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionAskHostDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionInheritRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionInheritRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionInheritStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionInheritStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionInheritCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionInheritCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionInheritDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionInheritDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionRefusedRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionRefusedStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionRefusedCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionRefusedDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionNoneRequiredRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionNoneRequiredStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionNoneRequiredCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveMemberDispatchAdmissionNoneRequiredDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 control_mob_stopped_mob_holds_member_run_starts == (IF (control_mob_phase # "Stopped") THEN TRUE ELSE (control_mob_member_run_starts_held = TRUE))
 control_mob_bindings_require_known_identity == (\A id \in DOMAIN control_mob_member_session_bindings : (id \in DOMAIN control_mob_identity_to_runtime))
 control_mob_placed_spawn_pending_attempt_is_complete == ((\A id \in DOMAIN control_mob_pending_placed_spawn_ids : ((id \in DOMAIN control_mob_pending_placed_spawn_generations) /\ (id \in DOMAIN control_mob_pending_placed_spawn_fence_tokens) /\ (id \in DOMAIN control_mob_pending_placed_spawn_hosts) /\ (id \in DOMAIN control_mob_pending_placed_spawn_host_binding_generations) /\ (id \in DOMAIN control_mob_pending_placed_spawn_spec_digests) /\ (id \in DOMAIN control_mob_pending_placed_spawn_provision_operation_ids) /\ (id \in DOMAIN control_mob_pending_placed_spawn_operation_owner_session_ids))) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_generations : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_fence_tokens : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_hosts : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_host_binding_generations : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_spec_digests : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_provision_operation_ids : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_operation_owner_session_ids : (id \in DOMAIN control_mob_pending_placed_spawn_ids)))
@@ -110047,6 +110395,354 @@ layer_mob_ResolveMemberCustodyRestoredUnrecordedDestroyed(arg_agent_identity) ==
        /\ model_step_count' = model_step_count + 1
 
 
+layer_mob_ResolveMemberDispatchAdmissionAskHostRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionAskHostStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionAskHostCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionAskHostDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NotAsked")
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "AskHost"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionAskHostDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionAskHostDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionInheritRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionInheritRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionInheritStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionInheritStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionInheritCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionInheritCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionInheritDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "Derived")
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Inherit"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionInheritDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionInheritDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionRefusedRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionRefusedStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionRefusedCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionRefusedDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))
+       /\ (packet.payload.host_answer = "NoneDerived")
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "Refused"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionRefusedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionRefusedDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionNoneRequiredRunning(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionNoneRequiredStopped(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionNoneRequiredCompleted(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveMemberDispatchAdmissionNoneRequiredDestroyed(arg_lineage, arg_host_answer) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveMemberDispatchAdmission"
+       /\ packet.payload.lineage = arg_lineage
+       /\ packet.payload.host_answer = arg_host_answer
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated")))
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberDispatchAdmissionResolved", payload |-> [host_answer |-> packet.payload.host_answer, lineage |-> packet.payload.lineage, verdict |-> "NoneRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveMemberDispatchAdmissionNoneRequiredDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveMemberDispatchAdmissionNoneRequiredDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 layer_mob_stopped_mob_holds_member_run_starts == (IF (layer_mob_phase # "Stopped") THEN TRUE ELSE (layer_mob_member_run_starts_held = TRUE))
 layer_mob_bindings_require_known_identity == (\A id \in DOMAIN layer_mob_member_session_bindings : (id \in DOMAIN layer_mob_identity_to_runtime))
 layer_mob_placed_spawn_pending_attempt_is_complete == ((\A id \in DOMAIN layer_mob_pending_placed_spawn_ids : ((id \in DOMAIN layer_mob_pending_placed_spawn_generations) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_fence_tokens) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_hosts) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_host_binding_generations) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_spec_digests) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_provision_operation_ids) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_operation_owner_session_ids))) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_generations : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_fence_tokens : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_hosts : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_host_binding_generations : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_spec_digests : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_provision_operation_ids : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_operation_owner_session_ids : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)))
@@ -112411,6 +113107,22 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (control_mob_phase = "Completed") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (control_mob_phase = "Destroyed") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_custody_unrestored) = FALSE))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
 
 layer_mob__entry_packet__operator_instruction_write_well_formed(revision, digest, kind, profile, member) == ((revision >= 1) /\ (digest # "") /\ (IF ((kind = "Mob") /\ (profile = "") /\ (member = None)) THEN TRUE ELSE (IF ((kind = "Profile") /\ (profile # "") /\ (member = None)) THEN TRUE ELSE ((kind = "Member") /\ (profile = "") /\ (member # None)))))
 
@@ -114671,6 +115383,22 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (layer_mob_phase = "Completed") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_custody_unrestored) = FALSE))
     \/ /\ (packet.variant = "ResolveMemberCustodyRestored") /\ (layer_mob_phase = "Destroyed") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_custody_unrestored) = FALSE))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NotAsked"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "Derived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "Recorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltGated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildGated")))) /\ ((packet.payload.host_answer = "NoneDerived"))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
+    \/ /\ (packet.variant = "ResolveMemberDispatchAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.lineage = "NoneRecorded") THEN TRUE ELSE (IF (packet.payload.lineage = "SourceBuiltUngated") THEN TRUE ELSE (packet.payload.lineage = "SourceRebuildUngated"))))
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -116646,6 +117374,22 @@ CoreNext ==
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_ResolveMemberCustodyRestoredUnrecordedStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_ResolveMemberCustodyRestoredUnrecordedCompleted(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_ResolveMemberCustodyRestoredUnrecordedDestroyed(arg_agent_identity)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionAskHostRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionAskHostStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionAskHostCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionAskHostDestroyed(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionInheritRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionInheritStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionInheritCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionInheritDestroyed(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionRefusedRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionRefusedStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionRefusedCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionRefusedDestroyed(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionNoneRequiredRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionNoneRequiredStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionNoneRequiredCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : control_mob_ResolveMemberDispatchAdmissionNoneRequiredDestroyed(arg_lineage, arg_host_answer)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : layer_mob_ClassifyFlowRunTerminalityTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : layer_mob_ClassifyFlowRunTerminalityNonTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_step_id \in StepIdValues : \E arg_status \in StepRunStatusValues : layer_mob_ClassifyFlowStepTerminalityTerminalRunning(arg_run_id, arg_step_id, arg_status)
@@ -118551,6 +119295,22 @@ CoreNext ==
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_ResolveMemberCustodyRestoredUnrecordedStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_ResolveMemberCustodyRestoredUnrecordedCompleted(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_ResolveMemberCustodyRestoredUnrecordedDestroyed(arg_agent_identity)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionAskHostRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionAskHostStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionAskHostCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionAskHostDestroyed(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionInheritRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionInheritStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionInheritCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionInheritDestroyed(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionRefusedRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionRefusedStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionRefusedCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionRefusedDestroyed(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionNoneRequiredRunning(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionNoneRequiredStopped(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionNoneRequiredCompleted(arg_lineage, arg_host_answer)
+    \/ \E arg_lineage \in MemberDispatchAdmissionLineageValues : \E arg_host_answer \in MemberDispatchAdmissionHostAnswerValues : layer_mob_ResolveMemberDispatchAdmissionNoneRequiredDestroyed(arg_lineage, arg_host_answer)
     \/ OwnerFeedback_control_mob_mob_destroying_session_ingress_SessionIngressDetachedForMobDestroy
     \/ OwnerFeedback_control_mob_mob_destroying_session_ingress_SessionIngressDetachFailedForMobDestroy
     \/ OwnerFeedback_layer_mob_mob_destroying_session_ingress_SessionIngressDetachedForMobDestroy

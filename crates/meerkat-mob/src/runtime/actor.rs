@@ -13,6 +13,7 @@ use super::*;
 
 pub(super) mod boot_lift;
 mod declared_apply;
+mod dispatch_admission;
 mod dormant_kickoff;
 mod dormant_seat;
 mod dormant_wiring;
@@ -7088,6 +7089,10 @@ pub(super) struct PendingSpawn {
     /// Whether the definition's wiring rules apply to the member, recorded
     /// with its membership commit and persisted with its spawn event.
     pub(super) definition_wiring: crate::DefinitionWiring,
+    /// The spawn's tool dispatch admission facts: its lineage, persisted with
+    /// its spawn event and roster entry, and its build's admission presence,
+    /// retained with its overlay.
+    pub(super) dispatch_admission: super::fork_build::SpawnDispatchAdmissionFacts,
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
@@ -7957,6 +7962,9 @@ struct RespawnSnapshot {
     /// Whether the definition's wiring rules apply to the member, carried to
     /// the replacement incarnation.
     definition_wiring: crate::DefinitionWiring,
+    /// Whether the member's lineage runs under a host's tool dispatch
+    /// admission: its replacement derives one or is refused.
+    dispatch_admission_lineage: bool,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -8017,6 +8025,9 @@ struct SpawnFinalizeCtx {
     /// member is recorded in its membership commit's own step and persisted
     /// with its spawn event and roster entry.
     definition_wiring: crate::DefinitionWiring,
+    /// The spawn's tool dispatch admission facts, for its spawn event, its
+    /// roster entry and the retention map.
+    dispatch_admission: super::fork_build::SpawnDispatchAdmissionFacts,
     /// Whether the spawn acts for the identity entry of its name: its
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
@@ -8098,6 +8109,9 @@ struct SpawnActivateState {
     /// Whether the definition's wiring rules apply to the member, for its
     /// roster entry (MobMachine's own fact decides its wiring).
     definition_wiring: crate::DefinitionWiring,
+    /// The spawn's tool dispatch admission facts, for its roster entry and
+    /// the retention map.
+    dispatch_admission: super::fork_build::SpawnDispatchAdmissionFacts,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -8145,6 +8159,7 @@ impl SpawnActivateState {
             fork_source,
             fork_overlay,
             definition_wiring,
+            dispatch_admission,
             entry_custody: _,
             created_custody: _,
             // Recorded on the spawn's row at its admission.
@@ -8203,6 +8218,7 @@ impl SpawnActivateState {
             fork_source,
             fork_overlay,
             definition_wiring,
+            dispatch_admission,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -23115,6 +23131,36 @@ impl MobActor {
                 overlay_origin,
             )
             .await;
+            // The tool dispatch admission the member is rebuilt under rides
+            // the rebuild request too: the host's, decided by MobMachine from
+            // the member's recorded lineage (see `fork_build`). A member
+            // whose lineage runs under one is not rebuilt when the host
+            // derives none.
+            let mob_id = self.definition.id.clone();
+            let customizer = self.spawn_member_customizer.clone();
+            match super::fork_build::rebuild_dispatch_admission(
+                &mob_id,
+                customizer.as_ref(),
+                &entry,
+                &bridge_session_id,
+                &restore_spec,
+                |lineage, host_answer| {
+                    self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+                },
+            ) {
+                Ok(admission) => restore_spec.tool_dispatch_admission = admission,
+                Err(error) => {
+                    failed.push((entry.agent_identity.clone(), error));
+                    continue;
+                }
+            }
+            self.per_spawn_external_tools
+                .write()
+                .await
+                .retain_dispatch_admission(
+                    &entry.agent_identity,
+                    restore_spec.tool_dispatch_admission.is_some(),
+                );
             {
                 let mut roster = self.roster.write().await;
                 let mut snapshot = roster.snapshot();
@@ -31063,6 +31109,31 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::ObserveForkSourceDispatchLineage {
+                    source_identity,
+                    source_session_id,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .observe_fork_source_dispatch_lineage(
+                            &source_identity,
+                            Some(&source_session_id),
+                        )
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::ResolveSeatDispatchAdmission {
+                    lineage,
+                    child,
+                    spawn_source,
+                    spawner,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .resolve_seat_dispatch_admission(lineage, &child, spawn_source, spawner)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ValidateCommandAuthority { reply_tx } => {
                     // Admission already ran at the actor mailbox boundary.
                     // Reaching the handler is the serialized validation ACK.
@@ -36304,6 +36375,7 @@ impl MobActor {
             fork_source: entry.fork_source,
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
+            dispatch_admission: Default::default(),
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,
@@ -36483,6 +36555,24 @@ impl MobActor {
             && let Err(error) = self.customize_spawn_spec(spawn_source, spawner.as_ref(), &mut spec)
         {
             reject_spawn_before_custody!("customize_spawn_spec", error);
+        }
+        // A prompt-context fork holds its source's history: whether it is
+        // seated from a lineage that runs under a tool dispatch admission is
+        // MobMachine's verdict on its source's lineage and the admission the
+        // customizer installed above, and a fork of a gated source the
+        // customizer installed none for is refused here, before custody.
+        if respawn_origin.is_none()
+            && let crate::launch::MemberLaunchMode::Fork {
+                source_member_id, ..
+            } = &spec.launch_mode
+        {
+            let source = source_member_id.clone();
+            match self.prompt_fork_dispatch_lineage(&source, &spec).await {
+                Ok(lineage) => spec.dispatch_admission_lineage = lineage,
+                Err(error) => {
+                    reject_spawn_before_custody!("prompt_fork_dispatch_admission", error);
+                }
+            }
         }
         // A member-initiated spawn is bounded by the authority recorded for the
         // member that asked for it. The customizer has run: its ceiling, or
@@ -36707,7 +36797,14 @@ impl MobActor {
             // spawn of a store-owned identity that owes a kickoff, and its
             // seat's embodiment.
             created_custody,
+            // Set only by a fork seat's resolution and a respawn of a member
+            // whose lineage carries an admission: the spawn row records it.
+            dispatch_admission_lineage,
         } = spec;
+        let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
+            lineage: dispatch_admission_lineage,
+            present: tool_dispatch_admission.is_some(),
+        };
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
             .set_spawn_stage(SpawnInlineStage::CommandAdmission);
@@ -36947,6 +37044,7 @@ impl MobActor {
             fork_source: fork_source.clone(),
             fork_overlay,
             definition_wiring,
+            dispatch_admission,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -37579,6 +37677,7 @@ impl MobActor {
             fork_source,
             fork_overlay,
             definition_wiring,
+            dispatch_admission,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -37796,6 +37895,7 @@ impl MobActor {
                 fork_source: fork_source.clone(),
                 fork_overlay,
                 definition_wiring,
+                dispatch_admission,
                 entry_custody,
                 created_custody,
                 history_unavailable,
@@ -38016,6 +38116,7 @@ impl MobActor {
             fork_source,
             fork_overlay,
             definition_wiring,
+            dispatch_admission,
             entry_custody,
             created_custody,
             history_unavailable,
@@ -39044,6 +39145,9 @@ impl MobActor {
             history_unavailable: _,
             fresh_life: _,
             created_custody,
+            // Refused below: a placed member cannot carry a process-local
+            // admission, which such a lineage needs at every build.
+            dispatch_admission_lineage,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -39081,6 +39185,12 @@ impl MobActor {
                 "process-local tool dispatch admission cannot cross member-host placement"
                     .to_string(),
             ));
+        }
+        if dispatch_admission_lineage {
+            fail!(MobError::WiringError(format!(
+                "'{identity}' cannot be placed on a member host: its lineage runs under a \
+                 process-local tool dispatch admission"
+            )));
         }
         if compaction_curator_override.is_some() {
             fail!(MobError::WiringError(
@@ -39955,6 +40065,9 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Refused above: a placed member is never exempt.
             definition_wiring: crate::DefinitionWiring::Applies,
+            // Refused above: a placed member carries no dispatch admission
+            // and no lineage that needs one.
+            dispatch_admission: Default::default(),
             // The remote ladder's custody is MobMachine's, recorded at its
             // open (spawn_exec_entry_custody, spawn_exec_created_custody):
             // the pending record of a placed spawn carries none.
@@ -40256,6 +40369,7 @@ impl MobActor {
                 fork_source,
                 fork_overlay,
                 definition_wiring,
+                dispatch_admission,
                 entry_custody,
                 created_custody,
                 history_unavailable,
@@ -40463,6 +40577,7 @@ impl MobActor {
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
                                 definition_wiring,
+                                dispatch_admission,
                                 entry_custody,
                                 created_custody,
                                 history_unavailable,
@@ -40550,6 +40665,7 @@ impl MobActor {
                                 fork_source: fork_source.clone(),
                                 fork_overlay,
                                 definition_wiring,
+                                dispatch_admission,
                                 entry_custody,
                                 created_custody,
                                 history_unavailable,
@@ -40706,6 +40822,8 @@ impl MobActor {
             fresh_life: _,
             // A policy auto-spawn is a worker's.
             created_custody: _,
+            // A policy auto-spawn is fresh: it continues no lineage.
+            dispatch_admission_lineage: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -40941,6 +41059,8 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
+            // Fresh, and built with no dispatch admission.
+            dispatch_admission: Default::default(),
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,
@@ -42049,6 +42169,10 @@ impl MobActor {
         // carries it (see `ForkBuildInheritance`).
         spawned_event.fork_source = ctx.fork_source.clone();
         spawned_event.fork_overlay = ctx.fork_overlay;
+        // Durable: a member whose lineage runs under a host's tool dispatch
+        // admission derives one at every later build, after a restart too,
+        // or is refused (see `fork_build`).
+        spawned_event.dispatch_admission_lineage = ctx.dispatch_admission.lineage;
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
         spawned_event.definition_wiring = ctx.definition_wiring;
@@ -43361,9 +43485,25 @@ impl MobActor {
             reject!(error);
         }
         // Proven above to name this capability's own source member and source
-        // session: the branch is built with its source's inputs.
+        // session: the branch is built with its source's inputs, and under the
+        // tool dispatch admission MobMachine decides from its source's
+        // observed lineage (the host's spawn customizer is asked for the
+        // branch when that lineage carries one), or not at all.
         if let Some(inheritance) = spec.fork_build_inheritance.take() {
+            let lineage = inheritance.dispatch_admission_lineage();
             inheritance.apply_to(&mut spec);
+            match self
+                .resolve_seat_dispatch_admission(
+                    lineage,
+                    &spec,
+                    super::handle::SpawnSource::AttachedForkedParticipant,
+                    None,
+                )
+                .await
+            {
+                Ok(admission) => admission.apply_to(&mut spec),
+                Err(error) => reject!(error),
+            }
         }
 
         // The source-owner service is composed against the capability's EXACT
@@ -52000,6 +52140,7 @@ impl MobActor {
                 ),
                 fork_job: entry.fork_job,
                 definition_wiring: entry.definition_wiring,
+                dispatch_admission_lineage: entry.dispatch_admission_lineage,
                 cleanup_retry,
             }
         };
@@ -52078,6 +52219,33 @@ impl MobActor {
             &mut replacement_spec,
         )
         .map_err(MobRespawnError::from)?;
+        // A member whose lineage runs under a host's tool dispatch admission
+        // passes that lineage to its successor: MobMachine decides from it
+        // and the admission the customizer's answer above carries, and a
+        // successor the host derives none for is refused here, before
+        // anything is retired.
+        if snapshot.dispatch_admission_lineage {
+            let answered = replacement_spec.tool_dispatch_admission.clone();
+            match super::fork_build::derive_member_dispatch_admission(
+                |lineage, host_answer| {
+                    self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+                },
+                mob_dsl::MemberDispatchAdmissionLineage::Recorded,
+                || Ok(answered),
+            )
+            .map_err(MobRespawnError::from)?
+            {
+                super::fork_build::DerivedDispatchAdmission::Inherit(_) => {
+                    replacement_spec.dispatch_admission_lineage = true;
+                }
+                super::fork_build::DerivedDispatchAdmission::Refused => {
+                    return Err(MobRespawnError::from(MobError::DispatchAdmissionRequired {
+                        member_id: original_identity.clone(),
+                    }));
+                }
+                super::fork_build::DerivedDispatchAdmission::NoneRequired => {}
+            }
+        }
         // The member's standing belongs to the identity: this path respawns
         // only a worker (MobMachine's admission below refuses an identity
         // entry's member), and a worker's successor is a worker, whatever

@@ -1499,6 +1499,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::UnlistIdentityEntry,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // A member build's tool dispatch admission (0.9.11), decided by
+    // MobMachine from the raw observations of the build's lineage and of the
+    // host customizer's answer; the step that seats or rebuilds the member
+    // drives it as a build input of the member, not a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberDispatchAdmission,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
 ];
 
 #[doc(hidden)]

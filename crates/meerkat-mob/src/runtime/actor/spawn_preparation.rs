@@ -100,6 +100,9 @@ pub(super) struct SpawnPreparationCarry {
     pub(super) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(super) fork_overlay: super::super::ForkOverlayOrigin,
     pub(super) definition_wiring: crate::DefinitionWiring,
+    /// The spawn's tool dispatch admission facts, for its row and the
+    /// retention map.
+    pub(super) dispatch_admission: super::super::fork_build::SpawnDispatchAdmissionFacts,
     /// Whether the spawn acts for the identity entry of its name.
     pub(super) entry_custody: bool,
     /// Whether the spawn acts for the store-owned entry of its name.

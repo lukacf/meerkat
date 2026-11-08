@@ -1043,6 +1043,24 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // (0.9.11).
             "AdoptLegacyIdentityEntryAdoptedUnlisted",
             "AdoptLegacyIdentityEntryRetireUnadopted",
+            // A member build's tool dispatch admission (0.9.11), in every
+            // phase.
+            "ResolveMemberDispatchAdmissionAskHostRunning",
+            "ResolveMemberDispatchAdmissionAskHostStopped",
+            "ResolveMemberDispatchAdmissionAskHostCompleted",
+            "ResolveMemberDispatchAdmissionAskHostDestroyed",
+            "ResolveMemberDispatchAdmissionInheritRunning",
+            "ResolveMemberDispatchAdmissionInheritStopped",
+            "ResolveMemberDispatchAdmissionInheritCompleted",
+            "ResolveMemberDispatchAdmissionInheritDestroyed",
+            "ResolveMemberDispatchAdmissionRefusedRunning",
+            "ResolveMemberDispatchAdmissionRefusedStopped",
+            "ResolveMemberDispatchAdmissionRefusedCompleted",
+            "ResolveMemberDispatchAdmissionRefusedDestroyed",
+            "ResolveMemberDispatchAdmissionNoneRequiredRunning",
+            "ResolveMemberDispatchAdmissionNoneRequiredStopped",
+            "ResolveMemberDispatchAdmissionNoneRequiredCompleted",
+            "ResolveMemberDispatchAdmissionNoneRequiredDestroyed",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

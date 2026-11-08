@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated semantic machine model for MobMachine.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InputIdValues, InstructionEffectValues, InstructionTargetKindValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveWsEndpointUrlValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, OperatorInstructionRefusalValues, PeerAddressValues, PeerIdValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerSigningKeyValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, RecoveredPresenceValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RunIdValues, RuntimeEpochIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnseatedEntryCauseValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InputIdValues, InstructionEffectValues, InstructionTargetKindValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveWsEndpointUrlValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberDispatchAdmissionHostAnswerValues, MemberDispatchAdmissionLineageValues, MemberDispatchAdmissionVerdictValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, OperatorInstructionRefusalValues, PeerAddressValues, PeerIdValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerSigningKeyValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, RecoveredPresenceValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RunIdValues, RuntimeEpochIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnseatedEntryCauseValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -26793,6 +26793,146 @@ ResolveMemberCustodyRestoredUnrecordedDestroyed(agent_identity) ==
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
+ResolveMemberDispatchAdmissionAskHostRunning(lineage, host_answer) ==
+    /\ phase = "Running"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NotAsked")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionAskHostStopped(lineage, host_answer) ==
+    /\ phase = "Stopped"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NotAsked")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionAskHostCompleted(lineage, host_answer) ==
+    /\ phase = "Completed"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NotAsked")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionAskHostDestroyed(lineage, host_answer) ==
+    /\ phase = "Destroyed"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NotAsked")
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionInheritRunning(lineage, host_answer) ==
+    /\ phase = "Running"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "Derived")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionInheritStopped(lineage, host_answer) ==
+    /\ phase = "Stopped"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "Derived")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionInheritCompleted(lineage, host_answer) ==
+    /\ phase = "Completed"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "Derived")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionInheritDestroyed(lineage, host_answer) ==
+    /\ phase = "Destroyed"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "Derived")
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionRefusedRunning(lineage, host_answer) ==
+    /\ phase = "Running"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NoneDerived")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionRefusedStopped(lineage, host_answer) ==
+    /\ phase = "Stopped"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NoneDerived")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionRefusedCompleted(lineage, host_answer) ==
+    /\ phase = "Completed"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NoneDerived")
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionRefusedDestroyed(lineage, host_answer) ==
+    /\ phase = "Destroyed"
+    /\ (IF (lineage = "Recorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltGated") THEN TRUE ELSE (lineage = "SourceRebuildGated")))
+    /\ (host_answer = "NoneDerived")
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionNoneRequiredRunning(lineage, host_answer) ==
+    /\ phase = "Running"
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionNoneRequiredStopped(lineage, host_answer) ==
+    /\ phase = "Stopped"
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionNoneRequiredCompleted(lineage, host_answer) ==
+    /\ phase = "Completed"
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
+ResolveMemberDispatchAdmissionNoneRequiredDestroyed(lineage, host_answer) ==
+    /\ phase = "Destroyed"
+    /\ (IF (lineage = "NoneRecorded") THEN TRUE ELSE (IF (lineage = "SourceBuiltUngated") THEN TRUE ELSE (lineage = "SourceRebuildUngated")))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
 Next ==
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityTerminalRunning(run_id, status)
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityNonTerminalRunning(run_id, status)
@@ -28699,6 +28839,22 @@ Next ==
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : ResolveMemberCustodyRestoredUnrecordedStopped(agent_identity)
     \/ (phase = "Completed") /\ \E agent_identity \in AgentIdentityValues : ResolveMemberCustodyRestoredUnrecordedCompleted(agent_identity)
     \/ (phase = "Destroyed") /\ \E agent_identity \in AgentIdentityValues : ResolveMemberCustodyRestoredUnrecordedDestroyed(agent_identity)
+    \/ (phase = "Running") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionAskHostRunning(lineage, host_answer)
+    \/ (phase = "Stopped") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionAskHostStopped(lineage, host_answer)
+    \/ (phase = "Completed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionAskHostCompleted(lineage, host_answer)
+    \/ (phase = "Destroyed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionAskHostDestroyed(lineage, host_answer)
+    \/ (phase = "Running") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionInheritRunning(lineage, host_answer)
+    \/ (phase = "Stopped") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionInheritStopped(lineage, host_answer)
+    \/ (phase = "Completed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionInheritCompleted(lineage, host_answer)
+    \/ (phase = "Destroyed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionInheritDestroyed(lineage, host_answer)
+    \/ (phase = "Running") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionRefusedRunning(lineage, host_answer)
+    \/ (phase = "Stopped") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionRefusedStopped(lineage, host_answer)
+    \/ (phase = "Completed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionRefusedCompleted(lineage, host_answer)
+    \/ (phase = "Destroyed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionRefusedDestroyed(lineage, host_answer)
+    \/ (phase = "Running") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionNoneRequiredRunning(lineage, host_answer)
+    \/ (phase = "Stopped") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionNoneRequiredStopped(lineage, host_answer)
+    \/ (phase = "Completed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionNoneRequiredCompleted(lineage, host_answer)
+    \/ (phase = "Destroyed") /\ \E lineage \in MemberDispatchAdmissionLineageValues : \E host_answer \in MemberDispatchAdmissionHostAnswerValues : ResolveMemberDispatchAdmissionNoneRequiredDestroyed(lineage, host_answer)
     \/ TerminalStutter
 
 stopped_mob_holds_member_run_starts == (IF (phase # "Stopped") THEN TRUE ELSE (member_run_starts_held = TRUE))

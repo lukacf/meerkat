@@ -2098,6 +2098,10 @@ impl MobActor {
         spawned.definition_wiring = candidate.definition_wiring;
         // The successor keeps its spawner; a fresh life names none.
         spawned.spawned_by = rotation.spawned_by.clone();
+        // A lineage that runs under a host's tool dispatch admission belongs
+        // to the identity: every build of the next incarnation derives one
+        // through the host's spawn customizer or is refused.
+        spawned.dispatch_admission_lineage = entry.dispatch_admission_lineage;
         let spawned = spawned.with_resume_from_role(rotation.resume_from_role.clone());
         // Durable: the rotation keeps the identity's standing, and the next
         // incarnation's row records the identity entry MobMachine holds for

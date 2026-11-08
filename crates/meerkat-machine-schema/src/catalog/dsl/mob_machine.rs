@@ -2272,6 +2272,20 @@ macro_rules! mob_catalog_machine_dsl {
             // flight leaves it to a later unlist; any other name is left as
             // it is.
             UnlistIdentityEntry { agent_identity: AgentIdentity },
+            // The tool dispatch admission of one member build whose lineage
+            // may carry one: a fork seat (`fork_off`, a member fork, a local
+            // council branch, a live-delegation fork), a respawn successor,
+            // and every rebuild of a member seated from such a lineage (wake,
+            // restore, reload, explicit resume). The shell feeds two RAW
+            // observations without composing them: what it observed of the
+            // lineage (the fork source's build in this process, a durable
+            // lineage record, or the host's answer for the source's next
+            // build), and what the host's spawn customizer derived for this
+            // build, when asked. MobMachine decides whether the host must be
+            // asked, whether the build inherits a derived admission, runs
+            // without one, or is refused; the shell mirrors the verdict and
+            // never builds a gated lineage's member without an admission.
+            ResolveMemberDispatchAdmission { lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer> },
         }
 
         surface_only [
@@ -2937,6 +2951,11 @@ macro_rules! mob_catalog_machine_dsl {
             // shell retires a Retiring entry's member with the cause
             // Unlisted.
             IdentityEntryUnlisted { agent_identity: AgentIdentity, verdict: Enum<UnlistEntryVerdict> },
+            // The verdict on one member build's tool dispatch admission,
+            // echoing the observations it was decided on: ask the host, build
+            // with the admission the host derived, build without one, or
+            // refuse the build.
+            MemberDispatchAdmissionResolved { lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer>, verdict: Enum<MemberDispatchAdmissionVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -4375,6 +4394,10 @@ macro_rules! mob_catalog_machine_dsl {
         // The one-entry unlist (0.9.9): its verdict answers the unlist, which
         // retires a marked entry's member.
         disposition IdentityEntryUnlisted => local seam SurfaceResultAlignment,
+        // A member build's dispatch admission: the verdict answers the build
+        // that asked, which asks the host, builds with or without the
+        // admission, or refuses.
+        disposition MemberDispatchAdmissionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -35174,6 +35197,75 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
         }
+
+        // --- Member dispatch admission ---
+        //
+        // One member build's tool dispatch admission, from the shell's raw
+        // observations of the build's lineage and of the host's answer. A
+        // lineage carries an admission when the fork source's build in this
+        // process ran under one, when a durable lineage record names one, or
+        // when the host's answer for the source's next build carries one.
+        // Such a build is never made without an admission: the host's spawn
+        // customizer is asked first (AskHost), the admission it derives is
+        // the build's (Inherit), and a build it derives none for is refused
+        // (Refused). Any other lineage needs none (NoneRequired), and the
+        // build takes what its request carries. Pure classification across
+        // all phases: no state changes.
+
+        transition ResolveMemberDispatchAdmissionAskHost {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { lineage, host_answer }
+            guard "lineage_carries_admission" {
+                lineage == MemberDispatchAdmissionLineage::Recorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+            }
+            guard "host_not_asked" { host_answer == MemberDispatchAdmissionHostAnswer::NotAsked }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::AskHost }
+        }
+
+        transition ResolveMemberDispatchAdmissionInherit {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { lineage, host_answer }
+            guard "lineage_carries_admission" {
+                lineage == MemberDispatchAdmissionLineage::Recorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+            }
+            guard "host_derived_admission" { host_answer == MemberDispatchAdmissionHostAnswer::Derived }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::Inherit }
+        }
+
+        transition ResolveMemberDispatchAdmissionRefused {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { lineage, host_answer }
+            guard "lineage_carries_admission" {
+                lineage == MemberDispatchAdmissionLineage::Recorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+            }
+            guard "host_derived_none" { host_answer == MemberDispatchAdmissionHostAnswer::NoneDerived }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::Refused }
+        }
+
+        transition ResolveMemberDispatchAdmissionNoneRequired {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { lineage, host_answer }
+            guard "lineage_carries_none" {
+                lineage == MemberDispatchAdmissionLineage::NoneRecorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltUngated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildUngated
+            }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::NoneRequired }
+        }
     }
         }
 
@@ -39676,6 +39768,63 @@ impl Default for PlacedKickoffObligation {
             objective_id: String::new(),
         }
     }
+}
+
+/// What the shell observed of the lineage one member build answers to
+/// ([`MobMachineInput::ResolveMemberDispatchAdmission`]): the lineage
+/// carries a tool dispatch admission when it is `Recorded`,
+/// `SourceBuiltGated` or `SourceRebuildGated`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberDispatchAdmissionLineage {
+    /// The member's records name no lineage that ran under an admission (a
+    /// rebuild of a member no fork of a gated source seated).
+    #[default]
+    NoneRecorded,
+    /// A durable lineage record names a lineage that ran under an
+    /// admission: the member's own (a rebuild), or the fork source's when
+    /// the source has no build in this process (a seat).
+    Recorded,
+    /// The fork source's build in this process runs under an admission.
+    SourceBuiltGated,
+    /// The fork source's build in this process runs under none.
+    SourceBuiltUngated,
+    /// The fork source has no build in this process and no lineage record,
+    /// and the host's answer for its next build carries an admission.
+    SourceRebuildGated,
+    /// As `SourceRebuildGated`, and the host's answer carries none.
+    SourceRebuildUngated,
+}
+
+/// What the host's spawn customizer derived for one member build's tool
+/// dispatch admission ([`MobMachineInput::ResolveMemberDispatchAdmission`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberDispatchAdmissionHostAnswer {
+    /// The customizer was not asked.
+    #[default]
+    NotAsked,
+    /// The customizer derived an admission for the build.
+    Derived,
+    /// The customizer was asked and derived none.
+    NoneDerived,
+}
+
+/// The verdict on one member build's tool dispatch admission
+/// ([`MobMachineEffect::MemberDispatchAdmissionResolved`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberDispatchAdmissionVerdict {
+    /// The lineage carries an admission and the host was not asked yet: ask
+    /// the host's spawn customizer for the build, then resolve again with
+    /// its answer.
+    #[default]
+    AskHost,
+    /// The lineage carries an admission and the host derived one: the build
+    /// runs under it (with any admission its request carries).
+    Inherit,
+    /// The lineage carries an admission and the host derived none: the
+    /// build is refused; it never runs without one.
+    Refused,
+    /// The lineage carries none: the build takes what its request carries.
+    NoneRequired,
 }
 
 /// The custody guards of an identity entry's origin in this DSL: an origin

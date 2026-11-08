@@ -1009,6 +1009,25 @@ them.
   credentials root (`<platform-config>/meerkat/credentials` by default) to
   tighten them.
 
+- `meerkat-mob`, `meerkat-mob-mcp`: a member created by `fork_off`, by a
+  `council` branch or by another fork (`MobHandle::fork_member` and its
+  siblings, a live delegation), or rebuilt by a resume or a reload, ran
+  without the tool dispatch admission its host installed for the source
+  member (`SpawnMemberSpec::tool_dispatch_admission`, which a
+  `SpawnMemberCustomizer` sets): its tool calls reached the host's tools
+  without passing the host's gate. MobMachine now decides each such build's
+  admission. A fork of a member whose build runs under one asks the host's
+  customizer for the child and runs under what it installs, or is refused
+  with the new `MobError::DispatchAdmissionRequired` before anything is
+  forked; the child's spawn row records this, so each later build of it (a
+  wake, a restore after a restart, a reload, an explicit resume, a respawn)
+  asks again and is refused when the customizer installs none. A
+  `fork_helper` child of such a member, whose spawn asks the customizer as
+  before, is refused the same way when it installs none. An ordinary
+  member's reload and explicit resume run under the admission the
+  customizer gives the rebuild. Affects 0.9.8 through 0.9.10. Until you
+  upgrade, do not offer `fork_off` or `council` to members you gate.
+
 ### Upgrade notes
 
 - A host binder of in-process deliveries from governed work binds them

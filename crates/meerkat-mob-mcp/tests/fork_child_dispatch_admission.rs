@@ -3,17 +3,18 @@
 //! A host installs its own approval gate on every member as
 //! `SpawnMemberSpec::tool_dispatch_admission`, through a
 //! `SpawnMemberCustomizer` (`MobMcpState::with_child_spawn_member_customizer`).
-//! These tests show where that gate reaches today:
+//! These tests show where that gate reaches:
 //!
 //! - the member's own tool calls pass through it;
 //! - a `delegate` helper (a fresh helper spawn) and a `fork_helper` child
 //!   (`SpawnSource::Fork`) pass through it, because their spawns ask the
 //!   customizer;
-//! - a `fork_off` child does not: it is seated through
-//!   `SpawnSource::PersistedForkResume`, which the customizer is never asked
-//!   for, and `ForkBuildInheritance` carries no `tool_dispatch_admission`, so
-//!   the child's tool calls run with no admission at all while its parent's
-//!   are gated. The parent's recorded tool restrictions do reach the child.
+//! - a `fork_off` child does too: it is seated through
+//!   `SpawnSource::PersistedForkResume`, and since its source runs under an
+//!   admission, its seat asks the customizer for the child and the child
+//!   runs under the admission the customizer derives (a child the customizer
+//!   derives none for is not forked at all). The parent's recorded tool
+//!   restrictions reach the child as well.
 //!
 //! Only the LLM is scripted, over the runtime-backed persistent composition.
 #![cfg(not(target_arch = "wasm32"))]
@@ -482,11 +483,7 @@ async fn a_members_own_tool_call_passes_the_host_admission() {
 /// Intended behaviour: a `fork_off` child runs under its source's host
 /// admission (inherited, or installed by a customizer call for the fork
 /// seat), as well as under its source's recorded tool restrictions.
-///
-/// Delete `today_a_fork_off_child_runs_its_tools_with_no_host_admission`
-/// when this passes.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "a fork_off child does not inherit its source's tool_dispatch_admission, and the fork seat never asks the customizer; see the PR"]
 async fn a_fork_off_child_runs_its_tools_under_the_host_admission() {
     let rig = Rig::new().await;
     rig.prove_parent_is_gated().await;
@@ -499,36 +496,6 @@ async fn a_fork_off_child_runs_its_tools_under_the_host_admission() {
          customizer asked {:?}",
         rig.admitted(),
         rig.asked()
-    );
-    rig.teardown().await;
-}
-
-/// Today: a `fork_off` child's tool call runs with the host admission never
-/// consulted, and the customizer is never asked for the child (its seat is
-/// `SpawnSource::PersistedForkResume`), although the parent's own calls are
-/// gated and the parent's recorded restriction does reach the child.
-///
-/// Pins current behaviour; delete it with the fix, when
-/// `a_fork_off_child_runs_its_tools_under_the_host_admission` passes.
-#[tokio::test(flavor = "multi_thread")]
-async fn today_a_fork_off_child_runs_its_tools_with_no_host_admission() {
-    let rig = Rig::new().await;
-    rig.prove_parent_is_gated().await;
-    let admitted_before = rig.admitted();
-    let forked = rig.fork_off().await;
-    assert_fork_off_child_ran_restricted(&rig, &forked);
-    assert!(
-        !rig.was_asked_for("fork-off-child"),
-        "the customizer is not asked for the fork_off child: {:?}",
-        rig.asked()
-    );
-    let mut admitted_after = rig.admitted();
-    // The fork_off call itself came from the test, not a model turn, so the
-    // parent's admission saw nothing new either.
-    admitted_after.retain(|id| !admitted_before.contains(id));
-    assert!(
-        admitted_after.is_empty(),
-        "no call of the fork_off child was admitted: {admitted_after:?}"
     );
     rig.teardown().await;
 }

@@ -138,6 +138,13 @@ struct RevivalResources {
     claim: Option<meerkat_runtime::PreparedSessionMaterialization>,
 }
 
+/// What the host gives a warm revival's rebuild of one member now
+/// (`MobActor::warm_revival_host_build`).
+struct WarmRevivalHostBuild {
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+    tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+}
+
 enum RevivalObservation {
     Inert(MemberLiveRevivalOutcome),
     Missing(RevivalResources),
@@ -1119,10 +1126,20 @@ impl MobActor {
         // member now (its resume hook, which every rebuild asks), never on the
         // binding its session recorded: a reload can rebuild a member built
         // under an earlier launch (a start's recovery of a member it left
-        // out). A fork-derived member keeps its own records.
-        let auth_binding = self
-            .warm_revival_auth_binding(&work.entry, &work.session_id)
+        // out). A fork-derived member keeps its own records. It runs under
+        // the tool dispatch admission the host derives for it now, which
+        // MobMachine decides from its recorded lineage: a member whose
+        // lineage runs under one is never revived without one.
+        let host_build = self
+            .warm_revival_host_build(&work.entry, &work.session_id)
             .await?;
+        self.per_spawn_external_tools
+            .write()
+            .await
+            .retain_dispatch_admission(
+                &work.entry.agent_identity,
+                host_build.tool_dispatch_admission.is_some(),
+            );
         Ok(Some(Box::new(DeferredResumeProvision {
             definition: Arc::clone(&self.definition),
             mob_incarnation: self.incarnation,
@@ -1143,7 +1160,7 @@ impl MobActor {
             shell_env: None,
             inherited_tool_filter: None,
             tool_access_policy: None,
-            tool_dispatch_admission: None,
+            tool_dispatch_admission: host_build.tool_dispatch_admission,
             web_search_override: Default::default(),
             // No policy choice: the member keeps its durable binding, which
             // the current registry realizes.
@@ -1169,35 +1186,56 @@ impl MobActor {
             generated_self_owned_operation_owner: Some(work.session_id.clone()),
             direct_member_incarnation: None,
             continuity_intent,
-            auth_binding,
+            auth_binding: host_build.auth_binding,
         })))
     }
 
-    /// The auth binding the host's spawn customizer gives `entry` for a
-    /// rebuild on `session_id` now (`customize_resume`, with what the session
-    /// holds), or `None` when no customizer is configured, the member is
+    /// What the host gives `entry`'s rebuild on `session_id` now: the auth
+    /// binding its spawn customizer names (`customize_resume`, with what the
+    /// session holds; `None` when no customizer is configured, the member is
     /// fork-derived, or the customizer names none: the session's recorded
-    /// binding then stays.
-    async fn warm_revival_auth_binding(
-        &self,
+    /// binding then stays), and the tool dispatch admission the rebuild runs
+    /// under, which MobMachine decides from the member's recorded lineage
+    /// (`fork_build::rebuild_dispatch_admission`): the customizer's answer
+    /// for a member whose lineage needs none, and for a member whose lineage
+    /// runs under one, the admission the host derives now, or a refusal
+    /// ([`MobError::DispatchAdmissionRequired`]).
+    async fn warm_revival_host_build(
+        &mut self,
         entry: &RosterEntry,
         session_id: &SessionId,
-    ) -> Result<Option<meerkat_core::AuthBindingRef>, MobError> {
-        if entry.fork_source.is_some() || self.spawn_member_customizer.is_none() {
-            return Ok(None);
-        }
-        let durable = super::super::fork_build::load_resumed_member_view(
-            self.session_service.as_ref(),
-            session_id,
-        )
-        .await?;
-        let spec = super::super::fork_build::rebuild_resume_spec(
-            &self.definition.id,
-            self.spawn_member_customizer.as_ref(),
+    ) -> Result<WarmRevivalHostBuild, MobError> {
+        let spec = if entry.fork_source.is_none() && self.spawn_member_customizer.is_some() {
+            let durable = super::super::fork_build::load_resumed_member_view(
+                self.session_service.as_ref(),
+                session_id,
+            )
+            .await?;
+            super::super::fork_build::rebuild_resume_spec(
+                &self.definition.id,
+                self.spawn_member_customizer.as_ref(),
+                entry,
+                &durable,
+            )?
+        } else {
+            super::super::fork_build::member_resume_spec(entry, session_id)
+        };
+        let mob_id = self.definition.id.clone();
+        let customizer = self.spawn_member_customizer.clone();
+        let tool_dispatch_admission = super::super::fork_build::rebuild_dispatch_admission(
+            &mob_id,
+            customizer.as_ref(),
             entry,
-            &durable,
+            session_id,
+            &spec,
+            |lineage, host_answer| {
+                self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+            },
         )?;
-        Ok(spec.auth_binding)
+        Ok(WarmRevivalHostBuild {
+            auth_binding: spec.auth_binding,
+            tool_dispatch_admission,
+        })
     }
 
     fn cleanup_warm_claim(

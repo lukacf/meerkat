@@ -401,6 +401,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
 # witnesses violated, and with --mutants each seeded defect's invariant
 # violated.
+# member_dispatch_admission_audit.sh (mob_machine) requires a coverage block
+# in which each of its four covered Running arms generated a state, its
+# Running witness violated, and with --mutants each seeded defect's target
+# invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -1077,6 +1081,12 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessDeleteDropsEarlierAck is violated."' \
   'echo "Error: Invariant AuditAckSetAnswersTheLatestSupersession is violated."' \
   'echo "Error: Invariant AuditLatestSupersessionAcksAreKept is violated."' \
+  'for action in ResolveMemberDispatchAdmissionAskHostRunning ResolveMemberDispatchAdmissionInheritRunning ResolveMemberDispatchAdmissionRefusedRunning ResolveMemberDispatchAdmissionNoneRequiredRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessRunning is violated by the initial state:"' \
+  'echo "Error: Invariant AuditHostAskedOnlyForGatedLineage is violated by the initial state:"' \
+  'echo "Error: Invariant AuditInheritNeedsDerived is violated by the initial state:"' \
+  'echo "Error: Invariant AuditVerdictTable is violated by the initial state:"' \
+  'echo "Error: Invariant AuditGatedLineageNeverBuiltUngated is violated by the initial state:"' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

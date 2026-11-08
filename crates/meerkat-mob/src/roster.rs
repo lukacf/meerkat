@@ -162,6 +162,13 @@ pub struct RosterEntry {
     /// it. The default (`applies`) is omitted from the serialized entry.
     #[serde(default, skip_serializing_if = "crate::DefinitionWiring::is_applies")]
     pub definition_wiring: crate::DefinitionWiring,
+    /// Whether this member's lineage runs under a host's tool dispatch
+    /// admission, from its `MemberSpawned` row
+    /// (`MemberSpawnedEvent::dispatch_admission_lineage`): every build of the
+    /// member derives one through the host's spawn customizer or is refused.
+    /// Internal: never on a public surface.
+    #[serde(skip, default)]
+    pub(crate) dispatch_admission_lineage: bool,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -186,6 +193,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(crate) fork_overlay: crate::runtime::ForkOverlayOrigin,
     pub(crate) definition_wiring: crate::DefinitionWiring,
+    pub(crate) dispatch_admission_lineage: bool,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -296,6 +304,7 @@ impl Roster {
                     fork_source: member_spawned.fork_source.clone(),
                     fork_overlay: member_spawned.fork_overlay,
                     definition_wiring: member_spawned.definition_wiring,
+                    dispatch_admission_lineage: member_spawned.dispatch_admission_lineage(),
                 });
             }
             // Retirement admission is not roster terminality. Keep the spawn
@@ -534,6 +543,7 @@ impl Roster {
                     fork_source: entry.fork_source,
                     fork_overlay: entry.fork_overlay,
                     definition_wiring: entry.definition_wiring,
+                    dispatch_admission_lineage: entry.dispatch_admission_lineage,
                 },
             )
             .is_none()
@@ -1159,6 +1169,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            dispatch_admission_lineage: false,
         }
     }
 
@@ -1744,6 +1755,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            dispatch_admission_lineage: false,
             direct_member_fence: None,
         };
         let json = serde_json::to_string(&entry).unwrap();

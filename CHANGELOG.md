@@ -497,18 +497,26 @@ them.
   selects a credential.
 - `tool_grants/grant` answers `applies` for an identity subject (`now`,
   `not_mounted` or `at_next_build`: whether the member's running build gates
-  the target, and, for a gated MCP server the member's profile configures,
-  holds it), and `tool_grants/list` answers the identity's `gate`:
-  `running` (what its live build gates and ignores, `null` when none is live
-  here) and `next_build` (what its next build resolves). Both are advisory.
+  the target; a gated MCP server the member's profile configures answers
+  `at_next_build` while the running build has left it unattached, since no
+  live grant covered it when that build read the grants, and a gated server
+  no build configures answers `now`), and `tool_grants/list` answers the
+  identity's `gate`: `running` (what its live build gates and ignores,
+  `null` when none is live here) and `next_build` (what its next build
+  resolves). Both are advisory; a field of the gate this version does not
+  know is ignored.
 - Rust: `GrantGatedTools::with_mcp_server`, `with_unconfigured_mcp_servers`
-  and `gates_mcp_server`; `meerkat_core::tool_grant::server_is_grant_gated`,
-  the one server predicate the gate's readers answer through;
-  `InstalledToolGrantGate`, `RunningToolGrantGate` (with `attached_servers`,
-  the servers the session's surface holds) and `GatedToolView`;
-  `ToolGrantTarget::mcp_server` and `is_empty`;
+  and `gates_mcp_server`; `InstalledToolGrantGate`, `RunningToolGrantGate`
+  (with `attached_servers`, the servers the session's surface holds) and
+  `GatedToolView`; `ToolGrantTarget::mcp_server` and `is_empty`;
   `SessionToolVisibilityState::tool_grant_gates_server`,
   `tool_is_grant_gated` and `tool_is_closed_by_grant_gate`;
+  `meerkat_core::tool_grant::server_is_grant_gated`, the one MCP server
+  predicate (a gate's gated servers, its unconfigured-servers mode and its
+  ungated servers) that `tool_grant_gates_server`,
+  `InstalledToolGrantGate::gates_server` and `gates_mcp_server` answer
+  through, stating MeerkatMachine's server guards (`ExtendToolGrantGate`,
+  `SurfaceStageGatedAdd`) in Rust;
   `MeerkatMachine::tool_grant_gate`; `McpRouter::stage_add_gated` and
   `McpRouterAdapter::stage_add_gated`, the stage of a grant-time live attach
   of a gated server, which MeerkatMachine admits only for a server the
@@ -516,7 +524,9 @@ them.
   their caller lands with the live attach, and a build's lazy residency of a
   gated server it configures is the factory's build-composition filter;
   `meerkat_contracts::WireToolGrantApplies`, `WireToolGrantGateView`,
-  `WireToolGrantGateEntries` and `WireMemberToolGrantGate`.
+  `WireToolGrantGateEntries` (a gate's entries as `tool_grants/list` shows
+  them, ignoring a field this version does not know) and
+  `WireMemberToolGrantGate`.
 - Python and TypeScript SDKs: `grant_tool` takes `mcp_server` and
   `server_tools`, and `grantTool` takes `{ mcpServer, serverTools? }`; the
   generated types carry a gate's `mcp_servers` and
@@ -563,21 +573,6 @@ them.
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
 
-- `meerkat-core`: the shell reads the MCP server half of a scoped tool grant
-  gate through one predicate, `meerkat_core::tool_grant::server_is_grant_gated`
-  (a gate's gated servers, its unconfigured-servers mode and its ungated
-  servers): `SessionToolVisibilityState::tool_grant_gates_server`,
-  `InstalledToolGrantGate::gates_server` and
-  `GrantGatedTools::gates_mcp_server` answer through it, and the runtime's
-  grant tests compare it with MeerkatMachine's server guards
-  (`ExtendToolGrantGate`, `SurfaceStageGatedAdd`) over every gate of two
-  servers.
-
-- `meerkat-contracts`: the advisory `gate` of a `tool_grants/list` result
-  carries its entries as `WireToolGrantGateEntries`, which ignores a field
-  this version does not know, where the closed `WireGrantGatedTools` refused
-  the whole result. The generated Python and TypeScript types follow.
-
 - `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
   decision kind it registers instead of the whole store, so two runtimes on
   one store each execute their own kinds. A kind another executor holds is
@@ -602,13 +597,6 @@ them.
   restart too. Its successor kept the build inputs the session's earlier
   builds recorded, so the member ran its new role with, for one, its
   previous role's context.
-
-- `meerkat-rpc`: an identity grant of a gated MCP server the member's profile
-  configures answers `applies: "at_next_build"` while the member's running
-  build has left the server unattached (no live grant covered it when that
-  build read the grants): it answered `now`, though nothing of the server
-  runs until the next build connects it. A grant of a gated server no build
-  configures still answers `now`.
 
 - `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
   label in the one encoding of a name into a member id

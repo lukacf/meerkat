@@ -1904,7 +1904,21 @@ impl IdentityRuntime {
                 continue;
             }
             match self.prepare_fresh_reset(identity).await {
-                Ok(reset) => fresh_resets.push(reset),
+                Ok(reset) => {
+                    // The round that carries the identity's build is the one
+                    // Core can carry the reset out in: a compaction
+                    // projection the session still owes is settled before
+                    // Core is asked, and its batch waits for the reset's
+                    // retirement.
+                    if composed.contains_key(identity) {
+                        self.settle_owed_compaction_for_retirement(
+                            identity,
+                            reset.retiring.as_ref(),
+                        )
+                        .await;
+                    }
+                    fresh_resets.push(reset);
+                }
                 Err(error) => {
                     // Nothing was asked of Core: every reset this
                     // declaration recorded is taken back.
@@ -1915,16 +1929,25 @@ impl IdentityRuntime {
                 }
             }
         }
+        let resetting = fresh_resets
+            .iter()
+            .map(|reset| reset.identity.clone())
+            .collect::<BTreeSet<_>>();
+        let owing = self
+            .settle_owed_compactions_of_declaration(&roster, composed, &resetting)
+            .await;
         let answer = match bridge.apply_declared_roster(roster).await {
             Ok(answer) => answer,
             Err(error) => {
                 self.settle_fresh_resets(fresh_resets, &BTreeSet::new())
                     .await;
+                self.hand_back_owed_compactions(owing).await;
                 return Err(declaration_not_applied(error));
             }
         };
         self.settle_fresh_resets(fresh_resets, &answer.first_boot_requests_carried_out)
             .await;
+        self.hand_back_owed_compactions(owing).await;
         // The rows Core carried out leave the manifest; Core ended their
         // first-boot preparation in the step that carried them out.
         for identity in &answer.first_boot_requests_carried_out {
@@ -1988,6 +2011,123 @@ impl IdentityRuntime {
             asked_after,
             first,
         })
+    }
+
+    /// Settle, before a declaration asks Core, the compaction projections
+    /// owed by each session `roster` may end besides its first-boot resets
+    /// (`resetting`, which settle their own): the session of an identity a
+    /// complete roster no longer lists, whose member Core's seal retires
+    /// (one this process registered, or one Core's members name that the
+    /// roster dropped while the process was down), and that of an identity
+    /// declared with its build (`composed`) under another role than its
+    /// live member's, which Core moves to a fresh session. Only the
+    /// identity's own member is settled (an identity-first spawn made it),
+    /// and nothing of an identity a host adopted. What a settle answers
+    /// waits for that incarnation's retirement. Answers each incarnation
+    /// something was kept for, with the session it was on
+    /// ([`Self::hand_back_owed_compactions`]).
+    async fn settle_owed_compactions_of_declaration(
+        &self,
+        roster: &DeclaredRosterRequest,
+        composed: &BTreeMap<AgentIdentity, AgentBuildDraft>,
+        resetting: &BTreeSet<AgentIdentity>,
+    ) -> Vec<(AgentIdentity, u64, Option<SessionId>)> {
+        let distills = match self.agent_memory.read().await.as_ref() {
+            Some(memory) => memory.distills(),
+            None => false,
+        };
+        if !distills || self.is_candidate_launch() {
+            return Vec::new();
+        }
+        let declared = roster
+            .identities
+            .iter()
+            .map(|declared| (declared.spec.identity.clone(), &declared.spec))
+            .collect::<BTreeMap<_, _>>();
+        let mut candidates = declared
+            .iter()
+            .filter(|(identity, _)| {
+                composed.contains_key(*identity) && !resetting.contains(*identity)
+            })
+            .map(|(identity, spec)| (identity.clone(), Some(&spec.profile)))
+            .collect::<Vec<_>>();
+        if roster.complete {
+            let mut unlisted = self
+                .entries
+                .read()
+                .await
+                .keys()
+                .filter(|identity| !declared.contains_key(*identity))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            // Core's members the roster materialized, or Meta 0.9.3
+            // labelled, that it no longer lists, though this process never
+            // registered them: the roster dropped them while it was down.
+            let desired = declared
+                .iter()
+                .map(|(identity, spec)| (identity.clone(), (*spec).clone()))
+                .collect::<BTreeMap<_, _>>();
+            match self.core_unlisted_durable_members(&desired).await {
+                Ok(members) => unlisted.extend(members),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Core's durable identity members could not be read; the declaration settles \
+                     the owed compaction projections of the unlisted identities this process \
+                     registered only"
+                ),
+            }
+            unlisted.extend(self.core_unlisted_labelled_members(&desired).await);
+            candidates.extend(unlisted.into_iter().map(|identity| (identity, None)));
+        }
+        let mut owing = Vec::new();
+        for (identity, profile) in candidates {
+            // The identity's own live incarnation, as the unlisting's
+            // retirement hook reads it ([`Self::keep_unlisting_incarnations`]):
+            // a member a host made directly on the mob under the identity's
+            // member id is not the identity's.
+            let Ok(Some(binding)) = self.core_last_binding(&identity).await else {
+                continue;
+            };
+            if !binding.is_live()
+                || !binding_spawned_for_identity(&binding, &identity)
+                || profile.is_some_and(|profile| profile == binding.role())
+            {
+                continue;
+            }
+            // An identity a host adopted is read-only to Meta.
+            if !self.compile_may_act_on(&identity).await.unwrap_or(false) {
+                continue;
+            }
+            let generation = binding.generation().get();
+            if self
+                .settle_owed_compaction_of_incarnation(&identity, generation)
+                .await
+            {
+                owing.push((identity, generation, binding.session_id().cloned()));
+            }
+        }
+        owing
+    }
+
+    /// What [`Self::settle_owed_compactions_of_declaration`] kept, once
+    /// Core answered the declaration (or refused it): an incarnation whose
+    /// identity Core still holds live on the same session was not ended, so
+    /// its session goes on and what was kept is handed back
+    /// ([`Self::hand_back_owed_compaction`]); an ended one's retirement
+    /// harvests it.
+    async fn hand_back_owed_compactions(
+        &self,
+        owing: Vec<(AgentIdentity, u64, Option<SessionId>)>,
+    ) {
+        for (identity, generation, session) in owing {
+            let goes_on = matches!(
+                self.core_last_binding(&identity).await,
+                Ok(Some(binding)) if binding.is_live() && binding.session_id() == session.as_ref()
+            );
+            if goes_on {
+                self.hand_back_owed_compaction(&identity, generation).await;
+            }
+        }
     }
 
     /// What the resets a declaration recorded for its first-boot `Fresh`

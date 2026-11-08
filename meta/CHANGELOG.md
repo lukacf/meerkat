@@ -470,6 +470,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   through a bridge without it answers Core's deferral at once; a host's own
   wrapper of a session bridge forwards it.
 
+- Rust: `SessionBridge::settle_owed_compaction_projections` (provided,
+  unsupported by default) settles the compaction projections an identity's
+  current session still owes, through Core's
+  `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
+  and the exported bridge implement it.
+
+- `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
+  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
+  step owed the session it ended failed. Its record has its own key, apart
+  from the retirement's distillation, and goes once the fallback read of
+  the session's memory harvested them. Earlier releases neither write nor
+  read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
+  (provided, removes nothing by default) removes such a record; the SQLite,
+  in-memory and host store placements implement it.
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals
@@ -844,6 +859,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   composition that is not authoritative) answers `AdmissionFailed`
   instead of `IdentityWakeRetryable`.
 
+- A delete, reset, role move or unlisting of an identity whose member was
+  stopped after it compacted inside a run, and has not woken since, now
+  harvests that compaction's discarded history into agent memory. The stop
+  had committed the run with the compaction's memory projection still owed,
+  a lazy start does not wake the member for it, and the distiller harvests
+  discards only when a live member finalizes them, so the identity's next
+  life lost them. The step now settles the projection in Core before it
+  asks Core to end the session, and the distiller reads the settled
+  discards before it distills the transcript (and, for a delete, before the
+  session's memory scope is dropped). When the settle answers no discards
+  (an earlier finalization published them), the distiller reads the
+  compaction's discards from the session's memory instead. When the
+  settle fails or is busy, it reads them there once Core ended the
+  session, which publishes them only for a reset, a role move or a delete
+  (Core's rotation settles the session it leaves) and only when that
+  settle succeeds; the roster's unlisting leaves them owed in Core, as
+  before, for the session's next settle or wake. A harvest that times out,
+  is denied by the realm's budget or fails is recorded as a failed
+  compaction harvest (`lifecycle_effect_failed`, effect
+  `compaction_harvest`) and attempted again through that read, bounded
+  like the other side effects; the record goes once that read harvested
+  the discards. A step Core refuses before any of it reaches Core harvests
+  the discards it settled, or those the session's memory already holds, as
+  the session's live compaction's would be.
+
 ### Known limitations
 
 - Forge: an application on the legacy ordinary route keeps one shared
@@ -869,6 +909,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sign-out, or a new sign-in in the same browser), the review stays open
   but nobody can read or answer it, and a new one starts only after the
   application restarts.
+
+- A rotation a host starts directly on the mob (`MobHandle::rotate_member`),
+  with no Meta verb behind it, finalizes a dormant member's owed compaction
+  projection, but its discards are not distilled into agent memory; use a
+  delete, reset, role move or the roster's unlisting to have them
+  distilled.
+
+- The compaction harvest a step owes the session it ends (the settled
+  batch, or the fallback read of the session's memory) is kept in process
+  until the retirement's side effects run: a restart in between leaves the
+  records searchable in the old session's memory but never distilled.
 
 ## [0.9.10] - 2026-11-04
 

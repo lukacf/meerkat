@@ -15638,6 +15638,19 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
             .await
     }
 
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        // Forwarded for the same reason: the inner factory owns the
+        // canonical durable-memory backend a cold settle of a session's
+        // owed compaction projections finalizes into.
+        self.inner
+            .finalize_absent_session_compaction_stages(session_id, projections)
+            .await
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,

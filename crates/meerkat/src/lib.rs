@@ -628,8 +628,8 @@ pub use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 pub use meerkat_session::{
-    EphemeralSessionService, LiveSessionActorWitness, RuntimeContextAdmissionGuard, SessionAgent,
-    SessionAgentBuilder,
+    EphemeralSessionService, LiveSessionActorWitness, OwedCompactionSettlement,
+    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SettledCompactionProjection,
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that
 // refuses agent construction, composed with the persistent service to drive

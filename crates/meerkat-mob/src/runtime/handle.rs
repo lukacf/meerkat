@@ -10127,6 +10127,51 @@ impl MobHandle {
         }
     }
 
+    /// Settle the owed compaction projections of `identity`'s current
+    /// session cold, before a host ends that session: finalize each memory
+    /// batch the runtime's compaction outbox still owes for it, acknowledge
+    /// its row, and answer the finalized batches
+    /// ([`MobSessionService::settle_owed_compaction_projections`]).
+    ///
+    /// A member that compacted inside a run its stop committed as
+    /// interrupted owes the compaction's memory projection until it wakes
+    /// again, and a start does not wake it for that. A host that is about to
+    /// end such a member's session (a reset, a delete, a role move) settles
+    /// it here first, so the compaction's discards reach the host instead of
+    /// waiting for a wake that never comes. The mob's own rotation onto a
+    /// fresh session settles the session it leaves the same way, so every
+    /// host gets the finalization; it does not hand the batch to anyone.
+    ///
+    /// Read and checked without an actor command, under the
+    /// [`crate::ControlScope::Retire`] scope: the session is the one
+    /// MobMachine binds the seated member to now. A member whose session is
+    /// unborn (no wake created it) owes nothing. A session this process
+    /// hosts answers [`meerkat_session::OwedCompactionSettlement::Live`]:
+    /// its live agent owns the finalization. Nothing is woken and no model
+    /// is asked. An identity the mob does not hold seated is refused with
+    /// [`MobError::MemberNotFound`].
+    pub async fn settle_member_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, MobError> {
+        let session = self.read_published_machine_state(crate::ControlScope::Retire, |state| {
+            Self::machine_bridge_session_id_for_identity(identity, state).map(|session_id| {
+                let unborn = super::boot_plan::domain_seat_session_never_born(state, &session_id);
+                (session_id, unborn)
+            })
+        })?;
+        let Some((session_id, unborn)) = session else {
+            return Err(MobError::MemberNotFound(identity.clone()));
+        };
+        if unborn {
+            return Ok(meerkat_session::OwedCompactionSettlement::NothingOwed);
+        }
+        self.session_service
+            .settle_owed_compaction_projections(&session_id)
+            .await
+            .map_err(MobError::SessionError)
+    }
+
     /// The fresh life a rotation starts for an identity entry no member
     /// holds takes a fresh session: the entry's archived session record, if
     /// it has one, is let go first (`ForgetArchivedSession`,

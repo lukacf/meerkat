@@ -606,9 +606,11 @@ them.
 - The OpenAI image models `gpt-image-1`, `dall-e-3` and `dall-e-2` are no
   longer in the image generation catalog. OpenAI has shut them down (the
   DALL-E models on 2026-05-12, `gpt-image-1` on 2026-10-23), so requests for
-  them already failed at OpenAI; `generate_image` now denies them with
-  `unsupported_target` before calling the provider. See Breaking for the
-  request shape removed with them.
+  them already failed at OpenAI; `generate_image` now refuses them before
+  calling the provider: denied with `unsupported_target` when the request
+  names `provider: "openai"`, and refused as invalid arguments when it names
+  no provider, since no configured image provider owns them. See Breaking
+  for the request shape removed with them.
 
 ### Fixed
 

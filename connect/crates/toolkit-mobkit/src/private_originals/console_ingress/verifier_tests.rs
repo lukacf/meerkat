@@ -1178,7 +1178,17 @@ async fn console_send_refused_after_its_first_attempt_write_admits_nothing() {
         );
         assert_eq!(
             observation.failure.lock().unwrap().as_deref(),
-            Some("The Console human may no longer send to this agent"),
+            Some(
+                format!(
+                    "{:?}",
+                    GovernedBindError::Refused(
+                        meerkat_mobkit::identity_first::GovernedBindRefusal::unavailable(
+                            "The Console human may no longer send to this agent"
+                        )
+                    )
+                )
+                .as_str()
+            ),
             "the Console entry check after the write refused"
         );
         assert!(observation.bound.lock().unwrap().is_none());

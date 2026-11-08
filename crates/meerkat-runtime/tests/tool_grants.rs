@@ -3748,6 +3748,177 @@ async fn a_build_reads_which_gated_servers_a_live_server_grant_covers() {
     }
 }
 
+/// The view of a build that gates the MCP server `tickets`, whose server
+/// provides `open_ticket` and `close_ticket` now.
+fn tickets_view() -> GatedToolView {
+    let names: BTreeSet<ToolName> = ["close_ticket", "open_ticket"]
+        .into_iter()
+        .map(ToolName::from)
+        .collect();
+    GatedToolView::new(
+        names.clone(),
+        BTreeMap::from([("tickets".to_string(), names)]),
+    )
+}
+
+/// A grant of the gated MCP server `tickets` to `session_id`, scoped to the
+/// run `run_id`.
+fn run_scoped_tickets_grant(session_id: &SessionId, run_id: &RunId) -> ToolGrantRequest {
+    ToolGrantRequest {
+        subject: ToolGrantSubject::session(session_id.clone()),
+        target: ToolGrantTarget::McpServer {
+            server: "tickets".to_string(),
+            tools: None,
+        },
+        issuer: ToolGrantIssuer::operator(),
+        reason: None,
+        window: ToolGrantWindow::For(Duration::from_mins(10)),
+        run_scope: Some(run_id.clone()),
+    }
+}
+
+/// A run-scoped grant of a gated MCP server opens its server's gated names at
+/// the boundaries of its own run, and admits that run's calls of the
+/// server's tools. Outside any run it opens nothing and stays live, and a
+/// build, which belongs to no run, finds it covering no server.
+#[tokio::test]
+async fn a_run_scoped_server_grant_opens_its_server_in_its_run_only() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(
+            bindings
+                .tool_grants()
+                .expect("the runtime carries the session's grants"),
+        );
+        let run = RunId::new();
+        let grant = machine
+            .grant_tool(run_scoped_tickets_grant(&session_id, &run), None)
+            .await
+            .unwrap();
+        assert_eq!(grant.run_scope, Some(run.clone()), "{backend:?}");
+        let view = tickets_view();
+
+        let open: BTreeSet<ToolName> = grants
+            .open_names(&view, Some(&run))
+            .await
+            .expect("the grants read")
+            .into_inner()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            open,
+            view.gated().clone(),
+            "{backend:?}: its run opens them"
+        );
+        grants
+            .admit_call(ToolGrantCall {
+                name: "open_ticket",
+                server: Some("tickets"),
+                call_id: "call-of-its-run",
+                run_id: Some(&run),
+            })
+            .await
+            .expect("a call of its run is admitted");
+
+        assert!(
+            grants
+                .open_names(&view, None)
+                .await
+                .expect("the grants read")
+                .into_inner()
+                .is_empty(),
+            "{backend:?}: outside any run it opens nothing"
+        );
+        assert!(
+            grants
+                .granted_servers(&BTreeSet::from(["tickets".to_string()]))
+                .await
+                .expect("the grants read")
+                .is_empty(),
+            "{backend:?}: a build covers no server with a run-scoped grant"
+        );
+        let store = durable.open();
+        assert_eq!(
+            stored(&*store, &grant).await.status,
+            ToolGrantStatus::Active,
+            "{backend:?}: it stays live for its run"
+        );
+    }
+}
+
+/// A model-request boundary of a later run ends a run-scoped grant of a gated
+/// MCP server: it opens nothing of the server there, the grant is recorded
+/// as ended with its run by the boundary, and its own run's boundary opens
+/// nothing after that.
+#[tokio::test]
+async fn a_later_runs_boundary_ends_a_run_scoped_server_grant() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(
+            bindings
+                .tool_grants()
+                .expect("the runtime carries the session's grants"),
+        );
+        let earlier = RunId::new();
+        let later = RunId::new();
+        let grant = machine
+            .grant_tool(run_scoped_tickets_grant(&session_id, &earlier), None)
+            .await
+            .unwrap();
+        let view = tickets_view();
+
+        clock.set(T0 + 1_000);
+        assert!(
+            grants
+                .open_names(&view, Some(&later))
+                .await
+                .expect("the grants read")
+                .into_inner()
+                .is_empty(),
+            "{backend:?}: a later run's boundary opens nothing of the server"
+        );
+        let store = durable.open();
+        let ended = stored(&*store, &grant).await;
+        assert_eq!(ended.status, ToolGrantStatus::RunEnded, "{backend:?}");
+        assert_eq!(ended.run_scope, Some(earlier.clone()), "{backend:?}");
+        let events = audit_events(&*store, &session_id).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ToolGrantAuditEvent::RunEnded {
+                    run_id,
+                    driver: ToolGrantExpiryDriver::Boundary,
+                    ..
+                } if *run_id == earlier
+            )),
+            "{backend:?}: the boundary ended it with its run: {events:?}"
+        );
+        assert!(
+            grants
+                .open_names(&view, Some(&earlier))
+                .await
+                .expect("the grants read")
+                .into_inner()
+                .is_empty(),
+            "{backend:?}: an ended grant opens nothing in its own run either"
+        );
+    }
+}
+
 /// The shell's MCP server predicate answers what the generated machine
 /// admits. For every gate over two servers (its gated servers, its ungated
 /// servers and its unconfigured-servers mode) and every server asked, a third

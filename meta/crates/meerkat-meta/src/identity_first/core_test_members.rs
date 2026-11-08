@@ -49,9 +49,10 @@ pub(crate) struct CoreTestMembers {
     /// Bindings a rebind ended: Core's history still names the sessions an
     /// identity's member was bound to before (who owned a session).
     ended: Mutex<Vec<(AgentIdentity, TestMember)>>,
-    /// The member lifecycle facts the binds and retires journaled, in order;
-    /// a fact's cursor is its position from one.
-    facts: Mutex<Vec<MemberLifecycleFact>>,
+    /// The member lifecycle facts the binds and retires journaled, in order,
+    /// each with the time it was appended (Unix milliseconds, strictly
+    /// increasing); a fact's cursor is its position from one.
+    facts: Mutex<Vec<(MemberLifecycleFact, u64)>>,
     /// Set by [`Self::keep_journal`]: the journal reads answer.
     journal: AtomicBool,
     /// The identities whose member a host made directly on the mob
@@ -66,6 +67,9 @@ pub(crate) struct CoreTestMembers {
     /// Core's standing of these identities' members as it answers it,
     /// whatever Core holds ([`Self::pin_standing`]).
     pinned_standing: Mutex<BTreeMap<AgentIdentity, MemberStanding>>,
+    /// The cause each retirement Core started for one was journaled for
+    /// ([`Self::start_unlisting`]), by incarnation, until its end records it.
+    retirement_causes: Mutex<BTreeMap<AgentRuntimeId, meerkat_mob::MemberRetirementCause>>,
 }
 
 impl CoreTestMembers {
@@ -389,9 +393,37 @@ impl CoreTestMembers {
         }
     }
 
+    /// Core's seal started the retirement of the live incarnation
+    /// `runtime_id` of an entry the complete roster no longer lists, and has
+    /// not ended it: its start is journaled with the cause the seal's rows
+    /// record ([`meerkat_mob::MemberRetirementCause::Unlisted`]), and the
+    /// member reads retiring until [`Self::retire`] ends it, with that cause.
+    pub(crate) fn start_unlisting(&self, runtime_id: &AgentRuntimeId) {
+        let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
+        for (identity, member) in members.iter_mut() {
+            if member.runtime_id == *runtime_id && member.live && !member.retiring {
+                member.retiring = true;
+                self.retirement_causes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(
+                        runtime_id.clone(),
+                        meerkat_mob::MemberRetirementCause::Unlisted,
+                    );
+                self.journal_fact(MemberLifecycleFact::retirement_started(
+                    member_id(identity),
+                    member.generation,
+                    None,
+                    Some(meerkat_mob::MemberRetirementCause::Unlisted),
+                ));
+            }
+        }
+    }
+
     /// Core retired the member whose runtime id is `runtime_id`, its
     /// retirement's start journaled first (unless Core started it already);
-    /// its binding stays in the history as retired.
+    /// its binding stays in the history as retired. The end records the
+    /// cause its start was journaled for, if any.
     pub(crate) fn retire(&self, runtime_id: &AgentRuntimeId) {
         let mut members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         for (identity, member) in members.iter_mut() {
@@ -406,13 +438,19 @@ impl CoreTestMembers {
                 }
                 member.live = false;
                 member.retiring = false;
+                let cause = self
+                    .retirement_causes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(runtime_id);
                 self.journal_fact(
                     MemberLifecycleFact::retired(
                         member_id(identity),
                         member.generation,
                         member.profile.clone(),
                     )
-                    .with_session(member.session_id.clone()),
+                    .with_session(member.session_id.clone())
+                    .with_cause(cause),
                 );
             }
         }
@@ -553,11 +591,20 @@ impl CoreTestMembers {
         self.journal.store(true, Ordering::SeqCst);
     }
 
+    /// Journal `fact` at the wall-clock time, as Core appends an event; a
+    /// fact appended within the previous one's millisecond is a millisecond
+    /// later, so no two facts share a time.
     fn journal_fact(&self, fact: MemberLifecycleFact) {
-        self.facts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(fact);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        let mut facts = self.facts.lock().unwrap_or_else(PoisonError::into_inner);
+        let appended_at = facts
+            .last()
+            .map_or(now_ms, |(_, last)| now_ms.max(last.saturating_add(1)));
+        facts.push((fact, appended_at));
     }
 
     pub(crate) fn journal_head(&self) -> Result<MemberLifecycleJournalHead, BridgeError> {
@@ -587,9 +634,9 @@ impl CoreTestMembers {
         let records = facts
             .iter()
             .enumerate()
-            .map(|(index, fact)| MemberLifecycleFactRecord {
-                cursor: index as u64 + 1,
-                fact: fact.clone(),
+            .map(|(index, (fact, appended_at))| {
+                MemberLifecycleFactRecord::new(index as u64 + 1, fact.clone())
+                    .with_recorded_at_ms(*appended_at)
             })
             .filter(|record| record.cursor > after)
             .take(limit.max(1))

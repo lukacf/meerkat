@@ -331,8 +331,9 @@ pub struct IdentityToolRecord {
 /// A fresh life (`reset`, `delete_identity`) Meta asked Core to start for an
 /// identity, recorded before Core is asked and removed once Core answers.
 /// A record that survives a restart names a rotation whose steps a crash
-/// interrupted: the next roster compile drives it to its end. Kept in the
-/// same placements as [`IdentityToolRecord`] (key
+/// interrupted, which Core finishes from its own record; the record stays
+/// written for a rollback, whose roster pass drives the rotation to its end
+/// or settles it. Kept in the same placements as [`IdentityToolRecord`] (key
 /// `identity_rotation/<identity>`; host store document `rotation/...`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityRotationIntent {
@@ -919,16 +920,17 @@ pub trait PersistentMetadataStore: Send + Sync {
 
     /// Every rotation intent recorded for `mob_id`'s identities.
     ///
-    /// Required: the records carry a rotation (a reset, a delete) a crash
-    /// interrupted across the restart, so that the next roster compile
-    /// drives it to its end.
+    /// Required: the records carry a rotation (a reset, a delete) that may
+    /// have started, which a rollback's roster pass (Meta 0.9.10's) drives to
+    /// its end. This Meta writes them for that rollback and never reads them.
     async fn load_identity_rotation_intents(
         &self,
         mob_id: &str,
     ) -> Result<Vec<IdentityRotationIntent>, MetadataStoreError>;
 
-    /// Record (or replace) an identity's rotation intent, durably, before
-    /// the rotation starts. An error refuses the rotation: nothing starts.
+    /// Record (or replace) an identity's rotation intent, durably: the
+    /// identity runtime writes it after Core's answer to a rotation that may
+    /// have started, for a rollback. An error is logged.
     async fn set_identity_rotation_intent(
         &self,
         intent: &IdentityRotationIntent,

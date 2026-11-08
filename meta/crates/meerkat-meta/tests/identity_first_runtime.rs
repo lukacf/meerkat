@@ -44,6 +44,9 @@ use meerkat_meta::identity_first::{LocalContinuityStore, LocalLeaseProvider};
 use meerkat_meta::memory::SqliteAgentMemoryStore;
 use meerkat_meta::{ErrorEvent, ErrorHook, StewardStore, TaintableStore};
 
+#[path = "support/declared_apply.rs"]
+mod declared_apply;
+
 // ===========================================================================
 // Helpers
 // ===========================================================================
@@ -264,6 +267,10 @@ struct CoreMembers {
             ),
         >,
     >,
+    /// Identities whose member a host made directly on the mob under the
+    /// identity's member id: it carries neither the durable-identity marker
+    /// nor the identity-first label.
+    host_made: Mutex<std::collections::BTreeSet<AgentIdentity>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -523,6 +530,20 @@ impl CoreMembers {
         self.adopted.lock().unwrap().insert(identity.clone());
     }
 
+    /// Core holds a member of `identity` live at `generation` on `session`
+    /// that a host made directly on the mob under the identity's member id:
+    /// it carries neither the durable-identity marker nor the identity-first
+    /// label.
+    fn bind_live_host_made(
+        &self,
+        identity: &AgentIdentity,
+        generation: u64,
+        session: meerkat_core::types::SessionId,
+    ) -> AgentRuntimeId {
+        self.host_made.lock().unwrap().insert(identity.clone());
+        self.bind_live_unmarked(identity, "default", generation, Some(session))
+    }
+
     /// A host adopted `identity` with an intent row that declares a live
     /// member (`present`) or none, and Core's convergence of it stands at
     /// `decision`.
@@ -585,6 +606,24 @@ impl CoreMembers {
     /// Core retired the member `runtime_id` names, its retirement's start
     /// journaled first; its binding stays.
     fn retire(&self, runtime_id: &AgentRuntimeId) {
+        self.retire_for(runtime_id, None);
+    }
+
+    /// Core's seal retired the member `runtime_id` names, an entry a
+    /// complete roster no longer lists: its retirement's start and end are
+    /// journaled with the seal's cause (`Unlisted`).
+    fn retire_unlisted(&self, runtime_id: &AgentRuntimeId) {
+        self.retire_for(
+            runtime_id,
+            Some(meerkat_mob::MemberRetirementCause::Unlisted),
+        );
+    }
+
+    fn retire_for(
+        &self,
+        runtime_id: &AgentRuntimeId,
+        cause: Option<meerkat_mob::MemberRetirementCause>,
+    ) {
         for (identity, member) in self.members.lock().unwrap().iter_mut() {
             if member.runtime_id == *runtime_id && member.live {
                 member.live = false;
@@ -595,7 +634,7 @@ impl CoreMembers {
                         ),
                         member.generation,
                         None,
-                        None,
+                        cause,
                     ),
                 );
                 self.facts.lock().unwrap().push(
@@ -606,7 +645,8 @@ impl CoreMembers {
                         member.generation,
                         member.profile.clone(),
                     )
-                    .with_session(member.session_id.clone()),
+                    .with_session(member.session_id.clone())
+                    .with_cause(cause),
                 );
             }
         }
@@ -622,7 +662,7 @@ impl CoreMembers {
     }
 
     fn binding(&self, identity: &AgentIdentity, member: &CoreMember) -> meerkat_mob::MemberBinding {
-        meerkat_mob::MemberBinding::for_test(
+        let binding = meerkat_mob::MemberBinding::for_test(
             meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str()),
             meerkat_mob::Generation::new(member.generation),
             member.session_id.clone(),
@@ -640,10 +680,14 @@ impl CoreMembers {
                 meerkat_mob::SpawnContinuityIntent::Ephemeral
             },
             self.management(identity),
-        )
+        );
+        // A member the host made directly carries no label.
+        if self.host_made.lock().unwrap().contains(identity) {
+            return binding;
+        }
         // Every identity-first spawn labels its member with the identity,
         // Meta 0.9.3's unmarked ones included.
-        .with_labels(std::collections::BTreeMap::from([(
+        binding.with_labels(std::collections::BTreeMap::from([(
             "agent_identity".to_owned(),
             identity.as_str().to_owned(),
         )]))
@@ -782,7 +826,10 @@ async fn register_live(
         .core
         .bind_live(&spec.identity, generation, session_id.clone());
     bridge.set_deliver_session_id(session_id.clone()).await;
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
     session_id
 }
 
@@ -907,6 +954,15 @@ struct CountingBridge {
     /// Whether Core keeps a member's session beyond the member (`None`: the
     /// bridge cannot answer, as a bridge without the read).
     sessions_outlive_members: Mutex<Option<bool>>,
+    /// The identities Core holds declared: a complete roster unlists the
+    /// ones it does not list, as Core's seal does.
+    declared: declared_apply::DeclaredSet,
+    /// Set while the declared apply unlists: each retirement it starts is
+    /// journaled for that cause, as Core's seal journals it.
+    sealing: AtomicBool,
+    /// Core refuses each declared apply as a whole: nothing of the
+    /// declaration is applied.
+    refuse_declarations: AtomicBool,
 }
 
 impl CountingBridge {
@@ -1057,10 +1113,6 @@ impl CountingBridge {
             .insert(identity.clone());
     }
 
-    fn clear_retire_failures(&self) {
-        self.failing_retires.lock().unwrap().clear();
-    }
-
     /// Core answers that it holds a durable copy of `sessions`, and of no
     /// other session.
     fn hold_durable_sessions(
@@ -1068,17 +1120,6 @@ impl CountingBridge {
         sessions: impl IntoIterator<Item = meerkat_core::types::SessionId>,
     ) {
         *self.durable_sessions.lock().unwrap() = Some(sessions.into_iter().collect());
-    }
-
-    /// The bridge's queue captures, retires, seats, resumes, rotations,
-    /// releases and queue readmissions so far, in call order.
-    fn lifecycle_log(&self) -> Vec<String> {
-        self.lifecycle_log.lock().unwrap().clone()
-    }
-
-    /// Core's session authority fails every durable-session read.
-    fn fail_durable_session_reads(&self, detail: &str) {
-        *self.durable_session_failure.lock().unwrap() = Some(detail.to_string());
     }
 
     fn reload_required_times(&self, times: usize) {
@@ -1680,7 +1721,12 @@ impl SessionBridge for CountingBridge {
         if let Some(identity) = failing {
             return Err(BridgeError::Mob(format!("retire of {identity} failed")));
         }
-        self.core.retire(runtime_id);
+        // Core's seal journals the retirements it starts for its cause.
+        if self.sealing.load(Ordering::SeqCst) {
+            self.core.retire_unlisted(runtime_id);
+        } else {
+            self.core.retire(runtime_id);
+        }
         Ok(())
     }
 
@@ -1755,6 +1801,68 @@ impl SessionBridge for CountingBridge {
         }
         Ok(())
     }
+
+    /// Core's declared apply through this double's own seat, rotation,
+    /// resume and release ([`declared_apply::apply_through_seats`]), and its
+    /// seal's unlisting ([`declared_apply::DeclaredSet`]). A seat on an
+    /// archived session is revived as Core revives it (a resume of that
+    /// session, counted as one), refused while the double refuses resumes
+    /// as archived and not revivable. While the double refuses declarations,
+    /// nothing is applied.
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        if self.refuse_declarations.load(Ordering::SeqCst) {
+            return Err(BridgeError::Mob("declared apply refused".to_string()));
+        }
+        let revive = |identity: &AgentIdentity,
+                      spec: &DurableAgentSpec,
+                      session_id: &meerkat_core::types::SessionId| {
+            self.resume_calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .reject_resume_archived_not_revivable
+                .load(Ordering::SeqCst)
+            {
+                return Err(BridgeError::ResumeRejected {
+                    kind: meerkat_meta::identity_first::ResumeRejectionKind::Unavailable {
+                        reason:
+                            meerkat_mob::error::SessionResumeUnavailableReason::ArchivedNotRevivable,
+                    },
+                    session_id: session_id.clone(),
+                    detail: format!(
+                        "revive: session '{session_id}' archived and not revivable; the \
+                         transcript is intact and preserved"
+                    ),
+                });
+            }
+            let generation = self.resume_generation.load(Ordering::SeqCst);
+            let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:{generation}"))
+                .map_err(|error| BridgeError::Mob(error.to_string()))?;
+            self.lifecycle_log
+                .lock()
+                .unwrap()
+                .push(format!("revive {identity} {session_id}"));
+            self.core.bind(
+                identity,
+                &meerkat_meta::identity_first::MemberRuntimeBinding {
+                    agent_runtime_id,
+                    session_id: Some(session_id.clone()),
+                },
+                &spec.profile,
+            );
+            Ok(())
+        };
+        let mut answer = declared_apply::apply_through_seats(self, &roster, Some(&revive)).await?;
+        self.sealing.store(true, Ordering::SeqCst);
+        let unlisted = self.declared.apply(self, &roster).await;
+        self.sealing.store(false, Ordering::SeqCst);
+        answer.unlisted = unlisted?;
+        Ok(answer)
+    }
 }
 
 fn make_content() -> meerkat_core::ContentInput {
@@ -1801,7 +1909,10 @@ async fn identity_first_runtime_send_to_internal_only_rejected() {
 
     let spec = make_internal_spec("gate:main");
 
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
 
     let result = runtime
         .send(&make_identity("gate:main"), &make_content())
@@ -1846,7 +1957,10 @@ async fn r68_a_delivery_to_an_unseated_identity_seats_it_once_and_wakes_through_
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let id = make_identity("triage:main");
     let last = seed_core_last_session(&bridge, "triage:main");
-    runtime.register(make_spec("triage:main")).await;
+    runtime
+        .register(make_spec("triage:main"))
+        .await
+        .expect("the identity registers");
 
     runtime
         .send(&id, &make_content())
@@ -2085,7 +2199,10 @@ async fn identity_first_runtime_agent_returns_for_active() {
 
     let spec = make_spec("triage:main");
 
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
 
     assert!(runtime.contains(&make_identity("triage:main")).await);
 }
@@ -2495,7 +2612,8 @@ async fn member_health_does_not_lock_entries_while_awaiting_custom_durability() 
         runtime.register(make_spec("triage:other")),
     )
     .await
-    .expect("a custom durability read must not block fleet entry writes");
+    .expect("a custom durability read must not block fleet entry writes")
+    .expect("the identity registers");
     gate.notify_one();
     assert!(health.await.unwrap().durability.is_none());
 }
@@ -2583,10 +2701,16 @@ async fn reload_actor_observations_remain_typed_on_explicit_and_automatic_paths(
 async fn last_reload_records_early_noops_and_failures_without_reviving_retired_identity() {
     use meerkat_meta::identity_first::ReloadAttemptOutcome;
     let (runtime, bridge) = make_registered_counting_runtime().await;
-    // Registered, but Core holds no member for it: Dormant. A reload
-    // finds nothing current and wakes nothing.
+    // Registered, but Core holds no member for it (its registration seated
+    // it, and Core retired that member since): Dormant. A reload finds
+    // nothing current and wakes nothing.
     let id = make_identity("triage:early");
-    runtime.register(make_spec("triage:early")).await;
+    runtime
+        .register(make_spec("triage:early"))
+        .await
+        .expect("the identity registers");
+    let seated = core_member(&bridge, &id).runtime_id;
+    bridge.core.retire(&seated);
     let result = runtime.reload_member(&id).await;
     assert!(result.is_ok(), "{result:?}");
     let health = runtime.member_health(&id).await.unwrap();
@@ -3534,8 +3658,8 @@ async fn identity_first_runtime_lazy_first_send_takes_no_meta_step_after_the_res
     }
 }
 
-/// Parallel first sends to an identity Core does not hold (registered, not
-/// seated yet) seat it ONCE, on its last session, and every send is
+/// Parallel first sends to an identity Core does not hold (registered, its
+/// seat retired since) seat it ONCE, on its last session, and every send is
 /// delivered through Core: nothing is resumed, loaded or woken by Meta.
 /// Core's seat call is held open until every send is in flight, so the
 /// sends overlap the one seat: each other send waits for it and then finds
@@ -3550,7 +3674,16 @@ async fn identity_first_runtime_parallel_sends_to_an_unseated_identity_seat_it_o
 
     // Core holds the member retired on its last session.
     let last = seed_core_last_session(&bridge, "agent:coalesce");
-    runtime.register(make_spec("agent:coalesce")).await;
+    runtime
+        .register(make_spec("agent:coalesce"))
+        .await
+        .expect("the identity registers");
+    // The registration's declaration seated it on its last session; Core
+    // retires that member again, so the first sends find it unseated.
+    let seated = core_member(&bridge, &id).runtime_id;
+    bridge.core.retire(&seated);
+    let seat_calls = bridge.seat_calls.load(Ordering::SeqCst);
+    let seats = bridge.seats().len();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     bridge.set_seat_barrier(barrier.clone()).await;
 
@@ -3572,7 +3705,7 @@ async fn identity_first_runtime_parallel_sends_to_an_unseated_identity_seat_it_o
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         bridge.seat_calls.load(Ordering::SeqCst),
-        1,
+        seat_calls + 1,
         "the other sends wait for the seat in flight instead of seating again"
     );
     assert_eq!(
@@ -3591,7 +3724,7 @@ async fn identity_first_runtime_parallel_sends_to_an_unseated_identity_seat_it_o
     }
 
     assert_eq!(
-        bridge.seats(),
+        bridge.seats()[seats..].to_vec(),
         vec![(id.clone(), Some(last))],
         "one seat, on its last session"
     );
@@ -3831,7 +3964,9 @@ async fn identity_first_runtime_materialize_all_continues_when_one_identity_fail
 
 /// Flow admission's strict variant fails when a registered identity cannot
 /// be made a member of Core's mob, and names it. It wakes nothing: the
-/// identity it could seat stays seated, the refused one stays unseated.
+/// identity it could seat stays seated, the refused one stays unseated. A
+/// registration declares its identity, so Core refuses the second one's seat
+/// from its registration on.
 #[tokio::test]
 async fn identity_first_runtime_materialize_all_required_fails_when_an_identity_cannot_be_seated() {
     let store = Arc::new(CountingContinuityStore::new());
@@ -3841,11 +3976,18 @@ async fn identity_first_runtime_materialize_all_required_fails_when_an_identity_
     let healthy = make_identity("agent:healthy");
     let broken = make_identity("agent:broken");
 
-    // Registered, not seated yet.
-    runtime.register(make_spec("agent:healthy")).await;
-    runtime.register(make_spec("agent:broken")).await;
+    runtime
+        .register(make_spec("agent:healthy"))
+        .await
+        .expect("the identity registers");
     runtime.materialize(&healthy).await.unwrap();
     bridge.fail_create();
+    // Core refuses the seat its registration asks for; the spec is
+    // registered all the same.
+    runtime
+        .register(make_spec("agent:broken"))
+        .await
+        .expect("the identity registers");
 
     let err = runtime.materialize_all_required().await.unwrap_err();
 
@@ -4985,6 +5127,18 @@ async fn identity_first_runtime_topology_materializes_runtime_peer_wires() {
                 })
                 .collect())
         }
+
+        /// Core's declared apply through this double's own seat
+        /// ([`declared_apply::apply_through_seats`]).
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            declared_apply::apply_through_seats(self, &roster, None).await
+        }
     }
 
     struct StaticTopology(Vec<(&'static str, &'static str)>);
@@ -5262,6 +5416,18 @@ async fn identity_first_runtime_topology_claims_persisted_wires_without_rebatchi
                 })
                 .collect())
         }
+
+        /// Core's declared apply through this double's own seat
+        /// ([`declared_apply::apply_through_seats`]).
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            declared_apply::apply_through_seats(self, &roster, None).await
+        }
     }
 
     struct StaticTopology(Vec<(&'static str, &'static str)>);
@@ -5434,7 +5600,10 @@ async fn identity_first_runtime_roster_inspect_returns_all_identities() {
     let mut spec2 = make_internal_spec("gate:main");
     spec2.labels.insert("role".to_string(), "gate".to_string());
     register_live(&runtime, &bridge, spec1.clone(), 2).await;
-    runtime.register(spec2.clone()).await;
+    runtime
+        .register(spec2.clone())
+        .await
+        .expect("the identity registers");
     let roster = runtime
         .roster_inspect()
         .await
@@ -5447,7 +5616,9 @@ async fn identity_first_runtime_roster_inspect_returns_all_identities() {
     assert_eq!(status.generation, Some(meerkat_mob::Generation::new(2)));
     let (spec, status) = roster.get(&make_identity("gate:main")).unwrap();
     assert_eq!(spec.labels.get("role"), Some(&"gate".to_string()));
-    assert_eq!(status.state, IdentityLifecycleState::Dormant);
+    // Its registration declared it, and Core seated it: Core holds its
+    // member.
+    assert_eq!(status.state, IdentityLifecycleState::Active);
     assert_eq!(status.addressability, AgentAddressability::InternalOnly);
 }
 
@@ -5564,13 +5735,24 @@ async fn identity_first_runtime_reconcile_unchanged_no_action() {
 /// wake publishes Active; a retire releases the member, which stays a member
 /// of Core's mob, and publishes nothing; a reload that retires the
 /// incarnation and seats it again publishes Dormant, then Active, on the
-/// same subscription.
+/// same subscription. The registration's declaration seats the identity, so
+/// Core retires that member first, as a host's retire does: the identity
+/// reads Dormant until the wake seats it again.
 #[tokio::test]
 async fn identity_first_runtime_subscribe_receives_identity_events() {
     let bridge = Arc::new(CountingBridge::default());
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let identity = make_identity("triage:main");
-    runtime.register(make_spec("triage:main")).await;
+    runtime
+        .register(make_spec("triage:main"))
+        .await
+        .expect("the identity registers");
+    let seated = core_member(&bridge, &identity).runtime_id;
+    bridge.core.retire(&seated);
+    assert_eq!(
+        runtime.status(&identity).await.unwrap().state,
+        IdentityLifecycleState::Dormant
+    );
     let mut rx = runtime.subscribe(&identity).await.unwrap();
     // The lifecycle states published since the last call, in order: every
     // verb publishes before it answers.
@@ -6745,6 +6927,45 @@ async fn dormant_identity_owing_a_compaction_with(
     let session = core_member(&bridge, &make_identity(name))
         .session_id
         .expect("the seat binds a session");
+    let (events, memory_store, memory_dir) = wire_recording_distiller(
+        &runtime,
+        discards,
+        failing_harvests,
+        hang_transcripts,
+        slow_harvests,
+    )
+    .await;
+    bridge.owe_compaction(owed_compaction_batch(&session));
+    (
+        runtime,
+        bridge,
+        session,
+        events,
+        memory_store,
+        context,
+        memory_dir,
+    )
+}
+
+/// Give `runtime` agent memory over a fresh store with a distiller whose
+/// extractions, scope drops and compaction follow-ups land in the
+/// returned event order, reading `discards` from the session's memory and
+/// failing the first `failing_harvests` harvest requests, whose model
+/// never answers a transcript extraction when `hang_transcripts` is set,
+/// and answers each harvest only half a second after it was asked when
+/// `slow_harvests` is. The memory store and its directory are returned
+/// with the events.
+async fn wire_recording_distiller(
+    runtime: &Arc<IdentityRuntime>,
+    discards: OwedDiscards,
+    failing_harvests: usize,
+    hang_transcripts: bool,
+    slow_harvests: bool,
+) -> (
+    Arc<Mutex<Vec<String>>>,
+    Arc<meerkat_meta::SqliteAgentMemoryStore>,
+    tempfile::TempDir,
+) {
     let memory_dir = tempfile::tempdir().unwrap();
     let memory_store =
         Arc::new(meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).unwrap());
@@ -6792,16 +7013,7 @@ async fn dormant_identity_owing_a_compaction_with(
                 .with_distiller(engine),
         ))
         .await;
-    bridge.owe_compaction(owed_compaction_batch(&session));
-    (
-        runtime,
-        bridge,
-        session,
-        events,
-        memory_store,
-        context,
-        memory_dir,
-    )
+    (events, memory_store, memory_dir)
 }
 
 /// Wait, bounded, until `events` holds an event `done` names; answer the
@@ -7263,7 +7475,10 @@ async fn identity_first_runtime_owned_identity_for_member_alias_discriminates_pl
     let store = Arc::new(LocalContinuityStore::in_memory().unwrap());
     let lease = Arc::new(LocalLeaseProvider::new());
     let runtime = make_runtime(store, lease);
-    runtime.register(make_spec("personal:alice")).await;
+    runtime
+        .register(make_spec("personal:alice"))
+        .await
+        .expect("the identity registers");
 
     // Registered identity: plain name and rt-alias both resolve.
     assert_eq!(
@@ -7426,7 +7641,7 @@ async fn restore_pass_settles_each_member_typed_once_core_answers_its_seat_call(
 }
 
 // ===========================================================================
-// The roster compile respawns unmarked members (members Meta 0.9.3 spawned)
+// The roster compile keeps unmarked members (members Meta 0.9.3 spawned)
 // ===========================================================================
 
 /// The member Core holds for `identity` behind `bridge`, as the compile left
@@ -7439,133 +7654,72 @@ fn core_member(bridge: &CountingBridge, identity: &AgentIdentity) -> CoreMember 
 }
 
 /// A member Meta 0.9.3 spawned carries no durable-identity marker, and Core
-/// holds it live. The roster compile respawns each such listed identity
-/// through the bridge, one identity at a time: a retire, then a seat on the
-/// same session that carries the marker, under a new Core generation. A
-/// retire that fails refuses that identity alone, typed, and leaves its
-/// member as Core held it, while the next unmarked identity of the same
-/// compile is respawned. The next compile retries the refused identity; a
-/// compile after that changes nothing.
+/// holds it live. The roster compile no longer respawns it to gain the
+/// marker: Core's legacy adoption takes the member as it is (its identity
+/// label is one legacy mark), so the compile retires, seats and resumes
+/// nothing and refuses nothing, even where a retire of the member would
+/// fail, and a later compile changes nothing either.
 #[tokio::test]
-async fn identity_first_runtime_compile_respawns_unmarked_members_and_refuses_only_a_failed_one() {
+async fn identity_first_runtime_compile_keeps_unmarked_members_as_core_holds_them() {
     let bridge = Arc::new(CountingBridge::default());
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let failing = make_identity("agent:failing");
     let upgraded = make_identity("agent:upgraded");
-    let failing_session = meerkat_core::types::SessionId::new();
-    let upgraded_session = meerkat_core::types::SessionId::new();
-    bridge
-        .core
-        .bind_live_unmarked(&failing, "default", 1, Some(failing_session.clone()));
-    bridge
-        .core
-        .bind_live_unmarked(&upgraded, "default", 1, Some(upgraded_session.clone()));
-    bridge.hold_durable_sessions([failing_session.clone(), upgraded_session.clone()]);
-    bridge.resume_generation.store(2, Ordering::SeqCst);
+    bridge.core.bind_live_unmarked(
+        &failing,
+        "default",
+        1,
+        Some(meerkat_core::types::SessionId::new()),
+    );
+    bridge.core.bind_live_unmarked(
+        &upgraded,
+        "default",
+        1,
+        Some(meerkat_core::types::SessionId::new()),
+    );
     bridge.fail_retire_of(&failing);
     let roster = vec![make_spec("agent:failing"), make_spec("agent:upgraded")];
-    let failing_before = core_member(&bridge, &failing);
+    let before = (
+        core_member(&bridge, &failing),
+        core_member(&bridge, &upgraded),
+    );
 
-    let result = lazy_register_flow(&runtime, &roster, None)
-        .await
-        .expect("a failed respawn never fails the compile");
-    match result.outcomes.get(&failing) {
-        Some(RestoreOutcome::Refused(error)) => assert!(
-            error.to_string().contains("retire of agent:failing failed"),
-            "the refusal carries the bridge's retire failure: {error}"
-        ),
-        other => panic!("a failed respawn refuses its identity: {other:?}"),
+    for pass in 1..=2 {
+        let result = lazy_register_flow(&runtime, &roster, None)
+            .await
+            .expect("the compile answers");
+        for identity in [&failing, &upgraded] {
+            assert!(
+                !matches!(
+                    result.outcomes.get(identity),
+                    Some(RestoreOutcome::Refused(_))
+                ),
+                "compile {pass}: {identity} is not refused: {:?}",
+                result.outcomes.get(identity)
+            );
+        }
+        assert_eq!(
+            (
+                core_member(&bridge, &failing),
+                core_member(&bridge, &upgraded),
+            ),
+            before,
+            "compile {pass}: each member stays as Core holds it, live and unmarked"
+        );
     }
-    assert_eq!(
-        core_member(&bridge, &failing),
-        failing_before,
-        "a failed retire leaves the member as Core held it: live and unmarked"
-    );
-    assert!(
-        matches!(
-            result.outcomes.get(&upgraded),
-            Some(outcome) if !matches!(outcome, RestoreOutcome::Refused(_))
-        ),
-        "the other identity is not refused: {:?}",
-        result.outcomes.get(&upgraded)
-    );
-    let respawned = core_member(&bridge, &upgraded);
-    assert!(
-        respawned.live
-            && respawned.marked
-            && respawned.generation == 2
-            && respawned.session_id == Some(upgraded_session.clone()),
-        "the other unmarked identity is respawned onto its session, marked, under a new \
-         Core generation: {respawned:?}"
-    );
-    assert_eq!(
-        bridge.seats(),
-        vec![(upgraded.clone(), Some(upgraded_session.clone()))],
-        "the respawn seats the member on its own session"
-    );
+    assert_eq!(bridge.retire_calls.load(Ordering::SeqCst), 0);
+    assert!(bridge.seats().is_empty(), "{:?}", bridge.seats());
     assert_eq!(bridge.resume_calls.load(Ordering::SeqCst), 0);
-
-    bridge.clear_retire_failures();
-    bridge.resume_generation.store(3, Ordering::SeqCst);
-    let result = lazy_register_flow(&runtime, &roster, None).await.unwrap();
-    assert!(
-        !matches!(
-            result.outcomes.get(&failing),
-            Some(RestoreOutcome::Refused(_))
-        ),
-        "the next compile retries the refused identity: {:?}",
-        result.outcomes.get(&failing)
-    );
-    let retried = core_member(&bridge, &failing);
-    assert!(
-        retried.live
-            && retried.marked
-            && retried.generation == 3
-            && retried.session_id == Some(failing_session.clone()),
-        "the retried respawn keeps the session: {retried:?}"
-    );
-    assert_eq!(
-        core_member(&bridge, &upgraded),
-        respawned,
-        "a marked identity is never respawned again"
-    );
-
-    let retires = bridge.retire_calls.load(Ordering::SeqCst);
-    let seats = bridge.seats().len();
-    let members = (
-        core_member(&bridge, &failing),
-        core_member(&bridge, &upgraded),
-    );
-    lazy_register_flow(&runtime, &roster, None).await.unwrap();
-    assert_eq!(
-        (
-            bridge.retire_calls.load(Ordering::SeqCst),
-            bridge.seats().len(),
-        ),
-        (retires, seats),
-        "a compile after every identity is marked retires and seats nothing"
-    );
-    assert_eq!(
-        (
-            core_member(&bridge, &failing),
-            core_member(&bridge, &upgraded),
-        ),
-        members
-    );
 }
 
-/// The compile respawns only a listed, command-driven identity whose member
-/// is live, unmarked, bound to a session Core holds a durable copy of, and
-/// spawned under the identity's profile. It respawns no other member: a
-/// host-adopted one (a typed conflict, as before), a peer-only one (bound
-/// here to a session, so only the peer-only rule keeps it out), a marked
-/// one, one spawned under another profile (its undeclared role change is
-/// held typed), and one whose session Core answers it holds no durable copy
-/// of are left as Core holds them. A retired one is no respawn either: the
-/// compile's seat step seats it again on its session, with the marker.
+/// The compile leaves every member Core holds as Core holds it: a
+/// host-adopted one (a typed conflict), a peer-only one, a marked one, an
+/// unmarked one whose session Core holds a durable copy of or not (Core's
+/// legacy adoption takes it as it is), and one spawned under another profile
+/// (its undeclared role change is held typed). A retired one is seated again
+/// on its session, which is the compile's only Core step.
 #[tokio::test]
-async fn identity_first_runtime_compile_respawns_no_adopted_peer_only_marked_dormant_or_unheld_member()
- {
+async fn identity_first_runtime_compile_keeps_adopted_peer_only_marked_and_reprofiled_members() {
     let bridge = Arc::new(CountingBridge::default());
     let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let adopted = make_identity("agent:adopted");
@@ -7754,211 +7908,6 @@ async fn an_adopted_identity_core_still_converges_refuses_admission_retryably() 
             "{case}: nothing is seated, created, resumed or delivered"
         );
     }
-}
-
-/// Before it retires an unmarked member, the compile asks Core whether it
-/// holds a durable copy of the member's session. A bridge that cannot answer
-/// vouches for nothing: the compile leaves the member as Core holds it and
-/// refuses nothing, since the member itself is fine.
-#[tokio::test]
-async fn identity_first_runtime_compile_leaves_an_unmarked_member_whose_session_nothing_vouches_for()
- {
-    let bridge = Arc::new(CountingBridge::default());
-    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
-    let identity = make_identity("agent:unvouched");
-    bridge.core.bind_live_unmarked(
-        &identity,
-        "default",
-        1,
-        Some(meerkat_core::types::SessionId::new()),
-    );
-    let before = core_member(&bridge, &identity);
-
-    let result = lazy_register_flow(&runtime, &[make_spec("agent:unvouched")], None)
-        .await
-        .unwrap();
-
-    assert!(
-        !matches!(
-            result.outcomes.get(&identity),
-            Some(RestoreOutcome::Refused(_))
-        ),
-        "an unvouched session refuses nothing: {:?}",
-        result.outcomes.get(&identity)
-    );
-    assert_eq!(core_member(&bridge, &identity), before);
-    assert_eq!(bridge.retire_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(bridge.resume_calls.load(Ordering::SeqCst), 0);
-}
-
-/// Before it retires an unmarked member, the compile asks Core whether it
-/// holds a durable copy of the member's session. When Core's session
-/// authority fails to answer, the compile refuses that identity, typed as
-/// history unavailable, and retires nothing.
-#[tokio::test]
-async fn identity_first_runtime_compile_refuses_an_unmarked_member_whose_session_read_fails() {
-    let bridge = Arc::new(CountingBridge::default());
-    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
-    let identity = make_identity("agent:unread");
-    bridge.core.bind_live_unmarked(
-        &identity,
-        "default",
-        1,
-        Some(meerkat_core::types::SessionId::new()),
-    );
-    bridge.fail_durable_session_reads("session authority unavailable");
-    let before = core_member(&bridge, &identity);
-
-    let result = lazy_register_flow(&runtime, &[make_spec("agent:unread")], None)
-        .await
-        .unwrap();
-
-    match result.outcomes.get(&identity) {
-        Some(RestoreOutcome::Refused(error)) => assert!(
-            matches!(
-                error.as_ref(),
-                IdentityRuntimeError::IdentityHistoryUnavailable { identity: refused, .. }
-                    if *refused == identity
-            ),
-            "{error:?}"
-        ),
-        other => panic!("a failed durable-session read refuses the identity, typed: {other:?}"),
-    }
-    assert_eq!(core_member(&bridge, &identity), before);
-    assert_eq!(bridge.retire_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(bridge.resume_calls.load(Ordering::SeqCst), 0);
-}
-
-/// The respawn carries the member's queued inputs: the inputs other senders
-/// queued on the unmarked member are captured from its session before the
-/// retire, and admitted to the same session once the seat has bound it.
-#[tokio::test]
-async fn identity_first_runtime_compile_respawn_carries_the_members_queued_inputs() {
-    let bridge = Arc::new(CountingBridge::default());
-    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
-    let identity = make_identity("agent:queued");
-    let session = meerkat_core::types::SessionId::new();
-    let runtime_id = bridge
-        .core
-        .bind_live_unmarked(&identity, "default", 1, Some(session.clone()));
-    bridge.hold_durable_sessions([session.clone()]);
-    bridge.resume_generation.store(2, Ordering::SeqCst);
-
-    let result = lazy_register_flow(&runtime, &[make_spec("agent:queued")], None)
-        .await
-        .unwrap();
-
-    assert!(
-        !matches!(
-            result.outcomes.get(&identity),
-            Some(RestoreOutcome::Refused(_))
-        ),
-        "{:?}",
-        result.outcomes.get(&identity)
-    );
-    assert_eq!(
-        bridge.lifecycle_log(),
-        vec![
-            format!("capture {identity} {session}"),
-            format!("retire {}", runtime_id.as_str()),
-            format!("seat {identity} {session}"),
-            format!("readmit {identity} {session} 0"),
-        ],
-        "the queue is captured before the retire and admitted after the seat, to the \
-         seated session"
-    );
-    let respawned = core_member(&bridge, &identity);
-    assert!(
-        respawned.live && respawned.marked && respawned.session_id == Some(session.clone()),
-        "{respawned:?}"
-    );
-}
-
-/// A member whose queued inputs cannot be observed is not respawned: its
-/// retire would drop inputs nobody saw. The compile leaves the member as
-/// Core holds it and refuses nothing; the next compile tries again.
-#[tokio::test]
-async fn identity_first_runtime_compile_leaves_a_member_whose_queue_cannot_be_observed() {
-    let bridge = Arc::new(CountingBridge::default());
-    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
-    let identity = make_identity("agent:unobserved");
-    let session = meerkat_core::types::SessionId::new();
-    bridge
-        .core
-        .bind_live_unmarked(&identity, "default", 1, Some(session.clone()));
-    bridge.hold_durable_sessions([session.clone()]);
-    bridge.resume_generation.store(2, Ordering::SeqCst);
-    bridge.fail_queue_capture.store(true, Ordering::SeqCst);
-    let before = core_member(&bridge, &identity);
-    let roster = [make_spec("agent:unobserved")];
-
-    let result = lazy_register_flow(&runtime, &roster, None).await.unwrap();
-
-    assert!(
-        !matches!(
-            result.outcomes.get(&identity),
-            Some(RestoreOutcome::Refused(_))
-        ),
-        "an unobservable queue refuses nothing: {:?}",
-        result.outcomes.get(&identity)
-    );
-    assert_eq!(core_member(&bridge, &identity), before);
-    assert_eq!(bridge.retire_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(bridge.resume_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        bridge.lifecycle_log(),
-        vec![format!("capture {identity} {session}")]
-    );
-
-    bridge.fail_queue_capture.store(false, Ordering::SeqCst);
-    lazy_register_flow(&runtime, &roster, None).await.unwrap();
-    let respawned = core_member(&bridge, &identity);
-    assert!(
-        respawned.live
-            && respawned.marked
-            && respawned.generation == 2
-            && respawned.session_id == Some(session.clone()),
-        "the next compile respawns the member once its queue is observable: {respawned:?}"
-    );
-}
-
-/// When the seat after the retire fails (Core keeps the session archived and
-/// its one revival is refused), the compile refuses the identity with the
-/// typed error and admits the captured inputs nowhere: no session was bound
-/// to take them.
-#[tokio::test]
-async fn identity_first_runtime_compile_respawn_whose_resume_fails_readmits_nothing() {
-    let bridge = Arc::new(CountingBridge::default());
-    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
-    let identity = make_identity("agent:unresumable");
-    let session = meerkat_core::types::SessionId::new();
-    let runtime_id = bridge
-        .core
-        .bind_live_unmarked(&identity, "default", 1, Some(session.clone()));
-    bridge.hold_durable_sessions([session.clone()]);
-    bridge.reject_resume_archived_not_revivable();
-
-    let result = lazy_register_flow(&runtime, &[make_spec("agent:unresumable")], None)
-        .await
-        .unwrap();
-
-    match result.outcomes.get(&identity) {
-        Some(RestoreOutcome::Refused(error)) => {
-            assert_archived_refusal(error.as_ref(), &identity, &session);
-        }
-        other => panic!("a failed resume refuses the identity, typed: {other:?}"),
-    }
-    assert_eq!(
-        bridge.lifecycle_log(),
-        vec![
-            format!("capture {identity} {session}"),
-            format!("retire {}", runtime_id.as_str()),
-            format!("seat {identity} {session}"),
-            format!("resume {identity} {session}"),
-        ],
-        "nothing is readmitted after a refused revival"
-    );
-    assert_eq!(bridge.create_calls.load(Ordering::SeqCst), 0);
 }
 
 /// A reset Core refuses, after its settle acknowledged a projection an
@@ -8354,4 +8303,258 @@ async fn a_host_s_own_rotation_harvests_the_retired_session_s_compactions_before
         "no Meta step settled anything: {:?}",
         bridge.settles()
     );
+}
+
+/// A first-boot `Fresh` row (the row an offline reset writes) of a dormant
+/// identity whose member owes a compaction's projection: the roster pass's
+/// declaration that carries the identity's build settles the projection
+/// before Core is asked, and once Core's rotation carried the row out, the
+/// lifecycle projection's retirement harvests the batch before it distills
+/// the retired session's transcript. Without that settle the batch stays
+/// owed in Core and its discards never reach the distiller.
+#[tokio::test]
+async fn a_first_boot_fresh_row_harvests_an_owed_compaction_before_its_transcript_distillation() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-first-boot").await;
+    let id = make_identity("triage:owed-first-boot");
+    let state_dir = tempfile::tempdir().unwrap();
+    meerkat_meta::identity_first::FirstBootManifest::write_new(
+        state_dir.path(),
+        vec![meerkat_meta::identity_first::FirstBootRow::Fresh {
+            identity: id.clone(),
+            retired_session: session.clone(),
+        }],
+    )
+    .expect("the offline reset writes the first-boot manifest");
+    runtime.set_first_boot_state_dir(Some(state_dir.path().to_path_buf()));
+
+    context
+        .bootstrap_roster(&[make_spec("triage:owed-first-boot")])
+        .await
+        .expect("the roster pass");
+    assert_eq!(
+        bridge.rotations(),
+        vec![id.clone()],
+        "the row's fresh life is Core's rotation of the member"
+    );
+    assert_ne!(
+        core_member(&bridge, &id).session_id,
+        Some(session.clone()),
+        "the fresh life runs on a fresh session"
+    );
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
+    });
+    let transcript =
+        at("transcript").expect("the fresh life distills the retired session's transcript");
+    assert!(
+        harvest < transcript,
+        "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's rotation"
+    );
+    drop(runtime);
+}
+
+/// A roster pass whose declaration Core refuses as a whole: the unlisting
+/// of a dormant identity whose member owes a compaction's projection
+/// settled it before Core was asked, and Core retired nothing, so the
+/// session goes on and the settled batch is harvested as its live
+/// compaction's would have been; nothing of the retirement runs. Without
+/// the hand-back the batch would wait for a retirement that never comes.
+#[tokio::test]
+async fn a_declaration_core_refuses_hands_an_unlisting_s_settled_batch_to_the_ordinary_harvest() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-refused-roster").await;
+    let id = make_identity("triage:owed-refused-roster");
+    bridge.refuse_declarations.store(true, Ordering::SeqCst);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        0,
+        "Core retires nothing of a declaration it refuses"
+    );
+    let member = core_member(&bridge, &id);
+    assert!(member.live, "the member stays live");
+    assert_eq!(
+        member.session_id,
+        Some(session.clone()),
+        "the member stays on its session"
+    );
+
+    let events = events_once(&events, |event| event == "harvest").await;
+    assert!(
+        !events.iter().any(|event| event == "transcript"),
+        "nothing of the retirement runs: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core is asked to unlist"
+    );
+    drop(runtime);
+}
+
+/// The roster's unlisting of a dormant identity whose member owes a
+/// compaction's projection, where Core's seal fails to retire the member:
+/// the projection was settled before Core was asked, Core's answer leaves
+/// the member live on its session, and the settled batch is harvested as
+/// the session's live compaction's would have been; nothing of the
+/// retirement runs. Without the hand-back the batch would wait for a
+/// retirement that never comes.
+#[tokio::test]
+async fn an_unlisting_core_fails_to_retire_hands_its_settled_batch_to_the_ordinary_harvest() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-unlist-failed").await;
+    let id = make_identity("triage:owed-unlist-failed");
+    bridge.fail_retire_of(&id);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        1,
+        "Core's seal tries to retire the unlisted member once"
+    );
+    let member = core_member(&bridge, &id);
+    assert!(member.live, "the member stays live");
+    assert_eq!(
+        member.session_id,
+        Some(session.clone()),
+        "the member stays on its session"
+    );
+
+    let events = events_once(&events, |event| event == "harvest").await;
+    assert!(
+        !events.iter().any(|event| event == "transcript"),
+        "nothing of the retirement runs: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's seal"
+    );
+    drop(runtime);
+}
+
+/// An identity the roster dropped while the process was down: the
+/// restarted process never registered it, and its first roster pass is a
+/// complete declaration whose seal retires the member Core still holds. The
+/// declaration settles the compaction projection that member's session
+/// owes before Core is asked, and the lifecycle projection's retirement
+/// harvests the batch before it distills the retired session's transcript.
+/// Without that settle the batch stays owed in Core, and nothing distills
+/// it.
+#[tokio::test]
+async fn an_identity_dropped_while_down_has_its_owed_compaction_distilled_at_the_restart() {
+    let (first, bridge, _session, _first_events, _first_store, first_context, _first_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-dropped").await;
+    let id = make_identity("triage:owed-dropped");
+    // The process stops, and the roster drops the identity meanwhile.
+    drop(first_context);
+    drop(first);
+    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
+    let context = meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
+        runtime.clone(),
+        Arc::new(StaticRosterProvider::new(Vec::new())),
+        None,
+        None,
+        None,
+    );
+    let (events, _memory_store, _memory_dir) =
+        wire_recording_distiller(&runtime, OwedDiscards::Answered, 0, false, false).await;
+
+    context
+        .bootstrap_roster(&[])
+        .await
+        .expect("the restart's first roster pass");
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        1,
+        "Core's seal retires the member of the identity the roster dropped"
+    );
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
+    });
+    let transcript =
+        at("transcript").expect("the unlisting distills the retired session's transcript");
+    assert!(
+        harvest < transcript,
+        "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's seal"
+    );
+    drop(runtime);
+}
+
+/// A complete roster's unlisting of a registered identity whose member id
+/// holds a live member a host made directly on the mob, with neither the
+/// durable-identity marker nor the identity-first label: that member is not
+/// the identity's, so the declaration settles nothing of its session, and
+/// nothing of it is handed to the identity's memory when Core leaves the
+/// member live.
+#[tokio::test]
+async fn a_host_made_member_under_an_unlisted_identity_s_id_is_not_settled_or_handed_back() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-host-made").await;
+    let id = make_identity("triage:owed-host-made");
+    // A host made a member directly under the identity's member id, on the
+    // session that owes the projection; Core's seal leaves it live.
+    let generation = core_member(&bridge, &id).generation + 1;
+    bridge
+        .core
+        .bind_live_host_made(&id, generation, session.clone());
+    bridge.fail_retire_of(&id);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert!(
+        bridge.settles().is_empty(),
+        "nothing of the host-made member's session is settled: {:?}",
+        bridge.settles()
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let events = events.lock().unwrap().clone();
+    assert!(
+        !events.iter().any(|event| event == "harvest"),
+        "nothing of the host-made member's session reaches the identity's memory: {events:?}"
+    );
+    drop(runtime);
+}
+
+/// A complete roster's unlisting of a registered identity a host adopted
+/// (Core holds its identity intent row): the identity is read-only to
+/// Meta, so the declaration settles nothing of its session, and nothing of
+/// it is handed back when Core's seal leaves the identity as it is.
+#[tokio::test]
+async fn a_host_adopted_identity_the_roster_unlists_is_not_settled_or_handed_back() {
+    let (runtime, bridge, _session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-adopted").await;
+    let id = make_identity("triage:owed-adopted");
+    bridge.core.adopt(&id);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert!(
+        bridge.settles().is_empty(),
+        "nothing of the adopted identity's session is settled: {:?}",
+        bridge.settles()
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let events = events.lock().unwrap().clone();
+    assert!(
+        !events.iter().any(|event| event == "harvest"),
+        "nothing of the adopted identity's session is harvested: {events:?}"
+    );
+    drop(runtime);
 }

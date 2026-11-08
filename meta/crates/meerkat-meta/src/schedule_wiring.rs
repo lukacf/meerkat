@@ -3670,11 +3670,18 @@ comms = true
             "precondition: identity-first roster ids are marker-encoded"
         );
         let roster_identity = meerkat_mob::ids::AgentIdentity::from(roster_id.clone());
+        // Seated under the durable-identity continuity marker, as
+        // identity-first materialization seats a member, so the declaration
+        // of the identity's registration below adopts it.
+        let mut member_spec = meerkat_mob::SpawnMemberSpec::new(
+            meerkat_mob::ProfileName::from("general"),
+            roster_identity.clone(),
+        );
+        member_spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: roster_id.clone(),
+        };
         handle
-            .ensure_member(meerkat_mob::SpawnMemberSpec::new(
-                meerkat_mob::ProfileName::from("general"),
-                roster_identity.clone(),
-            ))
+            .ensure_member(member_spec)
             .await
             .expect("spawn identity-first member");
         handle
@@ -3727,7 +3734,8 @@ comms = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("schedule-dedup-identity-carrier".to_string()),
@@ -3929,7 +3937,8 @@ external_addressable = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("identity-no-bridge".to_string()),
@@ -4193,7 +4202,8 @@ schedule = true
                         binding: None,
                         placement: None,
                     })
-                    .await;
+                    .await
+                    .expect("the identity registers");
                 Some(identity_runtime)
             } else {
                 None
@@ -7940,6 +7950,18 @@ schedule = true
             ) -> Result<(), crate::identity_first::BridgeError> {
                 self.core.retire(runtime_id);
                 Ok(())
+            }
+
+            async fn apply_declared_roster(
+                &self,
+                roster: crate::identity_first::DeclaredRosterRequest,
+            ) -> Result<
+                crate::identity_first::DeclaredRosterAnswer,
+                crate::identity_first::BridgeError,
+            > {
+                Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                    &roster,
+                ))
             }
         }
 

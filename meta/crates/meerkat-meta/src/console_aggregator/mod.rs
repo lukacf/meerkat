@@ -15677,7 +15677,8 @@ comms = true
                     binding: None,
                     placement: None,
                 })
-                .await;
+                .await
+                .expect("the identity registers");
             authority.materialize(&specialist).await?;
             runtime
                 .mob_handle()
@@ -15854,7 +15855,8 @@ comms = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         identity_runtime
             .materialize(&alpha)
             .await?

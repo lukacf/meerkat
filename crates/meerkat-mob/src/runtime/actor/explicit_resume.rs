@@ -334,6 +334,7 @@ impl MobActor {
                         bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
                         reason,
                         hold: None,
+                        cause_data: None,
                         registration_refusal: None,
                     },
                 )
@@ -412,6 +413,7 @@ impl MobActor {
                 session_id: Some(session_id.clone()),
                 reason,
                 hold: None,
+                cause_data: None,
             }
         })
     }
@@ -750,6 +752,7 @@ impl MobActor {
                                     bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
                                     reason,
                                     hold: error.durable_resume_hold(),
+                                    cause_data: error.structured_data(),
                                     registration_refusal: None,
                                 },
                             )

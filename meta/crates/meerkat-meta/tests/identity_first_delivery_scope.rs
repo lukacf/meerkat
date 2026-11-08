@@ -1111,7 +1111,10 @@ async fn an_externally_bound_identity_is_unsupported_and_never_falls_back() {
     peer_spec.identity = peer.clone();
     peer_spec.backend = Some(meerkat_mob::MobBackendKind::External);
     let runtime_id = meerkat_meta::identity_first::AgentRuntimeId::parse("rt-remote-peer").unwrap();
-    boot.identity_rt.register(peer_spec).await;
+    boot.identity_rt
+        .register(peer_spec)
+        .await
+        .expect("the identity registers");
 
     let unsupported = |error: &ScopedDeliveryError| {
         matches!(error, ScopedDeliveryError::Unsupported { detail }

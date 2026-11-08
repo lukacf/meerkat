@@ -66,9 +66,10 @@ export interface ConsoleScheduleEditing {
  * Whether the pane offers schedule changes for `agent`: the console is
  * writable, the gateway offers the writes, and the agent takes the viewer's
  * sends. Under enforced access `can_send_message` is the viewer's
- * `agent.send` on the agent; without it, whether the agent is addressable.
- * Either way a schedule could not be sent, so the list stays read-only. The
- * gateway still judges every write.
+ * `agent.send` on the agent and `can_manage_schedules` adds
+ * `schedule.manage`; without it, whether the agent is addressable. Either
+ * way a schedule could not be sent or changed, so the list stays read-only.
+ * The gateway still judges every write.
  */
 export function consoleScheduleEditing(input: {
   offer: ConsoleScheduleOffer;
@@ -89,6 +90,9 @@ export function consoleScheduleEditing(input: {
         ? "You may view this agent but not message it, so you cannot change its schedules."
         : "This agent takes no console messages, so it cannot be scheduled.",
     };
+  }
+  if (input.agent?.affordances?.can_manage_schedules === false) {
+    return { canChange: false, note: "You may message this agent but not change its schedules." };
   }
   return { canChange: true, note: null };
 }
@@ -128,10 +132,20 @@ export interface ConsoleSchedule {
   sender: string | null;
   /** Whether the gateway withheld the sender: the viewer may not message the agent. */
   senderHidden: boolean;
+  /** Who the schedule sent as before each takeover, oldest first; empty when withheld. */
+  senderHistory: ConsoleScheduleFormerSender[];
   definedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
   nextDueAt: string | null;
+}
+
+/** A sender a takeover replaced: who it was (null for an anonymous console),
+ * when it defined the schedule, and when another caller took it over. */
+export interface ConsoleScheduleFormerSender {
+  sender: string | null;
+  definedAt: string | null;
+  replacedAt: string | null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -197,12 +211,28 @@ export function parseScheduleTrigger(value: unknown): ConsoleScheduleTrigger | n
   return null;
 }
 
+/** The former senders of a schedule item, oldest first; an entry that is not
+ * one is left out, and a withheld sender keeps none. */
+function parseFormerSenders(value: unknown, hidden: boolean): ConsoleScheduleFormerSender[] {
+  if (hidden || !Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const former = record(entry);
+    if (!former) return [];
+    return [{
+      sender: nonEmptyString(former.sender),
+      definedAt: nonEmptyString(former.defined_at_utc),
+      replacedAt: nonEmptyString(former.replaced_at_utc),
+    }];
+  });
+}
+
 /** One schedule item of a `meta/schedule/*` answer; null when it is not one. */
 export function parseConsoleSchedule(value: unknown): ConsoleSchedule | null {
   const item = record(value);
   const scheduleId = nonEmptyString(item?.schedule_id);
   const identity = nonEmptyString(item?.identity);
   if (!item || !scheduleId || !identity || typeof item.content !== "string") return null;
+  const senderHidden = item.sender_hidden === true;
   return {
     scheduleId,
     identity,
@@ -211,8 +241,9 @@ export function parseConsoleSchedule(value: unknown): ConsoleSchedule | null {
     trigger: parseScheduleTrigger(item.trigger),
     phase: nonEmptyString(item.phase) ?? "unknown",
     revision: wholeNumber(item.revision),
-    sender: item.sender_hidden === true ? null : nonEmptyString(item.sender),
-    senderHidden: item.sender_hidden === true,
+    sender: senderHidden ? null : nonEmptyString(item.sender),
+    senderHidden,
+    senderHistory: parseFormerSenders(item.sender_history, senderHidden),
     definedAt: nonEmptyString(item.defined_at_utc),
     createdAt: nonEmptyString(item.created_at_utc),
     updatedAt: nonEmptyString(item.updated_at_utc),
@@ -333,6 +364,39 @@ export function describeScheduleSender(
     if (words) return `the ${words} console identity`;
   }
   return raw;
+}
+
+/** The most recent takeover of a schedule, in words: whom it was taken over
+ * from, and when. Null for a schedule never taken over. */
+export function describeLatestTakeover(
+  history: readonly ConsoleScheduleFormerSender[],
+  agentName: (sender: string) => string | undefined = () => undefined,
+  format: (iso: string) => string = formatScheduleTime,
+): string | null {
+  const latest = history[history.length - 1];
+  if (!latest) return null;
+  const when = latest.replacedAt ? ` on ${format(latest.replacedAt)}` : "";
+  return `Taken over from ${describeScheduleSender(latest.sender, agentName)}${when}`;
+}
+
+/** One earlier sender of a schedule, in words: whom it sent as, until when. */
+export function describeFormerSender(
+  former: ConsoleScheduleFormerSender,
+  agentName: (sender: string) => string | undefined = () => undefined,
+  format: (iso: string) => string = formatScheduleTime,
+): string {
+  const until = former.replacedAt ? ` until ${format(former.replacedAt)}` : "";
+  return `Sent as ${describeScheduleSender(former.sender, agentName)}${until}`;
+}
+
+/** Every sender a schedule sent as before, oldest first, with the time each
+ * was taken over: one line each. */
+export function describeScheduleSenderHistory(
+  history: readonly ConsoleScheduleFormerSender[],
+  agentName: (sender: string) => string | undefined = () => undefined,
+  format: (iso: string) => string = formatScheduleTime,
+): string {
+  return history.map((former) => describeFormerSender(former, agentName, format)).join("\n");
 }
 
 /** How the form says when a schedule fires. `keep` leaves an edited schedule's timing as it is. */
@@ -512,8 +576,11 @@ export function scheduleCreateParams(
 
 /**
  * The `meta/schedule/update` params for `schedule` the form describes: the
- * message and name, and the timing unless it is kept. An update also makes
- * the viewer the schedule's sender.
+ * message and name, and the timing unless it is kept, with the revision the
+ * console showed, so a change made meanwhile is refused rather than
+ * overwritten. An update makes the viewer the schedule's sender; when that
+ * takes it over from someone else, the gateway asks first
+ * (`scheduleTakeover`).
  */
 export function scheduleUpdateParams(
   schedule: ConsoleSchedule,
@@ -530,14 +597,66 @@ export function scheduleUpdateParams(
     if ("error" in timing) return timing;
     params.trigger = timing.trigger;
   }
-  return { params };
+  return { params: { ...params, ...observedRevision(schedule) } };
+}
+
+/** The `meta/schedule/resume` params for `schedule`, with the revision the
+ * console showed. */
+export function scheduleResumeParams(schedule: ConsoleSchedule): Record<string, unknown> {
+  return { schedule_id: schedule.scheduleId, ...observedRevision(schedule) };
+}
+
+/** `expected_revision` from the revision the console showed; none when it
+ * could not read one. Every Meta gateway answers a schedule with its
+ * `revision`, so that does not happen today; were it to, the change would
+ * act on the schedule's current revision (the last writer wins), unlike a
+ * WorkGraph action, which the console holds until its card shows one. */
+function observedRevision(schedule: ConsoleSchedule): Record<string, unknown> {
+  return schedule.revision === null ? {} : { expected_revision: schedule.revision };
+}
+
+/** A change the gateway held back because it would take the schedule over
+ * from its sender: who the schedule sends as now (null for an anonymous
+ * console). */
+export interface ConsoleScheduleTakeover {
+  sender: string | null;
+}
+
+/** The takeover a refused change asks for, when the refusal is one. */
+export function scheduleTakeover(error: unknown): ConsoleScheduleTakeover | null {
+  const rpc = rpcErrorOf(error);
+  if (rpc?.kind !== "sender_takeover_required") return null;
+  const data = record((error as { rpcError?: { data?: unknown } }).rpcError?.data);
+  return { sender: nonEmptyString(data?.sender) };
+}
+
+/** `params` confirmed as a takeover of the schedule's sender. */
+export function scheduleTakeoverParams(params: Record<string, unknown>): Record<string, unknown> {
+  return { ...params, take_over_sender: true };
+}
+
+/** What a takeover asks the viewer to confirm, in words. */
+export function describeScheduleTakeover(
+  takeover: ConsoleScheduleTakeover,
+  command: ConsoleScheduleCommand,
+  agentName: (sender: string) => string | undefined = () => undefined,
+): string {
+  const who = describeScheduleSender(takeover.sender, agentName);
+  const change = command === CONSOLE_SCHEDULE_COMMANDS.resume ? "Resuming it" : "Saving your change";
+  return `This schedule sends as ${who}. ${change} makes you its sender: it sends as you from then on.`;
+}
+
+/** The label of the button that confirms a takeover. */
+export function scheduleTakeoverConfirmLabel(command: ConsoleScheduleCommand): string {
+  return command === CONSOLE_SCHEDULE_COMMANDS.resume ? "Take over and resume" : "Take over and save";
 }
 
 /** The JSON-RPC error a failed console command carries, if any. */
-function rpcErrorOf(error: unknown): { code: unknown; message: unknown; kind: string | null } | null {
+function rpcErrorOf(error: unknown): { code: unknown; message: unknown; kind: string | null; action: string | null } | null {
   const rpc = record((error as { rpcError?: unknown } | null)?.rpcError);
   if (!rpc) return null;
-  return { code: rpc.code, message: rpc.message, kind: nonEmptyString(record(rpc.data)?.kind) };
+  const data = record(rpc.data);
+  return { code: rpc.code, message: rpc.message, kind: nonEmptyString(data?.kind), action: nonEmptyString(data?.action) };
 }
 
 /**
@@ -551,8 +670,9 @@ export function scheduleErrorMessage(error: unknown, command: ConsoleScheduleCom
     case "read_only":
       return "This console is read-only, so schedules cannot be changed.";
     case "access_denied":
-      return command === CONSOLE_SCHEDULE_COMMANDS.list
-        ? "You may not view this agent's schedules."
+      if (command === CONSOLE_SCHEDULE_COMMANDS.list) return "You may not view this agent's schedules.";
+      return rpc.action === "schedule.manage"
+        ? "You may not change this agent's schedules."
         : "You may not message this agent, so you cannot change its schedules.";
     case "candidate_launch":
       return "This console runs a candidate launch, which changes no schedules.";
@@ -560,6 +680,8 @@ export function scheduleErrorMessage(error: unknown, command: ConsoleScheduleCom
       return "This schedule no longer exists.";
     case "schedule_revision_conflict":
       return "This schedule changed meanwhile, so nothing was changed. Check it and try again.";
+    case "sender_takeover_required":
+      return "This schedule sends as someone else, so nothing was changed. Take it over to change it.";
     case "unknown_identity":
       return "The console does not know this agent.";
     case "not_addressable":

@@ -1,5 +1,22 @@
 //! OS lowering and exact native spawn. Authorization and process-group
 //! containment remain with their existing runtime owners.
+//!
+//! # Granted paths
+//!
+//! A granted path passes through no symbolic link (macOS also accepts its
+//! immutable system aliases `/etc`, `/tmp` and `/var`), with one Linux
+//! exception: a read-only literal file grant may name a symbolic link as its
+//! final component (`/etc/resolv.conf` on a systemd-resolved host) when the
+//! link's own text alone names its regular-file target, outside `/proc`,
+//! `/sys` and `/dev`, and only root or the effective user can replace the
+//! link or a directory above it, by the owners and modes the filesystem
+//! reports (on a FUSE or network filesystem, its server's word). Linux binds
+//! that target read-only at the link's path. A target replaced under its own
+//! name (a new file renamed into place, as systemd-resolved rewrites its stub
+//! file) is checked again by the same rules at the next launch, which binds
+//! the new file; a link replaced with other text, or a target replaced by
+//! anything those rules refuse, refuses the launch. macOS (Seatbelt) refuses
+//! such a grant, as it refuses every mutable symbolic link.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -168,8 +185,11 @@ impl PreparedConfinement {
 
     /// Spawn behind a host-owned custody release pipe. The fixed gate reads
     /// one release token, closes descriptor 3, then enters the bound executor
-    /// without changing PID or process group. EOF or a different token exits
-    /// with code 125 before any target code runs.
+    /// without changing PID or process group: the target keeps the gate's.
+    /// EOF or a different token exits with code 125 before any target code
+    /// runs. On Linux the gate runs as the command of the launch's own pid
+    /// namespace (pid 2 there), under the launch's init, which is the direct
+    /// child the returned [`NativeChild`] owns.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn spawn_behind_gate(
         self,
@@ -257,6 +277,43 @@ impl ConfinementCapabilityReport {
 impl std::fmt::Debug for ConfinementCapabilityReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ConfinementCapabilityReport([REDACTED])")
+    }
+}
+
+/// A host setting the native backend needs and this host refuses, as far as
+/// the backend can tell. Such a host refuses every requirement with
+/// [`ConfinementRefusal::BackendUnavailable`]; the requirement's text names
+/// the setting, so an operator can act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnmetHostRequirement {
+    /// Linux: the host refuses memory files it may execute, from which the
+    /// backend executes each launch's init (`vm.memfd_noexec` is 2).
+    ExecutableMemoryFiles,
+}
+
+impl std::fmt::Display for UnmetHostRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExecutableMemoryFiles => f.write_str(
+                "executable memory files are refused, and each launch's init runs from one: set vm.memfd_noexec below 2",
+            ),
+        }
+    }
+}
+
+/// The host settings the native backend needs and this host refuses, as far
+/// as the backend can tell: on Linux, executable memory files. Empty when it
+/// finds none, and on every other platform.
+#[must_use]
+pub fn unmet_host_requirements() -> Vec<UnmetHostRequirement> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::unmet_host_requirements()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
     }
 }
 

@@ -540,6 +540,31 @@ async fn pending_harvests_of(
         .collect()
 }
 
+/// The `retired_at_ms` of each exit interview `store` holds pending for
+/// `identity`: the key of its harvest, which the Console shows as the
+/// retirement's time.
+async fn pending_harvest_times_of(
+    store: &SqliteAgentMemoryStore,
+    identity: &AgentIdentity,
+) -> Vec<u64> {
+    store
+        .pending_harvests(REALM, 64)
+        .await
+        .expect("read the exit-interview queue")
+        .into_iter()
+        .filter(|harvest| harvest.identity == identity.as_str())
+        .map(|harvest| harvest.retired_at_ms)
+        .collect()
+}
+
+/// The wall-clock time, in Unix milliseconds.
+fn wall_clock_ms() -> u64 {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock reads after the Unix epoch");
+    u64::try_from(elapsed.as_millis()).expect("milliseconds fit a u64")
+}
+
 /// A customizer that changes no build and records each `after_create`.
 #[derive(Default)]
 struct RecordingCustomizer {
@@ -1117,13 +1142,17 @@ async fn a_first_boot_fresh_row_distills_the_retired_session_like_an_online_rese
 /// The roster stops listing an identity, Core retires its member, and
 /// the process is killed inside the host's retirement hook. The next start
 /// hands the retired incarnation to its hook, once, cause `unlisted`; the
-/// exit interview the unlisting queued before the hook stays queued once;
-/// and nothing the killed process completed before the unlisting (the
-/// seats' `after_create`) is told again.
+/// exit interview the unlisting queued before the hook stays queued once,
+/// keyed by the time Core journaled the retirement: a wall-clock time
+/// between the roster's change and the restart's read, which the replay
+/// reads again; and nothing the killed process completed before the
+/// unlisting (the seats' `after_create`) is told again.
 ///
 /// RED before lifecycle effects were projected from Core's journal: the hook
 /// was called once, from the roster pass, and never again, so a kill inside
-/// it lost the call.
+/// it lost the call. RED while that key was the journal cursor of the
+/// retirement: stable across the replay, but no time, so the Console showed
+/// the harvest as retired in 1970 and the queue read it first.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
     const NAME: &str = "a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart";
@@ -1157,6 +1186,8 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
             boot.generation_of(&beta.identity).await.to_string(),
         )
         .expect("note the generation the unlisting retires");
+        std::fs::write(state.join("unlisted-at-ms"), wall_clock_ms().to_string())
+            .expect("note when the roster stops listing the identity");
         assert!(boot.roster.remove(&beta.identity));
         // The hook ends the process.
         let _ = boot.context.refresh_desired_topology_tracked().await;
@@ -1169,6 +1200,10 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
         .expect("the child noted the retired generation")
         .parse()
         .expect("a generation");
+    let unlisted_at_ms: u64 = std::fs::read_to_string(temp.path().join("unlisted-at-ms"))
+        .expect("the child noted when the roster stopped listing the identity")
+        .parse()
+        .expect("a time");
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let customizer = Arc::new(RecordingCustomizer::default());
@@ -1206,6 +1241,14 @@ async fn a_kill_inside_the_unlisted_hook_delivers_it_once_after_the_restart() {
         pending_harvests_of(&memory_store, &beta.identity).await,
         vec!["retire".to_string()],
         "the exit interview is queued once, however often its step is replayed"
+    );
+    let read_at_ms = wall_clock_ms();
+    let keyed = pending_harvest_times_of(&memory_store, &beta.identity).await;
+    assert!(
+        matches!(keyed.as_slice(), [at] if (unlisted_at_ms..=read_at_ms).contains(at)),
+        "the exit interview is keyed by the time Core journaled the retirement, a \
+         wall-clock time after the roster stopped listing the identity: {keyed:?} \
+         (window {unlisted_at_ms}..={read_at_ms})"
     );
     assert!(
         customizer.told().is_empty(),
@@ -2064,20 +2107,18 @@ async fn the_bridge_forwards_every_lifecycle_fact() {
     let _ = boot.runtime.shutdown().await;
 }
 
-/// A host's legacy respawn of an identity's member (`MobHandle::respawn`)
-/// is two of Core's steps: Core retires the incarnation, then seats the next
-/// one on a fresh session, and that seat names the incarnation it follows
-/// (`SeatRotation::RespawnAfter`, from MobMachine's respawn hold). The
-/// respawn owes what a rotation no Meta verb asked for owes: the hook hears
-/// of the retired incarnation as `rotated`, and the session it left is
-/// distilled, once.
-///
-/// RED before the projection read a respawn's seat: Core's retirement read
-/// as one no Meta verb asked for, which owes nothing, and the seat as a
-/// plain one, so the hook heard nothing and nothing was distilled.
+/// A host's respawn of a declared identity's member (`MobHandle::respawn`)
+/// is Core's same-session successor of the entry's member: one step retires
+/// the incarnation and seats the next on the member's own session
+/// (`SeatRotation::Successor`, target `SameSession`), its history kept. A
+/// rotation on the member's own session owes nothing: the hook hears nothing,
+/// and the session, which the member keeps, is not distilled. (A legacy
+/// respawn onto a fresh session, which owes a rotation's side effects, is a
+/// respawn of a member no identity entry holds; Meta's identities are
+/// declared entries.)
 #[tokio::test(flavor = "multi_thread")]
-async fn a_host_s_legacy_respawn_reaches_the_hook_as_rotated_and_distills_the_old_session() {
-    const MOB: &str = "lifecycle-fact-legacy-respawn";
+async fn a_host_s_respawn_of_an_identity_s_member_keeps_its_session_and_owes_nothing() {
+    const MOB: &str = "lifecycle-fact-entry-respawn";
     let temp = tempfile::tempdir().expect("temp dir");
     let alpha = member(ALPHA);
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2114,36 +2155,29 @@ async fn a_host_s_legacy_respawn_reaches_the_hook_as_rotated_and_distills_the_ol
             MemberLifecycleFact::Seated {
                 generation: 1,
                 session: Some(session),
-                rotation: Some(meerkat_mob::SeatRotation::RespawnAfter { predecessor, .. }),
+                rotation: Some(meerkat_mob::SeatRotation::Successor {
+                    predecessor,
+                    target: meerkat_mob::RotationTarget::SameSession,
+                    ..
+                }),
                 ..
-            } if *session != first && predecessor.get() == 0
+            } if *session == first && predecessor.get() == 0
         )),
-        "the respawn's seat runs on a fresh session and names the incarnation it follows: \
-         {records:#?}"
+        "the respawn's seat keeps the member's session and names the incarnation it \
+         follows: {records:#?}"
     );
 
     boot.identities.settle_lifecycle_projection().await;
-    eventually("the respawn's retirement hook", || {
-        (!hook_calls_of(&seen, &alpha.identity).is_empty()).then_some(())
-    })
-    .await;
     tokio::time::sleep(SETTLE).await;
-    let calls = seen
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|retired| retired.identity == alpha.identity)
-        .map(|retired| (retired.cause.as_str().to_string(), retired.generation))
-        .collect::<Vec<_>>();
     assert_eq!(
-        calls,
-        vec![("rotated".to_string(), 0)],
-        "the respawn's retired incarnation reaches the hook as a rotation, once"
+        hook_calls_of(&seen, &alpha.identity),
+        Vec::<String>::new(),
+        "a rotation on the member's own session owes the hook nothing"
     );
     assert_eq!(
         transcripts.reads_of(&first),
-        1,
-        "the session the respawn retired is distilled once"
+        0,
+        "the session the member keeps is not distilled"
     );
     let _ = boot.runtime.shutdown().await;
 }
@@ -2238,10 +2272,13 @@ async fn a_retirement_core_s_seal_unlisted_owes_the_unlisting_from_its_own_fact(
 }
 
 /// Meta's session bridge forwards the facts Core's journal records of an
-/// identity entry: a host's adoption of alpha's member as an identity entry
-/// (`EntryAdopted`, with its origin), and the end of that entry's member,
-/// whose `Retired` names the entry and no cause. Neither owes a side effect:
-/// the hook hears nothing.
+/// identity entry: a host's adoption of a member it seated under its own
+/// identity before identity entries existed (`EntryAdopted`, with its
+/// origin), and the end of an entry's member, whose `Retired` names the entry
+/// and no cause. Neither owes a side effect: the hook hears nothing. Alpha is
+/// a declared entry from the roster pass's declaration; the adopted member
+/// is a host's, outside the roster, labelled with its own identity (the
+/// legacy `agent_identity` label).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bridge_forwards_an_adoption_and_the_entry_its_member_ends_with() {
     const MOB: &str = "lifecycle-fact-adoption";
@@ -2259,12 +2296,22 @@ async fn the_bridge_forwards_an_adoption_and_the_entry_its_member_ends_with() {
     )
     .await;
     let first = boot.session_of(&alpha.identity).await;
+    let legacy = meerkat_mob::AgentIdentity::from("legacy-host-member");
+    boot.runtime
+        .mob_handle()
+        .spawn_spec(
+            meerkat_mob::SpawnMemberSpec::host_root("lead", legacy.clone()).with_labels(
+                BTreeMap::from([("agent_identity".to_string(), legacy.as_str().to_string())]),
+            ),
+        )
+        .await
+        .expect("a host seats its member under its own identity");
     let adoption = boot
         .runtime
         .mob_handle()
-        .adopt_legacy_identity_entry(&member_id(&alpha.identity))
+        .adopt_legacy_identity_entry(&legacy)
         .await
-        .expect("the host adopts alpha's member");
+        .expect("the host adopts its member");
     assert_eq!(adoption, meerkat_mob::LegacyIdentityEntryAdoption::Adopted);
     boot.runtime
         .mob_handle()
@@ -2272,13 +2319,13 @@ async fn the_bridge_forwards_an_adoption_and_the_entry_its_member_ends_with() {
         .await
         .expect("a host retires the entry's member");
 
-    let facts = member_records(&boot, &alpha.identity)
+    let adopted = records_of_member(&boot, &legacy)
         .await
         .into_iter()
         .map(|record| record.fact)
         .collect::<Vec<_>>();
     assert!(
-        facts.iter().any(|fact| matches!(
+        adopted.iter().any(|fact| matches!(
             fact,
             MemberLifecycleFact::EntryAdopted {
                 generation: 0,
@@ -2286,8 +2333,13 @@ async fn the_bridge_forwards_an_adoption_and_the_entry_its_member_ends_with() {
                 ..
             }
         )),
-        "the adoption names its incarnation and its origin: {facts:#?}"
+        "the adoption names its incarnation and its origin: {adopted:#?}"
     );
+    let facts = member_records(&boot, &alpha.identity)
+        .await
+        .into_iter()
+        .map(|record| record.fact)
+        .collect::<Vec<_>>();
     assert!(
         facts.iter().any(|fact| matches!(
             fact,

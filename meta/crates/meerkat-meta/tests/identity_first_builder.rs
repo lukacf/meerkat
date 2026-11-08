@@ -517,6 +517,78 @@ impl SessionBridge for RecordingResumeBridge {
     ) -> Result<Vec<meerkat_mob::MemberBinding>, BridgeError> {
         self.core.durable_identity_members()
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        apply_through_own_seats(self, &roster).await
+    }
+}
+
+/// Core's declared apply as these doubles answer it, through their own
+/// seat: an identity Core holds live keeps its member; for any other, a
+/// declaration of its facts only answers `BuildRequired` (Meta declares it
+/// again with its composed build), and one with its build is seated Dormant
+/// on its first-boot `Resume` request's session, its last binding's session,
+/// or a fresh one.
+async fn apply_through_own_seats(
+    bridge: &dyn SessionBridge,
+    roster: &meerkat_meta::identity_first::DeclaredRosterRequest,
+) -> Result<meerkat_meta::identity_first::DeclaredRosterAnswer, BridgeError> {
+    use meerkat_meta::identity_first::bridge::{DormantSeatRequest, DormantSeatResult};
+    use meerkat_meta::identity_first::{DeclaredIdentityAnswer, DeclaredIdentityBuild};
+
+    let mut answer = meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(roster);
+    let mut requests = Vec::new();
+    for declared in &roster.identities {
+        let identity = &declared.spec.identity;
+        if bridge.live_member(identity).await?.is_some() {
+            continue;
+        }
+        let draft = match &declared.build {
+            DeclaredIdentityBuild::Composed(draft) => draft.clone(),
+            // Facts only: Core asks for the composed build.
+            _ => {
+                answer
+                    .identities
+                    .insert(identity.clone(), DeclaredIdentityAnswer::BuildRequired);
+                continue;
+            }
+        };
+        let session = match roster.first_boot_requests.get(identity) {
+            Some(meerkat_mob::FirstBootRequest::Resume { session_id }) => Some(session_id.clone()),
+            _ => bridge
+                .last_member_binding(identity)
+                .await?
+                .and_then(|binding| binding.session_id().cloned()),
+        };
+        requests.push(DormantSeatRequest {
+            identity: identity.clone(),
+            spec: declared.spec.clone(),
+            draft,
+            session,
+            resume_from_role: None,
+        });
+    }
+    if requests.is_empty() {
+        return Ok(answer);
+    }
+    for (identity, result) in bridge.seat_dormant_members(requests).await? {
+        if let DormantSeatResult::Seated { session_id } = result {
+            answer.identities.insert(
+                identity,
+                DeclaredIdentityAnswer::Seated {
+                    session_id,
+                    history_unavailable: None,
+                },
+            );
+        }
+    }
+    Ok(answer)
 }
 
 #[derive(Clone)]
@@ -2091,6 +2163,16 @@ impl SessionBridge for CoreBackedBridge {
         self.core.retire(runtime_id);
         Ok(())
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        apply_through_own_seats(self, &roster).await
+    }
 }
 
 #[tokio::test]
@@ -2170,7 +2252,10 @@ async fn wait_until_warmed(runtime: &meerkat_meta::UnifiedRuntime, identities: &
 /// with all 20 identities seated and active, before any warm build is
 /// released, and the warm changes no bootstrap state. A warm build the host
 /// refuses leaves that identity's customizer tools pending with the host's
-/// reason, and the bootstrap stays ready.
+/// reason, and the bootstrap stays ready. The host is asked once more for
+/// that identity: Core refuses the warm's wake for the build preparation
+/// the host asked to retry, and the door retries the preparation once, as
+/// it does on every lane.
 async fn warm_twenty_identities(mode_concurrency: Option<usize>, in_flight: usize, instance: &str) {
     let tmp = tempfile::tempdir().unwrap();
     let names = (0..20)
@@ -2232,7 +2317,11 @@ async fn warm_twenty_identities(mode_concurrency: Option<usize>, in_flight: usiz
     assert_eq!(warming.counts.active, 20, "{warming:?}");
     assert_eq!(warming.counts.warming, 0, "{warming:?}");
 
-    permits.add_permits(names.len());
+    // One permit more than identities: the refused identity's build is
+    // asked for twice, by design (the door's one retry of the build
+    // preparation Core refused the warm's wake for), so the host is asked
+    // 21 times for 20 identities.
+    permits.add_permits(names.len() + 1);
     tokio::time::timeout(Duration::from_secs(10), async {
         while customizer.entered.load(Ordering::SeqCst) < names.len() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2263,6 +2352,21 @@ async fn warm_twenty_identities(mode_concurrency: Option<usize>, in_flight: usiz
     assert!(
         pending.reason.contains("injected warm failure"),
         "{pending:?}"
+    );
+    // The host was asked once per identity and once more for the refused
+    // one, never again.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while customizer.entered.load(Ordering::SeqCst) < names.len() + 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the door retries the refused identity's build preparation once");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        customizer.entered.load(Ordering::SeqCst),
+        names.len() + 1,
+        "the host is asked once more for the refused identity, never again"
     );
     let after = identity_runtime.identity_bootstrap_status();
     assert!(after.complete && after.ready, "{after:?}");
@@ -2712,49 +2816,69 @@ async fn identity_first_lazy_reconcile_serializes_with_foreground_materializatio
     );
 
     permits.add_permits(1);
-    let materialized = materialize
+    let materialized = tokio::time::timeout(Duration::from_secs(30), materialize)
         .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the materialization completes once its build is let go (customizer entered {} \
+                 times)",
+                customizer.entered.load(Ordering::SeqCst)
+            )
+        })
         .expect("materialize task should not panic")
         .expect("original materialization should reach its commit boundary")
         .expect("the materialized member has a delivery scope");
-    reconcile
+    // The reconcile's declaration moves the identity to another role, and
+    // its session lives in memory only (this runtime store is ephemeral):
+    // there is nothing to carry to the new role, so Core's declared apply
+    // rotates the member onto a fresh session under it, with the build the
+    // reconcile composes once the materialization ended (the customizer's
+    // next build).
+    permits.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(30), reconcile)
         .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the reconcile completes once the materialization did (customizer entered {} \
+                 times)",
+                customizer.entered.load(Ordering::SeqCst)
+            )
+        })
         .expect("reconcile task should not panic")
-        .expect("reconcile should release the stale embodiment and install v2 metadata");
+        .expect("reconcile should rotate the member onto its new role and install v2 metadata");
+    assert_eq!(
+        customizer.entered.load(Ordering::SeqCst),
+        2,
+        "the materialization's build, then the rotation's"
+    );
 
     let identity_runtime = runtime.identity_runtime().unwrap();
     let status = identity_runtime.status(&identity).await.unwrap();
-    // A reprofile releases the live member instead of retiring it: Core keeps
-    // it seated on its session at its generation, so the identity reads
-    // active on the incarnation the foreground materialization made.
-    assert_eq!(status.state, IdentityLifecycleState::Active);
+    assert_eq!(status.state, IdentityLifecycleState::Active, "{status:?}");
+    assert_ne!(
+        status.session_id.as_ref(),
+        Some(materialized.session_id()),
+        "the rotation seats the member on a fresh session: {status:?}"
+    );
+    assert_ne!(
+        status.generation,
+        Some(materialized.generation()),
+        "at the identity's next generation: {status:?}"
+    );
     assert_eq!(
-        (status.session_id.as_ref(), status.generation),
-        (
-            Some(materialized.session_id()),
-            Some(materialized.generation())
-        ),
-        "the release keeps the session and the generation: {status:?}"
+        status.profile,
+        Some(meerkat_mob::ProfileName::from("security"))
     );
     assert_eq!(
         status.labels.get("roster_revision").map(String::as_str),
         Some("v2")
     );
-    // The v2 profile moved the identity off the role Core last ran its
-    // session under, and this activation declared no migration from it: the
-    // pass's seat is held typed, so the identity is reported broken with
-    // that reason, while Core keeps it seated under its previous role.
     let bootstrap = identity_runtime.identity_bootstrap_status();
-    assert!(bootstrap.complete);
-    assert!(!bootstrap.ready);
-    let entry = &bootstrap.identities[&identity];
-    assert_eq!(entry.state, IdentityBootstrapState::Broken);
-    assert!(
-        entry
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("declared no migration")),
-        "{entry:?}"
+    assert!(bootstrap.complete && bootstrap.ready, "{bootstrap:?}");
+    assert_ne!(
+        bootstrap.identities[&identity].state,
+        IdentityBootstrapState::Broken,
+        "{bootstrap:?}"
     );
     let members = runtime.mob_handle().list_members_including_retiring().await;
     assert_eq!(
@@ -2763,7 +2887,7 @@ async fn identity_first_lazy_reconcile_serializes_with_foreground_materializatio
             .map(|member| member.agent_identity.clone())
             .collect::<Vec<_>>(),
         vec![meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str())],
-        "the released member stays the identity's one member of Core's mob, never retired"
+        "the rotated member is the identity's one member of Core's mob"
     );
 
     runtime.shutdown().await;
@@ -6954,4 +7078,106 @@ async fn raw_spec_empty_identity_root_is_refused_before_bootstrap() {
                 .exists()
         );
     }
+}
+
+/// Boot the one-identity roster of the interrupted-rotation row over the mob
+/// journal and the state under `state`.
+async fn boot_listed_identity(
+    state: &std::path::Path,
+    mob_id: &str,
+    identity: &AgentIdentity,
+) -> meerkat_meta::UnifiedRuntime {
+    let (mob_storage, mob_provenance) =
+        meerkat_meta::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
+            .expect("open persistent mob journal");
+    Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(test_definition_with_id(mob_id))
+            .mob_storage(mob_storage, mob_provenance)
+            .persistent_state(state)
+            .roster_provider(Arc::new(StubRosterProvider::new(vec![durable_spec(
+                identity.as_str(),
+            )])))
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build(),
+    )
+    .await
+    .expect("boot the runtime")
+}
+
+/// A rotation a crash interrupted leaves Meta's record of it behind, and the
+/// next start hands the mob no host preparation for it: Core finishes an
+/// interrupted rotation from its own record, so no start waits for Meta to
+/// issue it again. A listed identity whose rotation record the restart finds
+/// takes its deliveries after the restart.
+///
+/// RED: hand the mob the identities Meta's rotation records name again at the
+/// start (`host_pending_members_before_build`): the mob holds the identity for
+/// a host preparation no declaration ends, and its delivery is refused.
+#[tokio::test]
+async fn an_interrupted_rotation_of_a_listed_identity_never_leaves_its_wakes_refused() {
+    use meerkat_meta::PersistentMetadataStore as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join("root");
+    let mob_id = unique_builder_mob_id();
+    let identity = AgentIdentity::parse("agent:rotated").unwrap();
+
+    // The first process: its runtime, and every handle onto it, ends before
+    // the restart (the topology state is one process's at a time).
+    {
+        let runtime = boot_listed_identity(&state, &mob_id, &identity).await;
+        let identities = runtime.identity_runtime().unwrap();
+        identities
+            .send_awaiting_commit(
+                &identity,
+                &meerkat_core::ContentInput::Text("before the restart".to_string()),
+            )
+            .await
+            .expect("the first life's turn commits");
+        let generation = identities
+            .status(&identity)
+            .await
+            .expect("the identity's status")
+            .generation
+            .map(meerkat_mob::Generation::get);
+        drop(identities);
+        // What a reset leaves behind when the process ends inside its
+        // rotation: Meta's record of the rotation (as Meta 0.9.10 writes it
+        // before Core is asked, or this Meta after an answer that may have
+        // started it).
+        let recorded_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock reads")
+            .as_millis();
+        runtime
+            .persistent_metadata()
+            .set_identity_rotation_intent(&meerkat_meta::IdentityRotationIntent {
+                mob_id: runtime.mob_handle().mob_id().as_str().to_string(),
+                identity: identity.as_str().to_string(),
+                verb: "reset".to_string(),
+                from_generation: generation,
+                recorded_at_ms: u64::try_from(recorded_at_ms).expect("milliseconds fit"),
+            })
+            .await
+            .expect("the rotation record is written");
+        let shutdown = runtime.shutdown().await;
+        assert!(shutdown.cleanup_completed(), "{shutdown:?}");
+    }
+
+    let runtime = boot_listed_identity(&state, &mob_id, &identity).await;
+    let identities = runtime.identity_runtime().unwrap();
+    assert!(identities.identity_bootstrap_status().ready);
+    tokio::time::timeout(
+        Duration::from_mins(1),
+        identities.send_awaiting_commit(
+            &identity,
+            &meerkat_core::ContentInput::Text("after the restart".to_string()),
+        ),
+    )
+    .await
+    .expect("the delivery answers")
+    .expect("the identity takes its delivery after the restart");
+    let shutdown = runtime.shutdown().await;
+    assert!(shutdown.cleanup_completed(), "{shutdown:?}");
 }

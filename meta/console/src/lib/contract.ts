@@ -21,6 +21,7 @@ export const CONSOLE_RPC_PATHS = {
 
 export const CONSOLE_RPC_METHODS = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",

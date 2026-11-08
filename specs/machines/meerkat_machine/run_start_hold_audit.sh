@@ -11,14 +11,16 @@
 # and requires TLC to report exactly that violation, so the invariants are
 # not vacuous. The main run explores the MobStop and ToolsNotPublished
 # reasons; a reasons run then registers, holds and releases every reason (a
-# mob member's HostPreparation among them) with no input and no run, and
-# reaches its own witness. With --mutants it then seeds five defects into a
-# copy of the generated model (a registration that ignores its holds,
-# run-start gates that test only MobStop, a release that clears every
-# reason, a registration that ignores the HostPreparation hold, and a host's
-# release of its tools that ends that hold too) and requires TLC to refuse
-# each with the property it breaks. An anchor this script expects but cannot
-# find fails the run.
+# mob member's HostPreparation and a host's HostRecovery among them) with no
+# input and no run, and reaches its two witnesses. With --mutants it then
+# seeds seven defects into a copy of the generated model (a registration that
+# ignores its holds, run-start gates that test only MobStop, a release that
+# clears every reason, a registration that ignores the HostPreparation hold,
+# a host's release of its tools that ends that hold too, a registration that
+# ignores the HostRecovery hold, and a release of the tools hold that ends
+# the host's HostRecovery hold too) and requires TLC to refuse each with the
+# property it breaks. An anchor this script expects but cannot find fails the
+# run.
 set -euo pipefail
 
 usage="usage: run_start_hold_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -148,19 +150,21 @@ if [[ "${reasons_status}" != "0" ]] \
   echo "error: run-start hold audit's reasons run failed (tlc exit ${reasons_status}, bound ${max_steps})" >&2
   exit 1
 fi
-cfg="${work_dir}/witness-HostPreparationHeld.cfg"
-write_cfg "${cfg}" "
-  NotAuditWitnessHostPreparationHeld" reasons
-status=0
-run_tlc witness-HostPreparationHeld "${cfg}" "$@" || status=$?
-log="${work_dir}/witness-HostPreparationHeld.log"
-if ! grep -q "Error: Invariant NotAuditWitnessHostPreparationHeld is violated" "${log}"; then
-  cat "${log}"
-  echo "error: witness HostPreparationHeld is not reachable at bound ${max_steps} (tlc exit ${status})" >&2
-  exit 1
-fi
-depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
-echo "witness HostPreparationHeld reached in ${depth} states"
+for witness in HostPreparationHeld HostRecoveryHeld; do
+  cfg="${work_dir}/witness-${witness}.cfg"
+  write_cfg "${cfg}" "
+  NotAuditWitness${witness}" reasons
+  status=0
+  run_tlc "witness-${witness}" "${cfg}" "$@" || status=$?
+  log="${work_dir}/witness-${witness}.log"
+  if ! grep -q "Error: Invariant NotAuditWitness${witness} is violated" "${log}"; then
+    cat "${log}"
+    echo "error: witness ${witness} is not reachable at bound ${max_steps} (tlc exit ${status})" >&2
+    exit 1
+  fi
+  depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
+  echo "witness ${witness} reached in ${depth} states"
+done
 
 if [[ "${run_mutants}" == "true" ]]; then
   # usage: mutate <name> <expected property> [main|reasons]; reads a python
@@ -251,6 +255,32 @@ old = "run_start_holds' = (run_start_holds \\ {reason})"
 count = text.count(old)
 assert count == 14, f"expected 14 release updates, found {count}"
 text = text.replace(old, "run_start_holds' = (run_start_holds \\ (IF reason = \"ToolsNotPublished\" THEN {reason, \"HostPreparation\"} ELSE {reason}))")
+open(path, "w").write(text)
+PY
+
+  # Every registration arm stages the holds its binding starts with but the
+  # host's HostRecovery.
+  mutate registration_ignores_host_recovery AuditRegistrationAppliesHoldsEvery reasons "$@" <<'PY'
+import os
+path = os.environ["MODEL"]
+text = open(path).read()
+old = '\\cup {"HostRecovery"}'
+count = text.count(old)
+assert count >= 10, f"expected the registration arms to stage HostRecovery, found {count}"
+text = text.replace(old, "\\cup {}")
+open(path, "w").write(text)
+PY
+
+  # A release of the tools hold (a mob's or Meta's) ends the host's
+  # HostRecovery hold too.
+  mutate tools_release_ends_host_recovery AuditHoldAndReleaseOwnReasonOnlyEvery reasons "$@" <<'PY'
+import os
+path = os.environ["MODEL"]
+text = open(path).read()
+old = "run_start_holds' = (run_start_holds \\ {reason})"
+count = text.count(old)
+assert count == 14, f"expected 14 release updates, found {count}"
+text = text.replace(old, "run_start_holds' = (run_start_holds \\ (IF reason = \"ToolsNotPublished\" THEN {reason, \"HostRecovery\"} ELSE {reason}))")
 open(path, "w").write(text)
 PY
 fi

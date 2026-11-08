@@ -2756,25 +2756,32 @@ fn model_aware_compaction_config(
     provider: Provider,
     model: &str,
     build_threshold_override: Option<std::num::NonZeroU64>,
+    account_prompt_token_limit: Option<u32>,
 ) -> meerkat_core::CompactionConfig {
     let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
     // Keep only an explicit host cap here. Built-in clients attach the current
     // provider's cap to their exact lowered-request witness on every boundary,
     // so model fallback cannot keep applying the initial provider's limit.
     // The per-build override (e.g. a mob profile's `auto_compact_threshold`)
-    // wins over the global config knob and model-aware scaling.
+    // wins over the global config knob and model-aware scaling. Either
+    // explicit value stays within the selected account's prompt limit.
     if let Some(threshold) = build_threshold_override {
-        compaction.auto_compact_threshold = threshold.get();
+        compaction.auto_compact_threshold =
+            explicit_threshold_within_account_limit(threshold.get(), account_prompt_token_limit);
         return compaction;
     }
     let default_threshold = meerkat_core::CompactionConfig::default().auto_compact_threshold;
     if config.compaction.auto_compact_threshold_explicit
         || compaction.auto_compact_threshold != default_threshold
     {
+        compaction.auto_compact_threshold = explicit_threshold_within_account_limit(
+            compaction.auto_compact_threshold,
+            account_prompt_token_limit,
+        );
         return compaction;
     }
 
-    if let Some(context_window) = registry
+    let registry_bound = registry
         .entry_for_provider(provider, model)
         .and_then(|entry| {
             entry.context_window.map(|window| {
@@ -2782,8 +2789,15 @@ fn model_aware_compaction_config(
                     .max_input_tokens
                     .map_or(window, |input| input.min(window))
             })
-        })
-    {
+        });
+    // The selected account's own prompt limit (a Copilot account model's
+    // `max_prompt_tokens`) bounds it as well: the account refuses a longer
+    // prompt whatever the model's own window.
+    let bound = match (registry_bound, account_prompt_token_limit) {
+        (Some(registry), Some(account)) => Some(registry.min(account)),
+        (registry, account) => registry.or(account),
+    };
+    if let Some(context_window) = bound {
         // The static default is intentionally conservative for unknown models.
         // Compact before the tighter of the shared window and separate input
         // ceiling, leaving headroom for the active turn.
@@ -2794,6 +2808,31 @@ fn model_aware_compaction_config(
     }
 
     compaction
+}
+
+/// An explicit compaction threshold, bounded by the selected account's own
+/// prompt limit (the rule of the request-byte cap,
+/// `ProviderRequestPressure::effective_cap`): the account refuses a longer
+/// prompt whatever the threshold, so a higher value could only fail the
+/// session later with a non-retryable error. A lowered value is logged once,
+/// when the session's compactor is built. The model's own window does not
+/// bound an explicit threshold.
+#[cfg(any(feature = "session-compaction", test))]
+fn explicit_threshold_within_account_limit(
+    threshold: u64,
+    account_prompt_token_limit: Option<u32>,
+) -> u64 {
+    match account_prompt_token_limit.map(u64::from) {
+        Some(limit) if threshold > limit => {
+            tracing::warn!(
+                threshold,
+                account_prompt_token_limit = limit,
+                "the explicit compaction threshold is above the selected account's prompt limit; the session compacts by that limit"
+            );
+            limit
+        }
+        _ => threshold,
+    }
 }
 
 fn model_aware_default_max_tokens(
@@ -3335,7 +3374,9 @@ pub struct AgentFactory {
     pub runtime_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
     /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
-    /// When unset, convention loading remains disabled unless caller opts in.
+    /// When unset, a build takes `project_root` as that root (its
+    /// `.rkat/config.toml` hooks, `.rkat/skills` and AGENTS.md); with neither
+    /// root set, it reads no project convention.
     pub context_root: Option<PathBuf>,
     /// Optional user-global convention root (typically HOME).
     pub user_config_root: Option<PathBuf>,
@@ -3354,6 +3395,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The host's trust over the convention hook sources, installed with
+    /// [`Self::with_hook_source_trust`]: asked about each source over the
+    /// bytes the build read.
+    #[cfg(not(target_arch = "wasm32"))]
+    hook_source_trust: Option<Arc<dyn crate::HookSourceTrust>>,
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile,
     /// The host's HTTP egress profile, retained by newly built routers.
@@ -3480,6 +3526,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_mob", &self.enable_mob);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("shell_confinement", &self.shell_confinement);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("hook_source_trust", &self.hook_source_trust.is_some());
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         d.field("mcp_stdio_launch_profile", &self.mcp_stdio_launch_profile);
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4539,7 +4587,14 @@ impl AgentFactory {
                 "failed to resolve web-search auth binding for provider {search_provider:?}"
             ));
         };
-        let mut env = self.host_resolver_environment();
+        // The helper reads none of the account's stated limits (its route
+        // takes the account's model list once it loads, as the session's own
+        // does), so its resolution admits an account whose limits are pending,
+        // such as one whose credential exchange is temporarily unavailable;
+        // the first search completes it.
+        let mut env = self
+            .host_resolver_environment()
+            .admitting_pending_account_limits();
         // A faulted credential backend is a hard typed fault, never folded
         // into the inherit-mode `Ok(None)` degradation.
         if let Some(persistence) = self
@@ -4662,6 +4717,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4872,6 +4929,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -5248,6 +5307,30 @@ impl AgentFactory {
             return env.with_host_launch_guard(guard);
         }
         env
+    }
+
+    /// Install the host's trust over the convention hook sources
+    /// (`<context_root>/.rkat/config.toml`, or `<project_root>/.rkat/config.toml`
+    /// when the factory has no context root, and
+    /// `<user_config_root>/.rkat/config.toml`).
+    /// Each build, of this factory or a clone of it, asks it once about every
+    /// such file it read and parsed, with the SHA-256 of the exact bytes
+    /// ([`crate::HookSource`]), so the decision covers the content consumed
+    /// rather than a check the host made before the build: a file changed
+    /// after the host's check is judged as changed. Every hook of an
+    /// untrusted source keeps its slot and is refused at each invocation with
+    /// [`meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource`];
+    /// none of them runs. Without one, every source is trusted (unless the
+    /// host confinement says otherwise). The trust judges those files' bytes
+    /// only, not the programs their command hooks name, a run's hook
+    /// overrides or the hooks of the config passed to the build. A build
+    /// handed its own hook engine ([`AgentBuildConfig::hook_engine_override`])
+    /// reads no such file, so the trust is not asked. It must not block: see
+    /// [`crate::HookSourceTrust`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_hook_source_trust(mut self, trust: Arc<dyn crate::HookSourceTrust>) -> Self {
+        self.hook_source_trust = Some(trust);
+        self
     }
 
     /// Install a stock host's resolved OS process confinement: each launch
@@ -8348,6 +8431,14 @@ impl AgentFactory {
                 .as_ref()
                 .and_then(|client| client.output_token_limit()),
         };
+        // Its own prompt limit, likewise, read once the session's output
+        // budget is resolved (below): the session's default compaction
+        // threshold stays below the limit for that budget.
+        #[cfg(feature = "session-compaction")]
+        let account_limit_client = match prepared_controller.as_deref() {
+            Some(graph) => Some(Arc::clone(&graph.account_limit_client)),
+            None => llm_client.clone(),
+        };
         let resolved_auth_credential_identity = resolved_llm_client_phase.credential_identity;
         let prompt_cache_backend = resolved_llm_client_phase.prompt_cache_backend;
         #[cfg(not(target_arch = "wasm32"))]
@@ -8581,6 +8672,11 @@ impl AgentFactory {
                 );
                 account_output_token_limit.map_or(default, |limit| default.min(limit))
             });
+        // The selected account's prompt limit for this budget.
+        #[cfg(feature = "session-compaction")]
+        let account_prompt_token_limit = account_limit_client
+            .as_ref()
+            .and_then(|client| client.prompt_token_limit(max_tokens));
         let _realm_scope_root = self.realm_scope_root(&build_config);
         let _conventions_context_root = self
             .context_root
@@ -9473,6 +9569,8 @@ impl AgentFactory {
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
+                provider: resolved_llm_identity.provider,
+                self_hosted_server_id: resolved_llm_identity.self_hosted_server_id.clone(),
                 authority_context: build_config.mob_tool_authority_context.clone(),
                 effective_authority: mob_authority_handle.clone(),
                 comms_name: mob_comms_name,
@@ -9541,14 +9639,35 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    // A hook a confined process could have defined keeps its
-                    // slot and is refused at every invocation.
-                    let refused_hooks = self
-                        .host_confinement
-                        .as_ref()
-                        .map_or_else(Vec::new, |host| {
-                            layered.untrusted_entries(|source| host.untrusted_source(source))
-                        });
+                    // A hook a confined process could have defined, or one
+                    // whose content the host does not trust as read here,
+                    // keeps its slot and is refused at every invocation.
+                    let refused_hooks = if self.host_confinement.is_none()
+                        && self.hook_source_trust.is_none()
+                    {
+                        Vec::new()
+                    } else {
+                        layered.untrusted_entries(|source| {
+                            // Both policies see every read source: the
+                            // trust is asked once per source whatever
+                            // confinement said, so an auditing or
+                            // stateful trust observes each build's files.
+                            let confined = self
+                                .host_confinement
+                                .as_ref()
+                                .is_some_and(|host| host.untrusted_source(source.path));
+                            let untrusted = self.hook_source_trust.as_ref().is_some_and(|trust| {
+                                // Exhaustive on purpose: a decision added
+                                // later is classified here, never trusted
+                                // by default.
+                                match trust.decide(source) {
+                                    crate::HookSourceDecision::Trusted => false,
+                                    crate::HookSourceDecision::Untrusted => true,
+                                }
+                            });
+                            confined || untrusted
+                        })
+                    };
                     let layered_hooks = layered.config;
                     // Run overrides execute through this engine too. With
                     // override entries and no base entries the engine is
@@ -10253,6 +10372,7 @@ impl AgentFactory {
                     provider,
                     &model,
                     build_config.auto_compact_threshold_override,
+                    account_prompt_token_limit,
                 ),
             ));
             builder = builder.compactor(compactor);
@@ -10967,6 +11087,8 @@ impl AgentFactory {
             )
         })?;
         let account_output_token_limit = llm_client.output_token_limit();
+        #[cfg(feature = "session-compaction")]
+        let account_limit_client = Arc::clone(&llm_client);
         let identity = SessionLlmIdentity {
             model: build_config.model.clone(),
             provider,
@@ -10999,6 +11121,8 @@ impl AgentFactory {
             event_tap,
             late_event,
             account_output_token_limit,
+            #[cfg(feature = "session-compaction")]
+            account_limit_client,
             credential_identity: phase.credential_identity,
             auto_image_generation_executor: phase.auto_image_generation_executor,
             resolved_model: identity.model,
@@ -12606,8 +12730,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 840_000);
     }
@@ -12624,6 +12754,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             None,
+            None,
         );
         assert_eq!(compaction.auto_compact_threshold, 737_600);
         assert_eq!(
@@ -12639,6 +12770,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             None,
+            None,
         );
         assert_eq!(explicit.auto_compact_threshold, 42_000);
         let build_override = model_aware_compaction_config(
@@ -12647,6 +12779,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             std::num::NonZeroU64::new(9_000),
+            None,
         );
         assert_eq!(build_override.auto_compact_threshold, 9_000);
     }
@@ -12707,6 +12840,7 @@ mod tests {
             Provider::Anthropic,
             "claude-fable-5",
             None,
+            None,
         );
         assert_eq!(compaction.max_request_bytes, None);
 
@@ -12716,6 +12850,7 @@ mod tests {
             Provider::Anthropic,
             "claude-fable-5",
             Some(std::num::NonZeroU64::new(1_234).expect("non-zero")),
+            None,
         );
         assert_eq!(overridden.auto_compact_threshold, 1_234);
         assert_eq!(overridden.max_request_bytes, None);
@@ -12757,6 +12892,7 @@ mod tests {
             &registry,
             Provider::Anthropic,
             "claude-fable-5",
+            None,
             None,
         );
 
@@ -13234,6 +13370,88 @@ mod tests {
         );
     }
 
+    /// The selected account's prompt limit (a Copilot account model's
+    /// `max_prompt_tokens`) bounds the model-aware default threshold the way
+    /// the registry's input ceiling does: the tighter one wins. An explicit
+    /// threshold or a per-build override under the limit keeps its value.
+    #[test]
+    fn account_prompt_limit_bounds_the_model_aware_compaction_threshold() {
+        let mut config = Config::default();
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let threshold = |config: &Config, account, build_override| {
+            model_aware_compaction_config(
+                config,
+                &registry,
+                Provider::OpenAI,
+                "gpt-5.5",
+                build_override,
+                account,
+            )
+            .auto_compact_threshold
+        };
+        assert_eq!(threshold(&config, Some(128_000), None), 102_400);
+        assert_eq!(
+            threshold(&config, Some(2_000_000), None),
+            840_000,
+            "the registry's ceiling is the tighter one"
+        );
+        assert_eq!(threshold(&config, None, None), 840_000);
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(9_000)),
+            9_000
+        );
+        config.compaction.auto_compact_threshold = 42_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        assert_eq!(threshold(&config, Some(128_000), None), 42_000);
+    }
+
+    /// An explicit compaction threshold, from the configuration or a
+    /// per-build override, is bounded by the selected account's prompt limit
+    /// (the byte cap's rule): a prompt over that limit is refused whatever the
+    /// threshold, so a higher value could only fail the session later. A value
+    /// under the limit, or one with no account limit, keeps its value, and the
+    /// model's own window still does not bound it.
+    #[test]
+    fn an_explicit_threshold_above_the_account_prompt_limit_is_lowered_to_it() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = 150_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let threshold = |config: &Config, account, build_override| {
+            model_aware_compaction_config(
+                config,
+                &registry,
+                Provider::OpenAI,
+                "gpt-5.5",
+                build_override,
+                account,
+            )
+            .auto_compact_threshold
+        };
+        assert_eq!(threshold(&config, Some(128_000), None), 128_000);
+        assert_eq!(threshold(&config, Some(200_000), None), 150_000);
+        assert_eq!(threshold(&config, None, None), 150_000);
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(200_000)),
+            128_000,
+            "a per-build override above the account limit is lowered too"
+        );
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(9_000)),
+            9_000
+        );
+        config.compaction.auto_compact_threshold = 2_000_000;
+        assert_eq!(
+            threshold(&config, None, None),
+            2_000_000,
+            "the model's own window does not bound an explicit threshold"
+        );
+    }
+
     #[test]
     fn explicit_compaction_threshold_is_preserved() {
         let mut config = Config::default();
@@ -13242,8 +13460,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 42_000);
     }
@@ -13257,8 +13481,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 100_000);
     }
@@ -16030,6 +16260,174 @@ mod tests {
         assert_eq!(requested_output_budget(None).await, 64_000);
         assert_eq!(requested_output_budget(Some(128_000)).await, 128_000);
         assert_eq!(requested_output_budget(Some(1_024)).await, 1_024);
+    }
+
+    /// A client whose selected account states a prompt limit (as a Copilot
+    /// account model does) and whose provider measures every request's
+    /// prompt at `input_tokens`. With `less_the_budget` the account states a
+    /// context window of `prompt_limit` and no output limit, so its prompt
+    /// limit is that window less a request's output budget.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    struct AccountPromptLimitedClient {
+        prompt_limit: u32,
+        input_tokens: u64,
+        less_the_budget: bool,
+    }
+
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for AccountPromptLimitedClient {
+        fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+            Some(if self.less_the_budget {
+                self.prompt_limit.saturating_sub(output_budget)
+            } else {
+                self.prompt_limit
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        Provider::OpenAI,
+                        &request.model,
+                        meerkat_core::Usage {
+                            input_tokens: self.input_tokens,
+                            output_tokens: 1,
+                            ..Default::default()
+                        },
+                    ),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session, on a client
+    /// whose account allows prompts of at most 128_000 tokens, starts by
+    /// compacting after a first turn whose prompt measured `input_tokens`;
+    /// `threshold` is the build's explicit threshold override.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts(input_tokens: u64, threshold: Option<u64>) -> bool {
+        second_turn_compacts_on(
+            Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+                less_the_budget: false,
+            }),
+            None,
+            threshold,
+        )
+        .await
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session on `client`,
+    /// with the output budget `max_tokens` (the model default when `None`)
+    /// and the explicit threshold override `threshold`, starts by
+    /// compacting.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts_on(
+        client: Arc<dyn LlmClient>,
+        max_tokens: Option<u32>,
+        threshold: Option<u64>,
+    ) -> bool {
+        let session_id = SessionId::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.resume_session = Some(Session::with_id(session_id));
+        build.llm_client_override = Some(client);
+        build.max_tokens = max_tokens;
+        build.auto_compact_threshold_override = threshold.and_then(std::num::NonZeroU64::new);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("agent on the prompt-limited client");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("first".into()))
+            .await
+            .expect("first turn");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        agent
+            .run_with_events(meerkat_core::ContentInput::Text("second".into()), tx)
+            .await
+            .expect("second turn");
+        let mut compacted = false;
+        while let Ok(event) = rx.try_recv() {
+            compacted |= matches!(event, meerkat_core::AgentEvent::CompactionStarted { .. });
+        }
+        compacted
+    }
+
+    /// The selected account's prompt limit reaches the session's compactor:
+    /// on `gpt-5.5` (whose own default threshold is 840_000) an account that
+    /// allows 128_000 prompt tokens compacts from 102_400, four-fifths of its
+    /// limit, and an explicit 150_000 is lowered to the 128_000 limit.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_session_compactor() {
+        assert!(second_turn_compacts(110_000, None).await);
+        assert!(!second_turn_compacts(100_000, None).await);
+        assert!(second_turn_compacts(130_000, Some(150_000)).await);
+        assert!(!second_turn_compacts(125_000, Some(150_000)).await);
+    }
+
+    /// The account's prompt limit reaches the compactor for the session's
+    /// own output budget: an account stating a 128_000-token window and no
+    /// output limit lets a session with a 32_000-token budget send prompts of
+    /// 96_000 tokens, so the session compacts from 76_800, four-fifths of
+    /// that.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_compactor_for_the_session_budget() {
+        let window = |input_tokens| -> Arc<dyn LlmClient> {
+            Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+                less_the_budget: true,
+            })
+        };
+        assert!(second_turn_compacts_on(window(80_000), Some(32_000), None).await);
+        assert!(!second_turn_compacts_on(window(70_000), Some(32_000), None).await);
     }
 
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -19246,6 +19644,34 @@ mod tests {
             build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
             build
         }
+    }
+
+    /// A web-search helper on an account whose limits are pending (its
+    /// credential exchange is temporarily unavailable) builds like the session
+    /// it serves: the helper reads none of the account's limits, so its
+    /// resolution admits the pending ones, and an explicit web search is
+    /// provisioned instead of failing the build.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_web_search_helper_builds_while_the_account_limits_are_pending() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let config = Config::default();
+        let registry = stand_in.factory.model_registry(&config).expect("registry");
+        let executor = stand_in
+            .factory
+            .build_web_search_executor(
+                &config,
+                &registry,
+                Provider::OpenAI,
+                &PendingLimitsFactory::request(),
+                meerkat_core::new_event_tap(),
+                true,
+            )
+            .await
+            .expect("an explicit web search is provisioned during the outage");
+        assert!(executor.is_some());
+        assert_eq!(stand_in.admissions(), [true]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -23615,6 +24041,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-5.5",
             std::num::NonZeroU64::new(9_000),
+            None,
         );
 
         assert_eq!(

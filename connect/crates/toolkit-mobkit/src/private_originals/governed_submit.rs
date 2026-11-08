@@ -150,6 +150,7 @@ impl PrivateOriginals {
             }
             IdentityRuntimeError::KeyedSendRefused { .. } => "KeyedSendRefused",
             IdentityRuntimeError::SessionNotHeldByIdentity { .. } => "SessionNotHeldByIdentity",
+            IdentityRuntimeError::DeclarationNotApplied { .. } => "DeclarationNotApplied",
             IdentityRuntimeError::Internal(..) => "Internal",
         }
     }

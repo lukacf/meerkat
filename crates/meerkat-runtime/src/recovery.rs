@@ -3218,6 +3218,13 @@ async fn recover_durable_tail_capturing(
                  {boundary_sequence}"
             )));
         }
+        // The recovered run is over: end its run-scoped tool grants.
+        crate::tool_grant::service::end_recovered_run(
+            store,
+            &candidate.session_id,
+            &candidate.candidate_run_id,
+        )
+        .await;
         return Ok(DriveAnswer::Outcome(committed_recovery_outcome(
             candidate,
             disposition,
@@ -3404,6 +3411,13 @@ async fn recover_durable_tail_capturing(
                          {boundary_sequence}"
                     )));
                 }
+                // The recovered run is over: end its run-scoped tool grants.
+                crate::tool_grant::service::end_recovered_run(
+                    store,
+                    &candidate.session_id,
+                    &candidate.candidate_run_id,
+                )
+                .await;
                 return Ok(DriveAnswer::Outcome(committed_recovery_outcome(
                     candidate,
                     disposition,
@@ -3716,6 +3730,13 @@ async fn recover_durable_tail_capturing(
         message_count = candidate.message_count,
         "durable-tail recovery committed as a recovered runtime boundary"
     );
+    // The recovered run is over: end its run-scoped tool grants.
+    crate::tool_grant::service::end_recovered_run(
+        store,
+        &candidate.session_id,
+        &candidate.candidate_run_id,
+    )
+    .await;
     let outcome = committed_recovery_outcome(candidate, disposition, boundary_sequence);
     Ok(match operator_repair {
         Some(mut repair) => {

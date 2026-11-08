@@ -38,6 +38,7 @@ fn shell_grant(subject: &ToolGrantSubject) -> ToolGrantRequest {
         },
         reason: None,
         window: ToolGrantWindow::For(Duration::from_mins(10)),
+        run_scope: None,
     }
 }
 
@@ -665,4 +666,73 @@ fn a_grant_end_that_meets_a_concurrent_writer_answers_the_busy_class() {
         matches!(internal, MobError::Internal(_)),
         "any other failure stays internal: {internal:?}"
     );
+}
+
+/// An identity's life marker moves at every end of the identity and at
+/// nothing else, and a resume rebuilds it from the journal: a respawn keeps
+/// it; the end of a plain retire moves it, and the terminal row records the
+/// end; the name spawned again lives the life that began at that end; and
+/// the resumed mob reads the marker the live one published.
+#[tokio::test]
+async fn an_identitys_life_marker_moves_at_its_ends_only_and_survives_a_resume() {
+    let mob = RecoverableMob::new();
+    let handle = mob.create().await;
+    let identity = AgentIdentity::from("life-marked");
+    let spawn = |handle: &MobHandle| {
+        let handle = handle.clone();
+        let identity = identity.clone();
+        async move {
+            handle
+                .spawn_with_options(
+                    ProfileName::from("worker"),
+                    identity,
+                    None,
+                    Some(crate::MobRuntimeMode::TurnDriven),
+                    None,
+                )
+                .await
+                .expect("spawn the member")
+        }
+    };
+    spawn(&handle).await;
+    let first = handle.identity_life(&identity).expect("the first life");
+
+    handle
+        .respawn(identity.clone(), None)
+        .await
+        .expect("the respawn");
+    assert_eq!(
+        handle.identity_life(&identity).expect("after the respawn"),
+        first,
+        "a respawn keeps the identity's life"
+    );
+
+    handle.retire(identity.clone()).await.expect("the retire");
+    let ended = handle.identity_life(&identity).expect("after the retire");
+    assert_ne!(ended, first, "the retire's end ends the identity's life");
+    let journal = mob.events.replay_all().await.expect("the journal");
+    assert!(
+        journal.iter().any(|event| matches!(
+            &event.kind,
+            MobEventKind::MemberRetired { agent_identity, facts, .. }
+                if *agent_identity == identity && facts.identity_ended
+        )),
+        "the terminal row records the end of the identity"
+    );
+
+    spawn(&handle).await;
+    assert_eq!(
+        handle.identity_life(&identity).expect("the new life"),
+        ended,
+        "a spawn moves nothing: the new life began at the end"
+    );
+
+    handle.shutdown().await.expect("shutdown test mob");
+    let resumed = mob.resume().await;
+    assert_eq!(
+        resumed.identity_life(&identity).expect("after the resume"),
+        ended,
+        "the resume rebuilds the marker the live mob published"
+    );
+    resumed.shutdown().await.expect("shutdown resumed mob");
 }

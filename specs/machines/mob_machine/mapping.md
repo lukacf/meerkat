@@ -6126,6 +6126,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordMemberDispatchAdmissionLineageStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `EndIdentityLifeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`

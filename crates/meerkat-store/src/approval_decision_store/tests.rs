@@ -175,6 +175,47 @@ fn writes_are_revision_conditional_and_never_wait() {
         .expect("replace once released");
 }
 
+/// Calls of one process take turns on the file: reads and writes from many
+/// threads never fail each other as held by another owner. Without turns,
+/// one connection opening while another closes (and checkpoints the
+/// write-ahead log) answers busy at once under the zero busy timeout, and
+/// two of the process's writers refuse each other.
+#[test]
+fn concurrent_calls_of_one_process_never_fail_each_other() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = std::sync::Arc::new(SqliteDecisionStore::in_store_path(dir.path()));
+    store
+        .insert_if_absent(&open_row("subject-seed"))
+        .expect("create the file");
+    let workers: Vec<_> = (0..8)
+        .map(|worker| {
+            let store = std::sync::Arc::clone(&store);
+            std::thread::spawn(move || {
+                let mut contended = 0_usize;
+                for round in 0..40 {
+                    let row = open_row(&format!("subject-{worker}-{round}"));
+                    let failures = [
+                        store.insert_if_absent(&row).err(),
+                        store.get(&row.decision_id).err(),
+                        store.list(&DecisionListFilter::default(), None, 10).err(),
+                        store.owed(None, 10).err(),
+                    ];
+                    contended += failures
+                        .iter()
+                        .filter(|failure| matches!(failure, Some(ApprovalStoreError::Contended)))
+                        .count();
+                }
+                contended
+            })
+        })
+        .collect();
+    let contended: usize = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker"))
+        .sum();
+    assert_eq!(contended, 0, "calls of one process refused each other");
+}
+
 #[test]
 fn a_future_domain_version_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -318,6 +359,71 @@ fn owed_due_and_count_queries_use_their_indexes() {
         "list by requester",
         &plan(&sql, &values),
         &["approval_decisions_requester_phase_idx"],
+    );
+}
+
+/// A list bounded by a deadline reads only its phase's decisions due at or
+/// after the bound, through the phase and deadline index, so a caller that
+/// lists recent ended decisions never reads the store's whole history.
+#[test]
+fn a_deadline_bounded_list_reads_recent_decisions_through_the_phase_and_deadline_index() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteDecisionStore::in_store_path(dir.path());
+    let old = stored(
+        "subject-old",
+        DecisionPhase::Rejected,
+        DecisionNotice::Delivered,
+        100,
+    );
+    let recent = stored(
+        "subject-recent",
+        DecisionPhase::Rejected,
+        DecisionNotice::Delivered,
+        1_000,
+    );
+    let open = stored(
+        "subject-open",
+        DecisionPhase::Open,
+        DecisionNotice::NotDue,
+        1_000,
+    );
+    for row in [&old, &recent, &open] {
+        store.insert_if_absent(row).expect("insert");
+    }
+    let filter = DecisionListFilter::default()
+        .with_kind(DecisionKind::new("release").expect("kind"))
+        .with_phase(DecisionPhase::Rejected)
+        .with_deadline_from(500);
+    assert!(filter.matches(&recent), "the in-memory reading agrees");
+    assert!(!filter.matches(&old) && !filter.matches(&open));
+
+    let listed: Vec<String> = store
+        .list(&filter, None, 10)
+        .expect("list")
+        .rows
+        .iter()
+        .map(|row| row.decision_id().to_owned())
+        .collect();
+    assert_eq!(listed, vec![recent.decision_id.as_str().to_owned()]);
+    assert_eq!(store.count(&filter).expect("count"), 1);
+
+    let conn = rusqlite::Connection::open(store.path()).expect("open");
+    let (sql, values) = list_query(&filter, None, 10);
+    let mut statement = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("explain");
+    let details = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("plan rows");
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("approval_decisions_phase_deadline_idx")),
+        "the bounded list reads the phase and deadline index: {details:?}"
     );
 }
 

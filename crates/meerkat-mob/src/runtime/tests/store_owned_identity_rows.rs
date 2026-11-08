@@ -1390,6 +1390,7 @@ async fn the_removal_of_an_unseated_identity_ends_its_grants() {
                 },
                 reason: None,
                 window: meerkat_runtime::tool_grant::ToolGrantWindow::For(Duration::from_mins(10)),
+                run_scope: None,
             },
             None,
         )

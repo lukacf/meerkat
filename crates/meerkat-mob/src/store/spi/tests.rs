@@ -1319,6 +1319,7 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
                     Generation::new(generation.get() + 1),
                     ProfileName::from("lead"),
                 )),
+                identity_ended: true,
             },
         },
         MobEventKind::RespawnTopologyAbandoned {

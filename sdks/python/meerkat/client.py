@@ -2681,6 +2681,7 @@ class MeerkatClient:
         duration_ms: int | None = None,
         expires_at_ms: int | None = None,
         reason: str | None = None,
+        scope: str | None = None,
         mob_id: str | None = None,
         identity: str | None = None,
         decision_ref: str | None = None,
@@ -2699,11 +2700,19 @@ class MeerkatClient:
         provides, or with ``server_tools`` (a non-empty list) only those of
         them. Bound the grant by exactly one of ``duration_ms`` and
         ``expires_at_ms`` (UNIX ms), at most the server's maximum lifetime.
-        ``decision_ref`` records the host's reference to the decision it made
-        before issuing, as attribution. Returns the ``tool_grants/grant``
-        result, ``{"grant": {...}}``: a family grant's ``target.names`` are
-        the names the server took for it, and an identity grant's ``applies``
-        says whether the member's running build gates the target.
+        ``scope="current_run"`` also scopes the grant to the run the subject
+        is running now (an identity's: the run of the session its member
+        holds on the server): it opens the target in that run only and ends
+        with it, and a subject that runs no turn refuses it (the request
+        refusal ``run_not_active``: error ``data``
+        ``{"kind": "tool_grant_request_refused", "tool_grant_request_refusal":
+        {"kind": "run_not_active"}}``). Omitted, or ``"window"``, the grant
+        lasts for its window. ``decision_ref`` records the host's reference
+        to the decision it made before issuing, as attribution. Returns the
+        ``tool_grants/grant`` result, ``{"grant": {...}}``: a family grant's
+        ``target.names`` are the names the server took for it, and an
+        identity grant's ``applies`` says whether the member's running build
+        gates the target.
         """
         if sum(target is not None for target in (tool, family, mcp_server)) != 1:
             raise ValueError("exactly one of tool, family or mcp_server must be provided")
@@ -2713,6 +2722,8 @@ class MeerkatClient:
             raise ValueError(
                 "exactly one of duration_ms or expires_at_ms must be provided"
             )
+        if scope is not None and scope not in ("window", "current_run"):
+            raise ValueError('scope must be "window" or "current_run"')
         target: dict[str, Any]
         if tool is not None:
             target = {"kind": "tool", "name": tool}
@@ -2732,9 +2743,63 @@ class MeerkatClient:
             params["expires_at_ms"] = expires_at_ms
         if reason is not None:
             params["reason"] = reason
+        if scope is not None:
+            params["scope"] = {"kind": scope}
         if decision_ref is not None:
             params["decision_ref"] = decision_ref
         return await self._request("tool_grants/grant", params)
+
+    async def request_tool_grant(
+        self,
+        session_id: str | None = None,
+        *,
+        tool: str | None = None,
+        family: str | None = None,
+        duration_ms: int,
+        scope: str | None = None,
+        reason: str | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask for a grant of a subject's grant-gated tool name or tool family
+        that a person approves.
+
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``), as for :meth:`grant_tool`. Name exactly
+        one of ``tool`` and ``family``, as for :meth:`grant_tool`.
+        ``duration_ms`` bounds the grant from its issuance, at most the
+        server's maximum lifetime; ``scope="current_run"`` also scopes it to
+        the run the subject is running now (an identity's: the run of the
+        session its member holds on the server). The server holds a durable
+        decision of kind ``tool_grant.issue`` and issues nothing: once a
+        person approves the decision, the server issues the grant under the
+        id the result names. Returns ``{"grant": {...}, "decision": {...}}``:
+        the request as a list shows it (status ``requested``) and its
+        decision. A server whose persistence keeps no durable decisions
+        answers capability unavailable. Needs a Meerkat 0.9.11 or newer
+        server: an older one answers method not found (``-32601``), raised
+        as a :class:`MeerkatError` that names the method.
+        """
+        if (tool is None) == (family is None):
+            raise ValueError("exactly one of tool or family must be provided")
+        if scope is not None and scope not in ("window", "current_run"):
+            raise ValueError('scope must be "window" or "current_run"')
+        target: dict[str, Any] = (
+            {"kind": "tool", "name": tool}
+            if tool is not None
+            else {"kind": "family", "family": family}
+        )
+        params: dict[str, Any] = {
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
+            "target": target,
+            "duration_ms": duration_ms,
+        }
+        if scope is not None:
+            params["scope"] = {"kind": scope}
+        if reason is not None:
+            params["reason"] = reason
+        with _decision_method_served("tool_grants/request"):
+            return await self._request("tool_grants/request", params)
 
     async def revoke_tool_grant(
         self, grant_id: str, *, reason: str | None = None
@@ -2762,8 +2827,12 @@ class MeerkatClient:
 
         The subject is a session (``session_id``) or a mob member identity
         (``mob_id`` and ``identity``); a retired identity's history stays
-        readable. Ended (expired or revoked) grants are listed only with
-        ``include_ended``. Returns ``{"grants": [...]}``, with an
+        readable. Ended (expired, revoked or run-ended) grants are listed
+        only with ``include_ended``. On a 0.9.11 or newer server that keeps
+        durable decisions, the subject's grant requests
+        (:meth:`request_tool_grant`) follow its grants: open and approved ones
+        as ``requested`` and, with ``include_ended``, recently declined ones
+        as ``declined``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the server cannot read.
         For a member identity in the mob's roster the result also carries
         ``"gate"``: ``"running"``, what the member's live build gates and the

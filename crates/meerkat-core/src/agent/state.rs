@@ -4530,6 +4530,50 @@ where
         })
     }
 
+    /// A run's terminal effect (completed, failed or cancelled) ends the
+    /// run's run-scoped tool grants through the grant gate: the session's run
+    /// is over, so nothing may use them again. Best effort: a failure is
+    /// logged, and the grants still admit no use of a later run, whose first
+    /// use ends them.
+    async fn end_run_scoped_tool_grants(&self, effect: &TurnExecutionEffect) {
+        let Some(run_id) = Self::run_ended_by(effect) else {
+            return;
+        };
+        let Some(gate) = self.tool_grant_gate.as_ref() else {
+            return;
+        };
+        if let Err(refusal) = gate.end_run(run_id).await {
+            tracing::warn!(
+                error = %refusal,
+                "the run's end could not end its run-scoped tool grants"
+            );
+        }
+    }
+
+    /// Record the run a dropped run's terminal effect ended, whose
+    /// run-scoped tool grants the cancel's caller ends after it
+    /// ([`Self::end_dropped_run_tool_grants`]): the cancel that realizes the
+    /// effect is synchronous.
+    pub(super) fn owe_dropped_run_tool_grant_end(&mut self, effect: &TurnExecutionEffect) {
+        if self.tool_grant_gate.is_some()
+            && let Some(run_id) = Self::run_ended_by(effect)
+        {
+            self.dropped_run_tool_grants_owed = Some(run_id.clone());
+        }
+    }
+
+    /// The run a run's terminal effect (completed, failed or cancelled)
+    /// ends.
+    fn run_ended_by(effect: &TurnExecutionEffect) -> Option<&crate::RunId> {
+        let (TurnExecutionEffect::RunCompleted { run_id }
+        | TurnExecutionEffect::RunFailed { run_id, .. }
+        | TurnExecutionEffect::RunCancelled { run_id }) = effect
+        else {
+            return None;
+        };
+        Some(run_id)
+    }
+
     /// Charge one compaction summary call to the session and the budget, and
     /// to the run's request rows when a provider request backs it. Its
     /// accounting identity is routed, not repaired: the counters are charged
@@ -4656,6 +4700,7 @@ where
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
             self.execute_turn_terminal_effect(effect)?;
+            self.end_run_scoped_tool_grants(effect).await;
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let Some(current_boundary_index) = self.pending_compaction_boundary_index.take()
                 else {
@@ -7912,12 +7957,12 @@ where
 
     /// Boundary step: the grant gate gates the names each gated MCP server
     /// provides now (`ExtendToolGrantGate`), then opens the gated names a
-    /// live grant admits now. An extension the visibility owner refuses
-    /// leaves that server's names out of what the boundary opens (they stay
-    /// hidden and gated by their provenance) and warns. A gate that cannot
-    /// read its grants, or whose open set the visibility owner refuses,
-    /// closes every gated name and warns. The run goes on, and the next
-    /// boundary tries again.
+    /// live grant admits now, in the run this boundary belongs to. An
+    /// extension the visibility owner refuses leaves that server's names out
+    /// of what the boundary opens (they stay hidden and gated by their
+    /// provenance) and warns. A gate that cannot read its grants, or whose
+    /// open set the visibility owner refuses, closes every gated name and
+    /// warns. The run goes on, and the next boundary tries again.
     async fn apply_tool_grant_open_set_at_boundary(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
@@ -7925,7 +7970,7 @@ where
         dispatcher_tools: &[Arc<ToolDef>],
     ) {
         let (view, refused_extension) = self.extend_tool_grant_gate_at_boundary(dispatcher_tools);
-        let failure = match gate.open_names(&view).await {
+        let failure = match gate.open_names(&view, Some(ctx.run_id)).await {
             Ok(open) => self
                 .tool_scope
                 .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -22305,9 +22350,17 @@ mod tests {
             async fn open_names(
                 &self,
                 _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -24242,9 +24295,17 @@ mod tests {
             async fn open_names(
                 &self,
                 _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -24295,6 +24356,202 @@ mod tests {
         );
     }
 
+    /// The agent reads its grants in the run it serves: each model-request
+    /// boundary passes its run to the grant gate, and the end of each run
+    /// ends that run's run-scoped grants through the gate, once.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_agent_passes_its_run_to_the_grant_gate_and_ends_it_at_the_run_terminal() {
+        /// A session's grants that record the runs they are asked about.
+        #[derive(Default)]
+        struct RecordingGrants {
+            boundary_runs: Mutex<Vec<Option<crate::RunId>>>,
+            ended_runs: Mutex<Vec<crate::RunId>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for RecordingGrants {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.boundary_runs.lock().unwrap().push(run_id.cloned());
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(
+                &self,
+                run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.ended_runs.lock().unwrap().push(run_id.clone());
+                Ok(())
+            }
+        }
+
+        let grants = Arc::new(RecordingGrants::default());
+        let gate = crate::tool_grant::gate_over_table(
+            grants.clone() as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(Arc::new(StaticLlmClient), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent
+            .run("the first run".to_string().into())
+            .await
+            .expect("the first run completes");
+        agent
+            .run("the second run".to_string().into())
+            .await
+            .expect("the second run completes");
+
+        let boundary_runs = grants.boundary_runs.lock().unwrap().clone();
+        let ended_runs = grants.ended_runs.lock().unwrap().clone();
+        assert_eq!(
+            ended_runs.len(),
+            2,
+            "each run's end is signalled once: {ended_runs:?}"
+        );
+        assert_ne!(ended_runs[0], ended_runs[1], "two runs, two ends");
+        assert!(!boundary_runs.is_empty(), "every run reads its grants");
+        for run_id in &boundary_runs {
+            let run_id = run_id.as_ref().expect("every boundary is inside a run");
+            assert!(
+                ended_runs.contains(run_id),
+                "the boundary's run {run_id:?} is a run that ended"
+            );
+        }
+    }
+
+    /// A hard interrupt drops the run future in its model call, and the
+    /// session cancels the dropped run (`cancel_dropped_run`), which is
+    /// synchronous. The run's end still ends its run-scoped grants: the
+    /// session's task ends them through the gate right after the cancel
+    /// (`end_dropped_run_tool_grants`), once. Before a dropped run ended,
+    /// that ends nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_dropped_run_ends_its_run_scoped_grants() {
+        /// A session's grants that record the runs they are asked about.
+        #[derive(Default)]
+        struct RecordingGrants {
+            boundary_runs: Mutex<Vec<Option<crate::RunId>>>,
+            ended_runs: Mutex<Vec<crate::RunId>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for RecordingGrants {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.boundary_runs.lock().unwrap().push(run_id.cloned());
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(
+                &self,
+                run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.ended_runs.lock().unwrap().push(run_id.clone());
+                Ok(())
+            }
+        }
+
+        let grants = Arc::new(RecordingGrants::default());
+        let gate = crate::tool_grant::gate_over_table(
+            grants.clone() as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(NeverAnsweringLlmClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(Arc::clone(&client), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent.end_dropped_run_tool_grants().await;
+        assert!(
+            grants.ended_runs.lock().unwrap().is_empty(),
+            "no run was dropped yet"
+        );
+        {
+            let run = agent.run("the dropped run".to_string().into());
+            tokio::pin!(run);
+            let in_call = async {
+                while client.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = &mut run => panic!("the model call never answers"),
+                () = in_call => {}
+            }
+        }
+        let _ = agent.cancel_dropped_run();
+        agent.end_dropped_run_tool_grants().await;
+        agent.end_dropped_run_tool_grants().await;
+
+        let boundary_runs = grants.boundary_runs.lock().unwrap().clone();
+        let ended_runs = grants.ended_runs.lock().unwrap().clone();
+        let run_id = boundary_runs
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .expect("the dropped run read its grants at its boundary");
+        assert_eq!(
+            ended_runs,
+            vec![run_id],
+            "the dropped run's end ends its run-scoped grants, once: boundaries \
+             {boundary_runs:?}"
+        );
+    }
+
     /// A model call naming a gated tool that its closed gate hides passes the
     /// visibility precheck to the dispatch gate, the gated name's one refusal
     /// site. The grants are adjudicated exactly once, and that adjudication
@@ -24317,10 +24574,18 @@ mod tests {
             async fn open_names(
                 &self,
                 _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 *self.boundaries.lock().unwrap() += 1;
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -24670,6 +24935,7 @@ mod tests {
             async fn open_names(
                 &self,
                 view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 self.views.lock().unwrap().push(view.clone());
@@ -24684,6 +24950,13 @@ mod tests {
                 } else {
                     crate::types::ToolNameSet::new()
                 })
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(
@@ -28890,9 +29163,17 @@ mod tests {
             async fn open_names(
                 &self,
                 _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
             }
 
             async fn admit_call(

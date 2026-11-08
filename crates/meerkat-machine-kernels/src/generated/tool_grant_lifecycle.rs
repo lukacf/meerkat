@@ -33,6 +33,8 @@ pub enum ToolGrantEndReason {
     Deadline,
     #[serde(rename = "Revoked")]
     Revoked,
+    #[serde(rename = "RunEnded")]
+    RunEnded,
     #[serde(rename = "SubjectEnded")]
     SubjectEnded,
 }
@@ -41,6 +43,7 @@ impl ToolGrantEndReason {
         match self {
             Self::Deadline => "Deadline",
             Self::Revoked => "Revoked",
+            Self::RunEnded => "RunEnded",
             Self::SubjectEnded => "SubjectEnded",
         }
     }
@@ -51,6 +54,7 @@ impl std::convert::TryFrom<&str> for ToolGrantEndReason {
         match value {
             "Deadline" => Ok(Self::Deadline),
             "Revoked" => Ok(Self::Revoked),
+            "RunEnded" => Ok(Self::RunEnded),
             "SubjectEnded" => Ok(Self::SubjectEnded),
             other => Err(format!("invalid ToolGrantEndReason value `{other}`")),
         }
@@ -117,6 +121,34 @@ impl std::fmt::Display for ToolGrantIssueRefusal {
         f.write_str(self.as_str())
     }
 }
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct ToolGrantRunId(pub String);
+impl From<String> for ToolGrantRunId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for ToolGrantRunId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for ToolGrantRunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -137,6 +169,10 @@ pub enum ToolGrantUseRefusal {
     Expired,
     #[serde(rename = "Revoked")]
     Revoked,
+    #[serde(rename = "RunEnded")]
+    RunEnded,
+    #[serde(rename = "OutsideRun")]
+    OutsideRun,
     #[serde(rename = "SubjectEnded")]
     SubjectEnded,
 }
@@ -145,6 +181,8 @@ impl ToolGrantUseRefusal {
         match self {
             Self::Expired => "Expired",
             Self::Revoked => "Revoked",
+            Self::RunEnded => "RunEnded",
+            Self::OutsideRun => "OutsideRun",
             Self::SubjectEnded => "SubjectEnded",
         }
     }
@@ -155,6 +193,8 @@ impl std::convert::TryFrom<&str> for ToolGrantUseRefusal {
         match value {
             "Expired" => Ok(Self::Expired),
             "Revoked" => Ok(Self::Revoked),
+            "RunEnded" => Ok(Self::RunEnded),
+            "OutsideRun" => Ok(Self::OutsideRun),
             "SubjectEnded" => Ok(Self::SubjectEnded),
             other => Err(format!("invalid ToolGrantUseRefusal value `{other}`")),
         }
@@ -183,6 +223,7 @@ pub enum Phase {
     Active,
     Expired,
     Revoked,
+    RunEnded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -193,6 +234,7 @@ pub struct State {
     pub expires_at_ms: u64,
     pub ended_at_ms: Option<u64>,
     pub end_reason: Option<ToolGrantEndReason>,
+    pub run_scope: Option<ToolGrantRunId>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -209,6 +251,7 @@ pub mod inputs {
         pub now_ms: u64,
         pub expires_at_ms: u64,
         pub max_lifetime_ms: u64,
+        pub run_scope: Option<ToolGrantRunId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Expire {
@@ -220,6 +263,12 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitUse {
+        pub now_ms: u64,
+        pub run_id: Option<ToolGrantRunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndRun {
+        pub run_id: ToolGrantRunId,
         pub now_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -234,6 +283,7 @@ pub enum Input {
     Expire(inputs::Expire),
     Revoke(inputs::Revoke),
     AdmitUse(inputs::AdmitUse),
+    EndRun(inputs::EndRun),
     EndWithSubject(inputs::EndWithSubject),
 }
 impl Input {
@@ -243,6 +293,7 @@ impl Input {
             Self::Expire(_) => InputKind::Expire,
             Self::Revoke(_) => InputKind::Revoke,
             Self::AdmitUse(_) => InputKind::AdmitUse,
+            Self::EndRun(_) => InputKind::EndRun,
             Self::EndWithSubject(_) => InputKind::EndWithSubject,
         }
     }
@@ -253,6 +304,7 @@ pub enum InputKind {
     Expire,
     Revoke,
     AdmitUse,
+    EndRun,
     EndWithSubject,
 }
 
@@ -288,6 +340,11 @@ pub mod effects {
     pub struct IssueRefused {
         pub reason: ToolGrantIssueRefusal,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunEnded {
+        pub grant_id: String,
+        pub observed_at_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -298,6 +355,7 @@ pub enum Effect {
     UseAdmitted(effects::UseAdmitted),
     UseRefused(effects::UseRefused),
     IssueRefused(effects::IssueRefused),
+    RunEnded(effects::RunEnded),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -307,6 +365,7 @@ pub enum EffectKind {
     UseAdmitted,
     UseRefused,
     IssueRefused,
+    RunEnded,
 }
 
 #[allow(non_camel_case_types)]
@@ -329,11 +388,24 @@ pub enum TransitionId {
     AdmitDue,
     AdmitEndedExpired,
     AdmitEndedRevoked,
+    AdmitEndedRunEnded,
+    AdmitOtherRun,
+    AdmitOutsideRun,
+    EndRunMatching,
+    EndRunAfterDeadline,
+    EndRunOther,
+    EndRunSettledExpired,
+    EndRunSettledRevoked,
+    EndRunSettledRunEnded,
+    IssueRefusedIssuedRunEnded,
+    ExpireSettledRunEnded,
+    RevokeSettledRunEnded,
     EndWithSubjectActive,
     EndWithSubjectAfterDeadline,
     EndWithSubjectSettledExpired,
     EndWithSubjectSettledRevoked,
     AdmitEndedWithSubject,
+    EndWithSubjectSettledRunEnded,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -411,5 +483,6 @@ pub fn initial_state() -> State {
         expires_at_ms: 0,
         ended_at_ms: None,
         end_reason: None,
+        run_scope: None,
     }
 }

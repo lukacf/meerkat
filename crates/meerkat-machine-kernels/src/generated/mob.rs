@@ -10827,6 +10827,8 @@ pub struct State {
     pub identity_runtime_fence_tokens: std::collections::BTreeMap<AgentIdentity, FenceToken>,
     pub identity_generation_highwater: std::collections::BTreeMap<AgentIdentity, Generation>,
     pub identity_generation_highwater_sealed: bool,
+    pub identity_life_resets: u64,
+    pub identity_life_ends: std::collections::BTreeMap<AgentIdentity, u64>,
     pub active_run_count: u64,
     pub flow_authority_schema_version: u64,
     pub run_status: std::collections::BTreeMap<RunId, FlowRunStatus>,
@@ -14346,6 +14348,14 @@ pub mod signals {
     pub struct RecoverRowlessCreatedEntry {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndIdentityLife {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverIdentityLifeResets {
+        pub resets: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14458,6 +14468,8 @@ pub enum Signal {
     RecoverIdentityEntryAdopting(signals::RecoverIdentityEntryAdopting),
     RecoverOwnedIdentityEdge(signals::RecoverOwnedIdentityEdge),
     RecoverRowlessCreatedEntry(signals::RecoverRowlessCreatedEntry),
+    EndIdentityLife(signals::EndIdentityLife),
+    RecoverIdentityLifeResets(signals::RecoverIdentityLifeResets),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -14606,6 +14618,8 @@ impl Signal {
             Self::RecoverIdentityEntryAdopting(_) => SignalKind::RecoverIdentityEntryAdopting,
             Self::RecoverOwnedIdentityEdge(_) => SignalKind::RecoverOwnedIdentityEdge,
             Self::RecoverRowlessCreatedEntry(_) => SignalKind::RecoverRowlessCreatedEntry,
+            Self::EndIdentityLife(_) => SignalKind::EndIdentityLife,
+            Self::RecoverIdentityLifeResets(_) => SignalKind::RecoverIdentityLifeResets,
         }
     }
 }
@@ -14715,6 +14729,8 @@ pub enum SignalKind {
     RecoverIdentityEntryAdopting,
     RecoverOwnedIdentityEdge,
     RecoverRowlessCreatedEntry,
+    EndIdentityLife,
+    RecoverIdentityLifeResets,
 }
 
 pub mod effects {
@@ -18449,6 +18465,14 @@ pub enum TransitionId {
     ResolveMemberDispatchAdmissionNoneRequiredDestroyed,
     RecordMemberDispatchAdmissionLineageRunning,
     RecordMemberDispatchAdmissionLineageStopped,
+    EndIdentityLifeRunning,
+    EndIdentityLifeStopped,
+    EndIdentityLifeCompleted,
+    EndIdentityLifeDestroyed,
+    RecoverIdentityLifeResetsRunning,
+    RecoverIdentityLifeResetsStopped,
+    RecoverIdentityLifeResetsCompleted,
+    RecoverIdentityLifeResetsDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18532,6 +18556,8 @@ pub fn initial_state() -> State {
         identity_runtime_fence_tokens: Default::default(),
         identity_generation_highwater: Default::default(),
         identity_generation_highwater_sealed: false,
+        identity_life_resets: 0,
+        identity_life_ends: Default::default(),
         active_run_count: 0,
         flow_authority_schema_version: 7,
         run_status: Default::default(),

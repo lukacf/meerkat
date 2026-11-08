@@ -33,6 +33,11 @@ pub struct MemberToolGrant {
     pub reason: Option<String>,
     /// How long it lives.
     pub window: meerkat_runtime::tool_grant::ToolGrantWindow,
+    /// The run it is scoped to, when it is: the run of the session the mob
+    /// holds for the identity as the grant is made. It opens its target in
+    /// that run only and ends with it. `None` for a grant bounded by its
+    /// window only.
+    pub run_scope: Option<meerkat_core::RunId>,
 }
 
 /// Why [`super::MobHandle::grant_member_tool`] issued no grant.

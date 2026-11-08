@@ -819,26 +819,31 @@ if run_part audits-s; then
   TLC_WORKERS="${tlc_workers}" "${source_credential_publication_audit}" "${SOURCE_CREDENTIAL_PUBLICATION_AUDIT_MAX_STEPS:-5}"
 fi
 
-# Scoped tool grant expiry (the ToolGrantLifecycleMachine deadline guards,
-# the deadline timer, the boundary that shows a gated name, the dispatch
-# gate's fresh admission and the expiry write it makes after a refusal or
-# loses, revocation and a grant's end with its subject, reads that settle a
-# due grant without loading the session, crash, restart and one bounded
-# clock rollback) spans the shell's
-# use of the machine, which the machine's own ci sweep cannot see. A
-# hand-written audit over the same generated model drives one grant with
-# deadline 2 on a clock in 0..3, under every generated invariant plus five
-# invariants and one action property (no call handed on at or after the
-# deadline or after the grant ended; a persisted end is latched across crash,
-# restart and rollback; expiry is never early; revocation precedes the
-# deadline; a visible name was shown before the deadline). It requires its
-# ten witnesses reached (among them a grant ended with its subject refusing
-# a call, and the subject's end at the deadline recording expiry) and
-# refuses seven seeded defects (--mutants): an early expiry guard, an
-# inclusive admission guard, a dispatch that reuses the boundary's verdict,
-# a restart that revives an ended grant, a revoked grant handed on, a grant
-# ended with its subject handed on, and a boundary that trusts the stored
-# phase. 6 steps reach every witness.
+# Scoped tool grant expiry and run scope (the ToolGrantLifecycleMachine
+# deadline and run guards, the deadline timer, the boundary that shows a gated
+# name, the dispatch gate's fresh admission and the end it writes after a
+# refusal or loses, revocation and a grant's end with its subject, reads that
+# settle a due grant without loading the session, two runs and the runtime's
+# signal of their ends, crash, restart, recovery of the interrupted run and
+# one bounded clock rollback) spans the shell's use of the machine, which the
+# machine's own ci sweep cannot see. A hand-written audit over the same
+# generated model drives one grant with deadline 2 on a clock in 0..3, under
+# every generated invariant plus seven invariants and one action property (no
+# call handed on at or after the deadline or after the grant ended; a
+# persisted end is latched across crash, restart and rollback; expiry is
+# never early; revocation precedes the deadline; a visible name was shown
+# before the deadline; a run-scoped grant hands on calls of its own run only;
+# it never ends with its run while that run is current). It requires its
+# fifteen witnesses reached (among them a grant ended with its subject
+# refusing a call, the subject's end at the deadline recording expiry, and
+# the subject's end of a grant whose run ended changing nothing) and refuses
+# ten seeded defects (--mutants): an early expiry guard, an inclusive
+# admission guard, an admission guard that ignores the run scope, a dispatch
+# that reuses the boundary's verdict, a restart that revives an ended grant,
+# a revoked grant handed on, a grant ended with its subject handed on, a
+# boundary that trusts the stored phase, a call of another run handed on,
+# and a run end signalled while the run is current. 6 steps reach every
+# witness.
 tool_grant_expiry_audit="${workspace_root}/specs/machines/tool_grant_lifecycle/tool_grant_expiry_audit.sh"
 if [[ ! -x "${tool_grant_expiry_audit}" ]]; then
   echo "error: tool grant expiry audit runner is missing from workspace runfiles: ${tool_grant_expiry_audit}" >&2
@@ -898,8 +903,9 @@ fi
 # identity has moved past (a later incarnation ended) is answered by exactly
 # one arm, the stale arm, which answers no other marker. It
 # explores the whole reachable space, with no step bound: its TLC VIEW
-# leaves out the two counters the model never reads
-# (model_step_count, topology_epoch), which it checks first. It runs with
+# leaves out the four counters no guard reads (model_step_count,
+# topology_epoch and the identity life marker, identity_life_resets and
+# identity_life_ends), which it checks first. It runs with
 # TLC coverage and requires every listed arm to fire and a floor of distinct
 # states, requires its seven witnesses reached (one recovers an archived
 # identity's next incarnation, one replays a delayed final of an older

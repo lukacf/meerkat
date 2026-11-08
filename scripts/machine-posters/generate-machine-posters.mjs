@@ -766,13 +766,13 @@ const MACHINE_SPECS = [
     id: "tool_grant_lifecycle",
     title: "ToolGrantLifecycleMachine",
     canonicalFn: "dsl_tool_grant_lifecycle_machine",
-    subtitle: "One scoped tool grant / clock-free / expiry and revocation are terminal / use is admitted per call",
+    subtitle: "One scoped tool grant / clock-free / expiry, revocation and run end are terminal / use is admitted per call, in its run",
     tlaPath: path.join(repoRoot, "specs", "machines", "tool_grant_lifecycle", "model.tla"),
     contractPath: path.join(repoRoot, "specs", "machines", "tool_grant_lifecycle", "contract.md"),
     catalogPath: path.join(repoRoot, "crates", "meerkat-machine-schema", "src", "catalog", "dsl", "tool_grant_lifecycle.rs"),
     accent: "#d9a95f",
     layout: {
-      plate: { width: 1800, height: 850 },
+      plate: { width: 1800, height: 1110 },
       phases: {
         Unissued: {
           x: 710,
@@ -803,6 +803,13 @@ const MACHINE_SPECS = [
           h: 110,
           subtitle: "terminal: revoked before the deadline",
         },
+        RunEnded: {
+          x: 740,
+          y: 880,
+          w: 320,
+          h: 110,
+          subtitle: "terminal: its run ended before the deadline",
+        },
       },
       statePanels: {
         left: [
@@ -810,6 +817,11 @@ const MACHINE_SPECS = [
             title: "Fixed Window",
             note: "Issued once; the deadline never moves. Every input carries the host's time observation.",
             fields: ["grant_id", "issued_at_ms", "expires_at_ms"],
+          },
+          {
+            title: "Run Scope",
+            note: "Set only by Issue, never moved: the run a run-scoped grant admits uses of.",
+            fields: ["run_scope"],
           },
         ],
         right: [
@@ -864,6 +876,17 @@ const MACHINE_SPECS = [
           columns: 1,
           anchors: ["Active", "Revoked"],
           triggers: ["Revoke", "EndWithSubject"],
+        },
+        {
+          id: "run-scope",
+          title: "Run Scope",
+          note: "A run-scoped grant admits uses of its own run only. The end of its run, or a use of a later run, ends it; a use outside any run is refused and ends nothing. At or after the deadline a run end records the expiry.",
+          x: 40,
+          y: 820,
+          w: 600,
+          columns: 1,
+          anchors: ["Active", "RunEnded"],
+          triggers: ["EndRun", "AdmitUse"],
         },
       ],
     },

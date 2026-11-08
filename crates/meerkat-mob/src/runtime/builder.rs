@@ -4614,6 +4614,7 @@ fn seed_mob_authority_sync_from_events(
                 agent_identity,
                 generation,
                 session_archived,
+                facts,
                 ..
             } => {
                 let agent_runtime_id = AgentRuntimeId::new(agent_identity.clone(), *generation);
@@ -4654,6 +4655,17 @@ fn seed_mob_authority_sync_from_events(
                     },
                     "recover_member_retired",
                 )?;
+                // A retirement whose end ended its identity moved the
+                // identity's life marker; its replay moves it again.
+                if facts.identity_ended {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::EndIdentityLife {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        },
+                        "recover_identity_life_end",
+                    )?;
+                }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 apply_seeded_mob_signal(
@@ -5096,6 +5108,21 @@ fn recover_identity_generation_highwaters(
                 generation: operator_instruction_generation,
             },
             "recover_operator_instruction_generation_highwater",
+        )?;
+    }
+    // The reset part of every identity's life marker: the resets of the
+    // whole history. The epoch replay rebuilds the ends since the last one.
+    let resets = events
+        .iter()
+        .filter(|event| matches!(event.kind, MobEventKind::MobReset))
+        .count();
+    if resets > 0 {
+        apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverIdentityLifeResets {
+                resets: u64::try_from(resets).unwrap_or(u64::MAX),
+            },
+            "recover_identity_life_resets",
         )?;
     }
     seal_identity_generation_highwater(authority, "resume_seal_generation_highwater")

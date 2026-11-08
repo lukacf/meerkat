@@ -511,6 +511,10 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     # presentation precedes it.
     "WireDecisionNoticePresentation",
     "WireDecisionNotice",
+    # `tool_grants/request`: its result carries the decision that holds the
+    # request, so it follows the decision records.
+    "RequestToolGrantParams",
+    "RequestToolGrantResult",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
@@ -539,12 +543,15 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireLoginCancelled",
     # Scoped tool grant vocabulary. Every alias the audit event union names
     # precedes it: the generated Python aliases evaluate in roster order. The
-    # request subject and target are closed; the result ones are tolerant.
+    # request subject, target and scope are closed; the result ones are
+    # tolerant.
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "ToolGrantScopeRequest",
     "WireToolGrantSubject",
     "WireToolGrantTarget",
     "WireToolGrantIssuer",
+    "WireToolGrantScope",
     "WireToolGrantStatus",
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
@@ -576,6 +583,7 @@ PARAMS_UNION_ALIAS_TYPES = {
     "LoginStartParams",
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "ToolGrantScopeRequest",
     "DecisionAudienceRequest",
 }
 

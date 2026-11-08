@@ -2902,6 +2902,7 @@ pub(crate) mod tests {
         async fn open_names(
             &self,
             view: &crate::tool_grant::GatedToolView,
+            _run_id: Option<&crate::RunId>,
         ) -> Result<ToolNameSet, crate::tool_grant::ToolGrantRefusal> {
             Ok(if self.clock.load(Ordering::SeqCst) < self.deadline {
                 view.gated().iter().cloned().collect()
@@ -2925,6 +2926,13 @@ pub(crate) mod tests {
                     expires_at_ms: self.deadline,
                 })
             }
+        }
+
+        async fn end_run(
+            &self,
+            _run_id: &crate::RunId,
+        ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+            Ok(())
         }
     }
 
@@ -3056,8 +3064,16 @@ pub(crate) mod tests {
         async fn open_names(
             &self,
             _view: &crate::tool_grant::GatedToolView,
+            _run_id: Option<&crate::RunId>,
         ) -> Result<ToolNameSet, crate::tool_grant::ToolGrantRefusal> {
             Ok(ToolNameSet::new())
+        }
+
+        async fn end_run(
+            &self,
+            _run_id: &crate::RunId,
+        ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+            Ok(())
         }
 
         async fn admit_call(

@@ -4,15 +4,19 @@
 
 use meerkat_contracts::{
     WireToolGrant, WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantExpiryDriver,
-    WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantStatus, WireToolGrantSubject,
-    WireToolGrantTarget, WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
+    WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantScope, WireToolGrantStatus,
+    WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrant,
+    WireUnreadableToolGrantAuditRow,
 };
-use meerkat_core::tool_grant::{ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
+use meerkat_core::RunId;
+use meerkat_core::approval::decision::{DecisionPhase, StoredDecision};
+use meerkat_core::tool_grant::{ToolGrantId, ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
 
 use super::audit::{
     ToolGrantAuditEvent, ToolGrantAuditRecord, ToolGrantExpiryDriver, ToolGrantRefusalKind,
     UnreadableToolGrantAuditRow,
 };
+use super::request::ToolGrantIssueBody;
 use super::service::{StoredToolGrant, ToolGrantStatus, UnreadableToolGrant};
 
 /// One grant as its row stands.
@@ -28,6 +32,57 @@ pub fn wire_tool_grant(grant: &StoredToolGrant) -> WireToolGrant {
         issued_at_ms: grant.issued_at_ms,
         expires_at_ms: grant.expires_at_ms,
         ended_at_ms: grant.ended_at_ms,
+        scope: wire_tool_grant_scope(grant.run_scope.as_ref()),
+    }
+}
+
+/// A grant request as a list shows it: `requested` while its decision is
+/// open or approved, `declined` once it was rejected, expired, withdrawn or
+/// refused. Its `grant_id` is the id its grant gets when it is issued, its
+/// issuer the approval (the decision's id), `issued_at_ms` when it was asked,
+/// `expires_at_ms` its decision's deadline, and `ended_at_ms` when it was
+/// declined.
+#[must_use]
+pub fn wire_tool_grant_request(
+    decision: &StoredDecision,
+    body: &ToolGrantIssueBody,
+) -> WireToolGrant {
+    let declined = !matches!(
+        decision.state.phase,
+        DecisionPhase::Open | DecisionPhase::Approved
+    );
+    WireToolGrant {
+        grant_id: ToolGrantId::approved(&decision.decision_id).to_string(),
+        subject: wire_tool_grant_subject(&body.subject),
+        target: wire_tool_grant_target(&body.target),
+        issuer: WireToolGrantIssuer::Approval {
+            approval_id: decision.decision_id.to_string(),
+        },
+        reason: body.reason.clone(),
+        status: if declined {
+            WireToolGrantStatus::Declined
+        } else {
+            WireToolGrantStatus::Requested
+        },
+        issued_at_ms: decision.descriptor.created_at_ms,
+        expires_at_ms: decision.descriptor.deadline_at_ms,
+        ended_at_ms: if declined {
+            decision.state.ended_at_ms
+        } else {
+            None
+        },
+        scope: wire_tool_grant_scope(body.run_scope.as_ref()),
+    }
+}
+
+/// A grant's scope: its window only, or the run it was issued for.
+#[must_use]
+pub fn wire_tool_grant_scope(run_scope: Option<&RunId>) -> WireToolGrantScope {
+    match run_scope {
+        None => WireToolGrantScope::Window,
+        Some(run_id) => WireToolGrantScope::CurrentRun {
+            run_id: run_id.to_string(),
+        },
     }
 }
 
@@ -93,6 +148,7 @@ pub fn wire_tool_grant_status(status: ToolGrantStatus) -> WireToolGrantStatus {
         ToolGrantStatus::Active => WireToolGrantStatus::Active,
         ToolGrantStatus::Expired => WireToolGrantStatus::Expired,
         ToolGrantStatus::Revoked => WireToolGrantStatus::Revoked,
+        ToolGrantStatus::RunEnded => WireToolGrantStatus::RunEnded,
     }
 }
 
@@ -134,12 +190,14 @@ fn wire_tool_grant_audit_event(event: &ToolGrantAuditEvent) -> WireToolGrantAudi
             issuer,
             reason,
             expires_at_ms,
+            run_scope,
         } => WireToolGrantAuditEvent::Granted {
             grant_id: grant_id.to_string(),
             target: wire_tool_grant_target(target),
             issuer: wire_tool_grant_issuer(issuer),
             reason: reason.clone(),
             expires_at_ms: *expires_at_ms,
+            scope: wire_tool_grant_scope(run_scope.as_ref()),
         },
         ToolGrantAuditEvent::Expired {
             grant_id,
@@ -176,6 +234,17 @@ fn wire_tool_grant_audit_event(event: &ToolGrantAuditEvent) -> WireToolGrantAudi
             call_id: call_id.clone(),
             run_id: run_id.clone(),
         },
+        ToolGrantAuditEvent::RunEnded {
+            grant_id,
+            run_id,
+            observed_at_ms,
+            driver,
+        } => WireToolGrantAuditEvent::RunEnded {
+            grant_id: grant_id.to_string(),
+            run_id: run_id.to_string(),
+            observed_at_ms: *observed_at_ms,
+            driver: wire_tool_grant_expiry_driver(*driver),
+        },
     }
 }
 
@@ -186,6 +255,8 @@ fn wire_tool_grant_expiry_driver(driver: ToolGrantExpiryDriver) -> WireToolGrant
         ToolGrantExpiryDriver::Dispatch => WireToolGrantExpiryDriver::Dispatch,
         ToolGrantExpiryDriver::Read => WireToolGrantExpiryDriver::Read,
         ToolGrantExpiryDriver::Revoke => WireToolGrantExpiryDriver::Revoke,
+        ToolGrantExpiryDriver::Run => WireToolGrantExpiryDriver::Run,
+        ToolGrantExpiryDriver::Recovery => WireToolGrantExpiryDriver::Recovery,
         ToolGrantExpiryDriver::Build => WireToolGrantExpiryDriver::Build,
     }
 }
@@ -231,6 +302,7 @@ mod tests {
             issued_at_ms: 1_000,
             expires_at_ms: 61_000,
             ended_at_ms: Some(2_000),
+            run_scope: None,
             subject_ended: false,
         };
         assert_eq!(
@@ -245,7 +317,20 @@ mod tests {
                 "issued_at_ms": 1000,
                 "expires_at_ms": 61000,
                 "ended_at_ms": 2000,
+                "scope": {"kind": "window"},
             })
+        );
+        let run_id = RunId::new();
+        let run_ended = StoredToolGrant {
+            status: ToolGrantStatus::RunEnded,
+            run_scope: Some(run_id.clone()),
+            ..grant.clone()
+        };
+        let projected = serde_json::to_value(wire_tool_grant(&run_ended)).unwrap();
+        assert_eq!(projected["status"], "run_ended");
+        assert_eq!(
+            projected["scope"],
+            serde_json::json!({"kind": "current_run", "run_id": run_id.to_string()})
         );
 
         let row = ToolGrantAuditRecord {

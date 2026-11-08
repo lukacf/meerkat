@@ -15,7 +15,7 @@ use meerkat_machine_schema::catalog::dsl::tool_grant_lifecycle::{
     ToolGrantEndReason, ToolGrantIssueRefusal, ToolGrantLifecycleEffect, ToolGrantLifecycleInput,
     ToolGrantLifecycleMachineAuthority, ToolGrantLifecycleMachineMutator,
     ToolGrantLifecycleMachineState, ToolGrantLifecycleMachineTransition,
-    ToolGrantLifecycleMachineTransitionError, ToolGrantPhase, ToolGrantUseRefusal,
+    ToolGrantLifecycleMachineTransitionError, ToolGrantPhase, ToolGrantRunId, ToolGrantUseRefusal,
 };
 
 type Authority = ToolGrantLifecycleMachineAuthority;
@@ -47,6 +47,7 @@ fn issue(grant_id: &str, now_ms: u64, expires_at_ms: u64, max_lifetime_ms: u64) 
         now_ms,
         expires_at_ms,
         max_lifetime_ms,
+        run_scope: None,
     }
 }
 
@@ -63,7 +64,18 @@ fn revoke(now_ms: u64) -> Input {
 }
 
 fn admit(now_ms: u64) -> Input {
-    Input::AdmitUse { now_ms }
+    Input::AdmitUse {
+        now_ms,
+        run_id: None,
+    }
+}
+
+/// The end of the run `run-1`, the run a run-ended grant was scoped to.
+fn end_run(now_ms: u64) -> Input {
+    Input::EndRun {
+        run_id: ToolGrantRunId::from("run-1"),
+        now_ms,
+    }
 }
 
 fn end_with_subject(now_ms: u64) -> Input {
@@ -71,7 +83,8 @@ fn end_with_subject(now_ms: u64) -> Input {
 }
 
 /// Build an authority parked in `phase` for the grant `GRANT`, issued at
-/// `ISSUED_AT` with the deadline `DEADLINE`.
+/// `ISSUED_AT` with the deadline `DEADLINE`: bounded by its window only, or,
+/// for `RunEnded`, scoped to the run `run-1`, which ended.
 fn authority_in(phase: Phase) -> Authority {
     let mut authority = Authority::new();
     match phase {
@@ -87,16 +100,30 @@ fn authority_in(phase: Phase) -> Authority {
             apply(&mut authority, valid_issue());
             apply(&mut authority, revoke(DEADLINE - 1));
         }
+        Phase::RunEnded => {
+            apply(
+                &mut authority,
+                Input::Issue {
+                    grant_id: GRANT.to_owned(),
+                    now_ms: ISSUED_AT,
+                    expires_at_ms: DEADLINE,
+                    max_lifetime_ms: MAX_LIFETIME,
+                    run_scope: Some(ToolGrantRunId::from("run-1")),
+                },
+            );
+            apply(&mut authority, end_run(DEADLINE - 1));
+        }
     }
     assert_eq!(authority.state().lifecycle_phase, phase);
     authority
 }
 
-const ALL_PHASES: [Phase; 4] = [
+const ALL_PHASES: [Phase; 5] = [
     Phase::Unissued,
     Phase::Active,
     Phase::Expired,
     Phase::Revoked,
+    Phase::RunEnded,
 ];
 
 /// A stable label for one effect, including its typed reason.
@@ -105,6 +132,7 @@ fn effect_label(effect: &Effect) -> &'static str {
         Effect::Issued { .. } => "Issued",
         Effect::Expired { .. } => "Expired",
         Effect::Revoked { .. } => "Revoked",
+        Effect::RunEnded { .. } => "RunEnded",
         Effect::UseAdmitted { .. } => "UseAdmitted",
         Effect::UseRefused {
             reason: ToolGrantUseRefusal::Expired,
@@ -114,6 +142,14 @@ fn effect_label(effect: &Effect) -> &'static str {
             reason: ToolGrantUseRefusal::Revoked,
             ..
         } => "UseRefused(Revoked)",
+        Effect::UseRefused {
+            reason: ToolGrantUseRefusal::RunEnded,
+            ..
+        } => "UseRefused(RunEnded)",
+        Effect::UseRefused {
+            reason: ToolGrantUseRefusal::OutsideRun,
+            ..
+        } => "UseRefused(OutsideRun)",
         Effect::UseRefused {
             reason: ToolGrantUseRefusal::SubjectEnded,
             ..
@@ -150,7 +186,7 @@ enum Expected {
 
 #[test]
 fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended() {
-    let commands: [(&str, fn() -> Input); 11] = [
+    let commands: [(&str, fn() -> Input); 13] = [
         ("Issue", valid_issue),
         ("IssuePastWindow", || {
             issue(GRANT, DEADLINE, ISSUED_AT, MAX_LIFETIME)
@@ -166,6 +202,8 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
         ("EndWithSubjectAtDeadline", || end_with_subject(DEADLINE)),
         ("AdmitEarly", || admit(DEADLINE - 1)),
         ("AdmitAtDeadline", || admit(DEADLINE)),
+        ("EndRunEarly", || end_run(DEADLINE - 1)),
+        ("EndRunAtDeadline", || end_run(DEADLINE)),
     ];
 
     let expected = |phase: Phase, command: &str| -> Expected {
@@ -190,12 +228,18 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
             (Phase::Active, "AdmitAtDeadline") => {
                 Advance(Phase::Expired, &["Expired", "UseRefused(Expired)"])
             }
+            // The Active grant here is bounded by its window only: the end
+            // of a run ends nothing (tool_grant_run_scope.rs drives the
+            // run-scoped grant's arms).
+            (Phase::Active, "EndRunEarly" | "EndRunAtDeadline") => SelfLoop(&[]),
             (
-                Phase::Expired | Phase::Revoked,
+                Phase::Expired | Phase::Revoked | Phase::RunEnded,
                 "ExpireEarly"
                 | "ExpireAtDeadline"
                 | "RevokeEarly"
                 | "RevokeAtDeadline"
+                | "EndRunEarly"
+                | "EndRunAtDeadline"
                 | "EndWithSubjectEarly"
                 | "EndWithSubjectAtDeadline",
             ) => SelfLoop(&[]),
@@ -204,6 +248,9 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
             }
             (Phase::Revoked, "AdmitEarly" | "AdmitAtDeadline") => {
                 SelfLoop(&["UseRefused(Revoked)"])
+            }
+            (Phase::RunEnded, "AdmitEarly" | "AdmitAtDeadline") => {
+                SelfLoop(&["UseRefused(RunEnded)"])
             }
             (phase, command) => panic!("no expectation for ({phase:?}, {command})"),
         }

@@ -7,10 +7,11 @@
 # generated constant and invariant, unchanged), then adds the audit's finite
 # model values (one identity, two runtime ids, two fence tokens, generations
 # 0..1, two sessions, the audit's strings) and its VIEW, which leaves out the
-# two counters no guard, other variable's update or invariant of the
-# generated model reads (model_step_count and topology_epoch). The runner
-# first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. With the counters left out the reachable space is finite,
+# four counters no guard, other variable's update or invariant of the
+# generated model reads (model_step_count, topology_epoch and the identity
+# life marker, identity_life_resets and identity_life_ends). The runner first
+# checks that the model still reads none of them anywhere else, and fails
+# otherwise. With the counters left out the reachable space is finite,
 # so each run explores all of it, with no step bound. It checks two runs over
 # their whole space with TLC coverage:
 # - the lifecycle run (AuditSpec) with its four action properties, the two
@@ -179,7 +180,8 @@ replace_exact_line() {
   mv "${file}.next" "${file}"
 }
 
-# The VIEW leaves out model_step_count and topology_epoch, so the generated
+# The VIEW leaves out model_step_count, topology_epoch and the identity life
+# marker (identity_life_resets, identity_life_ends), so the generated
 # model must read them nowhere but in their own updates, Init, the UNCHANGED
 # frames and the generated profiles' state constraints (which the audit does
 # not use). Prints their positions in the `vars` tuple.
@@ -203,6 +205,22 @@ allowed = {
         r"    /\\ topology_epoch' = ",
         r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
     ],
+    "identity_life_resets": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_resets = 0$",
+        r"    /\\ identity_life_resets' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+    ],
+    "identity_life_ends": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_ends = ",
+        r"    /\\ identity_life_ends' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+        r"CiStateConstraint == ",
+        r"DeepStateConstraint == ",
+    ],
 }
 for name, patterns in allowed.items():
     word = re.compile(r"\b" + name + r"\b")
@@ -216,12 +234,11 @@ names = [name.strip() for name in tuples[0][len("vars == << "):-len(" >>")].spli
 for name in allowed:
     if names.count(name) != 1:
         sys.exit(f"error: expected {name} once in the vars tuple of model.tla")
-print(names.index("model_step_count") + 1, names.index("topology_epoch") + 1)
+print(" ".join(str(names.index(name) + 1) for name in allowed))
 PY
 }
 view_positions="$(view_counter_positions)"
-step_index="${view_positions% *}"
-epoch_index="${view_positions#* }"
+read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_positions}"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is lifecycle (AuditSpec and its action properties) or scope
@@ -239,7 +256,9 @@ write_cfg() {
   replace_exact_line "  StringValues = {}" '  StringValues = {"profile_1", "token_1", "token_2"}' "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditStepIndex = ${step_index}
-  AuditEpochIndex = ${epoch_index}" "${cfg}"
+  AuditEpochIndex = ${epoch_index}
+  AuditLifeResetsIndex = ${life_resets_index}
+  AuditLifeEndsIndex = ${life_ends_index}" "${cfg}"
   case "${run}" in
     lifecycle)
       replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${cfg}"

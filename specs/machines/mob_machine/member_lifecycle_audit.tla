@@ -35,12 +35,14 @@
 \* tokens.
 \*
 \* Each run explores the whole reachable state space of these domains, with
-\* no step bound. The TLC VIEW (AuditView) leaves out the two counters that
+\* no step bound. The TLC VIEW (AuditView) leaves out the four counters that
 \* no guard, no other variable's update and no invariant reads:
-\* model_step_count, which every arm increments, and topology_epoch, which
-\* many arms increment. States that differ only in them are one state, so
-\* the space is finite and TLC finishes it. The runner checks on every run
-\* that the generated model still reads neither counter anywhere else.
+\* model_step_count, which every arm increments, topology_epoch, which
+\* many arms increment, and the identity life marker (identity_life_resets,
+\* identity_life_ends), which every end of an identity moves. States that
+\* differ only in them are one state, so the space is finite and TLC finishes
+\* it. The runner checks on every run that the generated model still reads
+\* none of the counters anywhere else.
 \*
 \* Input shapes: the audit gives each arm the shapes the shell sends, so a
 \* guard refusal outside them is not explored. A Retire arm's (releasing,
@@ -192,9 +194,10 @@
 \* member_lifecycle_audit.sh.
 EXTENDS model
 
-\* The positions of model_step_count and topology_epoch in the generated
-\* `vars` tuple; the runner reads them from model.tla.
-CONSTANTS AuditStepIndex, AuditEpochIndex
+\* The positions of model_step_count, topology_epoch and the identity life
+\* marker (identity_life_resets, identity_life_ends) in the generated `vars`
+\* tuple; the runner reads them from model.tla.
+CONSTANTS AuditStepIndex, AuditEpochIndex, AuditLifeResetsIndex, AuditLifeEndsIndex
 
 AuditIdentity == "agentidentity_1"
 AuditRuntimes == {"agentruntimeid_1", "agentruntimeid_2"}
@@ -588,8 +591,10 @@ AuditScopeNext ==
 
 AuditScopeSpec == Init /\ [][AuditScopeNext]_vars
 
-\* Every state variable but the two counters (see the header).
-AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads (see the header):
+\* the two above and the identity life marker.
+AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 AuditObservationMonotonic ==
     [][\A id \in DOMAIN member_last_observed_at_ms :

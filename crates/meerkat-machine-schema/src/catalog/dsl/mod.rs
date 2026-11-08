@@ -6082,8 +6082,8 @@ pub fn temporary_council_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 }
 
 /// Canonical ToolGrantLifecycleMachine: one scoped tool grant's issuance,
-/// expiry at a supplied clock, revocation and use admission. Record-scoped
-/// and clock-free.
+/// expiry at a supplied clock, revocation, the end of the run a run-scoped
+/// grant was issued for, and use admission. Record-scoped and clock-free.
 pub fn dsl_tool_grant_lifecycle_machine() -> MachineSchema {
     tool_grant_lifecycle_schema_metadata()
         .attach_to(tool_grant_lifecycle::ToolGrantLifecycleMachineState::schema())
@@ -6097,19 +6097,26 @@ pub fn dsl_tool_grant_lifecycle_machine_production_schema() -> MachineSchema {
     )
 }
 
-/// Named-type bindings for the scoped tool grant record machine: the end
-/// reason carried by the state and the two typed refusal vocabularies its
-/// verdict effects carry.
+/// Named-type bindings for the scoped tool grant record machine: its opaque
+/// run key, the end reason carried by the state and the two typed refusal
+/// vocabularies its verdict effects carry.
 pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            NamedTypeBinding::string("ToolGrantRunId"),
             NamedTypeBinding::string_enum(
                 "ToolGrantEndReason",
-                &["Deadline", "Revoked", "SubjectEnded"],
+                &["Deadline", "Revoked", "RunEnded", "SubjectEnded"],
             ),
             NamedTypeBinding::string_enum(
                 "ToolGrantUseRefusal",
-                &["Expired", "Revoked", "SubjectEnded"],
+                &[
+                    "Expired",
+                    "Revoked",
+                    "RunEnded",
+                    "OutsideRun",
+                    "SubjectEnded",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "ToolGrantIssueRefusal",
@@ -6124,17 +6131,27 @@ pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 /// The scoped tool grant machine's explicit TLC model. Every input carries
 /// unsigned times, which the generated model explores over the three values
 /// `0..2`: a grant issued at 0 or 1 with a deadline of 1 or 2 is observed
-/// before, at and after its deadline. Every arm is reached within four
-/// steps (issue, end, issue again), so the CI run requires each of them,
-/// the `IssueRefusedIssued*` arms of an ended grant included, to generate a
-/// state.
+/// before, at and after its deadline. A use and a run end name a run key, and
+/// a grant may be scoped to one, so the run key samples the two values
+/// `alpha` and `beta`: a use or a run end of the grant's own run and of
+/// another run are both explored. Every arm is reached within four steps
+/// (issue, end, issue again), so the CI run requires each of them, the
+/// settled arms of an ended grant included, to generate a state.
+#[allow(clippy::expect_used)]
 fn tool_grant_lifecycle_tlc_model() -> crate::MachineTlcModel {
-    let no_samples = || crate::MachineTlcProfile {
-        named_values: std::collections::BTreeMap::new(),
+    let two_runs = || crate::MachineTlcProfile {
+        named_values: std::iter::once((
+            crate::identity::NamedTypeId::parse("ToolGrantRunId").expect("valid named-type slug"),
+            vec![
+                crate::TlcValue::String("alpha".to_owned()),
+                crate::TlcValue::String("beta".to_owned()),
+            ],
+        ))
+        .collect(),
     };
     crate::MachineTlcModel {
-        ci: no_samples(),
-        deep: no_samples(),
+        ci: two_runs(),
+        deep: two_runs(),
         ci_limits: crate::MachineTlcStateLimits {
             step_limit: 4,
             seq_limit: 1,

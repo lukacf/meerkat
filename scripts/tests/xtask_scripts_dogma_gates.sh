@@ -370,7 +370,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # property violated.
 # source_credential_publication_audit.sh (auth) requires each of its nine
 # reachability witnesses violated.
-# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its eight
+# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its fifteen
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # action property violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
@@ -843,11 +843,18 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessRevokeAfterDeadlineRecordsExpiry is violated."' \
   'echo "Error: Invariant NotAuditWitnessSubjectEndAfterDeadlineRecordsExpiry is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnpersistedRefusalThenAdmitted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRunEndedThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLaterRunEndsStaleGrant is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHostCallOutsideRunRefusedWithoutEnding is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRecoveryEndsInterruptedRun is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSubjectEndOfRunEndedGrantChangesNothing is violated."' \
   'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
   'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \
   'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
   'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
+  'echo "Error: Invariant AuditRunScopedUseInItsRun is violated."' \
+  'echo "Error: Invariant AuditRunEndOnlyAfterItsRun is violated."' \
   'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryAdoptedUnlisted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryRetireUnadopted AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterRefused SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed UnlistIdentityEntryRemoved RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
   'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \

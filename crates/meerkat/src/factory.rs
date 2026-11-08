@@ -2292,11 +2292,10 @@ fn grant_gate_for_build(
     let grants = session_grants.ok_or(GrantGateBuildError::NoGrantService)?;
     let owner = owner.ok_or(GrantGateBuildError::NoGrantService)?;
     Ok(ResolvedGrantGate {
-        gate: Some(meerkat_core::tool_grant::ToolGrantGate::new(
-            grants,
-            install,
-            owner.clone(),
-        )),
+        gate: Some(
+            meerkat_core::tool_grant::ToolGrantGate::new(grants, install, owner.clone())
+                .with_table(table),
+        ),
         recorded,
     })
 }
@@ -11032,7 +11031,10 @@ impl AgentFactory {
         // agent gates each gated server's names and opens the gated names a
         // live grant admits at each boundary, and the outermost dispatch gate
         // adjudicates every gated call. The gate reads the session's machine
-        // through the build's generated visibility owner.
+        // through the build's generated visibility owner. A gated build also
+        // mounts the agent's `request_tool_grant` beside its tools, itself
+        // ungated; the session's host holds each request, or answers that it
+        // takes none.
         let grant_gate_owner = match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.tool_visibility_owner()),
             RuntimeBuildMode::StandaloneEphemeral => None,
@@ -11057,6 +11059,13 @@ impl AgentFactory {
         factory_metadata.tooling.grant_gated = recorded_grant_gate;
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
+            let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(
+                gate.clone(),
+            )) as Arc<dyn AgentToolDispatcher>;
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                request_tool,
+            ]));
         }
 
         let visibility_filters = capability_base_filter_override
@@ -27796,6 +27805,7 @@ mod mcp_server_grant_gate_tests {
                     issuer: ToolGrantIssuer::operator(),
                     reason: None,
                     window: ToolGrantWindow::For(lifetime),
+                    run_scope: None,
                 },
                 None,
             )

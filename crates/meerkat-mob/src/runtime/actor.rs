@@ -55000,8 +55000,31 @@ impl MobActor {
                 preserve_machine_topology: ctx.preserve_machine_topology,
             }
         };
-        let prepared = self
+        let mut prepared = self
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
+        // Whether this end ends the identity itself, read from the state
+        // before the step: its life marker moves on the same step, and the
+        // terminal row records it, so the replay of the row moves it again
+        // (a terminal re-driven over a row that exists moved it at that
+        // replay already).
+        let ends_identity = super::identity_entry::retirement_ends_identity(
+            self.dsl_authority.state(),
+            &ctx.entry.agent_identity,
+            &ctx.entry.agent_runtime_id,
+        );
+        if ends_identity && !final_event_exists {
+            prepared
+                .authority
+                .apply_signal(mob_dsl::MobMachineSignal::EndIdentityLife {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&ctx.entry.agent_identity),
+                })
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "DSL authority prepare (dispose_member_archive_completed) refused the end of '{}''s life: {error}",
+                        ctx.entry.agent_identity
+                    ))
+                })?;
+        }
         if !final_event_exists {
             // An identity's tool grants end with the identity: a retirement
             // that ends it ends them here, before its terminal row, with the
@@ -55011,11 +55034,7 @@ impl MobActor {
             // retirement for its retry.
             #[cfg(feature = "runtime-adapter")]
             {
-                if super::identity_entry::retirement_ends_identity(
-                    self.dsl_authority.state(),
-                    &ctx.entry.agent_identity,
-                    &ctx.entry.agent_runtime_id,
-                ) {
+                if ends_identity {
                     let sessions = if is_peer_only {
                         std::collections::BTreeSet::new()
                     } else {
@@ -55059,7 +55078,8 @@ impl MobActor {
                 &ctx.entry.agent_identity,
                 &ctx.entry.agent_runtime_id,
                 journal_session.as_ref(),
-            )?;
+            )?
+            .with_identity_ended(ends_identity);
             self.append_retire_event_for_entry(
                 &ctx.entry,
                 !is_peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
@@ -66005,6 +66025,7 @@ impl MobActor {
             issuer: grant.issuer,
             reason: grant.reason,
             window: grant.window,
+            run_scope: grant.run_scope,
         };
         runtime
             .tool_grant_service()

@@ -6068,7 +6068,7 @@ mod scoped_tool_grants {
     /// serves the shell family, so the view is its gated names.
     async fn boundary(agent: &meerkat::DynAgent, grants: &Arc<dyn SessionToolGrants>) {
         let view = GatedToolView::new(shell_names(), BTreeMap::new());
-        let open = grants.open_names(&view).await.expect("grants read");
+        let open = grants.open_names(&view, None).await.expect("grants read");
         agent
             .tool_scope()
             .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -6125,6 +6125,7 @@ mod scoped_tool_grants {
                     issuer: ToolGrantIssuer::operator(),
                     reason: None,
                     window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
+                    run_scope: None,
                 },
                 None,
             )
@@ -6534,6 +6535,49 @@ mod scoped_tool_grants {
                 .grant_gated,
             shell_gate()
         );
+    }
+
+    /// `request_tool_grant` is mounted by every gated build, visible (the
+    /// tool itself is not gated), and by no ungated build.
+    #[tokio::test]
+    async fn request_tool_grant_is_mounted_only_by_a_gated_build() {
+        use meerkat_core::tool_grant::REQUEST_TOOL_GRANT_TOOL;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let on_machine = &machine;
+        let build = move |gate: Option<GrantGatedTools>| {
+            gated_runtime_build(
+                on_machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                gate,
+            )
+        };
+        let mounted = |agent: &meerkat::DynAgent| {
+            let (base, visible) = names(agent);
+            (
+                base.iter().any(|name| name == REQUEST_TOOL_GRANT_TOOL),
+                visible.contains(REQUEST_TOOL_GRANT_TOOL),
+            )
+        };
+
+        let agent = factory
+            .build_agent(build(Some(shell_gate())).await, &Config::default())
+            .await
+            .expect("a gated build builds");
+        assert_eq!(
+            mounted(&agent),
+            (true, true),
+            "a gated build mounts it open"
+        );
+
+        let agent = factory
+            .build_agent(build(None).await, &Config::default())
+            .await
+            .expect("an ungated build builds");
+        assert_eq!(mounted(&agent), (false, false), "nothing is gated");
     }
 
     /// A deny list may name a tool no vocabulary declares while the gate

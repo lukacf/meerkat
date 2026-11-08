@@ -8,12 +8,18 @@
 //! authority, review, confinement) still applies on top.
 //!
 //! The canonical `ToolGrantLifecycleMachine` owns each grant's lifecycle
-//! (issuance, expiry at a supplied clock, revocation, use admission). The
-//! runtime implements [`SessionToolGrants`] over its store and hands it to
-//! the factory on the session's runtime bindings. Core never reads a grant's
-//! phase: it asks the seam for the open names at each model-request boundary,
-//! and for one call's admission immediately before the dispatcher hands the
-//! call on.
+//! (issuance, expiry at a supplied clock, revocation, the end of the run a
+//! run-scoped grant was issued for, use admission). The runtime implements
+//! [`SessionToolGrants`] over its store and hands it to the factory on the
+//! session's runtime bindings. Core never reads a grant's phase: it asks the
+//! seam for the open names at each model-request boundary of a run, for one
+//! call's admission immediately before the dispatcher hands the call on, and
+//! tells it when a run ends.
+//!
+//! A gated build also mounts [`REQUEST_TOOL_GRANT_TOOL`]
+//! ([`ToolGrantRequestDispatcher`]): the agent asks its session's host for a
+//! grant a person approves ([`SessionToolGrants::request_grant`]), and the
+//! host holds a durable decision for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -22,6 +28,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{SessionId, ToolName, ToolNameSet};
+
+mod request_tool;
+
+pub use request_tool::ToolGrantRequestDispatcher;
 
 /// Refusal code: no live grant covers the gated name.
 pub const TOOL_GRANT_REQUIRED_CODE: &str = "tool_grant_required";
@@ -383,10 +393,17 @@ impl InstalledToolGrantGate {
     }
 }
 
-/// One scoped tool grant's id: a UUID v4 the grant service mints.
+/// One scoped tool grant's id: a UUID v4 the grant service mints, or the
+/// UUID v5 an approved request derives from its decision
+/// ([`ToolGrantId::approved`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ToolGrantId(uuid::Uuid);
+
+/// The namespace of the grant ids approved requests derive
+/// ([`ToolGrantId::approved`]).
+const APPROVED_GRANT_ID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x6f1c_2b8e_4d3a_4f5b_9c27_8e1d_0a6b_3c59);
 
 impl ToolGrantId {
     /// A fresh id.
@@ -395,15 +412,27 @@ impl ToolGrantId {
         Self(uuid::Uuid::new_v4())
     }
 
-    /// Parse a UUID v4 id.
+    /// The id of the grant an approved request issues: a UUID v5 over the
+    /// approving decision's id. A request knows its grant's id before it is
+    /// decided, and a replayed execution meets the grant it issued.
+    #[must_use]
+    pub fn approved(decision_id: &crate::approval::decision::DecisionId) -> Self {
+        Self(uuid::Uuid::new_v5(
+            &APPROVED_GRANT_ID_NAMESPACE,
+            decision_id.as_str().as_bytes(),
+        ))
+    }
+
+    /// Parse a grant id: a version 4 UUID the grant service minted, or a
+    /// version 5 UUID an approved request derived.
     ///
     /// # Errors
-    /// [`ToolGrantIdError`] when `value` is not a version 4 UUID.
+    /// [`ToolGrantIdError`] when `value` is neither.
     pub fn parse(value: &str) -> Result<Self, ToolGrantIdError> {
         let uuid = uuid::Uuid::parse_str(value).map_err(|_| ToolGrantIdError {
             value: value.to_string(),
         })?;
-        if uuid.get_version_num() != 4 {
+        if !matches!(uuid.get_version_num(), 4 | 5) {
             return Err(ToolGrantIdError {
                 value: value.to_string(),
             });
@@ -438,9 +467,10 @@ impl From<ToolGrantId> for String {
     }
 }
 
-/// A tool grant id that is not a version 4 UUID.
+/// A string that is not a tool grant id: neither a version 4 nor a version 5
+/// UUID.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("tool grant id {value:?} is not a version 4 UUID")]
+#[error("tool grant id {value:?} is not a version 4 or version 5 UUID")]
 pub struct ToolGrantIdError {
     pub value: String,
 }
@@ -765,6 +795,11 @@ pub enum ToolGrantRequestRefusal {
     /// An audit page limit of zero.
     #[error("an audit page limit must be at least 1")]
     InvalidPageLimit,
+    /// A `current_run` scope whose subject runs no turn: an idle session, or
+    /// an identity whose member runs no turn on this host. Nothing was
+    /// issued or held.
+    #[error("the subject runs no turn: a current_run scope needs a run")]
+    RunNotActive,
 }
 
 impl ToolGrantRequestRefusal {
@@ -803,6 +838,61 @@ pub struct ToolGrantCall<'a> {
     pub call_id: &'a str,
     /// The run the call belongs to, when it belongs to one.
     pub run_id: Option<&'a crate::RunId>,
+}
+
+/// The name of the tool an agent asks for a grant with: every grant-gated
+/// build mounts it ([`ToolGrantRequestDispatcher`]).
+pub const REQUEST_TOOL_GRANT_TOOL: &str = "request_tool_grant";
+
+/// One grant request an agent asks for through [`REQUEST_TOOL_GRANT_TOOL`]:
+/// a target its build gates, how long the grant lasts from its issuance,
+/// why, and the run and tool call that ask (a replay of the call answers the
+/// same request). It names neither its subject (the agent's own session) nor
+/// its approver (the host's policy).
+#[derive(Debug, Clone, Copy)]
+pub struct ToolGrantAgentRequest<'a> {
+    pub target: &'a ToolGrantTarget,
+    pub duration: std::time::Duration,
+    pub reason: Option<&'a str>,
+    pub run_id: &'a crate::RunId,
+    pub call_id: &'a str,
+}
+
+/// An agent's grant request as its host holds it: the decision a person
+/// approves, the id the grant gets when it is issued, the decision's phase
+/// now and its deadline, how long the grant lasts once issued, and whether
+/// the call joined a request already open for its target. A replayed call
+/// answers the request it held, as it stands now; a call that joined a
+/// request answers that request while it is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGrantRequestReceipt {
+    pub decision_id: crate::approval::decision::DecisionId,
+    pub grant_id: ToolGrantId,
+    pub phase: crate::approval::decision::DecisionPhase,
+    pub deadline_at_ms: u64,
+    /// How long the grant lasts from its issuance, in milliseconds: the
+    /// duration the request holds, which for a joined request is that
+    /// request's and can differ from the one the call asked.
+    pub duration_ms: u64,
+    /// Whether the call joined a request already open or approved for its
+    /// subject and target instead of holding its own.
+    pub joined: bool,
+}
+
+/// Why an agent's grant request was not held.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ToolGrantAgentRequestRefusal {
+    /// The session's host takes no grant requests.
+    #[error("this host takes no tool grant requests")]
+    NotTaken,
+    /// The host refuses the request as asked: a duration outside its bounds,
+    /// or a request it cannot hold.
+    #[error("{0}")]
+    Invalid(String),
+    /// The request could not be held now.
+    #[error("the tool grant request could not be held now: {0}")]
+    Unavailable(String),
 }
 
 /// What a model-request boundary adjudicates of a build's gate: the gated
@@ -874,8 +964,15 @@ impl GatedToolView {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionToolGrants: Send + Sync {
-    /// The gated names of `view` that a live grant opens at this moment.
-    async fn open_names(&self, view: &GatedToolView) -> Result<ToolNameSet, ToolGrantRefusal>;
+    /// The gated names of `view` that a live grant opens at this moment, in
+    /// the run `run_id` (a model-request boundary belongs to one run). A
+    /// grant scoped to another run opens nothing here, and is ended: the
+    /// session's run moved on.
+    async fn open_names(
+        &self,
+        view: &GatedToolView,
+        run_id: Option<&crate::RunId>,
+    ) -> Result<ToolNameSet, ToolGrantRefusal>;
 
     /// One gated call's admission: a live grant that covers it admits it.
     /// The caller has already decided the call is gated. The clock is read
@@ -893,6 +990,32 @@ pub trait SessionToolGrants: Send + Sync {
     ) -> Result<BTreeSet<String>, ToolGrantRefusal> {
         let _ = servers;
         Ok(BTreeSet::new())
+    }
+
+    /// The run `run_id` of the session ended (completed, failed or
+    /// cancelled): end the grants scoped to it. Grants bounded by their
+    /// window only, and grants of another run, are left as they are.
+    ///
+    /// # Errors
+    /// `Unavailable` when the grants cannot be read or written. The ended
+    /// run's grants then admit no use of a later run either: the first such
+    /// use ends them.
+    async fn end_run(&self, run_id: &crate::RunId) -> Result<(), ToolGrantRefusal>;
+
+    /// Hold `request` for a person to approve: the host holds a durable
+    /// decision for a grant of the target to this seam's session and issues
+    /// nothing now. A replay of the same run and call answers the decision
+    /// it held, as it stands.
+    ///
+    /// # Errors
+    /// [`ToolGrantAgentRequestRefusal::NotTaken`] when the host takes no
+    /// requests, as the default does; the host's refusal otherwise.
+    async fn request_grant(
+        &self,
+        request: ToolGrantAgentRequest<'_>,
+    ) -> Result<ToolGrantRequestReceipt, ToolGrantAgentRequestRefusal> {
+        let _ = request;
+        Err(ToolGrantAgentRequestRefusal::NotTaken)
     }
 
     /// The seam of a mob member's build over the same grants: it reads the
@@ -922,6 +1045,11 @@ pub struct ToolGrantGate {
     grants: Arc<dyn SessionToolGrants>,
     install: Arc<InstalledToolGrantGate>,
     owner: crate::tool_scope::GeneratedToolVisibilityOwner,
+    /// The families and names the build gated by name, each family with the
+    /// names it provides: what an agent's grant request can name
+    /// ([`Self::requested_target`]). Empty unless the build sets it
+    /// ([`Self::with_table`]).
+    table: Arc<GatedToolTable>,
 }
 
 impl ToolGrantGate {
@@ -937,7 +1065,23 @@ impl ToolGrantGate {
             grants,
             install: Arc::new(install),
             owner,
+            table: Arc::new(GatedToolTable::default()),
         }
+    }
+
+    /// This gate, with `table`, the families and names the build gated by
+    /// name: the targets an agent's grant request can name.
+    #[must_use]
+    pub fn with_table(mut self, table: GatedToolTable) -> Self {
+        self.table = Arc::new(table);
+        self
+    }
+
+    /// The families and names the build gated by name: the targets an
+    /// agent's grant request can name.
+    #[must_use]
+    pub fn table(&self) -> &GatedToolTable {
+        &self.table
     }
 
     /// What the build installs.
@@ -965,12 +1109,17 @@ impl ToolGrantGate {
         }
     }
 
-    /// The gated names of `view` a live grant opens at this moment.
+    /// The gated names of `view` a live grant opens at this moment, in the
+    /// run `run_id`.
     ///
     /// # Errors
     /// The seam's refusal when the grants cannot be read.
-    pub async fn open_names(&self, view: &GatedToolView) -> Result<ToolNameSet, ToolGrantRefusal> {
-        self.grants.open_names(view).await
+    pub async fn open_names(
+        &self,
+        view: &GatedToolView,
+        run_id: Option<&crate::RunId>,
+    ) -> Result<ToolNameSet, ToolGrantRefusal> {
+        self.grants.open_names(view, run_id).await
     }
 
     /// One gated call's admission.
@@ -985,6 +1134,53 @@ impl ToolGrantGate {
     #[must_use]
     pub fn grants(&self) -> &Arc<dyn SessionToolGrants> {
         &self.grants
+    }
+
+    /// The run `run_id` ended: end the grants scoped to it.
+    ///
+    /// # Errors
+    /// The seam's refusal when the grants cannot be read or written.
+    pub async fn end_run(&self, run_id: &crate::RunId) -> Result<(), ToolGrantRefusal> {
+        self.grants.end_run(run_id).await
+    }
+
+    /// The target an agent's request names, when the build gates it: one
+    /// tool name the build gates (by name, or through a gated family), or a
+    /// gated family with the names the build gated for it. `None` otherwise,
+    /// and for a request naming both or neither.
+    #[must_use]
+    pub fn requested_target(
+        &self,
+        tool: Option<&str>,
+        family: Option<&str>,
+    ) -> Option<ToolGrantTarget> {
+        match (tool, family) {
+            (Some(name), None) if self.table.is_gated(name) => Some(ToolGrantTarget::Tool {
+                name: ToolName::from(name),
+            }),
+            (None, Some(family)) => {
+                self.table
+                    .families()
+                    .get(family)
+                    .map(|names| ToolGrantTarget::Family {
+                        family: family.to_owned(),
+                        names: names.clone(),
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// Ask the session's host to hold an agent's grant request
+    /// ([`SessionToolGrants::request_grant`]).
+    ///
+    /// # Errors
+    /// The host's refusal.
+    pub async fn request_grant(
+        &self,
+        request: ToolGrantAgentRequest<'_>,
+    ) -> Result<ToolGrantRequestReceipt, ToolGrantAgentRequestRefusal> {
+        self.grants.request_grant(request).await
     }
 }
 
@@ -1026,6 +1222,17 @@ pub(crate) fn gate_over_install(
             crate::tool_scope::LocalToolVisibilityOwner::with_state(state),
         )),
     )
+}
+
+/// A gate over `grants` that gates what `table` gates by name, read through a
+/// fixed local owner whose machine recorded exactly those names, with the
+/// table an agent's grant request names its targets from.
+#[cfg(test)]
+pub(crate) fn gate_over_table(
+    grants: Arc<dyn SessionToolGrants>,
+    table: GatedToolTable,
+) -> ToolGrantGate {
+    gate_over_install(grants, InstalledToolGrantGate::names(table.gated_names())).with_table(table)
 }
 
 #[cfg(test)]
@@ -1093,6 +1300,33 @@ mod tests {
         assert_eq!(serde_json::from_str::<ToolGrantId>(&text).unwrap(), id);
         assert!(ToolGrantId::parse("not-a-uuid").is_err());
         assert!(ToolGrantId::parse("00000000-0000-1000-8000-000000000000").is_err());
+    }
+
+    #[test]
+    fn an_approved_grant_id_derives_from_its_decision_and_parses() {
+        use crate::approval::decision::{DecisionId, DecisionKind, DecisionSubjectKey};
+        let decision = |subject: &str| {
+            DecisionId::derive(
+                &DecisionKind::new("tool_grant.issue").unwrap(),
+                &DecisionSubjectKey::new(subject).unwrap(),
+            )
+        };
+        let first = ToolGrantId::approved(&decision("s:one/tool:deploy/host:a"));
+        assert_eq!(
+            first,
+            ToolGrantId::approved(&decision("s:one/tool:deploy/host:a")),
+            "a replayed execution meets the id its decision derives"
+        );
+        assert_ne!(
+            first,
+            ToolGrantId::approved(&decision("s:one/tool:deploy/host:b")),
+            "another decision derives another id"
+        );
+        assert_eq!(first.as_uuid().get_version_num(), 5);
+        assert_eq!(ToolGrantId::parse(&first.to_string()).unwrap(), first);
+        let text = serde_json::to_string(&first).unwrap();
+        assert_eq!(serde_json::from_str::<ToolGrantId>(&text).unwrap(), first);
+        assert_ne!(first, ToolGrantId::mint());
     }
 
     #[test]

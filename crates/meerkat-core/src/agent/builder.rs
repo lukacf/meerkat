@@ -760,6 +760,7 @@ impl AgentBuilder {
             tools,
             tool_scope,
             tool_grant_gate,
+            dropped_run_tool_grants_owed: None,
             store,
             session,
             budget,

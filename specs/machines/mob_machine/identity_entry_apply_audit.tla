@@ -96,7 +96,8 @@
 \*     is retired without its adoption).
 \*
 \* Each run explores its whole reachable space under a VIEW that leaves out
-\* model_step_count and topology_epoch, which no guard reads, with TLC
+\* model_step_count, topology_epoch and the identity life marker
+\* (identity_life_resets, identity_life_ends), which no guard reads, with TLC
 \* coverage. Properties: every generated invariant of ci.cfg (the declared
 \* apply's among them: entry_is_seated_or_has_an_unseated_cause,
 \* unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
@@ -324,8 +325,10 @@ EntryReplay(id, rid) ==
     \/ RecoverIdentityEntrySeatedRunning(id, rid, "Declared")
     \/ RecoverIdentityEntrySeatedStopped(id, rid, "Declared")
 
-\* Every state variable but the two counters.
-StateView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads: model_step_count,
+\* topology_epoch and the identity life marker.
+StateView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 Cause(id) == IF id \in DOMAIN member_host_preparation_causes THEN Some(member_host_preparation_causes[id]) ELSE None
 Unseated(id) == IF id \in DOMAIN identity_entry_unseated THEN Some(identity_entry_unseated[id]) ELSE None

@@ -21,6 +21,7 @@ fn shell_grant() -> MemberToolGrant {
         issuer: ToolGrantIssuer::operator(),
         reason: Some("maintenance".to_string()),
         window: ToolGrantWindow::For(Duration::from_mins(10)),
+        run_scope: None,
     }
 }
 

@@ -26554,6 +26554,39 @@
   },
   "GrantToolParams": {
     "$defs": {
+      "ToolGrantScopeRequest": {
+        "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind or a field this version does not know is refused, never read as a\nwindow. The kinds are empty structs, so a field is refused as unknown.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The grant lasts for its window.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The grant also ends with the run its subject is running when it is\nissued: a session's own, or the run of the session a member\nidentity's member holds. A subject that runs none is refused with the\ntyped request refusal `run_not_active`.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ToolGrantSubjectRequest": {
         "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
         "oneOf": [
@@ -26670,7 +26703,7 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and\n`duration_ms` bounds the grant, at most the host's maximum lifetime.",
+    "description": "`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and\n`duration_ms` bounds the grant, at most the host's maximum lifetime. A\n`current_run` scope also ends it with the run its session is running\nwhen it is issued.",
     "properties": {
       "decision_ref": {
         "description": "The host's opaque reference to the decision it made before issuing\n(for example a person's approval in its own records): non-empty, at\nmost 1024 bytes, no control character. Recorded in the grant's issuer\nas attribution; nothing resolves or trusts it.",
@@ -26702,6 +26735,17 @@
           "string",
           "null"
         ]
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolGrantScopeRequest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Its window only (the default), or also the subject session's current\nrun. Absent, it names no scope, so an older server still takes a\nwindow grant."
       },
       "subject": {
         "$ref": "#/$defs/ToolGrantSubjectRequest"
@@ -42722,6 +42766,195 @@
     "title": "RealmIdParams",
     "type": "object"
   },
+  "RequestToolGrantParams": {
+    "$defs": {
+      "ToolGrantScopeRequest": {
+        "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind or a field this version does not know is refused, never read as a\nwindow. The kinds are empty structs, so a field is refused as unknown.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The grant lasts for its window.",
+            "properties": {
+              "kind": {
+                "const": "window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The grant also ends with the run its subject is running when it is\nissued: a session's own, or the run of the session a member\nidentity's member holds. A subject that runs none is refused with the\ntyped request refusal `run_not_active`.",
+            "properties": {
+              "kind": {
+                "const": "current_run",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolGrantSubjectRequest": {
+        "description": "The subject a request names: whose grants it writes or reads. Closed: a\nkind or a field this version does not know is refused, never ignored.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One session's grants.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
+            "properties": {
+              "identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "identity",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolGrantTargetRequest": {
+        "description": "The target a grant request names: one tool name, a built-in tool family,\nwhose names the server takes at grant time, or an MCP server. Closed: a\nkind or a field this version does not know is refused, never ignored, so\na request is never read as wider than it asked.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One tool name.",
+            "properties": {
+              "kind": {
+                "const": "tool",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A built-in tool family.",
+            "properties": {
+              "family": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "family",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "family"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An MCP server: every tool it provides when a call or a boundary\nadjudicates the grant, or, with `tools`, only those of its tools\nnamed there (a non-empty list, which only narrows).",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`tool_grants/request` parameters: ask for a grant a person approves\nthrough a durable decision of kind `tool_grant.issue`. `duration_ms`\nbounds the grant from its issuance, at most the host's maximum lifetime;\na `current_run` scope also scopes it to the run its session is running\nwhen it is asked. Closed, as `tool_grants/grant`'s parameters: a request\nnames no approver (the host's policy does).",
+    "properties": {
+      "duration_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ToolGrantScopeRequest"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "subject": {
+        "$ref": "#/$defs/ToolGrantSubjectRequest"
+      },
+      "target": {
+        "$ref": "#/$defs/ToolGrantTargetRequest"
+      }
+    },
+    "required": [
+      "subject",
+      "target",
+      "duration_ms"
+    ],
+    "title": "RequestToolGrantParams",
+    "type": "object"
+  },
   "RestoreSessionTranscriptRevisionParams": {
     "$defs": {
       "TranscriptEditRunningBehavior": {
@@ -46745,6 +46978,41 @@
     ],
     "title": "ToolGrantAuditParams",
     "type": "object"
+  },
+  "ToolGrantScopeRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "How long a grant request asks a grant to last beyond its window. Closed: a\nkind or a field this version does not know is refused, never read as a\nwindow. The kinds are empty structs, so a field is refused as unknown.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "The grant lasts for its window.",
+        "properties": {
+          "kind": {
+            "const": "window",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The grant also ends with the run its subject is running when it is\nissued: a session's own, or the run of the session a member\nidentity's member holds. A subject that runs none is refused with the\ntyped request refusal `run_not_active`.",
+        "properties": {
+          "kind": {
+            "const": "current_run",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "ToolGrantScopeRequest"
   },
   "ToolGrantSubjectRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

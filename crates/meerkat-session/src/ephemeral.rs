@@ -4152,6 +4152,13 @@ pub trait SessionAgent: Send {
         None
     }
 
+    /// End the run-scoped tool grants of the run
+    /// [`Self::cancel_dropped_run`] just cancelled. The cancel is
+    /// synchronous, so the session task awaits this right after it. The
+    /// default ends nothing, which is right only for an agent without a tool
+    /// grant gate.
+    async fn end_dropped_run_tool_grants(&mut self) {}
+
     /// End a turn whose run future a graceful requeue stop's suspension has
     /// dropped, with no terminal and no closing write, and say how the run
     /// ended: resumable from its last round commit, or past its final save.
@@ -12227,7 +12234,12 @@ async fn session_task<A: SessionAgent>(
                         | None => (None, interrupted),
                     };
                     let mut dropped_run_terminal = if cancel_dropped {
-                        agent.cancel_dropped_run()
+                        let terminal = agent.cancel_dropped_run();
+                        // The cancel realized the run's end: its run-scoped
+                        // tool grants end with it, before its terminal is
+                        // published.
+                        agent.end_dropped_run_tool_grants().await;
+                        terminal
                     } else {
                         None
                     };
@@ -15121,6 +15133,8 @@ mod admission_window_tests {
         /// Ask a suspension instead of the hard interrupt, and answer it with
         /// this outcome from `suspend_dropped_run`.
         suspend_before_success: Option<meerkat_core::DroppedRunSuspension>,
+        /// How many times the session ended a dropped run's tool grants.
+        dropped_run_grant_ends: Arc<AtomicUsize>,
     }
 
     struct AdmissionProbeAgent {
@@ -15133,6 +15147,7 @@ mod admission_window_tests {
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
         suspend_before_success: Option<meerkat_core::DroppedRunSuspension>,
+        dropped_run_grant_ends: Arc<AtomicUsize>,
         active_work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     }
@@ -15161,6 +15176,7 @@ mod admission_window_tests {
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
                 suspend_before_success: self.suspend_before_success.clone(),
+                dropped_run_grant_ends: Arc::clone(&self.dropped_run_grant_ends),
                 active_work_authorization: None,
                 transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
@@ -15258,6 +15274,10 @@ mod admission_window_tests {
             self.suspend_before_success.clone()
         }
 
+        async fn end_dropped_run_tool_grants(&mut self) {
+            self.dropped_run_grant_ends.fetch_add(1, Ordering::SeqCst);
+        }
+
         fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
             Some(self.cancel_after_boundary_tx.clone())
         }
@@ -15340,6 +15360,7 @@ mod admission_window_tests {
             turn_admission_for_run: Arc::new(Mutex::new(None)),
             interrupt_before_success: false,
             suspend_before_success: None,
+            dropped_run_grant_ends: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -15427,6 +15448,47 @@ mod admission_window_tests {
             .expect("next turn should run after interrupted compaction cleanup");
         assert_eq!(next.text, "ran");
         assert_eq!(compaction_abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A hard interrupt cancels the dropped run, then has the agent end the
+    /// dropped run's run-scoped tool grants, once. A turn that runs to its
+    /// end ends them at its own terminal: the session asks nothing more.
+    #[tokio::test]
+    async fn a_hard_interrupt_ends_the_dropped_runs_tool_grants() {
+        let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let builder = probe_builder(
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            cancel_after_boundary_tx,
+        );
+        let grant_ends = Arc::clone(&builder.dropped_run_grant_ends);
+        let service = EphemeralSessionService::new(builder, 1);
+        let (session_id, command_tx) = create_admitted_session(&service).await;
+
+        service
+            .interrupt(&session_id)
+            .await
+            .expect("admitted turn accepts hard interrupt");
+        let result = deliver_start_turn(command_tx).await;
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert_eq!(
+            grant_ends.load(Ordering::SeqCst),
+            1,
+            "the cancelled run's grants are ended once"
+        );
+
+        let next = service
+            .start_turn(&session_id, start_turn_request())
+            .await
+            .expect("the next turn runs");
+        assert_eq!(next.text, "ran");
+        assert_eq!(
+            grant_ends.load(Ordering::SeqCst),
+            1,
+            "a turn that ran to its end asks nothing more"
+        );
     }
 
     #[tokio::test]

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Bounded TLC audit of scoped tool grant expiry over the generated
-# ToolGrantLifecycleMachine model: the deadline timer, the model-request
-# boundary that shows a gated name, the dispatch gate's fresh admission and
-# the expiry write it makes after a refusal (or loses), revocation, reads
-# that settle a due grant without loading the session, crash and restart,
-# and one bounded host clock rollback.
+# Bounded TLC audit of scoped tool grant expiry and run scope over the
+# generated ToolGrantLifecycleMachine model: the deadline timer, the
+# model-request boundary that shows a gated name, the dispatch gate's fresh
+# admission and the end it writes after a refusal (or loses), revocation, a
+# grant's end with its subject, reads that settle a due grant without loading
+# the session, two runs of the session and the runtime's signal of their ends
+# (at once, late or never), crash and restart, durable-tail recovery of the
+# interrupted run, and one bounded host clock rollback.
 #
 # usage: tool_grant_expiry_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's model
-# values (one grant, deadline 2, a clock in 0..3), its step bound, its five
+# values (one grant, deadline 2, a clock in 0..3), its step bound, its seven
 # invariants and its action property, and checks them over the whole bounded
 # space (safety). It then reruns the space once per reachability witness,
 # with that witness's negation as an extra invariant, and requires TLC to
@@ -33,8 +35,18 @@
 #     (SubjectEndAfterDeadlineRecordsExpiry);
 #   - a dispatch refuses a call at the deadline and loses its expiry write,
 #     and after a clock rollback a call before the deadline is handed on
-#     (UnpersistedRefusalThenAdmitted).
-# With --mutants it seeds seven defects and requires TLC to refuse each with
+#     (UnpersistedRefusalThenAdmitted);
+#   - the runtime signals the end of the grant's run, which ends the grant,
+#     and a later call is refused (RunEndedThenRefused);
+#   - the end of the grant's run is never signalled, and a use of the
+#     session's next run ends the stale grant (LaterRunEndsStaleGrant);
+#   - a host call outside any run is refused and the run-scoped grant stays
+#     live (HostCallOutsideRunRefusedWithoutEnding);
+#   - recovery closes the run a crash interrupted and ends its grant
+#     (RecoveryEndsInterruptedRun);
+#   - the subject of a grant whose run already ended ends, and the grant
+#     stays ended with its run (SubjectEndOfRunEndedGrantChangesNothing).
+# With --mutants it seeds ten defects and requires TLC to refuse each with
 # the property it targets. TLC reports only the first violated invariant of a
 # state, and one defect can break different properties in different states
 # of the same depth, so each mutant run checks the generated invariants and
@@ -43,6 +55,8 @@
 #     of the generated model (AuditExpiryNotEarly);
 #   - admit_guard_inclusive: AdmitLive admits at the deadline, in a copy of
 #     the generated model (AuditNoAdmitAtOrAfterDeadline);
+#   - admit_ignores_run_scope: AdmitLive admits a call of any run, in a copy
+#     of the generated model (AuditRunScopedUseInItsRun);
 #   - dispatch_reuses_boundary_verdict: the dispatch hands on a call because
 #     the boundary showed the name (AuditNoAdmitAtOrAfterDeadline);
 #   - restart_reactivates_terminal: a restart reloads an ended grant as live
@@ -52,7 +66,11 @@
 #   - subject_ended_admits: the dispatch hands on a call the grant that
 #     ended with its subject refused (AuditTerminalNeverAdmits);
 #   - boundary_trusts_durable_phase: the boundary shows the name because the
-#     stored row is still Active (AuditVisibleOnlyWhileLive).
+#     stored row is still Active (AuditVisibleOnlyWhileLive);
+#   - other_run_admits: the dispatch hands on a call of another run that the
+#     run-scoped grant refused (AuditRunScopedUseInItsRun);
+#   - run_end_signalled_while_running: the runtime signals the end of the
+#     session's current run before it ended (AuditRunEndOnlyAfterItsRun).
 # An anchor this script expects but cannot find fails the run. Each TLC run
 # is held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails
 # closed as TLC INCOMPLETE.
@@ -84,10 +102,15 @@ text = open(os.environ["MODEL"]).read()
 arms = [
     "Issue", "IssueRefusedWindow",
     "ExpireDue", "ExpireNotDue", "ExpireSettledExpired", "ExpireSettledRevoked",
+    "ExpireSettledRunEnded",
     "RevokeActive", "RevokeAfterDeadline", "RevokeSettledExpired", "RevokeSettledRevoked",
+    "RevokeSettledRunEnded",
     "EndWithSubjectActive", "EndWithSubjectAfterDeadline", "EndWithSubjectSettledExpired",
-    "EndWithSubjectSettledRevoked",
-    "AdmitLive", "AdmitDue", "AdmitEndedExpired", "AdmitEndedRevoked", "AdmitEndedWithSubject",
+    "EndWithSubjectSettledRevoked", "EndWithSubjectSettledRunEnded",
+    "AdmitLive", "AdmitDue", "AdmitEndedExpired", "AdmitEndedRevoked", "AdmitEndedRunEnded",
+    "AdmitEndedWithSubject", "AdmitOtherRun", "AdmitOutsideRun",
+    "EndRunMatching", "EndRunAfterDeadline", "EndRunOther", "EndRunSettledExpired",
+    "EndRunSettledRevoked", "EndRunSettledRunEnded",
 ]
 for arm in arms:
     count = text.count("\n" + arm + "(")
@@ -96,7 +119,7 @@ declared = [line for line in text.split("\n") if line.startswith("VARIABLES ")]
 assert len(declared) == 1, "VARIABLES line not found in model.tla"
 variables = sorted(name.strip() for name in declared[0][len("VARIABLES "):].split(","))
 expected = sorted(["phase", "model_step_count", "grant_id", "issued_at_ms", "expires_at_ms",
-                   "ended_at_ms", "end_reason"])
+                   "ended_at_ms", "end_reason", "run_scope"])
 assert variables == expected, f"the audit names the generated variables {expected}, model.tla declares {variables}"
 PY
 
@@ -119,6 +142,8 @@ audit_invariants=(
   AuditExpiryNotEarly
   AuditRevokedBeforeDeadline
   AuditVisibleOnlyWhileLive
+  AuditRunScopedUseInItsRun
+  AuditRunEndOnlyAfterItsRun
 )
 audit_action_property=AuditTerminalLatched
 
@@ -212,7 +237,9 @@ fi
 for witness in ExpiredByTimer ExpiredAtDispatch ExpiredWhileDownSettledOnRead \
   AdmittedOneTickBeforeDeadline RollbackAfterExpiryStillRefused RevokedThenRefused \
   EndedWithSubjectThenRefused RevokeAfterDeadlineRecordsExpiry \
-  SubjectEndAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted; do
+  SubjectEndAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted RunEndedThenRefused \
+  LaterRunEndsStaleGrant HostCallOutsideRunRefusedWithoutEnding RecoveryEndsInterruptedRun \
+  SubjectEndOfRunEndedGrantChangesNothing; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" none "" "
   NotAuditWitness${witness}"
@@ -270,12 +297,16 @@ PY
     echo "mutant ${name} refused by ${violation} in ${depth} states"
   }
 
-  # The machine's own deadline guards, seeded into a copy of the model.
+  # The machine's own deadline and run scope guards, seeded into a copy of
+  # the model.
   mutate expire_guard_one_early "Invariant AuditExpiryNotEarly" AuditExpiryNotEarly none \
     'ExpireDue|    /\ (expires_at_ms <= now_ms)|    /\ (expires_at_ms <= now_ms + 1)'
   mutate admit_guard_inclusive "Invariant AuditNoAdmitAtOrAfterDeadline" \
     AuditNoAdmitAtOrAfterDeadline none \
     'AdmitLive|    /\ (now_ms < expires_at_ms)|    /\ (now_ms <= expires_at_ms)'
+  mutate admit_ignores_run_scope "Invariant AuditRunScopedUseInItsRun" \
+    AuditRunScopedUseInItsRun none \
+    'AdmitLive|    /\ (IF (run_scope = None) THEN TRUE ELSE ((run_id # None) /\ (run_scope = run_id)))|    /\ TRUE'
 
   # The shell's use of the machine, seeded through AuditMutant.
   mutate dispatch_reuses_boundary_verdict "Invariant AuditNoAdmitAtOrAfterDeadline" \
@@ -288,5 +319,9 @@ PY
     subject_ended_admits
   mutate boundary_trusts_durable_phase "Invariant AuditVisibleOnlyWhileLive" \
     AuditVisibleOnlyWhileLive boundary_trusts_durable_phase
+  mutate other_run_admits "Invariant AuditRunScopedUseInItsRun" AuditRunScopedUseInItsRun \
+    other_run_admits
+  mutate run_end_signalled_while_running "Invariant AuditRunEndOnlyAfterItsRun" \
+    AuditRunEndOnlyAfterItsRun run_end_signalled_while_running
 fi
 echo "tool grant expiry audit passed at model_step_count <= ${max_steps}"

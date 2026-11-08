@@ -799,6 +799,76 @@ them.
   before, and so does the stock governed realm, whose controller pins do not
   outlive their registration.
 
+- `meerkat-core`: a scoped tool grant can be scoped to a run (see Added).
+  `SessionToolGrants::open_names` and `ToolGrantGate::open_names` take the
+  run of the model-request boundary that asks, `run_id: Option<&RunId>`,
+  and `SessionToolGrants` gains the required method
+  `end_run(&self, run_id: &RunId) -> Result<(), ToolGrantRefusal>`, so every
+  implementation needs it (`Ok(())` for a seam with no run-scoped grants).
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  the `ToolGrantLifecycleMachine` (version 2) owns a grant's run scope (see
+  Added). Its state (`ToolGrantLifecycleMachineState` in meerkat-runtime
+  `tool_grant::dsl` and meerkat-machine-schema
+  `catalog::dsl::tool_grant_lifecycle`, and the kernel
+  `generated::tool_grant_lifecycle::State`) gains the public field
+  `run_scope: Option<ToolGrantRunId>`, the input `Issue` (kernel
+  `inputs::Issue`) gains `run_scope: Option<ToolGrantRunId>`, and the input
+  `AdmitUse` (kernel `inputs::AdmitUse`) gains
+  `run_id: Option<ToolGrantRunId>`, so code that builds them literally must
+  set them (`None` keeps the previous behaviour). The new key type
+  `ToolGrantRunId` names a run. An exhaustive match needs the arms of the
+  input `EndRun { run_id, now_ms }`
+  (`ToolGrantLifecycleInput`, its variant enum
+  `ToolGrantLifecycleInputVariant` in meerkat-machine-schema and
+  meerkat-runtime, kernel `Input` and `InputKind`), the phase
+  `RunEnded` (`ToolGrantPhase`, kernel `Phase`), the effect
+  `RunEnded { grant_id, observed_at_ms }` (`ToolGrantLifecycleEffect`, its
+  variant enum `ToolGrantLifecycleEffectVariant` in meerkat-machine-schema
+  and meerkat-runtime, kernel `Effect` and `EffectKind`),
+  `ToolGrantEndReason::RunEnded`,
+  `ToolGrantUseRefusal::RunEnded` and `ToolGrantUseRefusal::OutsideRun`,
+  and the kernel `generated::tool_grant_lifecycle::TransitionId` variants
+  `AdmitEndedRunEnded`, `AdmitOtherRun`, `AdmitOutsideRun`,
+  `EndRunMatching`, `EndRunAfterDeadline`, `EndRunOther`,
+  `EndRunSettledExpired`, `EndRunSettledRevoked`, `EndRunSettledRunEnded`,
+  `IssueRefusedIssuedRunEnded`, `ExpireSettledRunEnded` and
+  `RevokeSettledRunEnded`. Each follows every variant 0.9.10 published; the
+  machine's one order of its new variants is given with the end of a grant
+  with its subject, below.
+
+- `meerkat-runtime`: run-scoped tool grants (see Added).
+  `tool_grant::ToolGrantRequest` and `tool_grant::StoredToolGrant` gain the
+  public field `run_scope: Option<RunId>` (struct literals need it; `None`
+  is a window grant), and `ToolGrantAuditEvent::Granted` gains the field
+  `run_scope: Option<RunId>`. `ToolGrantStatus` gains `RunEnded`,
+  `ToolGrantAuditEvent` gains
+  `RunEnded { grant_id, run_id, observed_at_ms, driver }` and
+  `ToolGrantExpiryDriver` gains `Run` and `Recovery`, after `Revoke` (the
+  MCP server gate's `Build` follows them), so an exhaustive match needs
+  their arms.
+
+- `meerkat-contracts`: run-scoped tool grants over JSON-RPC (see Added).
+  `GrantToolParams` gains `scope: Option<ToolGrantScopeRequest>` and
+  `WireToolGrant` gains `scope: WireToolGrantScope`, so struct literals need
+  them (`None` and `WireToolGrantScope::Window` keep the previous
+  behaviour), and `WireToolGrantAuditEvent::Granted` gains the field
+  `scope: WireToolGrantScope`. `WireToolGrantStatus` gains `RunEnded`,
+  `WireToolGrantAuditEvent` gains
+  `RunEnded { grant_id, run_id, observed_at_ms, driver }` and
+  `WireToolGrantExpiryDriver` gains `Run` and `Recovery`, declared after
+  `Revoke` and before the MCP server gate's `Build` and `Unknown` (which
+  `#[serde(other)]` keeps last), so the
+  implicit discriminants of `WireToolGrantStatus::Unknown` and
+  `WireToolGrantExpiryDriver::Unknown` move, and an exhaustive match needs
+  the new arms; a 0.9.10 client decodes each of them as `unknown`.
+
+- `meerkat-core`: approval-carried tool grants (see Added).
+  `ToolGrantId::parse` (and a grant id's deserialization) also accepts a
+  version 5 UUID, the id an approved request's grant derives from its
+  decision (`ToolGrantId::approved`), and `ToolGrantIdError`'s message names
+  both versions. A 0.9.10 binary reads such a grant's row as unreadable.
+
 - Scoped tool grants (their types shipped in 0.9.9): grants to a mob member
   identity, the member grant gate and the issuer's decision reference change
   these signatures:
@@ -831,7 +901,8 @@ them.
     `meerkat_runtime::tool_grant::ToolGrantExpiryDriver` and
     `WireToolGrantExpiryDriver` gain `Build`. Both wire enums keep `Unknown`
     last, so its implicit discriminant moves (`WireToolGrantTarget::Unknown`
-    from 2 to 3, `WireToolGrantExpiryDriver::Unknown` from 5 to 6): code
+    from 2 to 3, `WireToolGrantExpiryDriver::Unknown` from 5 to 8, with the
+    run-scoped grants' `Run` and `Recovery`): code
     that casts the variant to a number must follow.
   - `meerkat_core::tool_grant::SessionToolGrants::open_names` takes a
     `GatedToolView` (the gate as the machine records it after the boundary's
@@ -840,8 +911,11 @@ them.
     gate decides that a call is gated before it asks. The trait gains the
     defaulted `granted_servers`. `ToolGrantGate::new` takes the build's
     `InstalledToolGrantGate` and its `GeneratedToolVisibilityOwner` instead of
-    a `GatedToolTable`; `ToolGrantGate::table` is now `install`, and
-    `is_gated` and `open_names` take the call's provenance and the view.
+    a `GatedToolTable`; `ToolGrantGate::with_table` sets the table, which
+    `ToolGrantGate::table` answers (empty unless set: the families and names
+    an agent's grant request can name), `install` answers what the build
+    installs, and `is_gated` and `open_names` take the call's provenance and
+    the view.
   - `meerkat_core::ToolVisibilityOwner::replace_tool_grant_gate`,
     `GeneratedToolVisibilityOwner::replace_tool_grant_gate` and
     `ToolScope::replace_tool_grant_gate` take an `InstalledToolGrantGate`
@@ -903,6 +977,27 @@ them.
   a respawn's abandonment replayed onto a retirement the replay folded as a
   plain terminal) emits `IdentityEnded`, as the live terminal abandonment
   does.
+- `meerkat-mob`, `meerkat-machine-kernels`, `meerkat-machine-schema`: an
+  identity's life marker (see Added, approval-carried tool grants).
+  MobMachine's state (`MobMachineState` in meerkat-mob and
+  meerkat-machine-schema, and the kernel `generated::mob::State`) gains the
+  public fields `identity_life_resets: u64` and `identity_life_ends` (each
+  identity's ends since the last reset), so code that builds it literally
+  must set them; `MobMachineSignal` (meerkat-mob and meerkat-machine-schema)
+  and its variant enum, and the kernel `generated::mob::Signal` and
+  `SignalKind`, gain `EndIdentityLife { agent_identity }` and
+  `RecoverIdentityLifeResets { resets }`, and the kernel
+  `generated::mob::TransitionId` gains `EndIdentityLifeRunning`,
+  `EndIdentityLifeStopped`, `EndIdentityLifeCompleted`,
+  `EndIdentityLifeDestroyed`, `RecoverIdentityLifeResetsRunning`,
+  `RecoverIdentityLifeResetsStopped`, `RecoverIdentityLifeResetsCompleted`
+  and `RecoverIdentityLifeResetsDestroyed`, each after every published
+  variant; exhaustive matches must add them. Behaviour: the arms that end
+  an identity (`UnlistIdentityEntryRemoved`, `RemoveIdentityEntryRemoved`,
+  the terminal abandonments of a respawn), the end of a retirement that
+  ends its identity (`EndIdentityLife`, applied on the retirement's terminal
+  step and again when the journal replays that step) and the reset move
+  the marker.
 - `meerkat-runtime`, `meerkat-machine-kernels`, `meerkat-machine-schema`:
   the generated `ToolGrantLifecycleMachine`'s `ToolGrantEndReason` and
   `ToolGrantUseRefusal` gain `SubjectEnded`, its `ToolGrantLifecycleInput`
@@ -911,7 +1006,18 @@ them.
   `generated::tool_grant_lifecycle::TransitionId` gains
   `EndWithSubjectActive`, `EndWithSubjectAfterDeadline`,
   `EndWithSubjectSettledExpired`, `EndWithSubjectSettledRevoked` and
-  `AdmitEndedWithSubject` after every published variant.
+  `AdmitEndedWithSubject` after every published variant. With the run
+  scope (above), the machine's new variants follow every variant 0.9.10
+  published in one order: `ToolGrantEndReason` `RunEnded`, `SubjectEnded`;
+  `ToolGrantUseRefusal` `RunEnded`, `OutsideRun`, `SubjectEnded`; the
+  inputs (`ToolGrantLifecycleInput`, `ToolGrantLifecycleInputVariant`, the
+  kernel `Input` and `InputKind`) `EndRun`, `EndWithSubject`; the phase
+  `RunEnded` and the effect `RunEnded`; and the kernel `TransitionId` the
+  twelve run-scope variants in the order listed above, then
+  `EndWithSubjectActive`, `EndWithSubjectAfterDeadline`,
+  `EndWithSubjectSettledExpired`, `EndWithSubjectSettledRevoked`,
+  `AdmitEndedWithSubject` and `EndWithSubjectSettledRunEnded` (the end with
+  its subject of a grant whose run ended, which changes nothing).
   `meerkat_runtime::tool_grant::StoredToolGrant` gains
   `subject_ended` (struct literals need it). Behaviour:
   `ToolGrantService::revoke_subject` and `MeerkatMachine::end_tool_grants_of`
@@ -2296,6 +2402,157 @@ them.
   composition's `ScopedRetainedResume::check_kept_original` and
   `ScopedRetainedResume::into_checks`.
 
+- `meerkat-core`, `meerkat-runtime`, `meerkat-machine-schema`,
+  `meerkat-machine-kernels`, `meerkat-session`, `meerkat`: run-scoped tool
+  grants. A scoped tool grant can
+  also be scoped to one run of its session (`ToolGrantRequest::run_scope`):
+  it opens its names only at the model-request boundaries of that run and
+  admits only that run's calls. A call outside any run is refused
+  (`tool_grant_required`) and leaves the grant live for its run; a boundary
+  or call of a later run ends it. The grant ends with its run when the run
+  completes, fails or is cancelled (the session tells its grant seam,
+  `SessionToolGrants::end_run`, which `ToolGrantService::end_run` serves),
+  a run a hard interrupt dropped included (the session task ends its grants
+  right after the cancel: `Agent::end_dropped_run_tool_grants`, and the
+  provided `SessionAgent::end_dropped_run_tool_grants` that the facade's
+  agent forwards), and when durable-tail recovery closes a run a stopped
+  process left open. Recovery ends the session's run-scoped grants of that
+  run; a mob member identity's run-scoped grants of a recovered member run
+  end at the member's next run's first boundary or call, or at their
+  deadline. At or after its deadline the run's end records the expiry
+  instead. The
+  status `run_ended` and a `run_ended` audit row (with the run and the driver
+  that ended it) record the end, which stays across restarts and clock
+  rollbacks. The `ToolGrantLifecycleMachine` owns the run scope (`EndRun`,
+  the terminal phase `RunEnded`, the invariants `run_ended_records_its_end`
+  and `run_scope_set_only_by_issue`), and the bounded TLC audit
+  `tool_grant_expiry_audit` covers two runs of the session, run ends
+  signalled or lost, crash and recovery of the interrupted run, and stale
+  grants, with four more reachability witnesses and three more seeded
+  defects. A binary older than run scopes reads a run-scoped grant's row and
+  its `granted` and `run_ended` audit rows as rows it cannot read: it opens
+  nothing there.
+
+- `meerkat-rpc`, `meerkat-contracts`, Python and TypeScript SDKs:
+  run-scoped tool grants over JSON-RPC. `tool_grants/grant` takes
+  `scope` (`ToolGrantScopeRequest`, closed): `{"kind": "window"}`, the
+  default, or `{"kind": "current_run"}`, which scopes the grant to the run
+  its subject is running now (a mob member identity's: the run of the
+  session its member holds on the server, whose end ends the grant); a
+  subject that runs no turn refuses it with the typed request refusal
+  `run_not_active` (`ToolGrantRequestRefusal::RunNotActive`, under
+  `tool_grant_request_refused`), and nothing is issued. Every grant carries its
+  `scope` (`WireToolGrantScope`: `window`, or `current_run` with the
+  `run_id`), as does its `granted` audit row. Python `grant_tool` takes
+  `scope="current_run"` and TypeScript `grantTool` takes
+  `{ scope: "current_run" }`.
+
+- `meerkat-core`, `meerkat-runtime`: approval-carried tool grants. A grant
+  request holds a durable decision of kind `tool_grant.issue`
+  (`tool_grant::hold_tool_grant_request`, or
+  `MeerkatMachine::request_tool_grant`; the held body `tool_grant.issue.v1`,
+  `ToolGrantIssueBody`, carries the subject, target, duration, run scope,
+  reason and origin; the subject key is the subject, the target and a request
+  key, so a replayed agent request answers its decision; renderer
+  `tool_grant.render-v1`) for the approver id of the host's
+  `ToolGrantRequestPolicy` (`operator`, with a one hour deadline, by
+  default), and issues nothing. `ToolGrantIssueExecutor`, a
+  `DecisionExecutor`, issues an approved request's grant under
+  `ToolGrantId::approved(decision id)` with the issuer
+  `ToolGrantIssuer::Approval`, for `[now, now + duration)`; a replayed
+  execution meets the grant it issued (`ToolGrantService::issued_for`) and
+  settles executed. It refuses a decision no person decided
+  (`not_a_human_decision`), a request whose subject ended (`subject_ended`:
+  a member identity whose mob is gone or was replaced, whose name no member
+  holds when the approval is executed, or whose life the request was asked
+  in ended, as below) or that the host cannot confirm now
+  (`subject_unknown`),
+  a run-scoped request whose run is over
+  (`run_ended`) and a body this version cannot read (`unreadable_request`),
+  and hands each ended request's notice (`ToolGrantRequestNotice`) to the
+  host's `ToolGrantRequestNotices`; the host's `ToolGrantSubjectObserver`
+  answers what the subject is now (`ToolGrantSubjectPresence`: held, with
+  its current run, a session's own or the run of the session a member
+  identity's member holds, and its life; ended; or unknown, which refuses
+  the approval `subject_unknown`, fail closed). A request records the life
+  of its subject it was asked in (`ToolGrantSubjectLife`, in the body's
+  `subject_life` and the notice's; `ToolGrantSubjectObserver::life` names
+  it for an agent's request, through `ToolGrantRequestHost::subjects`): an
+  approval executed in another life is refused `subject_ended`, its notice
+  reaches no later life, and an agent's ask never joins a request of
+  another life. A mob member identity's life is its mob's life marker
+  (`meerkat_mob::IdentityLife`, `MobHandle::identity_life`), MobMachine
+  state that moves at every end of the identity (the end of a retirement
+  that ends it, its entry's one-entry unlist or removal, a respawn abandoned
+  after its old member's archive, a reset of its mob) and at nothing else:
+  a respawn keeps it, and a resume rebuilds it from the journal (the
+  terminal row of a retirement records whether it ended its identity).
+  `tool_grant_requests_of` reads a
+  subject's requests (the ended ones from a deadline bound on), and
+  `MeerkatMachine::list_tool_grant_requests` lists them with the ended ones
+  whose deadline is within the grant policy's maximum lifetime of now;
+  `wire::wire_tool_grant_request` shows one as a `requested` or `declined`
+  grant.
+
+- `meerkat-core`, `meerkat`, `meerkat-runtime`: an agent asks for a grant a
+  person approves. Every grant-gated build mounts the tool
+  `request_tool_grant` (`tool_grant::REQUEST_TOOL_GRANT_TOOL`,
+  `ToolGrantRequestDispatcher`), itself ungated: the agent names one gated
+  `tool` or `family`, `duration_ms` and a `reason`, never its session or the
+  approver, and the call returns at once with the pending request. The
+  session's grant seam holds it (`SessionToolGrants::request_grant`, a
+  provided method that answers `ToolGrantAgentRequestRefusal::NotTaken`;
+  `ToolGrantAgentRequest`, `ToolGrantRequestReceipt`;
+  `ToolGrantGate::requested_target` and `ToolGrantGate::request_grant`),
+  keyed by the call's run and id, so a replayed call answers the request it
+  held. A call for a target its subject already has an open or approved
+  window request for joins that request instead of holding another: it
+  answers that request while it is open, and holds a new one after it ends,
+  so an agent that asks again and again leaves one request per target with
+  its approver. A joined request keeps its own duration, which can differ
+  from the one the call asked: the tool's answer says the call joined
+  (`joined`) and gives the request's `duration_ms`
+  (`ToolGrantRequestReceipt::joined` and `duration_ms`). A runtime takes its
+  agents' requests through `ToolGrantRequestHost`
+  (`MeerkatMachine::set_tool_grant_request_host`,
+  `ToolGrantService::set_request_host` and `request_host`): the decision
+  owner, the request policy and the requester its agents are named by.
+
+- `meerkat-core`, `meerkat-store`: `DecisionListFilter` gains
+  `deadline_from_ms` (`with_deadline_from`): only decisions due at or after
+  it. The SQLite decision store's list and count read it through the phase
+  and deadline index.
+
+- `meerkat-rpc`, `meerkat-contracts`, Python and TypeScript SDKs:
+  `tool_grants/request` (`RequestToolGrantParams`, closed, and
+  `RequestToolGrantResult`): a host asks for a grant of a session's or a mob
+  member identity's gated tool name, family or MCP server that a person
+  approves;
+  `rkat-rpc` is the requester
+  and `operator` the approver id. Its subject, target, scope and duration
+  are refused as a grant's are, with the typed request refusal (a zero or
+  too long `duration_ms` is `invalid_window`). `rkat-rpc` runs the executor of
+  `tool_grant.issue` decisions (`SessionRuntime::start_tool_grant_request_executor`,
+  started with the router and stopped with the runtime): a decide or
+  withdraw on the server asks it for a pass at once, and it passes every 30
+  seconds for deadlines. The deciding party stays current while the realm
+  lists the decision's approver id for the operator
+  (`[governance.decisions] operator_approver_ids`). Each ended request's
+  session receives a `tool_grant_request` external event, like any input,
+  with the decision, the outcome (`granted` with the grant id, `rejected`,
+  `expired`, `withdrawn`, or `refused` with a reason) and the target. A
+  member identity's notice goes through the mob's member input instead, a
+  keyed member send under the decision's key admitted into the session its
+  member holds then; an identity with no member left ends it failed. While
+  the executor runs, `rkat-rpc` takes its agents' requests, naming the
+  realm's agent `rkat-agent` as their requester. `tool_grants/list` lists
+  open and approved requests as `requested` and, with `include_ended`, the
+  rejected, expired, withdrawn and refused ones whose deadline is within the
+  grant policy's maximum lifetime of now as `declined`, the wire statuses
+  reserved since 0.9.9. Python `request_tool_grant` (a session, or `mob_id`
+  and `identity`), TypeScript `requestToolGrant` (a session id, or
+  `{ mobId, identity }`).
+
 - Member grant gate: a mob profile declares `tools.grant_gated`
   (`grant_gated = { families = [...], tools = [...] }` in TOML; on
   `mob/create`, realm profiles and a `mob/spawn` profile override). Every
@@ -2412,8 +2669,9 @@ them.
 - Rust: `meerkat_core::tool_grant::ToolGrantRequestRefusal` (`subject_unknown`,
   `target_not_gated`, `server_not_installed`, `no_live_grant`,
   `invalid_wait`, `invalid_window`, `empty_target`, `not_found`,
-  `invalid_decision_ref`, `invalid_page_limit`; the three server and attach
-  kinds are for host surfaces, and `rkat-rpc` never sends them) and
+  `invalid_decision_ref`, `invalid_page_limit`, `run_not_active`; the three
+  server and attach kinds are for host surfaces, and `rkat-rpc` never sends
+  them) and
   `TOOL_GRANT_REQUEST_REFUSED_KIND`; `ToolGrantSubject::member`;
   `ToolGrantIssuer::operator`; `GrantGatedTools::FIELD_NAMES`, `extend` and
   `without`; the defaulted `SessionToolGrants::for_member`;
@@ -2678,6 +2936,19 @@ them.
   one, and the decided row keeps the carried presentation only when the
   machine says it counted it (`carried_presentation_counted`). What counts is
   unchanged.
+
+- `meerkat`: a grant-gated build's tool list gains `request_tool_grant` (see
+  Added), visible and ungated, beside its tools. A host whose runtime takes
+  no grant requests answers its calls with a tool error.
+
+- `meerkat-store`: the calls of one process take turns on a SQLite decision
+  file, from a connection's open to its close, so they never refuse each
+  other as held by another owner (`ApprovalStoreError::Contended`): with
+  the zero busy timeout, a connection that opened while another closed (and
+  checkpointed the write-ahead log), or two of the process's writers, could
+  refuse each other at once, which a decision executor running beside a
+  host's own decision calls made visible. A database another process holds
+  is still refused at once, never waited for.
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the
@@ -3778,6 +4049,28 @@ them.
   cannot say now: the input waits for a definite answer without a time
   bound.
 
+- Run-scoped tool grants need no migration: window grants keep their rows.
+  A 0.9.10 binary on the same store reads a run-scoped grant's row as one it
+  cannot read, so it opens nothing there, and an `rkat-rpc` 0.9.10 refuses a
+  `tool_grants/grant` that names a `scope` (invalid params), so a request is
+  never read as a window grant.
+
+- Downgrade: a 0.9.10 binary reads the grant an approved request issued
+  (its id is a version 5 UUID) as a row it cannot read, a window grant
+  included, as it reads a run-scoped grant: it opens nothing there, lists
+  it under `unreadable`, and cannot revoke it (`tool_grants/revoke` answers
+  not found). Revoke such grants, or let them expire, before a rollback:
+  one still within its window comes back live on the next upgrade. 0.9.10
+  executes no `tool_grant.issue` decision (it has no executor of the kind):
+  open and approved requests, and the notices of ended ones, wait for the
+  next upgrade, where a request past its deadline by then expires. A
+  member's retirement row this release writes records whether its end
+  ended the identity under an internal key 0.9.10 ignores (the row parses
+  as before); the identity life markers are not stored otherwise, and the
+  next upgrade rebuilds them from the journal. A retirement 0.9.10 ends
+  records no such key, so withdraw the open requests of an identity that
+  ended while 0.9.10 ran before upgrading again.
+
 - An identity adopted before this release recorded no profile source in its
   desired material: its material reads as `Unrecorded`, and the identity
   keeps the rule of the release before, its role's gate joining as role
@@ -3996,6 +4289,21 @@ them.
   in process until the retirement's side effects run: a restart in
   between leaves the records searchable in the old session's memory but
   never distilled.
+
+- A one-entry unlist or a complete roster's seal of a Declared identity
+  entry with no member writes no journal row, so a restart cannot tell
+  that the entry's identity ended there: its life marker comes back as it
+  was before that end. After such an end and a restart, an approval of a
+  grant request asked for the identity before the end issues the grant to
+  a new member of the name declared after the restart, and the request's
+  notice reaches it. Reject or withdraw an identity's open requests before
+  declaring its name again, or revoke such a grant (`tool_grants/revoke`).
+
+- A member identity's end that lands while an approval of one of its grant
+  requests is being executed, after the executor read the identity and
+  before it committed the grant, leaves that grant live: the end found no
+  grant to end. A later member of the name in the same mob incarnation then
+  holds it. Revoke such a grant (`tool_grants/revoke`).
 
 
 ## [0.9.10] - 2026-11-04

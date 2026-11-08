@@ -2,12 +2,14 @@
 //!
 //! A build marks tool families and names grant-gated; a scoped tool grant
 //! opens, for a bounded time, the gated names its target covers for its
-//! subject. The grant lifecycle (issuance, expiry, revocation, use
+//! subject. A grant may also be scoped to the run its subject session is
+//! running when it is issued: it then ends with that run. The grant
+//! lifecycle (issuance, expiry, revocation, the end of its run, use
 //! admission) is owned by the runtime's `ToolGrantLifecycleMachine`; these
 //! types are its surface projection. Tagged enums use `kind`. A request's
-//! subject and target are closed: a kind or a field this version does not
-//! know is refused. Every vocabulary a result carries (subject, target,
-//! status, issuer, audit event, expiry driver, refusal kind) has a
+//! subject, target and scope are closed: a kind or a field this version does
+//! not know is refused. Every vocabulary a result carries (subject, target,
+//! scope, status, issuer, audit event, expiry driver, refusal kind) has a
 //! forward-compatible `unknown` variant that the server never sends.
 
 use serde::{Deserialize, Serialize};
@@ -112,6 +114,22 @@ pub enum ToolGrantTargetRequest {
     },
 }
 
+/// How long a grant request asks a grant to last beyond its window. Closed: a
+/// kind or a field this version does not know is refused, never read as a
+/// window. The kinds are empty structs, so a field is refused as unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantScopeRequest {
+    /// The grant lasts for its window.
+    Window {},
+    /// The grant also ends with the run its subject is running when it is
+    /// issued: a session's own, or the run of the session a member
+    /// identity's member holds. A subject that runs none is refused with the
+    /// typed request refusal `run_not_active`.
+    CurrentRun {},
+}
+
 /// Whose grant a record names: a session, or (in a later version) a mob
 /// member's identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +195,24 @@ pub enum WireToolGrantIssuer {
     Unknown,
 }
 
+/// How long a grant lasts beyond its window: for its window only, or also
+/// only as long as one run of its subject session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantScope {
+    /// The grant lasts for its window. A server that names no scope issued a
+    /// window grant.
+    #[default]
+    Window,
+    /// The grant admits uses of this run only, and ends when it ends.
+    CurrentRun { run_id: String },
+    /// Forward compatibility: a scope kind this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
 /// A grant's status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -192,6 +228,9 @@ pub enum WireToolGrantStatus {
     Requested,
     /// Requested through an approval and declined. Terminal.
     Declined,
+    /// Ended with the run it was scoped to, before its deadline. Terminal.
+    /// A client older than this status reads it as `unknown`.
+    RunEnded,
     /// Forward compatibility: a status this version does not know. The
     /// server never sends it.
     #[serde(other)]
@@ -216,6 +255,10 @@ pub struct WireToolGrant {
     /// The host clock reading the grant was observed to end at, in UNIX ms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// Its window only, or also its run. Absent from an older server: a
+    /// window grant.
+    #[serde(default)]
+    pub scope: WireToolGrantScope,
 }
 
 /// A stored grant row the server cannot read (written by a newer version,
@@ -228,7 +271,9 @@ pub struct WireUnreadableToolGrant {
 }
 
 /// `tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
-/// `duration_ms` bounds the grant, at most the host's maximum lifetime.
+/// `duration_ms` bounds the grant, at most the host's maximum lifetime. A
+/// `current_run` scope also ends it with the run its session is running
+/// when it is issued.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -243,6 +288,11 @@ pub struct GrantToolParams {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Its window only (the default), or also the subject session's current
+    /// run. Absent, it names no scope, so an older server still takes a
+    /// window grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ToolGrantScopeRequest>,
     /// The host's opaque reference to the decision it made before issuing
     /// (for example a person's approval in its own records): non-empty, at
     /// most 1024 bytes, no control character. Recorded in the grant's issuer
@@ -348,6 +398,35 @@ pub struct WireMemberToolGrantGate {
     pub next_build: WireToolGrantGateView,
 }
 
+/// `tool_grants/request` parameters: ask for a grant a person approves
+/// through a durable decision of kind `tool_grant.issue`. `duration_ms`
+/// bounds the grant from its issuance, at most the host's maximum lifetime;
+/// a `current_run` scope also scopes it to the run its session is running
+/// when it is asked. Closed, as `tool_grants/grant`'s parameters: a request
+/// names no approver (the host's policy does).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RequestToolGrantParams {
+    pub subject: ToolGrantSubjectRequest,
+    pub target: ToolGrantTargetRequest,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ToolGrantScopeRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `tool_grants/request` result: the request as a list shows it (status
+/// `requested`, the id its grant gets when it is issued, the approval as its
+/// issuer) and the decision that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RequestToolGrantResult {
+    pub grant: WireToolGrant,
+    pub decision: crate::wire::WireDecision,
+}
+
 /// `tool_grants/revoke` parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -406,7 +485,7 @@ pub struct ToolGrantAuditParams {
     pub limit: Option<u32>,
 }
 
-/// Which driver observed a grant's expiry.
+/// Which driver observed a grant's expiry or the end of its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -416,6 +495,10 @@ pub enum WireToolGrantExpiryDriver {
     Dispatch,
     Read,
     Revoke,
+    /// The session runtime, at the end of the grant's run.
+    Run,
+    /// Durable-tail recovery, closing the run a stopped process left open.
+    Recovery,
     /// A build reading which gated MCP servers a live grant covers.
     Build,
     /// Forward compatibility: a driver this version does not know. The
@@ -451,6 +534,10 @@ pub enum WireToolGrantAuditEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         expires_at_ms: u64,
+        /// Its window only, or also its run. Absent from an older server: a
+        /// window grant.
+        #[serde(default)]
+        scope: WireToolGrantScope,
     },
     Expired {
         grant_id: String,
@@ -474,6 +561,15 @@ pub enum WireToolGrantAuditEvent {
         call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+    },
+    /// A run-scoped grant ended with its run, before its deadline. A client
+    /// older than this event reads it as `unknown`.
+    RunEnded {
+        grant_id: String,
+        /// The run the grant was scoped to.
+        run_id: String,
+        observed_at_ms: u64,
+        driver: WireToolGrantExpiryDriver,
     },
     /// Forward compatibility: an event kind this version does not know. The
     /// server never sends it.
@@ -522,6 +618,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn request_params_are_closed_and_bound_by_a_duration() {
+        let subject = json!({"kind": "session", "session_id": "session-1"});
+        let target = json!({"kind": "family", "family": "shell"});
+        let params: RequestToolGrantParams = serde_json::from_value(json!({
+            "subject": subject,
+            "target": target,
+            "duration_ms": 600_000,
+            "scope": {"kind": "current_run"},
+            "reason": "rotate the logs",
+        }))
+        .unwrap();
+        assert_eq!(params.duration_ms, 600_000);
+        assert_eq!(params.scope, Some(ToolGrantScopeRequest::CurrentRun {}));
+        assert_eq!(params.reason.as_deref(), Some("rotate the logs"));
+        assert_eq!(
+            serde_json::to_value(RequestToolGrantParams {
+                scope: None,
+                reason: None,
+                ..params
+            })
+            .unwrap(),
+            json!({"subject": subject, "target": target, "duration_ms": 600_000}),
+            "an unset scope and reason are not sent"
+        );
+        for refused in [
+            // The host's policy names the approver; a request never does.
+            json!({"subject": subject, "target": target, "duration_ms": 1, "approver_id": "operator"}),
+            // A request is bounded by its duration from issuance only.
+            json!({"subject": subject, "target": target, "expires_at_ms": 1}),
+            json!({"subject": subject, "target": target}),
+        ] {
+            assert!(
+                serde_json::from_value::<RequestToolGrantParams>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
     fn grant_params_tag_their_subject_and_target_and_refuse_unknown_fields() {
         let params = GrantToolParams {
             subject: ToolGrantSubjectRequest::Session {
@@ -533,6 +668,7 @@ mod tests {
             expires_at_ms: None,
             duration_ms: Some(60_000),
             reason: None,
+            scope: None,
             decision_ref: None,
         };
         let value = serde_json::to_value(&params).unwrap();
@@ -557,6 +693,32 @@ mod tests {
             }))
             .is_err()
         );
+        let current_run: GrantToolParams = serde_json::from_value(json!({
+            "subject": {"kind": "session", "session_id": "session-1"},
+            "target": {"kind": "tool", "name": "shell"},
+            "duration_ms": 1,
+            "scope": {"kind": "current_run"},
+        }))
+        .unwrap();
+        assert_eq!(
+            current_run.scope,
+            Some(ToolGrantScopeRequest::CurrentRun {})
+        );
+        for refused in [
+            json!({"kind": "current_run", "run_id": "run-1"}),
+            json!({"kind": "turn"}),
+        ] {
+            assert!(
+                serde_json::from_value::<GrantToolParams>(json!({
+                    "subject": {"kind": "session", "session_id": "session-1"},
+                    "target": {"kind": "tool", "name": "shell"},
+                    "duration_ms": 1,
+                    "scope": refused,
+                }))
+                .is_err(),
+                "a scope this version does not know is refused"
+            );
+        }
     }
 
     /// An operator grant may name the decision its host made before

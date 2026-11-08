@@ -1256,11 +1256,23 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // tool dispatch admission (0.9.11).
             "RecordMemberDispatchAdmissionLineageRunning",
             "RecordMemberDispatchAdmissionLineageStopped",
+            // An identity's life marker (0.9.11): the end of a retirement
+            // that ends the identity, and the resets recovered at resume.
+            "EndIdentityLifeRunning",
+            "EndIdentityLifeStopped",
+            "EndIdentityLifeCompleted",
+            "EndIdentityLifeDestroyed",
+            "RecoverIdentityLifeResetsRunning",
+            "RecoverIdentityLifeResetsStopped",
+            "RecoverIdentityLifeResetsCompleted",
+            "RecoverIdentityLifeResetsDestroyed",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10
-    // published. Every ToolGrantLifecycleMachine arm added after them is
-    // appended here too, so none of them moves.
+    // published and the run-scope arms (0.9.11), which follow them in
+    // catalog order; then the end with its subject of a run-ended grant.
+    // Every ToolGrantLifecycleMachine arm added after them is appended here
+    // too, so none of them moves.
     (
         "ToolGrantLifecycleMachine",
         &[
@@ -1269,6 +1281,7 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "EndWithSubjectSettledExpired",
             "EndWithSubjectSettledRevoked",
             "AdmitEndedWithSubject",
+            "EndWithSubjectSettledRunEnded",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

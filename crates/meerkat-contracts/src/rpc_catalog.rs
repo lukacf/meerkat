@@ -499,6 +499,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "GrantToolResult",
             ),
             RpcMethodDescriptor::typed(
+                "tool_grants/request",
+                "Ask for a grant of a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server, which a person approves through a durable decision",
+                "RequestToolGrantParams",
+                "RequestToolGrantResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "tool_grants/revoke",
                 "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
                 "RevokeToolGrantParams",
@@ -1816,6 +1822,11 @@ mod tests {
         let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
         for (name, expected_params_type, expected_result_type) in [
             ("tool_grants/grant", "GrantToolParams", "GrantToolResult"),
+            (
+                "tool_grants/request",
+                "RequestToolGrantParams",
+                "RequestToolGrantResult",
+            ),
             (
                 "tool_grants/revoke",
                 "RevokeToolGrantParams",

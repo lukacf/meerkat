@@ -291,6 +291,13 @@ and confinement all still apply to every call it opens.
   with the names it provides, which `meerkat::tool_family_names` answers, or
   an MCP server, optionally narrowed to some of its tools) and
   a window of at most the host policy's maximum lifetime, 24 hours by default.
+  A grant can also be scoped to one run of its subject
+  (`ToolGrantRequest::run_scope`; over JSON-RPC, `scope: {"kind":
+  "current_run"}` takes the run the subject is running now, an identity's
+  being the run of the session its member holds, and is refused with
+  `run_not_active` when it runs none): it then admits uses of that run
+  only, and ends with it; a member's end of its run ends the run-scoped
+  grants of its identity and of its session.
   `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
   the Rust API; `ToolGrantService` offers the same operations over any
   `RuntimeStore`. Grant a mob member identity with
@@ -311,24 +318,67 @@ and confinement all still apply to every call it opens.
   the member across respawns and restarts; its grants end when its identity
   ends, and a reset of its mob, which ends every identity the mob held, ends
   them too.
+- **Requesting.** A host can ask for a grant that a person approves instead
+  of issuing it: `MeerkatMachine::request_tool_grant`, or
+  `tool_grants/request` over JSON-RPC (Python `request_tool_grant`,
+  TypeScript `requestToolGrant`), holds a durable decision of kind
+  `tool_grant.issue` (see [durable decisions](/api/rpc#durable-decisions))
+  and issues nothing. Every gated build also mounts the tool
+  `request_tool_grant`, itself ungated, through which the agent asks for one
+  of its gated names or families: it names the target, `duration_ms` and a
+  `reason`, never the session or the approver, and the call returns at once
+  with the pending request (a replayed call answers the request it held; a
+  call for a target the session's subject already has an open or approved
+  window request for joins that request while it is open, and holds a new
+  one after it ends; a joined request keeps its own duration, which can
+  differ from the one asked, and the answer says the call joined and gives
+  that `duration_ms`). The
+  session's host holds it with what it takes requests with
+  (`MeerkatMachine::set_tool_grant_request_host`: the decision owner, the
+  approver policy and the requester its agents are named by; `rkat-rpc`
+  takes them while it runs the executor), or the call answers that the host
+  takes none. Once a person approved the decision, the executor of the kind
+  (`ToolGrantIssueExecutor`, which `rkat-rpc` runs) issues the grant under an
+  id derived from the decision, with the decision as its issuer and its
+  window starting then; a review stage's allow never issues one. A list
+  shows an open request as `requested` and, with ended grants, a recently
+  rejected, expired, withdrawn or refused one as `declined`; the session
+  receives an input when its request ends (a member identity's request
+  reaches the session its member holds then, through the mob's member
+  input).
 - **Adjudication.** Every model-request boundary first gates the names each
   gated MCP server provides now, then opens the gated names a live grant
-  admits at that moment (a server grant opens its server's gated names
-  then), and every gated call is adjudicated again
+  admits at that moment, in the boundary's run (a server grant opens its
+  server's gated names then), and every gated call is adjudicated again
   immediately before it is handed to its tool, so a call at or after the
   deadline is refused even when the boundary that showed the tool ran before
-  it. The dispatch gate authorizes a gated MCP call before the host prepares
-  it (`McpCallContextProvider::prepare`), so a refused call never selects a
+  it. A run-scoped grant admits only the calls of its own run: a call outside
+  any run is refused and leaves the grant live for its run, and a call or
+  boundary of a later run ends it. A build belongs to no run, so a run-scoped
+  server grant starts no gated server the build configures; it opens the
+  names of a gated server that is attached during its run. The dispatch gate
+  authorizes a gated MCP call before the host prepares it
+  (`McpCallContextProvider::prepare`), so a refused call never selects a
   credential. A refusal is an ordinary `policy_denied` tool error with the code
   `tool_grant_required`, `tool_grant_expired`, `tool_grant_revoked` or
-  `tool_grant_unavailable`, which the model reads as
-  `Tool call denied (<code>): <message>`; a call of a closed gated tool
-  behind the deferred catalog is refused the same way. When the grants cannot
-  be read, or a boundary cannot gate a gated server's names, the gate stays
+  `tool_grant_unavailable` (a grant that ended with its run, or a run-scoped
+  grant asked outside its run, opens nothing: `tool_grant_required`), which
+  the model reads as `Tool call denied (<code>): <message>`; a call of a
+  closed gated tool behind the deferred catalog is refused the same way. When
+  the grants cannot be read, or a boundary cannot gate a gated server's
+  names, the gate stays
   closed and the session records a warning notice.
 - **Lifecycle.** The canonical `ToolGrantLifecycleMachine` owns each grant:
-  issued, then expired at its fixed deadline or revoked before it. Expired and
-  revoked grants stay ended across restarts and host clock rollbacks. The
+  issued, then expired at its fixed deadline, revoked before it, or, for a
+  run-scoped grant, ended with its run before it. The run's end ends the grant
+  when the run completes, fails or is cancelled (a run a hard interrupt
+  dropped included), when durable-tail recovery closes a run a stopped
+  process left open, and otherwise at the first use of a later run of the
+  session. Recovery ends the session's run-scoped grants of the run it
+  closes; a member identity's run-scoped grants of a recovered member run
+  end at the member's next run's first use, or at their deadline. Ended
+  grants stay ended across restarts and
+  host clock rollbacks. The
   runtime's deadline timer expires a served session's grants on time, and a
   list or audit read settles the due grants of any session without loading
   it; nothing about a grant wakes a dormant member. Grants live in the runtime
@@ -336,10 +386,12 @@ and confinement all still apply to every call it opens.
   write of a grant or audit row creates (a refused call's audit row is one).
   With the in-memory store, Web/WASM included, they last only for the
   process.
-- **Audit.** Each subject's grants append to one audit log: `granted`,
-  `expired` (with the driver that observed the expiry), `revoked` and
-  `refused` rows. A lifecycle row commits with the grant's change; a failed
-  refusal row never admits the call.
+- **Audit.** Each subject's grants append to one audit log: `granted` (with
+  the grant's scope), `expired` (with the driver that observed the expiry),
+  `revoked`, `run_ended` (with the run and the driver that ended it: `run` at
+  the run's end, `recovery`, or the `boundary` or `dispatch` of a later run)
+  and `refused` rows. A lifecycle row commits with the grant's change; a
+  failed refusal row never admits the call.
 - **Limits.** The dispatch gate is the authority; what the model is shown
   follows it at the next model-request boundary. A live session keeps the
   tool surface its live bridge opened with, so a name a grant opened stays
@@ -349,7 +401,11 @@ and confinement all still apply to every call it opens.
   grant row this binary cannot read (written by a newer binary, or damaged)
   opens nothing and blocks none of its subject's other grants; a list reports
   it, and an audit read reports an audit row it cannot read and serves the
-  rest of the page. A binary older than scoped tool grants does not know a session's gate:
+  rest of the page. A binary older than run scopes reads a run-scoped grant's
+  row, and its `granted` and `run_ended` audit rows, so: it never takes a
+  run-scoped grant for a window grant. A binary older than grant requests
+  reads the grant an approved request issued as unreadable, so it opens
+  nothing there. A binary older than scoped tool grants does not know a session's gate:
   it resumes a gated session with its gated tools ungated, so upgrade every
   host that serves gated sessions before relying on a gate.
 

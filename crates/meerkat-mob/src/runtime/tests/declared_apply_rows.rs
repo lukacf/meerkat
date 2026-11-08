@@ -3626,6 +3626,7 @@ async fn a_seal_leaves_an_unseated_entry_a_hosts_intent_row_names_and_its_grants
                 },
                 reason: None,
                 window: ToolGrantWindow::For(Duration::from_mins(10)),
+                run_scope: None,
             },
             None,
         )
@@ -3747,6 +3748,7 @@ async fn a_seal_unlists_an_unseated_entry_no_intent_row_names_first() {
                 },
                 reason: None,
                 window: ToolGrantWindow::For(Duration::from_mins(10)),
+                run_scope: None,
             },
             None,
         )

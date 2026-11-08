@@ -972,6 +972,7 @@ fn grant_of(
         },
         reason: None,
         window: crate::tool_grant::ToolGrantWindow::For(Duration::from_hours(1)),
+        run_scope: None,
     }
 }
 

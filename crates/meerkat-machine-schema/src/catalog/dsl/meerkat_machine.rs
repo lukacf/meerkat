@@ -7402,11 +7402,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             // releases it.
             HoldInputController { input_id: String },
             ReleaseInputController { input_id: String },
-            // The run marked resumable whose resumed-run admission could not
-            // decide is held (`resumed_run_admission_hold`); a later
-            // `Continue` releases it.
-            HoldResumedRunForAdmission { run_id: RunId },
-            ReleaseResumedRunAdmission { run_id: RunId },
             // The scoped tool grant gate: every build replaces the gated
             // names (every open name closes), and every model-request
             // boundary applies the gated names a live grant opens.
@@ -7422,6 +7417,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // the caller observed marked resumable, under the same mutation
             // gate as this input (none when none is marked).
             SettleRetainedRun { run_id: Option<RunId> },
+            // The run marked resumable whose resumed-run admission could not
+            // decide is held (`resumed_run_admission_hold`); a later
+            // `Continue` releases it. Appended last: every input before them
+            // keeps its place.
+            HoldResumedRunForAdmission { run_id: RunId },
+            ReleaseResumedRunAdmission { run_id: RunId },
         }
 
         surface_only [

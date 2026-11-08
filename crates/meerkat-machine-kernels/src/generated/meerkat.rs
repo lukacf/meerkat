@@ -19147,14 +19147,6 @@ pub mod inputs {
         pub input_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct HoldResumedRunForAdmission {
-        pub run_id: RunId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ReleaseResumedRunAdmission {
-        pub run_id: RunId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceToolGrantGate {
         pub gated: std::collections::BTreeSet<ToolName>,
     }
@@ -19169,6 +19161,14 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SettleRetainedRun {
         pub run_id: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldResumedRunForAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseResumedRunAdmission {
+        pub run_id: RunId,
     }
 }
 
@@ -19601,12 +19601,12 @@ pub enum Input {
     ClaimCompositionResidency(inputs::ClaimCompositionResidency),
     HoldInputController(inputs::HoldInputController),
     ReleaseInputController(inputs::ReleaseInputController),
-    HoldResumedRunForAdmission(inputs::HoldResumedRunForAdmission),
-    ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     SettleRetainedRun(inputs::SettleRetainedRun),
+    HoldResumedRunForAdmission(inputs::HoldResumedRunForAdmission),
+    ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20202,14 +20202,14 @@ impl Input {
             Self::ClaimCompositionResidency(_) => InputKind::ClaimCompositionResidency,
             Self::HoldInputController(_) => InputKind::HoldInputController,
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
-            Self::HoldResumedRunForAdmission(_) => InputKind::HoldResumedRunForAdmission,
-            Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
             Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
             Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
+            Self::HoldResumedRunForAdmission(_) => InputKind::HoldResumedRunForAdmission,
+            Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
         }
     }
 }
@@ -20630,12 +20630,12 @@ pub enum InputKind {
     ClaimCompositionResidency,
     HoldInputController,
     ReleaseInputController,
-    HoldResumedRunForAdmission,
-    ReleaseResumedRunAdmission,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
     SettleRetainedRun,
+    HoldResumedRunForAdmission,
+    ReleaseResumedRunAdmission,
 }
 
 pub mod signals {

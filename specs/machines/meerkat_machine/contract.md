@@ -914,12 +914,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
 - `HoldInputController`(input_id: String)
 - `ReleaseInputController`(input_id: String)
-- `HoldResumedRunForAdmission`(run_id: RunId)
-- `ReleaseResumedRunAdmission`(run_id: RunId)
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `SettleRetainedRun`(run_id: Option<RunId>)
+- `HoldResumedRunForAdmission`(run_id: RunId)
+- `ReleaseResumedRunAdmission`(run_id: RunId)
 
 ## Signals
 - `Initialize`

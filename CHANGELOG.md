@@ -260,6 +260,26 @@ them.
   `SettleRetainedRunNotRetainedStopped` and `SettleRetainedRunInertDestroyed`.
   An exhaustive match needs their arms.
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  a run marked resumable whose resumed-run admission could not decide is held
+  for a later answer (see Changed). `MeerkatMachineInput` and
+  `MeerkatMachineInputVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain
+  `HoldResumedRunForAdmission { run_id }` and
+  `ReleaseResumedRunAdmission { run_id }`, appended last. The kernel
+  `generated::meerkat::TransitionId` gains `HoldResumedRunForAdmissionIdle`,
+  `HoldResumedRunForAdmissionAttached`, `HoldResumedRunForAdmissionRunning`,
+  `HoldResumedRunForAdmissionRetired`, `HoldResumedRunForAdmissionStopped`,
+  `ReleaseResumedRunAdmissionIdle`, `ReleaseResumedRunAdmissionAttached`,
+  `ReleaseResumedRunAdmissionRunning`, `ReleaseResumedRunAdmissionRetired`
+  and `ReleaseResumedRunAdmissionStopped`, appended last. An exhaustive
+  match needs their arms. `MeerkatMachineState` (the same two modules) and
+  the kernel `generated::meerkat::State` gain the public field
+  `resumed_run_admission_hold: Option<RunId>`, so code that builds them
+  literally must set it (`None` holds no run).
+
 - Behaviour-only (not measured by the gate): `meerkat-runtime`,
   `meerkat-session`, `meerkat-mob`: a host store commit whose batch is still
   unsettled when its retry budget runs out, its writer's fence window open,

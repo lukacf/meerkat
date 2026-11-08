@@ -346,7 +346,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # property violated.
 # source_credential_publication_audit.sh (auth) requires each of its seven
 # reachability witnesses violated.
-# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its twelve
+# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its fifteen
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # action property violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
@@ -736,6 +736,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessLaterRunEndsStaleGrant is violated."' \
   'echo "Error: Invariant NotAuditWitnessHostCallOutsideRunRefusedWithoutEnding is violated."' \
   'echo "Error: Invariant NotAuditWitnessRecoveryEndsInterruptedRun is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSubjectEndOfRunEndedGrantChangesNothing is violated."' \
   'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
   'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \

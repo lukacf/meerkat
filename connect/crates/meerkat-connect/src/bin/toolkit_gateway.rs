@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
+    use meerkat_connect::application_driver::finish_then_release;
     use meerkat_connect::application_gateway::{
         InheritedOperatorTerminal, serve_local_operator, serve_local_operator_with_setup,
     };
@@ -213,19 +214,23 @@ fn main() -> std::process::ExitCode {
         // private owner. No ordinary error path exits the process first.
         // The private JoinSet and these presenter joins preserve issuance
         // custody even after RPC or parent loss. Neither observer aborts
-        // native work. They share the host close's join bound.
-        let joins = tokio::time::Instant::now() + toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND;
-        let private_result = match tokio::time::timeout_at(joins, private.finish()).await {
-            Ok(result) => result.map_err(|error| error.to_string()),
-            Err(_) => Err("private host cleanup did not finish within the close bound".into()),
+        // native work. The close's final release of the native custody
+        // follows them, within the host close's join bound.
+        let joins = async {
+            (
+                private.finish().await.map_err(|error| error.to_string()),
+                join_presenter(operator_task).await,
+                join_presenter(console_setup_task).await,
+                join_presenter(remote_task).await,
+            )
         };
-        let operator_result = join_presenter(operator_task, joins).await;
-        let console_setup_result = join_presenter(console_setup_task, joins).await;
-        let remote_result = join_presenter(remote_task, joins).await;
-        // Meta's host join, the private host's admitted work and the
-        // presenters are done (or out of time): only now does the close end
-        // the custody of the native grant owner and store they used.
-        let custody_result = owner.release_native_custody().await.map_err(|error| error.to_string());
+        let (joined, custody_result) = finish_then_release(
+            toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND, joins, owner.release_native_custody()).await;
+        let custody_result = custody_result.map_err(|error| error.to_string());
+        let (private_result, operator_result, console_setup_result, remote_result) =
+            joined.unwrap_or_else(|| (
+                Err("private host cleanup and its presenters did not finish within the close bound".into()),
+                Ok(()), Ok(()), Ok(())));
         let operator_result = match (operator_result, remote_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -266,19 +271,16 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Join a presenter task, if one runs, by the close's join deadline.
+/// Join a presenter task, if one runs.
 #[cfg(unix)]
 async fn join_presenter<E: std::fmt::Display>(
     task: Option<tokio::task::JoinHandle<Result<(), E>>>,
-    deadline: tokio::time::Instant,
 ) -> Result<(), String> {
     match task {
-        Some(task) => match tokio::time::timeout_at(deadline, task).await {
-            Ok(joined) => joined
-                .map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string())),
-            Err(_) => Err("a presenter did not finish within the close bound".into()),
-        },
+        Some(task) => task
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string())),
         None => Ok(()),
     }
 }

@@ -546,6 +546,55 @@ fn a_failed_attempt_leaves_the_writer_stopped() {
     assert_eq!(authority.state().token, GRANT + 1);
 }
 
+// A grant whose listing failed stays the writer's own lease, an earlier
+// grant of the realm: a later grant at or below it breaks the store's token
+// order as one at or below the installed token does, and loses the realm.
+// A grant above it is the writer's own until a listing proves it.
+#[test]
+fn a_grant_at_or_below_the_writers_own_unproven_grant_breaks_the_token_order() {
+    /// Stopped under token 1 after the grant of token 5 whose listing failed,
+    /// acquiring again.
+    fn acquiring_after_a_failed_listing() -> Authority {
+        let mut authority = authority_in(Phase::Acquiring);
+        apply(
+            &mut authority,
+            acquire(WriterFenceAcquireOutcome::Granted, 5),
+        );
+        apply(
+            &mut authority,
+            listing(WriterFenceListingOutcome::Failed, 5),
+        );
+        assert_eq!(authority.state().own_grant, Some(5));
+        assert_eq!(authority.state().token, OPENED);
+        apply(&mut authority, Input::BeginReacquire);
+        assert_eq!(authority.state().lifecycle_phase, Phase::Acquiring);
+        authority
+    }
+
+    for token in [OPENED + 1, 4, 5] {
+        let mut authority = acquiring_after_a_failed_listing();
+        assert_lost_to(
+            &apply(
+                &mut authority,
+                acquire(WriterFenceAcquireOutcome::Granted, token),
+            ),
+            WriterFenceLostCause::TokenOrder,
+        );
+        assert_eq!(authority.state().granted, None, "token {token}");
+    }
+
+    let mut authority = acquiring_after_a_failed_listing();
+    let granted = apply(
+        &mut authority,
+        acquire(WriterFenceAcquireOutcome::Granted, 6),
+    );
+    assert!(matches!(
+        only_effect(&granted),
+        Effect::GrantReceived { token: 6 }
+    ));
+    assert_eq!(authority.state().own_grant, Some(6));
+}
+
 #[test]
 fn an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire() {
     // No acquire timed out since the last grant: another writer.

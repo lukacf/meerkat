@@ -620,6 +620,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the approver label, and says when the gateway keeps its records in
   memory, where decisions from before a gateway restart may be missing.
 
+- Forge: with a console that predates `meta/console/whoami` (Meta 0.9.10
+  and earlier), the controller review is no longer unavailable. Such a
+  console answers whoami with "method not found" and names no
+  administrator, so the review goes to the first person who signs in,
+  with a named account or through the identity provider, administrator or
+  not, and only that sign-in sees and answers it. With a console that
+  serves whoami the review stays an administrator's, and a whoami answer
+  the front cannot use (none, a timeout, a malformed answer or another
+  error) still opens nothing.
+
 ### Known limitations
 
 - Forge: an application on the legacy ordinary route keeps one shared
@@ -646,6 +656,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and start empty after a restart. `rpc_gateway` started with a
   `persistent_state` directory keeps them in that directory's metadata
   store.
+
+- Forge: with a console that predates `meta/console/whoami`, the controller
+  review belongs to the sign-in it opened at. If that sign-in ends early (a
+  sign-out, or a new sign-in in the same browser), the review stays open
+  but nobody can read or answer it, and a new one starts only after the
+  application restarts.
 
 ## [0.9.10] - 2026-11-04
 

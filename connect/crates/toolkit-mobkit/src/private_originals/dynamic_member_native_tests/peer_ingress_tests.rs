@@ -5,7 +5,9 @@ use super::*;
 use meerkat_authorization_contracts::audit::{
     AuditObservation, AuditTarget, StoredAuthorizationAuditObservation,
 };
-use meerkat_authorization_contracts::work_association::{GrantTarget, OriginalWorkRef};
+use meerkat_authorization_contracts::work_association::{
+    GrantTarget, InputAuthorityAssociation, InputAuthorityAssociationCandidate, OriginalWorkRef,
+};
 use meerkat_core::authorization::OperationObservedOutcome;
 use meerkat_runtime::input_authority::{
     BoundOriginalPin, GovernedPeerOrigin, PeerIngressBindDenial, PeerIngressBindRefusal,
@@ -1162,6 +1164,148 @@ async fn fresh_host_restores_governed_peer_binding_and_replays_it_exactly() {
     fixture.close().await;
     match checked {
         Ok(result) => result.expect("cold governed Peer control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// One delivery that governed work sent, and its stored source row: the
+/// receiver's host-triggered work replies, so the reply reaches the sender
+/// bound under that work's origin.
+async fn governed_reply_row(fixture: &Fixture) -> (StoredRecord, SourceRecord) {
+    let receiver = add(fixture, ADDED).await;
+    let sender = add(fixture, SENDER).await;
+    ready(fixture, &receiver).await;
+    ready(fixture, &sender).await;
+    wire_pair(fixture).await;
+    let receiver_peer = peer(fixture, ADDED).await;
+    *fixture.factory.next_call.lock().unwrap() = Some("reply_to_peer");
+    *fixture.factory.next_args.lock().unwrap() =
+        serde_json::json!({"body":"Governed reply", "handling_mode":"queue"});
+    assert!(durably_accepted(
+        &send(fixture, &sender, &receiver_peer).await.unwrap()
+    ));
+    let first = completed(fixture, &receiver, 1).await;
+    tool_succeeded(&first, "reply_to_peer");
+    let reply = completed(fixture, &sender, 1).await;
+    let (_, first_source, _) = source_row(fixture, &first, &[]).await;
+    let sent_by = first_source
+        .final_association
+        .as_ref()
+        .unwrap()
+        .candidate()
+        .original_work
+        .clone();
+    let (row, record, _) = source_row(fixture, &reply, std::slice::from_ref(&sent_by)).await;
+    assert!(
+        record.governed_peer().is_some(),
+        "the reply was sent by governed work"
+    );
+    (row, record)
+}
+
+/// A governed row is bound under its sending work's requester, which need not
+/// be its route's: work bound for a person (a Console route's requester) may
+/// send to a member. Every member route in this fixture names the operator, so
+/// the row's retained governed requester is set to such a person; the bound
+/// principals and the source check then follow the retained governed facts,
+/// never the route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn governed_row_is_bound_under_the_sending_works_requester_not_its_routes() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let (_, stored) = governed_reply_row(&fixture).await;
+            let route = fixture.source.route(&stored.event.route).unwrap();
+            let saved = stored.final_association.clone().unwrap();
+            let governed = stored.governed_peer().unwrap().clone();
+            assert_eq!(governed.requester(), &route.requester);
+            assert_eq!(fixture.source.check_source_binding(&stored, &saved), Ok(()));
+            let person = PrincipalRef::in_domain(
+                meerkat_core::PrincipalKind::Human,
+                "console-person",
+                meerkat_core::TrustDomainId::new("console-test").unwrap(),
+            )
+            .unwrap();
+            assert_ne!(person, route.requester);
+            let mut value = serde_json::to_value(&stored).unwrap();
+            value["peer_ingress"]["origin"]["governed"]["requester"] =
+                serde_json::to_value(&person).unwrap();
+            let record: SourceRecord = serde_json::from_value(value).unwrap();
+            assert_eq!(record.bound_requester(), &person);
+            assert_eq!(record.bound_ingress_actor(), governed.sending_agent());
+            assert_eq!(record.bound_contributors(), governed.sending_work());
+            let under_person = InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
+                requester: person.clone(),
+                ..saved.candidate().clone()
+            })
+            .unwrap();
+            assert_eq!(
+                fixture.source.check_source_binding(&record, &under_person),
+                Ok(())
+            );
+            assert_eq!(
+                fixture.source.check_source_binding(&record, &saved),
+                Err(OriginalWriterError::WrongOwner),
+                "a binding under the route's requester is not this row's"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("governed requester control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A stored governed row whose delivering member is not the agent its origin
+/// names neither decodes nor is written, so one binding never names one agent
+/// as its ingress actor and another as its reply destination. Only the stored
+/// delivering member's executor changes; the delivery evidence still matches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stored_governed_row_from_another_delivering_member_is_refused() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let (row, stored) = governed_reply_row(&fixture).await;
+            let governed = stored.governed_peer().unwrap().clone();
+            let selection = &row.data.body["peer_ingress"]["selection"];
+            let delivering = &selection["sender"][1]["route"]["logical_executor"];
+            assert_eq!(
+                delivering,
+                &serde_json::to_value(governed.sending_agent()).unwrap()
+            );
+            let other = selection["receiver"]["route"]["logical_executor"].clone();
+            assert_ne!(delivering, &other);
+            let mut mismatched = row.clone();
+            mismatched.data.body["peer_ingress"]["selection"]["sender"][1]["route"]
+                ["logical_executor"] = other;
+            mismatched.content_digest = mismatched.data.digest().unwrap();
+            assert_eq!(fixture.source.decode_stored(&row).map(|_| ()), Ok(()));
+            assert_eq!(
+                fixture.source.decode_stored(&mismatched).map(|_| ()),
+                Err(PrivateOriginalError::Conflict)
+            );
+            let record: SourceRecord =
+                serde_json::from_value(mismatched.data.body.clone()).unwrap();
+            assert_eq!(
+                crate::private_originals::peer_ingress::validate(&record),
+                Err(PrivateOriginalError::Conflict)
+            );
+            assert_eq!(
+                crate::private_originals::encode(record).map(|_| ()),
+                Err(PrivateOriginalError::Conflict)
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("stored governed sender control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

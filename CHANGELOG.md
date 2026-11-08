@@ -546,6 +546,12 @@ them.
   `HookSourceDecision` are `#[non_exhaustive]`; none of this is built for
   wasm32.
 
+- `meerkat`: `HookSource::new(path, sha256)` builds a `HookSource` outside
+  the crate. A host tests its `HookSourceTrust` without a build by putting
+  `HookSource::new(path, HookSourceDigest::of(bytes))` to `decide`: the
+  question the factory asks about those bytes at that path. `HookSource`
+  stays `#[non_exhaustive]` (requested by @zond).
+
 - `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
   `store_refused` value of a member's `preview_unavailable`
   (`WireMemberPreviewUnavailable::StoreRefused`): the store refuses the

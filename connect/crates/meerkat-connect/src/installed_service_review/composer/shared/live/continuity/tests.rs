@@ -382,6 +382,7 @@ fn input() -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "closed-cohort-control".into(),
         payload: serde_json::json!({}),

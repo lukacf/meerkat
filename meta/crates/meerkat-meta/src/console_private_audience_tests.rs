@@ -2639,7 +2639,8 @@ async fn schedule_tools_refuse_a_private_target_unless_the_caller_shares_its_own
             "type": "fork_helper",
             "mob_id": MOB,
             "source_member_id": "alpha-side",
-            "action": { "type": "send", "content": "Look at the salary review." },
+            "member_id": "alpha-side-helper",
+            "prompt": "Look at the salary review.",
         }),
         json!({
             "target_kind": "session",

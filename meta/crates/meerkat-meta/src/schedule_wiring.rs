@@ -617,6 +617,34 @@ impl ScheduleMobTargetRegistry {
         }
     }
 
+    /// The person member `member` is private to, read from its roster
+    /// labels in the adopted mob state: of mob `mob_id`, or of whichever mob
+    /// holds it when no mob is named. `None` for a member private to no one,
+    /// one no mob holds, and when no mob state is adopted.
+    async fn member_private_owner(&self, mob_id: Option<&str>, member: &str) -> Option<String> {
+        let state = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.upgrade()?,
+            Ok(AdoptedMobState::Unset) | Err(_) => return None,
+        };
+        let identity = meerkat_mob::AgentIdentity::from(member);
+        for (id, handle) in state.mob_handles_snapshot().await.ok()? {
+            if mob_id.is_some_and(|mob_id| mob_id != id.as_str()) {
+                continue;
+            }
+            if let Ok(Some(entry)) = handle.get_member(&identity).await {
+                return crate::access::private_owner(&entry.labels).map(str::to_string);
+            }
+        }
+        None
+    }
+
+    /// The person the member holding session `session_id` is private to
+    /// (see [`Self::member_private_owner`]).
+    async fn session_private_owner(&self, session_id: &str) -> Option<String> {
+        let (mob_id, member) = self.resolve_bridge_session(session_id).await?;
+        self.member_private_owner(Some(&mob_id), &member).await
+    }
+
     /// Resolve a bridge session against the adopted mob state, holding the
     /// state only for this call's roster walk.
     async fn resolve_mob_session(&self, session_id: &str) -> MobSessionResolution {
@@ -842,6 +870,78 @@ struct MobStateStopped;
 struct MobIdentityScheduleToolDispatcher {
     inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
     resolve_mob_session: MobSessionResolver,
+    /// The registry that tells who a target member and the calling agent are
+    /// private to; `None` judges no target.
+    owners: Option<ScheduleMobTargetRegistry>,
+}
+
+/// Whether the target of a schedule create or update names a member private
+/// to a person the calling agent (the turn's own session) is not private
+/// to: the member a member target or an identity target names, the source
+/// of a fork helper, or the member holding a session target's session. An
+/// unparseable target names none here; the schedule service refuses it.
+async fn private_target_out_of_reach(
+    owners: &ScheduleMobTargetRegistry,
+    args: &Value,
+    context: &meerkat_core::ToolDispatchContext,
+) -> bool {
+    let Some(target) = args
+        .get("target")
+        .and_then(|target| serde_json::from_value::<TargetBinding>(target.clone()).ok())
+    else {
+        return false;
+    };
+    let named = match &target {
+        TargetBinding::Session(session) => {
+            let session_id = match session.as_ref() {
+                SessionTargetBinding::ExactSession { session_id, .. }
+                | SessionTargetBinding::ResumableSession { session_id, .. } => {
+                    Some(session_id.to_string())
+                }
+                SessionTargetBinding::MaterializeOnDemandSession {
+                    bound_session_id, ..
+                } => bound_session_id.as_ref().map(ToString::to_string),
+            };
+            match session_id {
+                Some(session_id) => owners.session_private_owner(&session_id).await,
+                None => None,
+            }
+        }
+        TargetBinding::Identity(binding) => {
+            match parse_mob_member_schedule_identity(binding.identity()) {
+                Some(member) => {
+                    owners
+                        .member_private_owner(Some(&member.mob_id), &member.member)
+                        .await
+                }
+                None => owners.member_private_owner(None, binding.identity()).await,
+            }
+        }
+        TargetBinding::Mob(binding) => match binding.as_ref() {
+            MobTargetBinding::Member {
+                mob_id, member_id, ..
+            } => owners.member_private_owner(Some(mob_id), member_id).await,
+            MobTargetBinding::ForkHelper {
+                mob_id,
+                source_member_id,
+                ..
+            } => {
+                owners
+                    .member_private_owner(Some(mob_id), source_member_id)
+                    .await
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(owner) = named else {
+        return false;
+    };
+    let caller = match context.origin_session_id() {
+        Some(session_id) => owners.session_private_owner(&session_id.to_string()).await,
+        None => None,
+    };
+    caller.as_deref() != Some(owner.as_str())
 }
 
 impl MobIdentityScheduleToolDispatcher {
@@ -849,6 +949,7 @@ impl MobIdentityScheduleToolDispatcher {
         inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
         mob_target_registry: ScheduleMobTargetRegistry,
     ) -> Self {
+        let owners = mob_target_registry.clone();
         let resolve_mob_session = Arc::new(move |session_id: String| {
             let mob_target_registry = mob_target_registry.clone();
             Box::pin(async move { mob_target_registry.resolve_mob_session(&session_id).await })
@@ -857,6 +958,7 @@ impl MobIdentityScheduleToolDispatcher {
         Self {
             inner,
             resolve_mob_session,
+            owners: Some(owners),
         }
     }
 
@@ -875,6 +977,7 @@ impl MobIdentityScheduleToolDispatcher {
         Self {
             inner,
             resolve_mob_session,
+            owners: None,
         }
     }
 
@@ -966,6 +1069,14 @@ impl meerkat_core::AgentToolDispatcher for MobIdentityScheduleToolDispatcher {
                     meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
                 )
             })?;
+        // A target naming a member private to a person the calling agent is
+        // not private to is refused, as an act on a member outside the
+        // agent's reach.
+        if let Some(owners) = self.owners.as_ref()
+            && private_target_out_of_reach(owners, &rewritten, context).await
+        {
+            return Err(meerkat_core::ToolError::access_denied(call.name));
+        }
         let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
             .map_err(|error| {
                 meerkat_core::ToolError::invalid_arguments(

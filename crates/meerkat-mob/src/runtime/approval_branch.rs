@@ -237,6 +237,7 @@ mod tests {
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Exempt,
             approval_branch: source,
+            dispatch_admission_lineage: false,
         });
         roster.get(&identity).cloned().expect("the seated entry")
     }

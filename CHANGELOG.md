@@ -562,6 +562,14 @@ them.
   last, so an exhaustive match needs its arm: a durable fork that takes no
   message of its source (see Added).
 
+- `meerkat-machine-schema`: `InputFieldDomainKind` gains
+  `CiSamples(Vec<TlcValue>)`, appended last: the values the CI profile
+  samples for an input field of any type, whose whole domain the Deep
+  profile and every composition explore. `InputFieldDomainError` gains
+  `SampleTypeMismatch { index }`, appended last, which refuses a sample that
+  is not a value of the field's type. Both enums are exhaustive, so a
+  downstream exhaustive match needs the new arms.
+
 - `meerkat-machine-schema`, `meerkat-machine-kernels`: the grant owner's
   approval-carried children (see Added). `GrantRecord`
   (`catalog::dsl::grant_authority::types`) gains the public fields

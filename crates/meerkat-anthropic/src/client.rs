@@ -456,10 +456,10 @@ impl MessageRun {
 /// consecutive user messages), and System rows open no turn. Assistant
 /// messages before the index belong to completed turns. `None` when no run
 /// starts a turn.
-fn turn_in_progress_start(messages: &[Message]) -> Option<usize> {
+fn turn_in_progress_start<'m>(messages: impl IntoIterator<Item = &'m Message>) -> Option<usize> {
     let mut start = None;
     let mut run: Option<MessageRun> = None;
-    for (index, message) in messages.iter().enumerate() {
+    for (index, message) in messages.into_iter().enumerate() {
         if matches!(message, Message::BlockAssistant(_)) {
             if let Some(ended) = run.take()
                 && ended.starts_a_turn()
@@ -514,6 +514,17 @@ fn lowers_to_content(block: &AssistantBlock) -> bool {
         AssistantBlock::ToolUse { .. } | AssistantBlock::ServerToolContent { .. } => true,
         _ => false,
     }
+}
+
+/// Whether `message` is an assistant message whose replayed thinking is all
+/// it would send.
+fn sends_only_replayed_thinking(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::BlockAssistant(assistant)
+            if assistant.blocks.iter().any(is_replayed_thinking)
+                && !assistant.blocks.iter().any(lowers_to_content)
+    )
 }
 
 /// `message` without its replayed thinking blocks, or `None` when nothing
@@ -1754,8 +1765,16 @@ impl AnthropicClient {
     /// `request` as this client sends it: under
     /// [`ThinkingReplay::TurnInProgress`] the assistant messages of completed
     /// turns ([`turn_in_progress_start`]) lose their thinking and redacted
-    /// thinking blocks (a server compaction block stays), and one left with
-    /// nothing to send is left out.
+    /// thinking blocks (a server compaction block stays).
+    ///
+    /// A completed message that would send nothing else is left out first,
+    /// and the turn in progress is then that of the messages as sent. Leaving
+    /// a message out joins the user messages around it, which can make an
+    /// earlier tool call the assistant message the request continues, and
+    /// that one keeps its thinking (manual `enabled` thinking requires it
+    /// there). Leaving messages out only joins runs, so the turn in progress
+    /// can only start earlier, and every message before it still has
+    /// something to send.
     fn thinking_replay_view<'r>(&self, request: &'r LlmRequest) -> Cow<'r, LlmRequest> {
         if self.thinking_replay(request) == ThinkingReplay::Whole {
             return Cow::Borrowed(request);
@@ -1763,8 +1782,7 @@ impl AnthropicClient {
         let Some(start) = turn_in_progress_start(&request.messages) else {
             return Cow::Borrowed(request);
         };
-        let (completed, in_progress) = request.messages.split_at(start);
-        let replays_completed_thinking = completed.iter().any(|message| {
+        let replays_completed_thinking = request.messages[..start].iter().any(|message| {
             matches!(
                 message,
                 Message::BlockAssistant(assistant)
@@ -1774,11 +1792,25 @@ impl AnthropicClient {
         if !replays_completed_thinking {
             return Cow::Borrowed(request);
         }
-        let mut view = request.clone();
-        view.messages = completed
+        let kept: Vec<&Message> = request
+            .messages
             .iter()
-            .filter_map(without_replayed_thinking)
-            .chain(in_progress.iter().cloned())
+            .enumerate()
+            .filter(|(index, message)| *index >= start || !sends_only_replayed_thinking(message))
+            .map(|(_, message)| message)
+            .collect();
+        let boundary = turn_in_progress_start(kept.iter().copied()).unwrap_or(0);
+        let mut view = request.clone();
+        view.messages = kept
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                if index < boundary {
+                    without_replayed_thinking(message)
+                } else {
+                    Some((*message).clone())
+                }
+            })
             .collect();
         Cow::Owned(view)
     }

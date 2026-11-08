@@ -1083,7 +1083,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiringReleasable is violated."' \
   'echo "Error: Action property AuditWriteOwesExactlyTheSelected is violated."' \
-  'echo "Error: Invariant AuditDeliversOnlyToBoundLocalBornMembers is violated."' \
+  'echo "Error: Invariant AuditDeliversOnlyToBoundBornMembers is violated."' \
   'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \
   'echo "Error: Action property AuditUnseatLeavesNoFact is violated."' \
   'echo "Error: Invariant NotAuditWitnessReviseDropsEarlierAck is violated."' \

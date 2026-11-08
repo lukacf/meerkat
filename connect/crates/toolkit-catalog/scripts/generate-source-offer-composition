@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Compose two canonical source/offer pairs with publication and crash recovery.
+
+Usage: generate-source-offer-composition GENERATED_ORIGINALS NEW_DIRECTORY
+The owner module headers are renamed for TLA INSTANCE; their bodies stay exact.
+Core ledger persistence/dedup remain environment assumptions. This is a bounded
+composition slice, not all thirteen controls or native/runtime conformance.
+The owner records the preparation's epoch, each dispatch start before the
+call, a lost answer against its dispatch and a read by key that finds the
+admission; a closed source refuses the commit through the owner.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def main():
+    root, output = map(Path, sys.argv[1:])
+    output.mkdir(exist_ok=False)
+    variables, instances, groups, owners, constants = [], [], {}, {}, set()
+    owner_invariants = {}
+    for kind, directory in [('source', 'source_record'), ('offer', 'original_offer')]:
+        raw = (root / directory / 'model.tla').read_bytes()
+        prefix = b'---- MODULE model ----\n'
+        if not raw.startswith(prefix):
+            raise ValueError('unexpected generated module header')
+        renamed = f'---- MODULE {kind}_owner ----\n'.encode() + raw[len(prefix):]
+        (output / (kind + '_owner.tla')).write_bytes(renamed)
+        owners[kind] = {'generated_sha256': sha(raw), 'renamed_sha256': sha(renamed),
+                        'body_sha256': sha(raw[len(prefix):])}
+        model = raw.decode()
+        fields = re.search(r'^VARIABLES (.+)$', model, re.MULTILINE)[1].split(', ')
+        constants.update(re.search(r'^CONSTANTS (.+)$', model, re.MULTILINE)[1].split(', '))
+        config = (root / directory / 'ci.cfg').read_text()
+        owner_invariants[kind] = config.split('INVARIANTS\n', 1)[1].split('CONSTRAINTS\n', 1)[0].split()
+        for lane in (1, 2):
+            name = kind + str(lane)
+            groups[name] = [name + '_' + field for field in fields]
+            variables.extend(groups[name])
+            instances.append(name + ' == INSTANCE ' + kind + '_owner WITH\n    ' +
+                             ',\n    '.join(field + ' <- ' + name + '_' + field for field in fields))
+    environment = ['alive', 'epoch', 'scanned']
+    for lane in (1, 2):
+        environment.extend(name + str(lane) for name in
+                           ['snapshot', 'published', 'revoked', 'outbox', 'parked',
+                            'inflight', 'native', 'dispatch_epochs', 'commit_revision'])
+    variables.extend(environment)
+    actions = []
+    definitions = []
+
+    def frame(changed):
+        expanded = set()
+        for name in changed:
+            expanded.update(groups.get(name, [name]))
+        return '    /\\ UNCHANGED <<' + ', '.join(v for v in variables if v not in expanded) + '>>'
+
+    def action(name, expressions, changed):
+        actions.append(name)
+        definitions.append(name + ' ==\n' + '\n'.join('    /\\ ' + expr for expr in expressions)
+                           + '\n' + frame(changed))
+
+    init = ['source1!Init', 'source2!Init', 'offer1!Init', 'offer2!Init',
+            'alive = TRUE', 'epoch = 1', 'scanned = TRUE']
+    for lane in (1, 2):
+        i = str(lane)
+        s, o = 'source' + i, 'offer' + i
+        def sv(field): return s + '_' + field
+        def ov(field): return o + '_' + field
+        for name in ['snapshot', 'published', 'commit_revision']:
+            init.append(name + i + ' = 0')
+        for name in ['revoked', 'outbox', 'parked', 'inflight', 'native']:
+            init.append(name + i + ' = FALSE')
+        init.append('dispatch_epochs' + i + ' = {}')
+        action('Register' + i, ['alive', f'{s}!RegisterSource("source{i}", "scope{i}", "Ordinary", "", "source-prep{i}")'], [s])
+        action('Ready' + i, ['alive', f'{s}!MakeSourceReady({sv("source_key")}, {sv("revision")}, {sv("preparation_id")}, "source-prepared{i}")'], [s])
+        action('Capture' + i, ['alive', f'{sv("readiness")} = "Ready"',
+                              f'snapshot{i} = 0', f'snapshot{i}\' = {sv("revision")}'], ['snapshot' + i])
+        action('Prepare' + i, ['alive', f'snapshot{i} > 0',
+                              f'{o}!PrepareOriginalOffer("offer{i}", "source{i}", snapshot{i}, "session{i}", "input{i}", "digest{i}", "binding{i}", "offer-prep{i}", epoch)'], [o])
+        action('Seal' + i, ['alive', f'{o}!SealOriginalPreparation({ov("offer_key")}, {ov("revision")}, {ov("preparation_id")}, {ov("input_digest")}, "offer-prepared{i}")'], [o])
+        action('Commit' + i, ['alive',
+            f'{o}!RecordOriginalSendIntent({ov("offer_key")}, {ov("revision")}, {sv("source_key")},\n'
+            f'        IF Fault = "stale-snapshot" THEN {ov("source_revision")} ELSE {sv("revision")},\n'
+            f'        "session{i}", Fault = "stale-snapshot" \\/ {sv("phase")} = "Open",\n'
+            f'        Fault = "stale-snapshot" \\/ {sv("readiness")} = "Ready", TRUE, TRUE)',
+            f'outbox{i}\' = TRUE', f'parked{i}\' = TRUE',
+            f'commit_revision{i}\' = {sv("revision")}'], [o, 'outbox' + i, 'parked' + i, 'commit_revision' + i])
+        action('Close' + i, ['alive', f'{s}!CloseSourceEligibility({sv("source_key")}, {sv("revision")}, "cancel{i}")'], [s])
+        action('Publish' + i, ['alive', f'{sv("phase")} \\in {{"Open", "CancellationPending"}}',
+                              f'published{i} # {sv("revision")}', f'published{i}\' = {sv("revision")}'], ['published' + i])
+        action('Revoke' + i, ['alive', f'{sv("phase")} = "CancellationPending"',
+                             f'~revoked{i}', f'revoked{i}\' = TRUE'], ['revoked' + i])
+        action('Cancel' + i, ['alive', f'revoked{i}', f'published{i} = {sv("revision")}',
+            f'{s}!ConfirmSourceCancellation({sv("source_key")}, {sv("revision")}, {sv("cancellation_id")}, published{i}, "revoked{i}", "published{i}")'], [s])
+        # A closed source refuses the commit: the owner decides on the same observation.
+        action('Withdraw' + i, ['alive', f'{sv("readiness")} = "ClosedToOffers"',
+                                f'{o}!RefuseOriginalSendIntent({ov("offer_key")}, {ov("revision")}, {sv("source_key")}, {sv("revision")},\n'
+                                f'        "session{i}", {sv("phase")} = "Open", {sv("readiness")} = "Ready", TRUE, TRUE)'], [o])
+        # The dispatch start is recorded through the owner before the call (the
+        # send-before-owner mutant calls over a sealed Prepared record without it).
+        action('Dispatch' + i, ['alive', 'scanned', f'~inflight{i}',
+            f'epoch \\notin dispatch_epochs{i}',
+            f'{sv("readiness")} = "Ready"',
+            f'(outbox{i} /\\ parked{i} /\\ {ov("phase")} = "Offered"\n'
+            f'         /\\ {o}!RecordDispatchStart({ov("offer_key")}, {ov("revision")}, epoch, {ov("dispatch_count")} + 1)) \\/\n'
+            f'        (Fault = "send-before-owner" /\\ {ov("phase")} = "Prepared" /\\ {ov("preparation_receipt")} # ""\n'
+            f'         /\\ UNCHANGED <<' + ', '.join(groups[o]) + '>>)',
+            f'inflight{i}\' = TRUE', f'dispatch_epochs{i}\' = dispatch_epochs{i} \\cup {{epoch}}'],
+            [o, 'inflight' + i, 'dispatch_epochs' + i])
+        action('NativeCommit' + i, ['alive', f'inflight{i}', f'native{i}\' = TRUE', f'inflight{i}\' = FALSE'], ['native' + i, 'inflight' + i])
+        # The answer of this process's last dispatch: Core's admission, or lost (before Core or
+        # after its commit) and recorded against that dispatch; a read by key finds an admission.
+        own = (f'{ov("dispatch_count")} \\in DOMAIN {ov("dispatch_epochs")}'
+               f' /\\ {ov("dispatch_epochs")}[{ov("dispatch_count")}] = epoch')
+        action('Observe' + i, ['alive', f'native{i}', f'~inflight{i}', own,
+            f'{o}!RetainCoreReceipt({ov("offer_key")}, {ov("revision")}, {ov("input_digest")}, {ov("incarnation")}, {ov("dispatch_count")}, "Admitted", "core-receipt{i}")',
+            f'outbox{i}\' = FALSE', f'parked{i}\' = FALSE'], [o, 'outbox' + i, 'parked' + i])
+        action('LostAnswer' + i, ['alive', own,
+            f'{o}!PreserveUnresolvedOffer({ov("offer_key")}, {ov("revision")}, {ov("input_digest")}, {ov("incarnation")}, {ov("dispatch_count")}, "Unresolved", "")',
+            f'inflight{i}\' = FALSE'], [o, 'inflight' + i])
+        action('Find' + i, ['alive', 'scanned', f'native{i}', f'~inflight{i}',
+            f'{o}!RetainFoundReceipt({ov("offer_key")}, {ov("revision")}, {ov("input_digest")}, {ov("incarnation")}, epoch, "Admitted", "core-found{i}", "Live")',
+            f'outbox{i}\' = FALSE', f'parked{i}\' = FALSE'], [o, 'outbox' + i, 'parked' + i])
+    action('Crash', ['alive', 'epoch = 1', 'offer1_phase = "Offered" \\/ offer2_phase = "Offered"',
+                    'alive\' = FALSE', 'parked1\' = FALSE', 'parked2\' = FALSE',
+                    'inflight1\' = FALSE', 'inflight2\' = FALSE'], ['alive', 'parked1', 'parked2', 'inflight1', 'inflight2'])
+    action('Restart', ['~alive', 'epoch = 1', 'alive\' = TRUE', 'epoch\' = 2', 'scanned\' = FALSE'], ['alive', 'epoch', 'scanned'])
+    action('Scan', ['alive', '~scanned', 'scanned\' = TRUE',
+                   'parked1\' = (Fault # "skip-restart-owner" /\\ offer1_phase = "Offered" /\\ outbox1)',
+                   'parked2\' = (offer2_phase = "Offered" /\\ outbox2)'], ['scanned', 'parked1', 'parked2'])
+    # The end: every source cancelled, every offer terminal or kept Offered without a native
+    # admission (its intent durable; a later replay, the restart or the close discharges it).
+    action('Finished', ['source1_phase = "Cancelled"', 'source2_phase = "Cancelled"',
+                        'offer1_phase \\in {"Absent", "Withdrawn", "CoreObserved"} \\/ (offer1_phase = "Offered" /\\ ~native1)',
+                        'offer2_phase \\in {"Absent", "Withdrawn", "CoreObserved"} \\/ (offer2_phase = "Offered" /\\ ~native2)',
+                        '~inflight1 /\\ ~inflight2'], [])
+    invariants = {}
+    for kind in ['source', 'offer']:
+        for lane in (1, 2):
+            name = kind + str(lane)
+            invariants[name + 'Canonical'] = ' /\\ '.join(name + '!' + inv for inv in owner_invariants[kind])
+    invariants['I2_FreshSourceAtCommit'] = ' /\\ '.join(
+        f'(offer{i}_phase \\in {{"Offered", "CoreObserved"}} => offer{i}_source_revision = commit_revision{i})' for i in (1, 2))
+    invariants['I4_OwnerBeforeDispatch'] = ' /\\ '.join(
+        f'(inflight{i} => offer{i}_phase \\in {{"Offered", "CoreObserved"}})' for i in (1, 2))
+    invariants['I11_RestartEnumeratesOwners'] = ' /\\ '.join(
+        f'((alive /\\ epoch = 2 /\\ scanned /\\ offer{i}_phase = "Offered") => (outbox{i} /\\ parked{i}))' for i in (1, 2))
+    invariants['CoreReceiptProvenance'] = ' /\\ '.join(
+        f'(offer{i}_core_receipt_ref # "" => native{i})' for i in (1, 2))
+    invariants['DurableOutbox'] = ' /\\ '.join(f'(offer{i}_phase = "Offered" => outbox{i})' for i in (1, 2))
+    text = '\n\n'.join([
+        '---- MODULE source_offer_composition ----\nEXTENDS TLC, Naturals, Sequences, FiniteSets',
+        '\\* Two fixed source/offer identities, two exact native session keys, one crash/restart.\n'
+        '\\* Only generated owner actions change owner state. Core commit/dedup are assumptions.\n'
+        '\\* No protected-lock, effect-mark, all-door, liveness or full I1-I13 acceptance.',
+        'CONSTANTS ' + ', '.join(sorted(constants)) + ', Fault',
+        'VARIABLES ' + ', '.join(variables),
+        'vars == <<' + ', '.join(variables) + '>>',
+        *instances,
+        'Init ==\n' + '\n'.join('    /\\ ' + expr for expr in init),
+        *definitions,
+        'Next ==\n' + '\n'.join('    \\/ ' + action for action in actions),
+        'Spec == Init /\\ [][Next]_vars',
+        *[name + ' == ' + expr for name, expr in invariants.items()],
+        'Bound == ' + ' /\\ '.join(name + '_model_step_count <= 8' for name in groups),
+        '=============================================================================',
+    ]) + '\n'
+    (output / 'source_offer_composition.tla').write_text(text)
+    profiles = {'none': None, 'stale-snapshot': 'I2_FreshSourceAtCommit',
+                'send-before-owner': 'I4_OwnerBeforeDispatch',
+                'skip-restart-owner': 'I11_RestartEnumeratesOwners'}
+    for name in profiles:
+        config = ('SPECIFICATION Spec\nCONSTANTS\n  BooleanValues = {TRUE,FALSE}\n'
+                  '  NatValues = {0,1,2}\n  StringValues = {"","alpha"}\n  SetOfU64Values = {{},{1}}\n'
+                  '  RustU64Max = 16\n'
+                  '  ToolkitSourceKindValues = {"Ordinary","Helper"}\n'
+                  '  ToolkitSourceReadinessValues = {"Preparing","Ready","ClosedToOffers"}\n'
+                  '  ToolkitCoreObservationValues = {"Unresolved","Admitted","NotAdmitted","Absent","Unavailable"}\n'
+                  '  ToolkitDispatchAnswerValues = {"NotSubmitted","Admitted","CoreRefused","EntryRefused","Unresolved"}\n'
+                  '  ToolkitReceiptKindValues = {"Unsettled","Admitted","Found","CoreRefused","EntryRefused"}\n'
+                  '  ToolkitWithdrawalCauseValues = {"NotWithdrawn","PolicyDenied","SourceClosed","AdmissionClosed",'
+                  '"PreparationStale","ProcessEnded"}\n'
+                  '  ToolkitCoreReadValues = {"Durable","Live"}\n'
+                  f'  Fault = "{name}"\nINVARIANTS\n  ' + '\n  '.join(invariants) + '\nCONSTRAINT Bound\n')
+        (output / (name + '.cfg')).write_text(config)
+    manifest = {'scope': 'two source/offer pairs, fixed distinct incarnations, publication/revocation, one crash/restart, eight steps per owner; dispatch starts, lost answers and found reads through the owner',
+                'full_b1_acceptance': False, 'owners': owners, 'actions': actions, 'profiles': profiles,
+                'generator_sha256': sha(Path(__file__).read_bytes()),
+                'artifact_hashes': {f.name: sha(f.read_bytes()) for f in output.iterdir() if f.is_file()}}
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Extend a recorded source/offer composition with the protected bind boundary.
+
+Usage: generate-protected-composition TWO_PAIR_EXPORT NEW_DIRECTORY
+The source/offer models are retained unchanged. This bounded slice activates
+one pair and models A/B, Find/Launch, P/A, and fresh/partial/saved binding rows.
+It checks the contract, not the current binder's implementation or Rust locks.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    root, output = map(Path, sys.argv[1:])
+    output.mkdir(exist_ok=False)
+    base = json.loads((root / 'manifest.json').read_text())
+    copied = {}
+    for name in ['source_owner.tla', 'offer_owner.tla', 'source_offer_composition.tla']:
+        if sha(root / name) != base['artifact_hashes'][name]:
+            raise ValueError('recorded composition input changed')
+        shutil.copyfile(root / name, output / name)
+        copied[name] = sha(output / name)
+    model = (root / 'source_offer_composition.tla').read_text()
+    base_vars = re.search(r'^VARIABLES (.+)$', model, re.MULTILINE)[1].split(', ')
+    extra = ['stage', 'door', 'site', 'initial_binding', 'grant_present', 'binding_present',
+             'protected', 'effect_mark', 'attempt_wrote', 'gate_available', 'decision',
+             'cause', 'waiting', 'retry_owed']
+    definitions, actions = [], []
+
+    def frame(fields):
+        return 'UNCHANGED <<' + ', '.join(fields) + '>>'
+
+    def action(name, expressions, changed=(), base_action=None, owner_action=False):
+        actions.append(name)
+        body = list(expressions)
+        if base_action:
+            body.append(base_action)
+        else:
+            body.append(frame(v for v in base_vars if not (owner_action and v.startswith('offer1_'))
+                              and v not in changed))
+        body.append(frame(v for v in extra if v not in changed))
+        definitions.append(name + ' ==\n' + '\n'.join('    /\\ ' + expr for expr in body))
+
+    for name in ['Register1', 'Ready1', 'Capture1', 'Close1', 'Publish1', 'Revoke1', 'Cancel1',
+                 'NativeCommit1', 'Observe1', 'LostAnswer1', 'Find1']:
+        action('P' + name, [], base_action=name)
+    action('EnterA', ['alive', 'stage = "A"', 'snapshot1 > 0', '~protected',
+                     'decision = "Pending"', 'source1_readiness = "Ready"',
+                     'protected\' = TRUE'], ['protected'])
+    action('GrantOutside', ['alive', 'stage = "B"', '~protected', '~grant_present',
+                           'snapshot1 > 0', 'grant_present\' = TRUE'], ['grant_present'])
+    action('BindingOutside', ['alive', 'stage = "B"', '~protected', 'grant_present',
+                             '~binding_present', 'binding_present\' = TRUE'], ['binding_present'])
+    action('GrantInside', ['alive', 'stage = "A"', 'protected', '~grant_present',
+                          'grant_present\' = TRUE', 'attempt_wrote\' = TRUE',
+                          'effect_mark\' = (Fault # "drop-effect-marks")'],
+           ['grant_present', 'attempt_wrote', 'effect_mark'])
+    action('BindingInside', ['alive', 'stage = "A"', 'protected', 'grant_present',
+                            '~binding_present', 'binding_present\' = TRUE',
+                            'attempt_wrote\' = TRUE', 'effect_mark\' = (Fault # "drop-effect-marks")'],
+           ['binding_present', 'attempt_wrote', 'effect_mark'])
+    action('PPrepare', ['binding_present', '(stage = "A" /\\ protected) \\/ (stage = "B" /\\ ~protected)'], base_action='Prepare1')
+    action('PSeal', ['(stage = "A" /\\ protected) \\/ (stage = "B" /\\ ~protected)'], base_action='Seal1')
+    action('EnterB', ['alive', 'stage = "B"', 'binding_present', '~protected',
+                     'offer1_preparation_receipt # ""', 'decision = "Pending"',
+                     'source1_readiness = "Ready"', 'protected\' = TRUE'], ['protected'])
+
+    eligible = ['alive', 'protected', 'binding_present', 'offer1_phase = "Prepared"',
+                'offer1_preparation_receipt # ""', 'decision = "Pending"']
+    outcome = ('IF effect_mark THEN (IF site = "P" THEN "Refused" ELSE "WaitInPlace") '
+               'ELSE IF Fault = "block-in-protected" THEN "WaitInPlace" ELSE "NotNow"')
+    # Separate actions make coverage of every first-send/one-write row
+    # observable, instead of hiding those rows inside one disjunction counter.
+    rows = []
+    for stage in ['A', 'B']:
+        for door in ['Find', 'Launch']:
+            for site in ['P', 'A']:
+                for initial in ['First', 'GrantOnly', 'Bound']:
+                    name = 'Held_' + '_'.join([stage, door, site, initial])
+                    rows.append(name)
+                    action(name, eligible + ['~gate_available', f'stage = "{stage}"',
+                        f'door = "{door}"', f'site = "{site}"', f'initial_binding = "{initial}"',
+                        'cause\' = "SourceHeld"', 'decision\' = ' + outcome,
+                        'protected\' = (decision\' = "WaitInPlace")',
+                        'waiting\' = (decision\' = "NotNow")',
+                        'retry_owed\' = (decision\' = "NotNow" /\\ Fault # "drop-retry-owner")'],
+                           ['cause', 'decision', 'protected', 'waiting', 'retry_owed'])
+    action('Denied', eligible + ['cause\' = "PolicyDenied"',
+        'decision\' = IF Fault = "refusal-as-notnow" THEN "NotNow" ELSE "Refused"',
+        'protected\' = FALSE', 'waiting\' = (decision\' = "NotNow")',
+        'retry_owed\' = (decision\' = "NotNow")'], ['cause', 'decision', 'protected', 'waiting', 'retry_owed'])
+    action('Release', ['alive', '~gate_available', 'gate_available\' = TRUE'], ['gate_available'])
+    action('ReadyAtCheck', eligible + ['gate_available', 'source1_readiness = "Ready"',
+        'snapshot1 = source1_revision', 'decision\' = "Bound"', 'protected\' = FALSE'], ['decision', 'protected'])
+    action('FinishLegacyWait', ['alive', 'protected', 'decision = "WaitInPlace"',
+        'gate_available', 'source1_readiness = "Ready"', 'snapshot1 = source1_revision',
+        'decision\' = "Bound"', 'protected\' = FALSE'], ['decision', 'protected'])
+    action('Reenter', ['alive', 'waiting', 'retry_owed', 'gate_available',
+        'source1_readiness = "Ready"', 'snapshot1 = source1_revision',
+        'decision\' = "Pending"', 'cause\' = "None"', 'waiting\' = FALSE',
+        'retry_owed\' = FALSE', 'protected\' = TRUE', 'effect_mark\' = FALSE',
+        'attempt_wrote\' = FALSE'], ['decision', 'cause', 'waiting', 'retry_owed', 'protected', 'effect_mark', 'attempt_wrote'])
+    action('PCommit', ['decision = "Bound"', '~protected'], base_action='Commit1')
+    action('PDispatch', ['~protected'], base_action='Dispatch1')
+    # A refused decision or a closed source refuses the commit through the owner, which
+    # decides on the same observation (RefuseOriginalSendIntent).
+    action('AbortPrepared', ['alive', 'offer1_phase = "Prepared"',
+        'decision = "Refused" \\/ source1_readiness = "ClosedToOffers"',
+        'offer1!RefuseOriginalSendIntent(offer1_offer_key, offer1_revision, offer1_source_key, source1_revision,\n'
+        '        "session1", source1_phase = "Open", source1_readiness = "Ready", TRUE, decision # "Refused")',
+        'decision\' = "Refused"', 'waiting\' = FALSE', 'retry_owed\' = FALSE',
+        'protected\' = FALSE'], ['decision', 'waiting', 'retry_owed', 'protected'], owner_action=True)
+    action('AbortBeforePreparation', ['alive', 'offer1_phase = "Absent"',
+        'source1_readiness = "ClosedToOffers"', 'protected',
+        'decision\' = "Refused"', 'protected\' = FALSE'], ['decision', 'protected'])
+    action('PreSendCrash', ['alive', 'epoch = 1', 'waiting', '~protected',
+        'alive\' = FALSE', 'waiting\' = FALSE'], ['alive', 'waiting'])
+    action('PCrash', ['~protected', 'waiting\' = FALSE'], ['waiting'], base_action='Crash')
+    action('PRestart', [], base_action='Restart')
+    action('PScan', ['waiting\' = (retry_owed /\\ offer1_phase = "Prepared")'], ['waiting'], base_action='Scan')
+    action('FinishedOnePair', ['source1_phase = "Cancelled"',
+        'offer1_phase \\in {"Absent", "Withdrawn", "CoreObserved"} \\/ (offer1_phase = "Offered" /\\ ~native1)',
+        '~inflight1', '~protected', '~waiting', '~retry_owed'])
+
+    initial = ['Init', 'stage \\in StageValues', 'door \\in DoorValues', 'site \\in SiteValues',
+        'initial_binding \\in InitialBindingValues', 'grant_present = (initial_binding # "First")',
+        'binding_present = (initial_binding = "Bound")', 'protected = FALSE', 'effect_mark = FALSE',
+        'attempt_wrote = FALSE', 'gate_available = FALSE', 'decision = "Pending"',
+        'cause = "None"', 'waiting = FALSE', 'retry_owed = FALSE']
+    text = '\n\n'.join([
+        '---- MODULE protected_composition ----\nEXTENDS source_offer_composition',
+        '\\* Differential bridge contract, not proof of the current binder code or real locks.\n'
+        '\\* Grant/binding actions model entry into durable writes atomically with marking.\n'
+        '\\* Blocking-writer cancellation and nested-section races are not modeled here.',
+        'CONSTANTS StageValues, DoorValues, SiteValues, InitialBindingValues',
+        'VARIABLES ' + ', '.join(extra),
+        'protected_vars == <<vars, ' + ', '.join(extra) + '>>',
+        'ProtectedInit ==\n' + '\n'.join('    /\\ ' + expr for expr in initial),
+        *definitions,
+        'ProtectedNext ==\n' + '\n'.join('    \\/ ' + name for name in actions),
+        'ProtectedSpec == ProtectedInit /\\ [][ProtectedNext]_protected_vars',
+        'I1_ProtectedBoundary == /\\ (decision = "NotNow" => ~attempt_wrote)\n'
+        '                        /\\ (stage = "B" => decision # "WaitInPlace")',
+        'I5_RefusalClassification == cause = "PolicyDenied" => decision # "NotNow"',
+        'I6_DurableRetryObligation == decision = "NotNow" => retry_owed',
+        'ProtectedBound == Bound',
+        '=============================================================================',
+    ]) + '\n'
+    (output / 'protected_composition.tla').write_text(text)
+    profiles = {
+        'none': ('none', None, ['A', 'B'], ['Find', 'Launch'], ['P', 'A'], ['First', 'GrantOnly', 'Bound']),
+        'find-first-marks': ('drop-effect-marks', 'I1_ProtectedBoundary', ['A'], ['Find'], ['P'], ['First']),
+        'launch-first-marks': ('drop-effect-marks', 'I1_ProtectedBoundary', ['A'], ['Launch'], ['P'], ['First']),
+        'one-write-marks': ('drop-effect-marks', 'I1_ProtectedBoundary', ['A'], ['Find'], ['P'], ['GrantOnly']),
+        'protected-block': ('block-in-protected', 'I1_ProtectedBoundary', ['B'], ['Find'], ['A'], ['First']),
+        'refusal-classification': ('refusal-as-notnow', 'I5_RefusalClassification', ['B'], ['Find'], ['P'], ['First']),
+        'retry-owner': ('drop-retry-owner', 'I6_DurableRetryObligation', ['B'], ['Launch'], ['P'], ['First']),
+    }
+    exported_profiles = {}
+    for name, (fault, invariant, stages, doors, sites, bindings) in profiles.items():
+        config = (root / 'none.cfg').read_text().replace('SPECIFICATION Spec', 'SPECIFICATION ProtectedSpec')
+        config = config.replace('CONSTRAINT Bound', 'CONSTRAINT ProtectedBound')
+        config = config.replace('Fault = "none"', f'Fault = "{fault}"')
+        domains = ''
+        for key, values in [('StageValues', stages), ('DoorValues', doors), ('SiteValues', sites), ('InitialBindingValues', bindings)]:
+            domains += '  ' + key + ' = {' + ','.join(json.dumps(value) for value in values) + '}\n'
+        config = config.replace('INVARIANTS\n', domains + 'INVARIANTS\n  I1_ProtectedBoundary\n  I5_RefusalClassification\n  I6_DurableRetryObligation\n')
+        (output / (name + '.cfg')).write_text(config)
+        exported_profiles[name] = {'fault': fault, 'expected_invariant': invariant,
+                                   'stage': stages, 'door': doors, 'site': sites, 'initial_binding': bindings}
+    manifest = {'scope': 'one active canonical source/offer pair; A/B Find/Launch P/A first,grant-only,bound rows; retained retry obligation across one crash/restart',
+                'full_b1_acceptance': False, 'closed_composition_inputs': copied, 'actions': actions,
+                'held_rows': rows, 'profiles': exported_profiles, 'generator_sha256': sha(Path(__file__)),
+                'artifact_hashes': {f.name: sha(f) for f in output.iterdir() if f.is_file()}}
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

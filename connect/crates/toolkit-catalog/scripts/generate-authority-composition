@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Compose post-wait authority checks with the closed protected-boundary model.
+
+Usage: generate-authority-composition PROTECTED_EXPORT NEW_DIRECTORY
+This is a bounded consumer-contract model. Authority facts are observations
+from an abstract external owner, not a new Connect authority implementation.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import sys
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    root, output = map(Path, sys.argv[1:])
+    manifest = json.loads((root / 'manifest.json').read_text())
+    output.mkdir(exist_ok=False)
+    copied = {}
+    for name in ['source_owner.tla', 'offer_owner.tla',
+                 'source_offer_composition.tla', 'protected_composition.tla']:
+        if sha(root / name) != manifest['artifact_hashes'][name]:
+            raise ValueError('recorded composition input changed')
+        shutil.copyfile(root / name, output / name)
+        copied[name] = sha(output / name)
+    base_vars = []
+    for name in ['source_offer_composition.tla', 'protected_composition.tla']:
+        base_vars += re.search(r'^VARIABLES (.+)$', (root / name).read_text(), re.MULTILINE)[1].split(', ')
+    extra = ['authority_allowed', 'controller_generation', 'current_incarnation',
+             'await_epoch', 'checked_epoch', 'wait_seen', 'commit_allowed',
+             'commit_generation', 'commit_incarnation', 'commit_checked_epoch',
+             'commit_await_epoch']
+    definitions, actions = [], []
+
+    def frame(fields):
+        return 'UNCHANGED <<' + ', '.join(fields) + '>>'
+
+    def action(name, expressions, changed=(), inherited=None):
+        actions.append(name)
+        # TLC must assign the inherited primed fields before wrapper expressions
+        # inspect the outcome of that same transition.
+        body = ([inherited] if inherited else []) + list(expressions)
+        if not inherited:
+            body.append(frame(v for v in base_vars if v not in changed))
+        body.append(frame(v for v in extra if v not in changed))
+        definitions.append(name + ' ==\n' + '\n'.join('    /\\ ' + expr for expr in body))
+
+    # The planned send only. The current binder and the completed mark-drop controls remain closed.
+    excluded = {'EnterA', 'GrantInside', 'BindingInside', 'FinishLegacyWait',
+                'AbortBeforePreparation'}
+    inherited_actions = [a for a in manifest['actions']
+                         if a not in excluded and not a.startswith('Held_A_')]
+    for inherited in inherited_actions:
+        expressions, changed = [], []
+        if inherited.startswith('Held_'):
+            expressions += [
+                'await_epoch\' = IF decision\' = "NotNow" THEN 2 ELSE await_epoch',
+                'checked_epoch\' = IF CacheAcrossWait /\\ decision\' = "NotNow" THEN 2 ELSE checked_epoch',
+                'wait_seen\' = (wait_seen \\/ decision\' = "NotNow")',
+            ]
+            changed += ['await_epoch', 'checked_epoch', 'wait_seen']
+        if inherited in ['EnterB', 'Reenter', 'ReadyAtCheck', 'PCommit']:
+            expressions += ['checked_epoch = await_epoch', 'EffectiveAuthority']
+        if inherited == 'PCommit':
+            expressions += ['commit_allowed\' = authority_allowed',
+                            'commit_generation\' = controller_generation',
+                            'commit_incarnation\' = current_incarnation',
+                            'commit_checked_epoch\' = checked_epoch',
+                            'commit_await_epoch\' = await_epoch']
+            changed += ['commit_allowed', 'commit_generation', 'commit_incarnation',
+                        'commit_checked_epoch', 'commit_await_epoch']
+        if inherited in ['PreSendCrash', 'PCrash']:
+            expressions += ['checked_epoch\' = 0']
+            changed += ['checked_epoch']
+        action('Auth_' + inherited, expressions, changed, inherited=inherited)
+
+    eligible = ['alive', '~protected', 'snapshot1 > 0',
+                'offer1_phase \\in {"Absent", "Prepared"}',
+                'decision \\in {"Pending", "NotNow"}', 'CurrentAuthority',
+                'checked_epoch # await_epoch', 'checked_epoch\' = await_epoch']
+    action('ValidateInitial', eligible + ['~wait_seen'], ['checked_epoch'])
+    action('ValidateAfterWait', eligible + ['wait_seen'], ['checked_epoch'])
+    # An external owner changes one or more facts during the released wait.
+    action('RevokeDuringWait', ['alive', 'waiting', 'authority_allowed',
+                              'DriftCase \\in {"Any", "Authority"}',
+                              'authority_allowed\' = FALSE'], ['authority_allowed'])
+    action('ReplaceControllerDuringWait', ['alive', 'waiting', 'controller_generation = 1',
+                                         'DriftCase \\in {"Any", "Controller"}',
+                                         'controller_generation\' = 2'], ['controller_generation'])
+    action('ReplaceIncarnationDuringWait', ['alive', 'waiting', 'current_incarnation = "session1"',
+                                          'DriftCase \\in {"Any", "Incarnation"}',
+                                          'current_incarnation\' = "session2"'], ['current_incarnation'])
+    action('RefuseChangedAuthority', ['alive', 'offer1_phase = "Prepared"',
+                                    'decision \\in {"Pending", "NotNow", "Bound"}',
+                                    '~CurrentAuthority', 'decision\' = "Refused"',
+                                    'cause\' = "PolicyDenied"', 'protected\' = FALSE',
+                                    'waiting\' = FALSE', 'retry_owed\' = FALSE'],
+           ['decision', 'cause', 'protected', 'waiting', 'retry_owed'])
+
+    initial = ['ProtectedInit', 'authority_allowed = TRUE', 'controller_generation = 1',
+               'current_incarnation = "session1"', 'await_epoch = 1', 'checked_epoch = 0',
+               'wait_seen = FALSE', 'commit_allowed = FALSE', 'commit_generation = 0',
+               'commit_incarnation = ""', 'commit_checked_epoch = 0', 'commit_await_epoch = 0']
+    text = '\n\n'.join([
+        '---- MODULE authority_composition ----\nEXTENDS protected_composition',
+        '\\* External authority facts and their atomic observation are model assumptions.\n'
+        '\\* Drift occurs during one released wait. No post-entry revocation race is claimed.\n'
+        '\\* One active original keeps session1; replacing a session cannot retarget it.\n'
+        '\\* Historical commit witnesses are not invalidated by a later revocation.',
+        'CONSTANT DriftCase',
+        'VARIABLES ' + ', '.join(extra),
+        'authority_vars == <<protected_vars, ' + ', '.join(extra) + '>>',
+        'CurrentAuthority == authority_allowed /\\ controller_generation = 1 /\\ current_incarnation = "session1"',
+        'CacheAcrossWait == Fault \\in {"cached-authority", "cached-controller", "cached-incarnation"}',
+        'EffectiveAuthority == CurrentAuthority \\/ (CacheAcrossWait /\\ wait_seen /\\ checked_epoch = await_epoch)',
+        'AuthorityInit ==\n' + '\n'.join('    /\\ ' + expr for expr in initial),
+        *definitions,
+        'AuthorityNext ==\n' + '\n'.join('    \\/ ' + a for a in actions),
+        'AuthoritySpec == AuthorityInit /\\ [][AuthorityNext]_authority_vars',
+        'I9_CurrentAuthorityAtCommit ==\n'
+        '    offer1_phase \\in {"Offered", "CoreObserved"} =>\n'
+        '        /\\ commit_allowed\n'
+        '        /\\ commit_generation = 1\n'
+        '        /\\ commit_incarnation = offer1_incarnation\n'
+        '        /\\ commit_checked_epoch = commit_await_epoch',
+        'AuthorityBound == ProtectedBound',
+        '=============================================================================',
+    ]) + '\n'
+    (output / 'authority_composition.tla').write_text(text)
+    profiles = {'none': ('none', 'Any'), 'stale-authority': ('cached-authority', 'Authority'),
+                'stale-controller': ('cached-controller', 'Controller'),
+                'stale-incarnation': ('cached-incarnation', 'Incarnation')}
+    exported = {}
+    for name, (fault, drift) in profiles.items():
+        config = (root / 'none.cfg').read_text().replace('SPECIFICATION ProtectedSpec', 'SPECIFICATION AuthoritySpec')
+        config = config.replace('CONSTRAINT ProtectedBound', 'CONSTRAINT AuthorityBound')
+        config = config.replace('Fault = "none"', f'Fault = "{fault}"')
+        config = config.replace('StageValues = {"A","B"}', 'StageValues = {"B"}')
+        config = config.replace('INVARIANTS\n', f'  DriftCase = "{drift}"\nINVARIANTS\n  I9_CurrentAuthorityAtCommit\n')
+        (output / (name + '.cfg')).write_text(config)
+        exported[name] = {'fault': fault, 'drift_case': drift,
+                          'expected_invariant': None if name == 'none' else 'I9_CurrentAuthorityAtCommit'}
+    result = {'scope': 'one active canonical source/offer pair of the planned send; authority/controller/incarnation drift during one released wait; unchanged original session; one crash/restart',
+              'full_b1_acceptance': False, 'closed_composition_inputs': copied, 'actions': actions,
+              'held_rows': [a for a in actions if a.startswith('Auth_Held_')],
+              'profiles': exported, 'generator_sha256': sha(Path(__file__)),
+              'artifact_hashes': {f.name: sha(f) for f in output.iterdir() if f.is_file()}}
+    (output / 'manifest.json').write_text(json.dumps(result, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

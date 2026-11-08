@@ -3701,6 +3701,24 @@ pub struct MobStreamOpenParams {
     pub mob_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_identity: Option<String>,
+    /// Resume the member stream `agent_identity` names right after this
+    /// position: the events the member still retains after it are replayed,
+    /// then the stream is live. Absent opens the stream live. A mob-wide
+    /// stream (no `agent_identity`) takes no cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<MobStreamCursor>,
+}
+
+/// A position in a mob member's event sequence: the `epoch` a member
+/// `mob/stream_event` names and the `seq` of its event (`event.seq`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobStreamCursor {
+    /// The sequence space of the position (a UUID).
+    pub epoch: String,
+    /// The last envelope sequence the client received in that space.
+    pub seq: u64,
 }
 
 /// Response payload for `mob/stream_open`.

@@ -187,6 +187,10 @@ them.
   the Web SDK's `WireMemberPreviewUnavailable` type, which gains
   `"store_refused"`.
 
+- `meerkat-contracts`: `MobStreamOpenParams` gains the public field
+  `cursor: Option<MobStreamCursor>` (see Added), so code that builds it
+  literally must set it (`None` opens the stream live, as before).
+
 - Behaviour-only (not measured by the gate): `meerkat-mob`,
   `meerkat-contracts`: a member status read whose session the store refuses
   until its realm is reopened answers `preview_unavailable: "store_refused"`
@@ -446,6 +450,22 @@ them.
   its agents. The predicate is applied before the creation order, the cursor
   and the page cut, so pages stay full and every row is the tool's bounded
   summary. The `meerkat` facade re-exports it.
+
+- `meerkat-contracts`, `meerkat-rpc`, Python and TypeScript SDKs: a mob
+  member's event stream resumes over RPC. Each member `mob/stream_event`
+  names the sequence space of its event in `epoch`, and `mob/stream_open`
+  takes `cursor: {epoch, seq}` (`MobStreamCursor`), the position of the last
+  event a client received: the new stream replays the events the member
+  still retains after it, then streams live, with nothing delivered twice or
+  skipped. A cursor of another sequence space (after a restart, or a placed
+  member's move to a new host binding), or one ahead of the space's newest
+  event, replays the current space from its earliest retained event, whose
+  events carry the current `epoch`. Without a cursor the stream is live, as
+  before. The SDKs' member subscriptions take the cursor
+  (`subscribe_mob_member_events(..., cursor=...)`,
+  `subscribeMobMemberEvents(..., { cursor })` and the `Mob` wrappers) and
+  report the last event's epoch (`last_event_epoch`, `lastEventEpoch`).
+  (#2114, thanks @zond)
 
 - OpenAI `gpt-6.1-terra` (GPT-6.1 Terra) is cataloged as a Supported OpenAI
   model: 1.05M context with a separate 922K input ceiling, 128K output,

@@ -352,6 +352,7 @@ import type {
   MobStatusResult as RpcMobStatusResult,
   MobStreamCloseParams as RpcMobStreamCloseParams,
   MobStreamCloseResult as RpcMobStreamCloseResult,
+  MobStreamCursor as RpcMobStreamCursor,
   MobStreamOpenParams as RpcMobStreamOpenParams,
   MobStreamOpenResult as RpcMobStreamOpenResult,
   MobSubmitWorkParams as RpcMobSubmitWorkParams,
@@ -721,6 +722,18 @@ export interface MobMemberLiveOpenOptions {
    * execution-identity authority, and a member local to that server.
    */
   executionIdentity?: RpcMobMemberLiveOpenParams["execution_identity"];
+}
+
+/** Options for a mob member event subscription. */
+export interface MobMemberEventsOptions {
+  /**
+   * Resume after this position: the `epoch` and `seq` of the last event
+   * received (`subscription.lastEventEpoch` and `subscription.lastEventSeq`).
+   * The stream first replays the events the member still retains after it;
+   * a cursor of another sequence space replays the current space from its
+   * earliest retained event. Without a cursor the stream is live.
+   */
+  cursor?: RpcMobStreamCursor;
 }
 
 interface WireSkillKey {
@@ -4416,10 +4429,18 @@ export class MeerkatClient {
     );
   }
 
-  async subscribeMobMemberEvents(mobId: string, agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
+  async subscribeMobMemberEvents(
+    mobId: string,
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    const params: RpcMobStreamOpenParams = { mob_id: mobId, agent_identity: agentIdentity };
+    if (options?.cursor != null) {
+      params.cursor = { epoch: options.cursor.epoch, seq: options.cursor.seq };
+    }
     return this.openEventSubscription(
       "mob/stream_open",
-      { mob_id: mobId, agent_identity: agentIdentity },
+      params,
       "mob/stream_close",
       MeerkatClient.parseAgentEventEnvelope,
     );
@@ -5541,10 +5562,12 @@ export class MeerkatClient {
             ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
             : rawEvent;
         const sequence = params.sequence;
+        const epoch = params.epoch;
         const delivery: SubscriptionEvent = {
           event,
           rpcSequence: typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
             ? sequence : undefined,
+          epoch: typeof epoch === "string" && epoch !== "" ? epoch : undefined,
         };
         if (queue && event) {
           queue.put(delivery);

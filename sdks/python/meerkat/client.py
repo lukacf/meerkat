@@ -169,6 +169,7 @@ from .generated.types import (
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
     MobSpawnSpecParams,
+    MobStreamCursor,
     MobTurnStartParams,
     MobUnwireParams,
     MobWireParams,
@@ -5064,11 +5065,27 @@ class MeerkatClient:
         )
 
     async def subscribe_mob_member_events(
-        self, mob_id: str, agent_identity: str
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
     ) -> EventSubscription:
+        """Subscribe to one mob member's events.
+
+        Without ``cursor`` the stream is live. With the ``epoch`` and ``seq``
+        of the last event received (``subscription.last_event_epoch`` and
+        ``subscription.last_event_seq``), it first replays the events the
+        member still retains after that position; a cursor of another
+        sequence space replays the current space from its earliest retained
+        event.
+        """
+        params: dict[str, Any] = {"mob_id": mob_id, "agent_identity": agent_identity}
+        if cursor is not None:
+            params["cursor"] = _wire_params(cursor)
         return await self._open_event_subscription(
             "mob/stream_open",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
+            params,
             "mob/stream_close",
             self._parse_agent_event_envelope,
         )

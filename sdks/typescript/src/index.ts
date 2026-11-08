@@ -22,7 +22,7 @@
  */
 
 export { MeerkatClient } from "./client.js";
-export type { ConnectOptions, MobMemberLiveOpenOptions } from "./client.js";
+export type { ConnectOptions, MobMemberEventsOptions, MobMemberLiveOpenOptions } from "./client.js";
 export type { WireMemberProgressSnapshot } from "./generated/types.js";
 export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
@@ -474,6 +474,7 @@ export type {
   MobSpawnPolicyInput,
   MobSpawnReceiptWire,
   MobSpawnSpecParams,
+  MobStreamCursor,
   MobRotateSupervisorResult,
   MobClaimCallbackRouteParams,
   MobClaimCallbackRouteResult,

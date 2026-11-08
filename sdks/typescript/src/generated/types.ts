@@ -2977,6 +2977,7 @@ export interface MobProfileDeleteResult {
 
 export interface MobStreamOpenParams {
   agent_identity?: string | null;
+  cursor?: MobStreamCursor | null;
   mob_id: string;
 }
 
@@ -3543,6 +3544,11 @@ export interface WireProviderParamsOverride {
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;
+}
+
+export interface MobStreamCursor {
+  epoch: string;
+  seq: number;
 }
 
 export interface AttentionBindingRequest {

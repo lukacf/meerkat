@@ -587,12 +587,6 @@ impl SessionBridge for ObservedBridge {
         self.inner.release_member(identity).await
     }
 
-    async fn broken_members(
-        &self,
-    ) -> Result<std::collections::BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        self.inner.broken_members().await
-    }
-
     async fn capture_queued_member_inputs(
         &self,
         identity: &AgentIdentity,

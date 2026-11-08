@@ -406,6 +406,9 @@ fn native_failure_kind(error: &IdentityRuntimeError) -> &'static str {
         IdentityRuntimeError::IdentityNameHeldByRawMember { .. } => {
             "IdentityRuntimeError::IdentityNameHeldByRawMember"
         }
+        IdentityRuntimeError::IdentityNameUnreadable { .. } => {
+            "IdentityRuntimeError::IdentityNameUnreadable"
+        }
         IdentityRuntimeError::WakeHeld { .. } => "IdentityRuntimeError::WakeHeld",
         IdentityRuntimeError::PeerWiringTimedOut { .. } => {
             "IdentityRuntimeError::PeerWiringTimedOut"

@@ -665,6 +665,29 @@ const SCHEDULE_TOOLS_BY_ID: &[&str] = &[
 /// The agent schedule tools that write a target.
 const SCHEDULE_TOOLS_WITH_TARGET: &[&str] = &["meerkat_schedule_create", "meerkat_schedule_update"];
 
+/// Which schedules beside console schedules the agent calling the schedule
+/// tools may not know of, decided per call from the turn's dispatch context
+/// (the schedules aimed at a member private to a person the agent does not
+/// act for, `crate::schedule_wiring`).
+#[async_trait]
+pub(crate) trait AgentScheduleAudience: Send + Sync {
+    /// Whether `schedule` is hidden from the agent whose turn dispatches with
+    /// `context`.
+    async fn hides(&self, schedule: &Schedule, context: &meerkat_core::ToolDispatchContext)
+    -> bool;
+}
+
+/// What [`ConsoleScheduleToolGate`] does with one call.
+enum GateVerdict {
+    /// The call reaches the tools unchanged.
+    Pass,
+    /// The call is refused.
+    Refuse(meerkat_core::ToolError),
+    /// The call names a schedule hidden from the calling agent by its id:
+    /// it is answered as a call about an id no schedule holds.
+    Absent,
+}
+
 /// Agents' schedule tools leave console schedules alone: a console schedule
 /// is a Console caller's deferred send, and only the Console, which judges
 /// that caller's access, writes it.
@@ -673,11 +696,17 @@ const SCHEDULE_TOOLS_WITH_TARGET: &[&str] = &["meerkat_schedule_create", "meerka
 /// so no agent sends as a Console caller; every verb that names a console
 /// schedule by its id (get, update, pause, resume, delete, occurrences) is
 /// refused, and so is one whose schedule cannot be read (it may be a console
-/// schedule); and `meerkat_schedule_list` leaves console schedules out. Every
-/// other call reaches the tools unchanged.
+/// schedule); and `meerkat_schedule_list` leaves console schedules out.
+///
+/// With an [`AgentScheduleAudience`], the schedules it hides from the calling
+/// agent are on no surface of its tools either: its list leaves them out,
+/// and every verb that names one by its id is answered exactly as the same
+/// call about an id no schedule holds is, and touches nothing. Every other
+/// call reaches the tools unchanged.
 pub(crate) struct ConsoleScheduleToolGate {
     inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
     service: ScheduleService,
+    audience: Option<Arc<dyn AgentScheduleAudience>>,
 }
 
 impl ConsoleScheduleToolGate {
@@ -685,58 +714,135 @@ impl ConsoleScheduleToolGate {
         inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
         service: ScheduleService,
     ) -> Self {
-        Self { inner, service }
+        Self {
+            inner,
+            service,
+            audience: None,
+        }
     }
 
-    /// Why `name` with `args` is refused, if it is.
-    async fn refusal(&self, name: &str, args: &Value) -> Option<meerkat_core::ToolError> {
+    /// The gate, also keeping the schedules `audience` hides from the calling
+    /// agent off its tools' surface.
+    pub(crate) fn with_audience(mut self, audience: Arc<dyn AgentScheduleAudience>) -> Self {
+        self.audience = Some(audience);
+        self
+    }
+
+    /// Whether `schedule` is hidden from the agent calling with `context`.
+    async fn hides(
+        &self,
+        schedule: &Schedule,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> bool {
+        match &self.audience {
+            Some(audience) => audience.hides(schedule, context).await,
+            None => false,
+        }
+    }
+
+    /// What the gate does with `name` and `args`, called with `context`.
+    async fn verdict(
+        &self,
+        name: &str,
+        args: &Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> GateVerdict {
         if SCHEDULE_TOOLS_WITH_TARGET.contains(&name)
             && args.get("target").is_some_and(target_value_names_console)
         {
-            return Some(meerkat_core::ToolError::execution_failed(format!(
+            return GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                 "{name} refused: the host runnable {CONSOLE_SCHEDULE_RUNNABLE} sends a \
                  console schedule as its Console caller, and only the Console schedules it"
             )));
         }
         if !SCHEDULE_TOOLS_BY_ID.contains(&name) {
-            return None;
+            return GateVerdict::Pass;
         }
         // An id that does not parse is the tools' own refusal.
-        let schedule_id = ScheduleId::parse(args.get("schedule_id")?.as_str()?).ok()?;
+        let Some(schedule_id) = args
+            .get("schedule_id")
+            .and_then(Value::as_str)
+            .and_then(|raw| ScheduleId::parse(raw).ok())
+        else {
+            return GateVerdict::Pass;
+        };
         match self.service.get(&schedule_id).await {
-            Ok(schedule) => is_console_schedule(&schedule).then(|| {
-                meerkat_core::ToolError::execution_failed(format!(
+            Ok(schedule) if is_console_schedule(&schedule) => {
+                GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                     "{name} refused: schedule {schedule_id} is a console schedule, a Console \
                      caller's deferred message to an agent; only the Console reads or changes it"
-                ))
-            }),
+                )))
+            }
+            Ok(schedule) if self.hides(&schedule, context).await => GateVerdict::Absent,
+            Ok(_) => GateVerdict::Pass,
             // No schedule has the id: the tools answer it as not found.
-            Err(ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. })) => None,
+            Err(ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. })) => {
+                GateVerdict::Pass
+            }
             // Whether it is a console schedule cannot be read now: refused,
             // since letting it through could change one.
-            Err(error) => Some(meerkat_core::ToolError::execution_failed(format!(
+            Err(error) => GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                 "{name} refused: schedule {schedule_id} cannot be read now ({error}), so it may \
                  be a console schedule; try again"
             ))),
         }
     }
 
-    /// `meerkat_schedule_list` without the console schedules, in the
+    /// `call`, which names a schedule hidden from the calling agent by its
+    /// id, asked about a fresh id no schedule holds instead: the tools answer
+    /// it as they answer such an id (no answer of theirs about an absent
+    /// schedule names the id), and the hidden schedule is never touched.
+    async fn dispatch_as_absent(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        mut args: Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        if let Some(object) = args.as_object_mut() {
+            object.insert(
+                "schedule_id".to_string(),
+                Value::String(ScheduleId::new().to_string()),
+            );
+        }
+        let absent =
+            serde_json::value::RawValue::from_string(args.to_string()).map_err(|error| {
+                meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    format!("failed to encode schedule arguments: {error}"),
+                )
+            })?;
+        self.inner
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: call.id,
+                    name: call.name,
+                    args: &absent,
+                },
+                context,
+            )
+            .await
+    }
+
+    /// `meerkat_schedule_list` without the console schedules and the
+    /// schedules hidden from the agent calling with `context`, in the
     /// listing's own shape.
-    async fn list_without_console_schedules(
+    async fn list_visible_schedules(
         &self,
         call_id: &str,
+        context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         let schedules = self.service.list().await.map_err(|error| {
             meerkat_core::ToolError::execution_failed(format!(
                 "meerkat_schedule_list failed: {error}"
             ))
         })?;
-        let schedules = schedules
-            .into_iter()
-            .filter(|schedule| !is_console_schedule(schedule))
-            .collect::<Vec<_>>();
-        let schedules = serde_json::to_value(&schedules).map_err(|error| {
+        let mut visible = Vec::with_capacity(schedules.len());
+        for schedule in schedules {
+            if !is_console_schedule(&schedule) && !self.hides(&schedule, context).await {
+                visible.push(schedule);
+            }
+        }
+        let schedules = serde_json::to_value(&visible).map_err(|error| {
             meerkat_core::ToolError::execution_failed(format!(
                 "failed to encode meerkat_schedule_list result: {error}"
             ))
@@ -795,11 +901,13 @@ impl meerkat_core::AgentToolDispatcher for ConsoleScheduleToolGate {
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         // Arguments that do not parse reach the tools, which refuse them.
         if let Ok(args) = serde_json::from_str::<Value>(call.args.get()) {
-            if let Some(refusal) = self.refusal(call.name, &args).await {
-                return Err(refusal);
+            match self.verdict(call.name, &args, context).await {
+                GateVerdict::Refuse(refusal) => return Err(refusal),
+                GateVerdict::Absent => return self.dispatch_as_absent(call, args, context).await,
+                GateVerdict::Pass => {}
             }
             if call.name == "meerkat_schedule_list" {
-                return self.list_without_console_schedules(call.id).await;
+                return self.list_visible_schedules(call.id, context).await;
             }
         }
         self.inner.dispatch_with_context(call, context).await

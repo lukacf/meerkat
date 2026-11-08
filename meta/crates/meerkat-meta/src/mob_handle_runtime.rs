@@ -7100,6 +7100,11 @@ pub struct MobBootstrapSpec {
     /// private member's owner to the members it asks for
     /// ([`crate::private_owners::PrivateOwners`]).
     pub(crate) private_owners: crate::private_owners::PrivateOwners,
+    /// The registry of the agent schedule tools a stock constructor attached
+    /// over an injected schedule store, which the runtime adopts once its
+    /// mobs exist, as a gateway composition adopts its own
+    /// ([`crate::gateway_composition::adopt_schedule_mob_targets`]).
+    pub(crate) schedule_target_registry: Option<crate::schedule_wiring::ScheduleMobTargetRegistry>,
     /// The host's fork instruction policy for this mob's member forks
     /// ([`Self::with_fork_instruction_policy`]). The mob does not persist
     /// it, so bootstrap applies it on create and on resume.
@@ -7270,6 +7275,7 @@ impl MobBootstrapSpec {
             dispatch_taint_slot,
             side_chat_memory_slot,
             private_owners,
+            schedule_target_registry: None,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -8988,9 +8994,11 @@ impl MobBootstrapSpec {
         // schedule tools over the caller's store. Library mode wires no
         // firing host — authored schedules become durable rows the embedder's
         // own driver (or a gateway pointed at the same store) fires.
+        let mut schedule_target_registry = None;
         let schedule_slot = schedule_store.map(|store| {
-            let _attached =
+            let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
                  attaches schedule tools without a firing host",
@@ -9196,6 +9204,7 @@ impl MobBootstrapSpec {
         if let Some(slot) = schedule_slot {
             slots.push(slot);
         }
+        spec.schedule_target_registry = schedule_target_registry;
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -9428,9 +9437,11 @@ impl MobBootstrapSpec {
         // otherwise-ephemeral local runtime whose durable schedule rows live
         // in a caller-supplied remote store. Library mode wires no firing
         // host (see `UnifiedRuntimeBuilder::schedule_store`).
+        let mut schedule_target_registry = None;
         let schedule_slot = schedule_store.map(|store| {
-            let _attached =
+            let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
                  attaches schedule tools without a firing host",
@@ -9621,6 +9632,7 @@ impl MobBootstrapSpec {
         if let Some(slot) = schedule_slot {
             slots.push(slot);
         }
+        spec.schedule_target_registry = schedule_target_registry;
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -11143,50 +11155,54 @@ impl MobRuntime {
         // their durable records in the background from the start, and read
         // again until it is read; no request waits for it.
         spec.private_owners.seed_in_background(&handle);
-        Ok((
-            Self {
-                handle,
-                runtime_delivery,
-                session_service: Some(session_service),
-                member_model_config,
-                agent_mob_mcp_state,
-                implicit_delegate_retirement_overrides,
-                binary_blob_store,
-                baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-                console_spawn_sink_slot,
-                identity_runtime_slot,
-                composition_release: Some(spec.composition_release),
-                workgraph_service: spec.workgraph_service,
-                workgraph_admission,
-                workgraph_realm_migration,
-                resolved_storage: match (spec.resolved_storage, candidate_composition_slot) {
-                    (Some(mut summary), Some(slot)) => {
-                        summary.slots.push(slot);
-                        Some(summary)
-                    }
-                    (summary, _) => summary,
-                },
-                durable_runtime_store: spec.durable_runtime_store,
-                committed_boundary_recoverer: spec.committed_boundary_recoverer,
-                controller_pin_source: spec.controller_pin_source,
-                native_work_governed,
-                _ephemeral_dir: ephemeral_dir,
-                state_dir_claims: Arc::new(std::sync::Mutex::new(state_dir_claims)),
-                composition_authority: spec.composition_authority,
-                member_auth_binding: spec.member_auth_binding,
-                member_auth_binding_recorded: spec.member_auth_binding_recorded,
-                child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::new(
-                    child_mob_root_claim,
-                ),
-                #[cfg(not(target_arch = "wasm32"))]
-                member_mcp_custody: spec.member_mcp_custody,
-                side_chat_lineages: Arc::default(),
-                run_members: Arc::default(),
-                private_owners: spec.private_owners,
-                console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+        let runtime = Self {
+            handle,
+            runtime_delivery,
+            session_service: Some(session_service),
+            member_model_config,
+            agent_mob_mcp_state,
+            implicit_delegate_retirement_overrides,
+            binary_blob_store,
+            baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            console_spawn_sink_slot,
+            identity_runtime_slot,
+            composition_release: Some(spec.composition_release),
+            workgraph_service: spec.workgraph_service,
+            workgraph_admission,
+            workgraph_realm_migration,
+            resolved_storage: match (spec.resolved_storage, candidate_composition_slot) {
+                (Some(mut summary), Some(slot)) => {
+                    summary.slots.push(slot);
+                    Some(summary)
+                }
+                (summary, _) => summary,
             },
-            pending_activation,
-        ))
+            durable_runtime_store: spec.durable_runtime_store,
+            committed_boundary_recoverer: spec.committed_boundary_recoverer,
+            controller_pin_source: spec.controller_pin_source,
+            native_work_governed,
+            _ephemeral_dir: ephemeral_dir,
+            state_dir_claims: Arc::new(std::sync::Mutex::new(state_dir_claims)),
+            composition_authority: spec.composition_authority,
+            member_auth_binding: spec.member_auth_binding,
+            member_auth_binding_recorded: spec.member_auth_binding_recorded,
+            child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::new(
+                child_mob_root_claim,
+            ),
+            #[cfg(not(target_arch = "wasm32"))]
+            member_mcp_custody: spec.member_mcp_custody,
+            side_chat_lineages: Arc::default(),
+            run_members: Arc::default(),
+            private_owners: spec.private_owners,
+            console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+        };
+        // Agent schedule tools attached over an injected schedule store
+        // judge their targets with this runtime's mobs and with who its
+        // members are private to.
+        if let Some(registry) = spec.schedule_target_registry {
+            registry.adopt_mob_runtime(&runtime);
+        }
+        Ok((runtime, pending_activation))
     }
 
     /// Adopt a handle built outside [`MobBootstrapSpec`]. Meta composes no

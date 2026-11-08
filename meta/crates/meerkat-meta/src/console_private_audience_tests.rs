@@ -3618,3 +3618,93 @@ async fn meerkat_member_tools_answer_a_hidden_member_as_an_absent_one() -> TestR
     );
     Ok(())
 }
+
+/// A runtime over an injected schedule store (library mode) judges its agent
+/// schedule tools with its own mobs and with who its members are private
+/// to, as a gateway composition does: the registry the tools are attached
+/// with adopts the runtime once its mobs exist. Another agent's tools there
+/// list nothing of a private member's schedule, and refuse a target that
+/// names the private member.
+#[tokio::test]
+async fn an_injected_schedule_stores_tools_hide_a_private_members_schedule() -> TestResult {
+    const MOB: &str = "private-schedule-library";
+    let state = tempfile::tempdir()?;
+    let layout = crate::storage_layout::MetaStorageLayout::with_injected_roots(
+        state.path().to_path_buf(),
+        None,
+    );
+    let (storage, provenance) =
+        crate::mob_composition_manifest::persistent_mob_storage(layout.event_log_db())?;
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        "[mob]\nid = \"{MOB}\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n\
+         runtime_mode = \"turn_driven\"\nexternal_addressable = true\n\
+         [profiles.worker.tools]\ncomms = true\n"
+    ))?;
+    let store: Arc<dyn meerkat::ScheduleStore> = Arc::new(meerkat::MemoryScheduleStore::new());
+    let mut spec = crate::mob_handle_runtime::MobBootstrapSpec::persistent_inner(
+        definition,
+        storage,
+        provenance,
+        state.path().to_path_buf(),
+        4,
+        None,
+        false,
+        Some(Arc::clone(&store)),
+        None,
+        None,
+        crate::mob_handle_runtime::CapabilityFlags::default(),
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    spec.options.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+    let registry = spec
+        .schedule_target_registry
+        .clone()
+        .ok_or("an injected schedule store attaches the agent schedule tools")?;
+    let runtime = Box::pin(crate::mob_handle_runtime::MobRuntime::bootstrap(spec)).await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_registry_for_test(
+        meerkat::ScheduleService::new(store),
+        registry,
+    );
+    let private = member_session(&runtime, "alpha-side").await?;
+    let shared = member_session(&runtime, "alpha").await?;
+    let note = "PRIVATE-NOTE: Alice asks for 15% at the salary review.";
+    let hidden_id = created_schedule_id(
+        &schedule_tool_call(
+            &tools,
+            &private,
+            "meerkat_schedule_create",
+            daily_schedule(
+                "PRIVATE-NAME salary review",
+                member_schedule_target(MOB, "alpha-side", note),
+            ),
+        )
+        .await?,
+    )?;
+    let listed = schedule_tool_call(&tools, &shared, "meerkat_schedule_list", json!({})).await?;
+    assert!(
+        !listed.contains(&hidden_id) && !listed.contains("PRIVATE-"),
+        "the shared agent lists nothing of the private member's schedule: {listed}"
+    );
+    let refused = schedule_tool_call(
+        &tools,
+        &shared,
+        "meerkat_schedule_create",
+        daily_schedule(
+            "a reminder",
+            member_schedule_target(MOB, "alpha-side", note),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(meerkat_core::ToolError::AccessDenied { .. })),
+        "the shared agent's schedule into the private member is refused: {refused:?}"
+    );
+    Ok(())
+}

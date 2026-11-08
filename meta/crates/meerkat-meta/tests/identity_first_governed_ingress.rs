@@ -164,6 +164,16 @@ impl SessionBridge for CountingBridge {
             peer_reachable_count: 0,
         })
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 /// A host binder that counts every bind it is asked for.
@@ -234,7 +244,8 @@ async fn register(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     identity
 }
 

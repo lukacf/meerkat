@@ -1087,6 +1087,7 @@ pub(crate) fn verified_member_signal(
             bridge_session_id: Some(session_id.clone()),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     ))

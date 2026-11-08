@@ -56,8 +56,11 @@ def inputs_destination(request, monkeypatch):
         chosen = dict(files)
         chosen["config/access.toml"] = (
             b'enabled = true\nadmins = ["fixture-operator"]\nrules = []\n\n[groups]\n')
-        if getattr(request, "param", None) == "two-admins":
-            chosen["config/access.toml"] = b'enabled = true\nadmins = ["fixture-operator", "foreign-operator"]\n'
+        if getattr(request, "param", None) == "duplicate-admins":
+            chosen["config/access.toml"] = b'enabled = true\nadmins = ["fixture-operator", "fixture-operator"]\n'
+        elif getattr(request, "param", None) == "further-admins":
+            chosen["config/access.toml"] = (b'enabled = true\nadmins = ["fixture-operator", "second-admin@example.test"]\n'
+                b'rules = []\n\n[groups]\n')
         elif getattr(request, "param", None) == "nested-access":
             chosen["config/access.toml"] = b'[access]\nenabled = true\nadmins = ["fixture-operator"]\n'
         return package(chosen)
@@ -374,13 +377,23 @@ async def test_destination_supplier_refuses_changed_accepted_source_before_proje
     assert not (f.root / SOURCE_DIRECTORY).exists() and f.service.application_host_selection is None
 
 
-@pytest.mark.parametrize("inputs_destination", ["two-admins", "nested-access"], indirect=True)
+@pytest.mark.parametrize("inputs_destination", ["duplicate-admins", "nested-access"], indirect=True)
 async def test_original_ambiguous_or_nonshipping_operator_choice_refuses_before_effects(inputs_destination):
     f = inputs_destination
-    with pytest.raises(CustodyError, match="single protected Console operator"):
+    with pytest.raises(CustodyError, match="protected Console operator first"):
         await create(f)
     assert not (f.root / SOURCE_DIRECTORY).exists() and not f.directory.exists()
     assert not (f.root / ".env").exists() and f.service.application_host_selection is None
+
+
+@pytest.mark.parametrize("inputs_destination", ["further-admins"], indirect=True)
+async def test_destination_custody_admits_further_admins_after_the_operator(inputs_destination):
+    # The installation's own account is the first admin; further admins are
+    # other people's accounts, which the console's access rules name.
+    f = inputs_destination
+    owner = await create(f)
+    assert owner.host._console_subject == "fixture-operator"
+    assert (f.root / SOURCE_DIRECTORY).exists()
 
 
 @pytest.mark.parametrize("case", ["local", "cloud", "native-bundle", "helper"])

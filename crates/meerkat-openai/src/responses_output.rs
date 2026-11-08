@@ -4,7 +4,7 @@
 use meerkat_core::{AssistantBlock, ProviderMeta, ServerToolKind};
 use meerkat_llm_core::LlmError;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::client::{
     message_citations_content, openai_response_meta, parse_tool_call_arguments,
@@ -235,213 +235,351 @@ fn item_id<'a>(item: &'a Value, kind: &str) -> Option<&'a str> {
     .and_then(Value::as_str)
 }
 
-/// The item kinds whose completed identity GitHub Copilot's Responses stream
-/// re-issues in the terminal response.
-pub(crate) const COPILOT_ALIASED_KINDS: [&str; 2] = ["message", "reasoning"];
+/// The kind an output item's `type` names on the Copilot route: a web search
+/// result belongs to its web search call.
+fn copilot_item_kind(item_type: &str) -> &str {
+    match item_type {
+        "web_search_result" => "web_search_call",
+        other => other,
+    }
+}
 
-/// Whether two items of `kind` are the same item for Copilot's
-/// re-identification: for a message, the same role, phase and full content;
-/// for reasoning, every field except the top-level id and the opaque
-/// `encrypted_content` (which must be a string on both when present), so the
-/// terminal id and ciphertext pair is taken as provider-owned. On the items
-/// it accepts this is an equivalence; a reasoning item whose
-/// `encrypted_content` is not a string matches nothing, not even itself.
+/// What a Responses stream event that names its item by `item_id` says
+/// about that item's kind.
+enum NamedItem {
+    /// An event of one kind of item.
+    Of(&'static str),
+    /// A content part (`response.content_part.*`): a message's and a
+    /// reasoning item's content share these events, which name the item but
+    /// not its kind.
+    Part,
+}
+
+/// What a Responses stream event of `event_type` says about the kind of the
+/// item it names by `item_id`; `None` for events that name no item.
+fn copilot_event_kind(event_type: &str) -> Option<NamedItem> {
+    let event = event_type.strip_prefix("response.")?;
+    if event.starts_with("content_part.") {
+        Some(NamedItem::Part)
+    } else if event.starts_with("output_text.") || event.starts_with("refusal.") {
+        Some(NamedItem::Of("message"))
+    } else if event.starts_with("reasoning") {
+        Some(NamedItem::Of("reasoning"))
+    } else if event.starts_with("function_call_arguments.") {
+        Some(NamedItem::Of("function_call"))
+    } else if event.starts_with("web_search_call.") {
+        Some(NamedItem::Of("web_search_call"))
+    } else {
+        None
+    }
+}
+
+/// Whether two items of `kind` that one Copilot slot carried on different
+/// events are the same item apart from Copilot's re-identification: for a
+/// message, the same role, phase and full content; for a function call, the
+/// same call_id, name and arguments; for anything else every field but the
+/// id and the slot's `output_index`, and for reasoning also the opaque
+/// `encrypted_content`, which Copilot re-encodes.
 fn copilot_same_item(kind: &str, left: &Value, right: &Value) -> bool {
+    let fields = |item: &Value, names: &[&str]| -> Vec<Option<Value>> {
+        names.iter().map(|name| item.get(*name).cloned()).collect()
+    };
     match kind {
         "message" => {
-            let semantics = |item: &Value| {
-                (
-                    item.get("role").cloned(),
-                    item.get("phase").cloned(),
-                    item.get("content").cloned(),
-                )
-            };
-            semantics(left) == semantics(right)
+            fields(left, &["role", "phase", "content"])
+                == fields(right, &["role", "phase", "content"])
         }
-        "reasoning" => {
-            let opaque_ok = |item: &Value| {
-                item.get("encrypted_content")
-                    .is_none_or(|ciphertext| ciphertext.is_string())
-            };
-            let visible = |item: &Value| {
+        "function_call" => {
+            fields(left, &["call_id", "name", "arguments"])
+                == fields(right, &["call_id", "name", "arguments"])
+        }
+        _ => {
+            let comparable = |item: &Value| {
                 let mut item = item.clone();
                 if let Some(object) = item.as_object_mut() {
                     object.remove("id");
-                    object.remove("encrypted_content");
+                    object.remove("output_index");
+                    if kind == "reasoning" {
+                        object.remove("encrypted_content");
+                    }
                 }
                 item
             };
-            opaque_ok(left) && opaque_ok(right) && visible(left) == visible(right)
+            comparable(left) == comparable(right)
         }
-        _ => false,
     }
 }
 
-/// Copilot's completed-to-terminal identity aliases, one map per aliased kind.
+/// The outcome of a GitHub Copilot Responses stream whose terminal output
+/// does not line up with the items the stream announced, or that
+/// contradicts itself ([`CopilotSlots`]): the retryable
+/// [`LlmError::IncompleteResponse`], so the turn is tried again and nothing
+/// of this response is committed.
+pub(crate) fn copilot_mismatch(detail: impl std::fmt::Display) -> LlmError {
+    LlmError::IncompleteResponse {
+        message: format!("GitHub Copilot Responses output does not match its stream: {detail}"),
+    }
+}
+
+/// A coverage refusal on the Copilot route ([`validate_completed_coverage`],
+/// [`validate_coverage`]): the terminal output lacks an item the stream
+/// carried, which is the same mismatch as [`copilot_mismatch`].
+pub(crate) fn copilot_coverage_mismatch(error: LlmError) -> LlmError {
+    match error {
+        LlmError::StreamParseError { message } => copilot_mismatch(message),
+        other => other,
+    }
+}
+
+/// The output items of one GitHub Copilot Responses stream, by slot.
+///
+/// Copilot gives an output item a new id on most events of its lifecycle
+/// (added, deltas, done, the terminal response) while the item's wire
+/// `output_index` stays, and it re-encodes a reasoning item's ciphertext in
+/// the terminal response. On that route an item is its `output_index` slot:
+/// the first non-empty id any event naming the slot carries is the item's
+/// id, and every later event of the slot carries that id instead of its own.
+/// An event that names no slot keeps its ids unless an earlier event carried
+/// them at a slot. Function calls keep their `call_id`, and no ciphertext is
+/// moved or merged.
+///
+/// The terminal output is paired with the slots by each item's own
+/// `output_index` (one that is not an unsigned integer is a mismatch), else
+/// by its array position, and is taken only when it
+/// lines up with them: exactly one terminal item for every slot the stream
+/// announced and none for another, each of its slot's kind and, where the
+/// stream completed the slot, the same item apart from its id
+/// ([`copilot_same_item`]). Each terminal item then carries its slot's id and
+/// keeps everything else, its ciphertext included. A terminal output that
+/// does not line up, and a stream that contradicts itself (another kind at a
+/// slot, one id at two slots, a slot added or completed again as a different
+/// item), is never repaired: no item is invented, moved or merged, and the
+/// response ends with [`copilot_mismatch`].
 #[derive(Debug, Default)]
-pub(crate) struct CopilotAliases {
-    by_kind: HashMap<&'static str, HashMap<String, String>>,
+pub(crate) struct CopilotSlots {
+    slots: BTreeMap<u64, CopilotSlot>,
+    /// Every id an event carried at a slot, to that slot.
+    seen: HashMap<String, u64>,
 }
 
-impl CopilotAliases {
-    /// The terminal identity of a completed item of `kind` with `id`: its
-    /// proven alias, or its own id when the terminal output kept it.
-    pub(crate) fn terminal_id<'a>(&'a self, kind: &str, id: &'a str) -> &'a str {
-        self.by_kind
-            .get(kind)
-            .and_then(|aliases| aliases.get(id))
-            .map_or(id, String::as_str)
-    }
+#[derive(Debug)]
+struct CopilotSlot {
+    /// The first id an event naming the slot carried.
+    id: String,
+    /// The kind of the slot's item, once an event names it.
+    kind: Option<String>,
+    /// The item the slot's first `response.output_item.added` carried.
+    added: Option<Value>,
+    /// The item the slot's first `response.output_item.done` carried.
+    completed: Option<Value>,
+}
 
-    /// `item` with its completed id replaced by its terminal alias.
-    pub(crate) fn apply(&self, item: &Value) -> Value {
-        let mut item = item.clone();
-        let Some(kind) = item.get("type").and_then(Value::as_str).map(str::to_owned) else {
-            return item;
-        };
-        if let Some(alias) = item
-            .get("id")
+impl CopilotSlots {
+    /// Give a stream event's ids their slot's identity. `output_index` is
+    /// the event's slot, `item` the item it carries (an added or done item,
+    /// or a reasoning completion) and `item_id` the item it names.
+    pub(crate) fn observe(
+        &mut self,
+        event_type: &str,
+        output_index: Option<u64>,
+        mut item: Option<&mut Value>,
+        item_id: Option<&mut String>,
+    ) -> Result<(), LlmError> {
+        let kind = match item
+            .as_deref()
+            .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
-            .and_then(|id| self.by_kind.get(kind.as_str())?.get(id))
-            .cloned()
-            && let Some(object) = item.as_object_mut()
         {
-            object.insert("id".to_owned(), Value::String(alias));
-        }
-        item
-    }
-}
-
-/// GitHub Copilot's Responses stream re-identifies completed messages and
-/// reasoning: an item completed by `response.output_item.done` as `F` can be
-/// carried by the terminal response as `G`. For that route only, return the
-/// aliases `F -> G` for the re-identified completed items (those whose id
-/// the terminal output lacks), each to a terminal item of the same type that
-/// no completed item claims and that [`copilot_same_item`] proves the same
-/// item. Identity conflicts are refused before anything is aliased: a
-/// completed id reused by two completed items, and a terminal id carried by
-/// two terminal items.
-///
-/// One response can hold several items of a type that differ only in their
-/// ids and ciphertext (two reasoning items without a summary, say), so items
-/// are matched by group: the group of a re-identified completed item is the
-/// k re-identified completed items and the m unclaimed terminal items that
-/// are the same item as it ([`copilot_same_item`] is an equivalence on the
-/// items it accepts). A group is aliased only when it is complete on both
-/// sides, k = m: walking the completed items in their given order, each
-/// takes the first terminal item of its group, in output order, that no
-/// earlier one took. Pairing inside a complete group is immaterial to the
-/// verdicts and the committed blocks: the blocks are lowered from the
-/// terminal items, each keeping its own id and ciphertext, and every pairing
-/// covers the same terminal ids, which carry the same visible content, so
-/// the coverage checks in the client give the same verdicts. The live events
-/// match too, unless a streamed id of one item is the terminal id of
-/// another, where the client's one-pass streamed-id reconciliation depends
-/// on the slot order. Array positions are never used to decide which items
-/// are the same; inside a complete group they only pick one of these
-/// pairings.
-///
-/// Otherwise a re-identified completed item is refused, by its group:
-/// - m = 0: as a re-identification with different content when an unclaimed
-///   terminal item of its type exists, otherwise by the ordinary coverage
-///   check as omitted;
-/// - k < m: as having no one-to-one match, since nothing tells which
-///   terminal item is the extra one;
-/// - k > m: as having no one-to-one match, at the first item of the group
-///   left without a terminal item.
-///
-/// Function calls (keyed by `call_id`) and other references are never
-/// aliased, and the terminal identity is kept.
-pub(crate) fn copilot_item_aliases<'a>(
-    output: &[Value],
-    completed: impl IntoIterator<Item = &'a Value>,
-) -> Result<CopilotAliases, LlmError> {
-    let completed: Vec<&Value> = completed.into_iter().collect();
-    let mut aliases = CopilotAliases::default();
-    for kind in COPILOT_ALIASED_KINDS {
-        let of_kind = |item: &&Value| item.get("type").and_then(Value::as_str) == Some(kind);
-        let completed: Vec<&Value> = completed.iter().copied().filter(of_kind).collect();
-        let terminal: Vec<&Value> = output.iter().filter(of_kind).collect();
-        let mut completed_ids = HashSet::new();
-        for item in &completed {
-            if let Some(id) = item.get("id").and_then(Value::as_str)
-                && !completed_ids.insert(id)
+            Some(item_type) => Some(copilot_item_kind(item_type).to_owned()),
+            None => match copilot_event_kind(event_type) {
+                Some(NamedItem::Of(kind)) => Some(kind.to_owned()),
+                // A content part names its item's slot, not its kind.
+                Some(NamedItem::Part) => None,
+                None => return Ok(()),
+            },
+        };
+        let carried_item_id = item
+            .as_deref()
+            .and_then(|item| item.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let named_item_id = item_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(String::to_owned);
+        let Some(index) = output_index else {
+            // An event that names no slot: an id an earlier event carried
+            // at a slot is that slot's, any other id stays as it is.
+            let slot_id = |id: Option<&String>| {
+                let index = self.seen.get(id?)?;
+                self.slots.get(index).map(|slot| slot.id.clone())
+            };
+            if let Some(item) = item
+                && let Some(slot_id) = slot_id(carried_item_id.as_ref())
             {
-                return Err(malformed(format!(
-                    "completed Responses {kind} id '{id}' is reused by two completed items"
-                )));
+                item["id"] = Value::String(slot_id);
             }
-        }
-        let mut terminal_ids = HashSet::new();
-        for item in &terminal {
-            if let Some(id) = item.get("id").and_then(Value::as_str)
-                && !terminal_ids.insert(id)
+            if let Some(item_id) = item_id
+                && let Some(slot_id) = slot_id(named_item_id.as_ref())
             {
-                return Err(malformed(format!(
-                    "terminal Responses output repeats {kind} id '{id}'"
-                )));
+                *item_id = slot_id;
             }
+            return Ok(());
+        };
+        for id in carried_item_id.iter().chain(named_item_id.iter()) {
+            self.place(index, id, kind.as_deref())?;
         }
-        let unclaimed: Vec<&Value> = terminal
-            .iter()
-            .copied()
-            .filter(|item| {
-                item.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !completed_ids.contains(id))
-            })
-            .collect();
-        let reidentified: Vec<(&str, &Value)> = completed
-            .iter()
-            .copied()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(|id| (id, item)))
-            .filter(|(id, _)| !terminal_ids.contains(id))
-            .collect();
-        let mut kind_aliases = HashMap::new();
-        let mut aliased_targets: HashSet<&str> = HashSet::new();
-        for &(done_id, done) in &reidentified {
-            // Its group: the unclaimed terminal items that are the same item,
-            // in output order, and the re-identified completed items that are.
-            let group_terminal: Vec<&str> = unclaimed
-                .iter()
-                .filter(|candidate| copilot_same_item(kind, done, candidate))
-                .filter_map(|candidate| candidate.get("id").and_then(Value::as_str))
-                .collect();
-            if group_terminal.is_empty() {
-                if unclaimed.is_empty() {
-                    continue;
+        let Some(slot) = self.slots.get_mut(&index) else {
+            // An event that carries no id cannot open a slot.
+            return Ok(());
+        };
+        if let (Some(slot_kind), Some(kind)) = (slot.kind.as_deref(), kind.as_deref())
+            && slot_kind != kind
+        {
+            return Err(copilot_mismatch(format!(
+                "a {kind} at output_index {index}, which holds a {slot_kind}"
+            )));
+        }
+        if let Some(item) = item.as_deref_mut()
+            && item.get("id").is_some_and(Value::is_string)
+        {
+            item["id"] = Value::String(slot.id.clone());
+        }
+        if let Some(item_id) = item_id {
+            item_id.clone_from(&slot.id);
+        }
+        // An added or completed item states its kind (its `type`).
+        let Some(kind) = kind else {
+            return Ok(());
+        };
+        let (first, again) = match event_type {
+            "response.output_item.added" => (&mut slot.added, "added"),
+            "response.output_item.done" => (&mut slot.completed, "completed"),
+            _ => return Ok(()),
+        };
+        if let Some(item) = item.as_deref() {
+            if let Some(previous) = first.as_ref() {
+                if !copilot_same_item(&kind, previous, item) {
+                    return Err(copilot_mismatch(format!(
+                        "output_index {index} was {again} again as a different item"
+                    )));
                 }
-                return Err(malformed(format!(
-                    "terminal Responses output re-identified completed {kind} item '{done_id}' with different content"
+            } else {
+                *first = Some(item.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `id`, carried by an event at `index` of a `kind` item (`None`:
+    /// an event that does not say which kind): the first id a slot sees is
+    /// its identity, and the first kind stated is its kind.
+    fn place(&mut self, index: u64, id: &str, kind: Option<&str>) -> Result<(), LlmError> {
+        if let Some(&other) = self.seen.get(id)
+            && other != index
+        {
+            return Err(copilot_mismatch(format!(
+                "id '{id}' appears at output_index {other} and {index}"
+            )));
+        }
+        let slot = self.slots.entry(index).or_insert_with(|| CopilotSlot {
+            id: id.to_owned(),
+            kind: None,
+            added: None,
+            completed: None,
+        });
+        if slot.kind.is_none() {
+            slot.kind = kind.map(str::to_owned);
+        }
+        self.seen.entry(id.to_owned()).or_insert(index);
+        Ok(())
+    }
+
+    /// The first slot the stream announced whose item never completed (no
+    /// `response.output_item.done`), if any. A stream that ends without a
+    /// terminal response commits only what it completed, so such a slot (a
+    /// started tool call included) is a mismatch, never dropped.
+    pub(crate) fn first_uncompleted(&self) -> Option<u64> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.completed.is_none())
+            .map(|(index, _)| *index)
+    }
+
+    /// Whether a slot holds `output_index`: an event named the item there
+    /// with an id. An item no event names with one has no slot.
+    pub(crate) fn holds(&self, output_index: u64) -> bool {
+        self.slots.contains_key(&output_index)
+    }
+
+    /// Pair the terminal `response`'s output with the slots, give each item
+    /// its slot's id and order the output by slot. Without slots the output
+    /// stays as the provider sent it; an `output` that is not an array is
+    /// left for the caller to refuse.
+    pub(crate) fn reconcile_terminal(&self, response: &mut Value) -> Result<(), LlmError> {
+        if self.slots.is_empty() {
+            return Ok(());
+        }
+        let output = match response.get_mut("output") {
+            Some(Value::Array(output)) => std::mem::take(output),
+            None | Some(Value::Null) => Vec::new(),
+            Some(_) => return Ok(()),
+        };
+        let mut paired: BTreeMap<u64, Value> = BTreeMap::new();
+        for (position, mut item) in output.into_iter().enumerate() {
+            // An item's own output_index pairs it; an absent one, its array
+            // position. One that is present but not an unsigned integer is
+            // evidence the pairing must not trust.
+            let index = match item.get("output_index") {
+                None | Some(Value::Null) => position as u64,
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    copilot_mismatch(format!(
+                        "the terminal output's item at position {position} has an output_index that is not an unsigned integer"
+                    ))
+                })?,
+            };
+            let Some(slot) = self.slots.get(&index) else {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output has an item at output_index {index} the stream never announced"
+                )));
+            };
+            let kind = item
+                .get("type")
+                .and_then(Value::as_str)
+                .map_or("untyped item", copilot_item_kind)
+                .to_owned();
+            if let Some(slot_kind) = slot.kind.as_deref()
+                && slot_kind != kind
+            {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output has a {kind} at output_index {index}, where the stream had a {slot_kind}"
                 )));
             }
-            let group_completed = reidentified
-                .iter()
-                .filter(|(_, other)| copilot_same_item(kind, done, other))
-                .count();
-            // Only a complete group pairs: with more terminal items than
-            // completed ones nothing tells which one is extra, and with fewer
-            // the last completed items find none left.
-            let target = if group_completed < group_terminal.len() {
-                None
-            } else {
-                group_terminal
-                    .iter()
-                    .copied()
-                    .find(|id| !aliased_targets.contains(id))
-            };
-            let Some(target) = target else {
-                return Err(malformed(format!(
-                    "terminal Responses output has no one-to-one match for re-identified completed {kind} item '{done_id}' ({group_completed} re-identified completed and {} unclaimed terminal items with the same content)",
-                    group_terminal.len()
+            if let Some(completed) = slot.completed.as_ref()
+                && !copilot_same_item(&kind, completed, &item)
+            {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output's item at output_index {index} differs from the completed one"
                 )));
-            };
-            aliased_targets.insert(target);
-            kind_aliases.insert(done_id.to_owned(), target.to_owned());
+            }
+            if item.get("id").is_some_and(Value::is_string) {
+                item["id"] = Value::String(slot.id.clone());
+            }
+            if paired.insert(index, item).is_some() {
+                return Err(copilot_mismatch(format!(
+                    "the terminal output has two items at output_index {index}"
+                )));
+            }
         }
-        aliases.by_kind.insert(kind, kind_aliases);
+        if let Some(index) = self.slots.keys().find(|index| !paired.contains_key(index)) {
+            return Err(copilot_mismatch(format!(
+                "output_index {index} is missing from the terminal output"
+            )));
+        }
+        response["output"] = Value::Array(paired.into_values().collect());
+        Ok(())
     }
-    Ok(aliases)
 }
 
 /// Atomic item-done events need coverage even when they emitted no deltas.
@@ -528,9 +666,15 @@ mod tests {
     use std::sync::Arc;
 
     async fn stub(events: Vec<Value>) -> (OpenAiClient, tokio::task::JoinHandle<()>) {
+        raw_stub(events.iter().map(Value::to_string).collect()).await
+    }
+
+    /// A Responses stub that sends each of `data` as one SSE `data:` line,
+    /// exactly as given (so `[DONE]` goes out as the protocol's sentinel).
+    async fn raw_stub(data: Vec<String>) -> (OpenAiClient, tokio::task::JoinHandle<()>) {
         let mut payload = String::new();
-        for event in events {
-            write!(payload, "data: {event}\n\n").expect("formatting into a String cannot fail");
+        for line in data {
+            write!(payload, "data: {line}\n\n").expect("formatting into a String cannot fail");
         }
         async fn respond(State(payload): State<String>) -> impl axum::response::IntoResponse {
             ([("content-type", "text/event-stream")], payload)
@@ -932,12 +1076,58 @@ mod tests {
         (client.with_copilot_responses_item_identity(), server)
     }
 
-    /// The Copilot route accepts a message Copilot re-identified on every
-    /// event of its lifecycle, or only in the terminal response, or with the
-    /// terminal id equal to the completed one but a distinct delta id: one
-    /// visible text sequence, and the terminal identity is kept for replay.
+    /// Every event of one Copilot route request over `events`, which the
+    /// stub sends as `data:` lines in order, then `[DONE]` when `done`.
+    async fn copilot_events(events: Vec<Value>, done: bool) -> Vec<Result<LlmEvent, LlmError>> {
+        let mut data: Vec<String> = events.iter().map(Value::to_string).collect();
+        if done {
+            data.push("[DONE]".to_owned());
+        }
+        let (client, server) = raw_stub(data).await;
+        let client = client.with_copilot_responses_item_identity();
+        let request = LlmRequest::new("gpt-5.5", vec![]);
+        let collected = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        collected
+    }
+
+    /// `events` end the request with the retryable outcome of a Copilot
+    /// stream whose terminal output does not match it, naming `detail`, and
+    /// commit nothing.
+    fn assert_copilot_mismatch(events: &[Result<LlmEvent, LlmError>], detail: &str, case: &str) {
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(LlmEvent::AssistantOutput { .. }))),
+            "{case}: nothing is committed"
+        );
+        let Some(Ok(LlmEvent::Done {
+            outcome: LlmDoneOutcome::Error { error },
+        })) = events.last()
+        else {
+            panic!(
+                "{case}: the request ends with an error, not {:?}",
+                events.last()
+            );
+        };
+        assert!(
+            matches!(
+                error,
+                LlmError::IncompleteResponse { message }
+                    if message.contains("does not match its stream") && message.contains(detail)
+            ),
+            "{case}: a retryable incomplete response naming '{detail}', not {error:?}"
+        );
+        assert!(error.is_retryable(), "{case}: the mismatch is retryable");
+    }
+
+    /// The Copilot route gives a message the first id any event of its
+    /// output_index slot carries, whichever event that is: Copilot
+    /// re-identifies it on every event, only in the terminal response, or
+    /// on a delta that comes before the item is added. The terminal item is
+    /// committed under that id, and its text streams once.
     #[tokio::test]
-    async fn copilot_reidentified_message_keeps_its_terminal_identity() {
+    async fn copilot_reidentified_message_takes_its_slot_identity() {
         let shapes: [(&str, [&str; 7]); 3] = [
             ("terminal rename", ["F", "F", "F", "F", "F", "F", "G"]),
             ("every event", ["A", "B", "C", "D", "E", "F", "G"]),
@@ -946,20 +1136,19 @@ mod tests {
                 ["A", "B", "D", "D", "E", "F", "F"],
             ),
         ];
-        for (shape, ids, retransmit) in shapes
+        let mut cases: Vec<(&str, Vec<Value>, &str)> = shapes
             .into_iter()
-            .map(|(shape, ids)| (shape, ids, false))
-            .chain([(
-                "identical added retransmission",
-                ["A", "B", "C", "D", "E", "F", "G"],
-                true,
-            )])
-        {
-            let mut events = copilot_message_lifecycle(ids);
-            if retransmit {
-                let added = events[1].clone();
-                events.insert(2, added);
-            }
+            .map(|(shape, ids)| (shape, copilot_message_lifecycle(ids), ids[0]))
+            .collect();
+        let mut retransmitted = copilot_message_lifecycle(["A", "B", "C", "D", "E", "F", "G"]);
+        let added = retransmitted[1].clone();
+        retransmitted.insert(2, added);
+        cases.push(("identical added retransmission", retransmitted, "A"));
+        let mut delta_first = copilot_message_lifecycle(["A", "B", "C", "D", "E", "F", "G"]);
+        let delta = delta_first.remove(3);
+        delta_first.insert(1, delta);
+        cases.push(("a delta before the added item", delta_first, "C"));
+        for (shape, events, slot_id) in cases {
             let (client, server) = copilot_stub(events).await;
             let (tx, mut rx) = tokio::sync::mpsc::channel(32);
             let result =
@@ -967,14 +1156,14 @@ mod tests {
                     .stream_response(&[], &[], 1000, None, None)
                     .await;
             server.abort();
-            let Ok(result) = result else {
-                panic!("{shape}: the re-identified terminal message is the completed message");
-            };
-            let terminal = message(ids[6], "final_answer", "Done.");
+            let result = result.unwrap_or_else(|error| {
+                panic!("{shape}: the terminal message is the slot's message: {error}")
+            });
+            let committed = message(slot_id, "final_answer", "Done.");
             assert_eq!(
                 result.blocks(),
-                lower_items([&terminal], Some("resp_1")).unwrap(),
-                "{shape}: the terminal identity is kept for replay"
+                lower_items([&committed], Some("resp_1")).unwrap(),
+                "{shape}: the slot's first id is the committed id"
             );
             let mut visible = String::new();
             while let Ok(event) = rx.try_recv() {
@@ -1006,11 +1195,12 @@ mod tests {
         );
     }
 
-    /// A Copilot reasoning item re-identified (added `A`, done `B`, terminal
-    /// `I`) with a re-encoded ciphertext and identical visible fields is
-    /// accepted; the terminal id and ciphertext stay together for replay.
+    /// A Copilot reasoning item re-identified (added `A`, summary done `X`,
+    /// done `B`, terminal `I`) with a re-encoded ciphertext and identical
+    /// visible fields is committed under its slot's first id with the
+    /// terminal ciphertext, exactly as the terminal response carried it.
     #[tokio::test]
-    async fn copilot_reencoded_reasoning_keeps_the_terminal_pair() {
+    async fn copilot_reencoded_reasoning_replays_the_slot_id_with_the_terminal_ciphertext() {
         let reasoning = |id: &str, ciphertext: &str| json!({"type":"reasoning","id":id,"summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":ciphertext});
         let answer = message("msg_1", "final_answer", "Done.");
         let terminal = reasoning("I", "terminal-cipher");
@@ -1032,23 +1222,19 @@ mod tests {
             .await;
         server.abort();
         let Ok(result) = result else {
-            panic!("the re-encoded terminal reasoning is the completed reasoning");
+            panic!("the re-encoded terminal reasoning is the slot's reasoning");
         };
+        let committed = reasoning("A", "terminal-cipher");
         assert_eq!(
             result.blocks(),
-            lower_items([&terminal, &answer], Some("resp_1")).unwrap(),
-            "the terminal reasoning id and ciphertext are lowered together"
+            lower_items([&committed, &answer], Some("resp_1")).unwrap(),
+            "the slot id and the terminal ciphertext are lowered together"
         );
-        let replay_client = OpenAiClient::new("unused".into());
-        let projected = replay_client
-            .project_replay_messages(&[Message::BlockAssistant(result.into_message())])
-            .unwrap();
-        let body = replay_client
-            .build_request_body(&LlmRequest::new("gpt-5.5", projected))
-            .unwrap();
-        let input = body["input"].as_array().unwrap();
-        assert_eq!(input[0]["id"], "I");
-        assert_eq!(input[0]["encrypted_content"], "terminal-cipher");
+        assert_replayed_reasoning(
+            result.into_message(),
+            &[("A", "terminal-cipher")],
+            "re-encoded",
+        );
     }
 
     /// A Copilot response of reasoning items and then an answer: each
@@ -1056,8 +1242,8 @@ mod tests {
     /// output index, and the terminal response carries `terminal` in that
     /// order, then the answer. Every reasoning item has a ciphertext of its
     /// own, `cipher-<id>`. With `streamed`, each completed lifecycle is first
-    /// added under its own canonical id and completes its summary in the
-    /// stream. Returns the events and the terminal output.
+    /// added as `A<index>` and completes its summary in the stream. Returns
+    /// the events and the terminal output.
     fn copilot_reasoning_response(
         completed: &[(&str, Option<&str>)],
         terminal: &[(&str, Option<&str>)],
@@ -1107,6 +1293,22 @@ mod tests {
         (events, output)
     }
 
+    /// `output` with each item's id replaced by the slot id at its index in
+    /// `slot_ids` (the reasoning items lead the terminal output).
+    fn with_slot_ids(output: &[Value], slot_ids: &[&str]) -> Vec<Value> {
+        output
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut item = item.clone();
+                if let Some(id) = slot_ids.get(index) {
+                    item["id"] = json!(id);
+                }
+                item
+            })
+            .collect()
+    }
+
     /// Asserts that `assistant` replays exactly the reasoning items
     /// `expected`, as `(id, encrypted_content)` pairs in replay order.
     fn assert_replayed_reasoning(
@@ -1135,92 +1337,64 @@ mod tests {
             .collect();
         assert_eq!(
             replayed, expected,
-            "{case}: each terminal reasoning id replays with its own ciphertext"
+            "{case}: each slot id replays with its terminal item's ciphertext"
         );
     }
 
-    /// Two reasoning items with the same visible fields (no summary, or the
-    /// same summary), each re-identified with fresh ciphertexts, are one
-    /// group with as many completed as terminal items: accepted, the blocks
-    /// are the terminal items, and each terminal id replays with its own
-    /// ciphertext, in terminal order.
+    /// Reasoning items with the same visible fields (no summary, or the same
+    /// summary), each re-identified with a fresh ciphertext, pair by their
+    /// slots, streamed or not: the blocks are the terminal items under their
+    /// slot ids, each with its own terminal ciphertext, and a streamed item
+    /// completes once in the live events.
     #[tokio::test]
-    async fn copilot_identical_reasoning_items_are_matched_as_a_group() {
-        for (shape, summary) in [
-            ("empty summaries", None),
-            ("identical summaries", Some("Plan")),
-        ] {
-            let (events, output) = copilot_reasoning_response(
-                &[("B", summary), ("C", summary)],
-                &[("I", summary), ("J", summary)],
-                false,
-            );
-            let (client, server) = copilot_stub(events).await;
-            let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
-                .stream_response(&[], &[], 1000, None, None)
-                .await;
-            server.abort();
-            let result = result.unwrap_or_else(|error| {
-                panic!("{shape}: the terminal pair is the completed pair: {error}")
-            });
-            assert_eq!(
-                result.blocks(),
-                lower_items(&output, Some("resp_1")).unwrap(),
-                "{shape}: the blocks are the terminal items"
-            );
-            assert_replayed_reasoning(
-                result.into_message(),
-                &[("I", "cipher-I"), ("J", "cipher-J")],
-                shape,
-            );
-        }
-    }
-
-    /// The same groups with streamed reasoning: each lifecycle is added under
-    /// its own canonical id and completes its summary in the stream, so the
-    /// streamed ids reconcile with the group's terminal ids. Accepted, and
-    /// each reasoning item completes once in the live events.
-    #[tokio::test]
-    async fn copilot_identical_reasoning_group_reconciles_its_streamed_ids() {
-        for (shape, summary) in [
-            ("empty summaries", None),
-            ("identical summaries", Some("Plan")),
-        ] {
-            let (events, output) = copilot_reasoning_response(
-                &[("B", summary), ("C", summary)],
-                &[("I", summary), ("J", summary)],
-                true,
-            );
-            let (client, server) = copilot_stub(events).await;
-            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-            let result =
-                LlmClientAdapter::with_event_channel(Arc::new(client), "gpt-5.5".into(), tx)
-                    .stream_response(&[], &[], 1000, None, None)
-                    .await;
-            server.abort();
-            let result = result.unwrap_or_else(|error| {
-                panic!("{shape}: the streamed group is the terminal group: {error}")
-            });
-            assert_eq!(
-                result.blocks(),
-                lower_items(&output, Some("resp_1")).unwrap(),
-                "{shape}: the blocks are the terminal items"
-            );
-            let completions = std::iter::from_fn(|| rx.try_recv().ok())
-                .filter(|event| matches!(event, meerkat_core::AgentEvent::ReasoningComplete { .. }))
-                .count();
-            assert_eq!(
-                completions, 2,
-                "{shape}: each reasoning item completes once"
-            );
+    async fn copilot_identical_reasoning_items_pair_by_slot() {
+        for streamed in [false, true] {
+            for (shape, summary) in [
+                ("empty summaries", None),
+                ("identical summaries", Some("Plan")),
+            ] {
+                let case = format!("{shape}, streamed {streamed}");
+                let (events, output) = copilot_reasoning_response(
+                    &[("B", summary), ("C", summary)],
+                    &[("I", summary), ("J", summary)],
+                    streamed,
+                );
+                let slot_ids: [&str; 2] = if streamed { ["A0", "A1"] } else { ["B", "C"] };
+                let (client, server) = copilot_stub(events).await;
+                let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+                let result =
+                    LlmClientAdapter::with_event_channel(Arc::new(client), "gpt-5.5".into(), tx)
+                        .stream_response(&[], &[], 1000, None, None)
+                        .await;
+                server.abort();
+                let result = result.unwrap_or_else(|error| {
+                    panic!("{case}: each slot has its terminal item: {error}")
+                });
+                assert_eq!(
+                    result.blocks(),
+                    lower_items(&with_slot_ids(&output, &slot_ids), Some("resp_1")).unwrap(),
+                    "{case}: the blocks are the terminal items under their slot ids"
+                );
+                let completions = std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter(|event| {
+                        matches!(event, meerkat_core::AgentEvent::ReasoningComplete { .. })
+                    })
+                    .count();
+                assert_eq!(completions, 2, "{case}: each reasoning item completes once");
+                assert_replayed_reasoning(
+                    result.into_message(),
+                    &[(slot_ids[0], "cipher-I"), (slot_ids[1], "cipher-J")],
+                    &case,
+                );
+            }
         }
     }
 
     /// Two identical messages, each re-identified on every event of its
-    /// lifecycle, are one group: accepted, the terminal identities are kept,
-    /// and each visible text streams once.
+    /// lifecycle, pair by their slots: the terminal messages are committed
+    /// under their slot ids, and each visible text streams once.
     #[tokio::test]
-    async fn copilot_identical_messages_are_matched_as_a_group() {
+    async fn copilot_identical_messages_pair_by_slot() {
         let at = |id: &str| message(id, "final_answer", "Done.");
         let output = [at("G0"), at("G1")];
         let events = vec![
@@ -1241,13 +1415,12 @@ mod tests {
             .stream_response(&[], &[], 1000, None, None)
             .await;
         server.abort();
-        let result = result.unwrap_or_else(|error| {
-            panic!("the terminal messages are the completed messages: {error}")
-        });
+        let result =
+            result.unwrap_or_else(|error| panic!("each slot has its terminal message: {error}"));
         assert_eq!(
             result.blocks(),
-            lower_items(&output, Some("resp_1")).unwrap(),
-            "the terminal identities are kept for replay"
+            lower_items(&[at("A0"), at("A1")], Some("resp_1")).unwrap(),
+            "the terminal messages are committed under their slot ids"
         );
         let mut visible = String::new();
         while let Ok(event) = rx.try_recv() {
@@ -1258,110 +1431,350 @@ mod tests {
         assert_eq!(visible, "Done.Done.", "each visible text streams once");
     }
 
-    /// A group beside a distinct reasoning item in one response: the pair
-    /// without a summary is matched as a group and the summarized item on its
-    /// own, streamed or not.
+    /// Reasoning items without a summary beside a summarized one pair by
+    /// their slots, streamed or not.
     #[tokio::test]
-    async fn copilot_reasoning_group_beside_a_distinct_item_is_accepted() {
+    async fn copilot_reasoning_slots_beside_a_distinct_item_pair_by_slot() {
         for streamed in [false, true] {
             let (events, output) = copilot_reasoning_response(
                 &[("B", None), ("E", Some("Plan")), ("C", None)],
                 &[("I", None), ("K", Some("Plan")), ("J", None)],
                 streamed,
             );
+            let slot_ids: [&str; 3] = if streamed {
+                ["A0", "A1", "A2"]
+            } else {
+                ["B", "E", "C"]
+            };
             let (client, server) = copilot_stub(events).await;
             let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
                 .stream_response(&[], &[], 1000, None, None)
                 .await;
             server.abort();
             let result = result.unwrap_or_else(|error| {
-                panic!("streamed {streamed}: the group and the distinct item both match: {error}")
+                panic!("streamed {streamed}: each slot has its terminal item: {error}")
             });
             assert_eq!(
                 result.blocks(),
-                lower_items(&output, Some("resp_1")).unwrap(),
-                "streamed {streamed}: the blocks are the terminal items"
+                lower_items(&with_slot_ids(&output, &slot_ids), Some("resp_1")).unwrap(),
+                "streamed {streamed}: the blocks are the terminal items under their slot ids"
+            );
+            assert_replayed_reasoning(
+                result.into_message(),
+                &[
+                    (slot_ids[0], "cipher-I"),
+                    (slot_ids[1], "cipher-K"),
+                    (slot_ids[2], "cipher-J"),
+                ],
+                &format!("streamed {streamed}"),
             );
         }
     }
 
-    /// Distinguishable reasoning items match by content, never by position:
-    /// with the two re-identified items listed in the other order by the
-    /// terminal output, each completed item is aliased to the terminal item
-    /// with its content, and the blocks follow the terminal order with each
-    /// terminal id and ciphertext kept together.
+    /// A terminal output that keeps one slot's id and re-identifies the
+    /// other pairs both by slot.
     #[tokio::test]
-    async fn copilot_reordered_terminal_items_match_by_content() {
-        let (events, output) = copilot_reasoning_response(
-            &[("B", Some("A plan")), ("C", Some("B plan"))],
-            &[("J", Some("B plan")), ("I", Some("A plan"))],
-            false,
-        );
-        let completed = events
-            .iter()
-            .filter(|event| event["type"] == "response.output_item.done")
-            .map(|event| &event["item"]);
-        let aliases = copilot_item_aliases(&output, completed).unwrap();
-        assert_eq!(aliases.terminal_id("reasoning", "B"), "I", "'A plan' is I");
-        assert_eq!(aliases.terminal_id("reasoning", "C"), "J", "'B plan' is J");
-        let (client, server) = copilot_stub(events).await;
-        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
-            .stream_response(&[], &[], 1000, None, None)
-            .await;
-        server.abort();
-        let result = result
-            .unwrap_or_else(|error| panic!("each completed item has its terminal item: {error}"));
-        assert_eq!(
-            result.blocks(),
-            lower_items(&output, Some("resp_1")).unwrap(),
-            "the blocks follow the terminal order"
-        );
-        assert_replayed_reasoning(
-            result.into_message(),
-            &[("J", "cipher-J"), ("I", "cipher-I")],
-            "reordered",
-        );
-    }
-
-    /// A group with a kept member: the completed item whose id the terminal
-    /// output keeps is neither aliased nor counted, so its re-identified twin
-    /// is aliased to the one unclaimed terminal item, and the response is
-    /// accepted.
-    #[tokio::test]
-    async fn copilot_group_with_a_kept_member_aliases_only_the_reidentified_one() {
+    async fn copilot_terminal_that_keeps_a_slot_id_pairs_by_slot() {
         let (events, output) = copilot_reasoning_response(
             &[("B", None), ("C", None)],
             &[("B", None), ("J", None)],
             false,
         );
-        let completed = events
-            .iter()
-            .filter(|event| event["type"] == "response.output_item.done")
-            .map(|event| &event["item"]);
-        let aliases = copilot_item_aliases(&output, completed).unwrap();
-        assert_eq!(aliases.terminal_id("reasoning", "B"), "B", "B is kept");
-        assert_eq!(aliases.terminal_id("reasoning", "C"), "J", "C is now J");
         let (client, server) = copilot_stub(events).await;
         let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
             .stream_response(&[], &[], 1000, None, None)
             .await;
         server.abort();
         let result =
-            result.unwrap_or_else(|error| panic!("the kept item and its twin both match: {error}"));
+            result.unwrap_or_else(|error| panic!("each slot has its terminal item: {error}"));
         assert_eq!(
             result.blocks(),
-            lower_items(&output, Some("resp_1")).unwrap(),
-            "the blocks are the terminal items"
+            lower_items(&with_slot_ids(&output, &["B", "C"]), Some("resp_1")).unwrap(),
+            "the blocks are the terminal items under their slot ids"
         );
         assert_replayed_reasoning(
             result.into_message(),
-            &[("B", "cipher-B"), ("J", "cipher-J")],
-            "kept member",
+            &[("B", "cipher-B"), ("C", "cipher-J")],
+            "kept slot id",
+        );
+    }
+
+    /// Synthetic: a terminal output whose items carry their own
+    /// output_index pairs each item with that slot, in slot order, whatever
+    /// the array order.
+    #[tokio::test]
+    async fn copilot_synthetic_terminal_items_pair_by_their_own_output_index() {
+        let (events, output) = copilot_reasoning_response(
+            &[("B", Some("A plan")), ("C", Some("B plan"))],
+            &[("I", Some("A plan")), ("J", Some("B plan"))],
+            false,
+        );
+        let mut indexed: Vec<Value> = output
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut item = item.clone();
+                item["output_index"] = json!(index);
+                item
+            })
+            .collect();
+        indexed.swap(0, 1);
+        let mut events = events;
+        let terminal = events.last_mut().unwrap();
+        terminal["response"]["output"] = json!(indexed);
+        let (client, server) = copilot_stub(events).await;
+        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+            .stream_response(&[], &[], 1000, None, None)
+            .await;
+        server.abort();
+        let result =
+            result.unwrap_or_else(|error| panic!("each item names its own output_index: {error}"));
+        assert_replayed_reasoning(
+            result.into_message(),
+            &[("B", "cipher-I"), ("C", "cipher-J")],
+            "own output_index",
+        );
+    }
+
+    /// A delta without an output_index whose item id an earlier event of a
+    /// slot carried belongs to that slot.
+    #[tokio::test]
+    async fn copilot_delta_without_output_index_follows_an_id_seen_at_its_slot() {
+        let mut events = copilot_message_lifecycle(["A", "B", "C", "D", "E", "F", "G"]);
+        events[3] = json!({"type":"response.output_text.delta","item_id":"B","content_index":0,"delta":"Done."});
+        let (client, server) = copilot_stub(events).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let result = LlmClientAdapter::with_event_channel(Arc::new(client), "gpt-5.5".into(), tx)
+            .stream_response(&[], &[], 1000, None, None)
+            .await;
+        server.abort();
+        let result = result.unwrap_or_else(|error| panic!("the delta is the slot's: {error}"));
+        assert_eq!(
+            result.blocks(),
+            lower_items([&message("A", "final_answer", "Done.")], Some("resp_1")).unwrap()
+        );
+        let mut visible = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let meerkat_core::AgentEvent::TextDelta { delta, .. } = event {
+                visible.push_str(&delta);
+            }
+        }
+        assert_eq!(visible, "Done.", "one visible text sequence");
+    }
+
+    /// A Copilot stream that ends with `[DONE]` and no terminal response
+    /// commits its completed items, each under its slot's first id.
+    #[tokio::test]
+    async fn copilot_stream_without_a_terminal_response_commits_its_slots() {
+        let mut events = copilot_message_lifecycle(["A", "B", "C", "D", "E", "F", "G"]);
+        events.pop();
+        let events = copilot_events(events, true).await;
+        let blocks = events
+            .iter()
+            .find_map(|event| match event {
+                Ok(LlmEvent::AssistantOutput { blocks }) => Some(blocks.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the completed items are committed: {:?}", events.last()));
+        assert_eq!(
+            blocks,
+            lower_items([&message("A", "final_answer", "Done.")], Some("resp_1")).unwrap()
+        );
+        assert!(matches!(
+            events.last(),
+            Some(Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { .. }
+            }))
+        ));
+    }
+
+    /// A stream whose message completed and whose function call was added
+    /// and started its arguments, then ended without completing the call.
+    fn a_call_started_but_never_completed() -> Vec<Value> {
+        let answer = message("msg_1", "final_answer", "Done.");
+        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"","status":"in_progress"});
+        vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":0,"item":answer}),
+            json!({"type":"response.output_item.added","output_index":1,"item":call}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"q\":"}),
+        ]
+    }
+
+    /// Without a terminal response a stream commits only what it completed,
+    /// so on the Copilot route a slot the stream announced and never
+    /// completed (here a started tool call) ends the response with the
+    /// retryable mismatch, and nothing is committed. (Fails-old: the call
+    /// was dropped and the turn ended as complete.)
+    #[tokio::test]
+    async fn copilot_done_without_a_terminal_response_refuses_an_uncompleted_slot() {
+        let events = copilot_events(a_call_started_but_never_completed(), true).await;
+        assert_copilot_mismatch(
+            &events,
+            "output_index 1 was announced but never completed",
+            "a started call at [DONE]",
+        );
+    }
+
+    /// The plain OpenAI route keeps the same rule: an item the stream added
+    /// that never completed before `[DONE]` ends the response as the
+    /// retryable incomplete response, and nothing is committed. (Fails-old:
+    /// the call was dropped and the turn ended as complete.)
+    #[tokio::test]
+    async fn plain_openai_done_without_a_terminal_response_refuses_an_uncompleted_item() {
+        let data: Vec<String> = a_call_started_but_never_completed()
+            .iter()
+            .map(Value::to_string)
+            .chain(["[DONE]".to_owned()])
+            .collect();
+        let (client, server) = raw_stub(data).await;
+        let request = LlmRequest::new("gpt-5.5", vec![]);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(LlmEvent::AssistantOutput { .. }))),
+            "nothing is committed"
+        );
+        let Some(Ok(LlmEvent::Done {
+            outcome: LlmDoneOutcome::Error { error },
+        })) = events.last()
+        else {
+            panic!("the request ends with an error, not {:?}", events.last());
+        };
+        assert!(
+            matches!(
+                error,
+                LlmError::IncompleteResponse { message }
+                    if message.contains("output_index 1 was announced but never completed")
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_retryable());
+    }
+
+    /// On the Copilot route an item the stream added with no id, which no
+    /// event names with one (so no slot holds it), and which never completed
+    /// before `[DONE]` ends the response as the retryable mismatch too, as on
+    /// the plain route, and nothing is committed. (Fails-old: the Copilot
+    /// route checked only its slots, so the call was dropped and the turn
+    /// ended as complete.)
+    #[tokio::test]
+    async fn copilot_done_without_a_terminal_response_refuses_an_uncompleted_item_without_an_id() {
+        let mut events = a_call_started_but_never_completed();
+        // The call is added with an empty id and nothing names it after.
+        events[4]["item"]["id"] = json!("");
+        events.truncate(5);
+        let events = copilot_events(events, true).await;
+        assert_copilot_mismatch(
+            &events,
+            "output_index 1 was announced but never completed",
+            "an id-less call at [DONE]",
+        );
+    }
+
+    /// A Responses stub that sends `payload` as the whole body, as given.
+    async fn body_stub(payload: String) -> (OpenAiClient, tokio::task::JoinHandle<()>) {
+        async fn respond(State(payload): State<String>) -> impl axum::response::IntoResponse {
+            ([("content-type", "text/event-stream")], payload)
+        }
+        let app = Router::new()
+            .route("/v1/responses", post(respond))
+            .with_state(payload);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            OpenAiClient::new_with_base_url("unused".into(), url),
+            server,
+        )
+    }
+
+    /// A body that ends cleanly in the middle of an event (part of its data,
+    /// no blank line after it) ends the response as the retryable incomplete
+    /// response on every Responses route, as a body cut anywhere else does:
+    /// the event the end cut is no malformed event. (Fails-old: the cut
+    /// event's data was parsed as a whole event and failed as a
+    /// non-retryable parse error.)
+    #[tokio::test]
+    async fn a_body_cut_mid_event_is_an_incomplete_response() {
+        let answer = message("msg_1", "final_answer", "Done.");
+        let payload = format!(
+            "data: {}\n\ndata: {}\n\ndata: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"delta\":\"Do",
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":answer}),
+        );
+        for copilot in [false, true] {
+            let (client, server) = body_stub(payload.clone()).await;
+            let client = if copilot {
+                client.with_copilot_responses_item_identity()
+            } else {
+                client
+            };
+            let request = LlmRequest::new("gpt-5.5", vec![]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let Some(Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            })) = events.last()
+            else {
+                panic!(
+                    "copilot {copilot}: the request ends with an error, not {:?}",
+                    events.last()
+                );
+            };
+            assert!(
+                matches!(error, LlmError::IncompleteResponse { .. }) && error.is_retryable(),
+                "copilot {copilot}: {error:?}"
+            );
+        }
+    }
+
+    /// A reasoning item may carry its text in content parts
+    /// (`response.content_part.added/done` with a `reasoning_text` part), as
+    /// the Responses event schema allows: on the Copilot route such a part
+    /// names no other kind of item at its slot, and the response completes.
+    /// (Fails-old: every content part was taken as a message's, so the
+    /// response failed as a slot mismatch.)
+    #[tokio::test]
+    async fn copilot_reasoning_content_parts_complete_the_response() {
+        let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"cipher"});
+        let part = json!({"type":"reasoning_text","text":"Plan"});
+        let answer = message("msg_1", "final_answer", "Done.");
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
+            json!({"type":"response.content_part.added","item_id":"rs_1","output_index":0,"content_index":0,"part":part}),
+            json!({"type":"response.content_part.done","item_id":"rs_1","output_index":0,"content_index":0,"part":part}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            json!({"type":"response.output_item.added","output_index":1,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":1,"item":answer}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":[reasoning, answer],
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
+        ];
+        let events = copilot_events(events, false).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. }
+                }))
+            ),
+            "{:?}",
+            events.last()
         );
     }
 
     /// Copilot rotates a function call's item id on every event while its
-    /// call_id stays: the call is identified by call_id, with no alias.
+    /// call_id stays: the call keeps its call_id, and its argument deltas,
+    /// whose item ids are those of the call's slot, stream live.
     #[tokio::test]
     async fn copilot_rotating_function_item_ids_keep_the_call_id() {
         let call = |id: &str| json!({"type":"function_call","id":id,"call_id":"call_1","name":"lookup","arguments":"{\"q\":5}","status":"completed"});
@@ -1378,20 +1791,17 @@ mod tests {
                 "output":[call("id14")],
                 "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
         ];
-        let (client, server) = copilot_stub(events).await;
-        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
-            .stream_response(&[], &[], 1000, None, None)
-            .await;
-        server.abort();
-        let Ok(result) = result else {
-            panic!("rotating function item ids keep the stable call_id");
-        };
-        let calls: Vec<_> = result
-            .blocks()
+        let events = copilot_events(events, false).await;
+        let calls: Vec<_> = events
             .iter()
+            .filter_map(|event| match event {
+                Ok(LlmEvent::AssistantOutput { blocks }) => Some(blocks.clone()),
+                _ => None,
+            })
+            .flatten()
             .filter_map(|block| match block {
                 AssistantBlock::ToolUse { id, name, args, .. } => {
-                    Some((id.clone(), name.clone(), args.get().to_owned()))
+                    Some((id, name, args.get().to_owned()))
                 }
                 _ => None,
             })
@@ -1402,44 +1812,85 @@ mod tests {
                 "call_1".to_owned(),
                 "lookup".to_owned(),
                 "{\"q\":5}".to_owned()
-            )]
+            )],
+            "rotating function item ids keep the stable call_id"
+        );
+        let streamed: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(LlmEvent::ToolCallDelta { id, args_delta, .. }) if id == "call_1" => {
+                    Some(args_delta.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            streamed, "{\"q\":5}",
+            "the call's argument deltas stream under its call_id"
         );
     }
 
-    /// On the Copilot route nothing but a proven one-to-one same item is
-    /// aliased: each unproven or conflicting identity still fails with its
-    /// own diagnosis.
+    /// Synthetic (no captured stream shows these): on the Copilot route a
+    /// terminal output that does not line up with the items its stream
+    /// announced, or a stream that contradicts itself, is never repaired:
+    /// no item is invented, moved or merged, and no ciphertext changes. The
+    /// request ends with the retryable incomplete-response outcome that
+    /// names the slot, and nothing is committed.
     #[tokio::test]
-    async fn copilot_unproven_reidentifications_still_fail() {
+    async fn copilot_synthetic_stream_mismatches_are_retryable_incomplete_responses() {
         let done = message("message-f", "final_answer", "Done.");
         let completed = |output: Value| {
             json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
                 "output":output,"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}})
         };
+        let added_at = |index: u64, item: &Value| json!({"type":"response.output_item.added","output_index":index,"item":item});
         let done_at = |index: u64, item: &Value| json!({"type":"response.output_item.done","output_index":index,"item":item});
         let reasoning = |id: &str, text: &str, ciphertext: &str| json!({"type":"reasoning","id":id,"summary":[{"type":"summary_text","text":text}],"encrypted_content":ciphertext});
+        let at_index = |mut item: Value, index: u64| {
+            item["output_index"] = json!(index);
+            item
+        };
         let call_f = json!({"type":"function_call","id":"fc_f","call_id":"call_f","name":"lookup","arguments":"{}","status":"completed"});
         let mut call_g = call_f.clone();
         call_g["call_id"] = json!("call_g");
+        let mut with_status = reasoning("I", "Plan", "c2");
+        with_status["status"] = json!("completed");
+        let other = message("other", "final_answer", "Done");
         let cases = [
             (
-                "different content",
+                "drifted message content",
                 vec![
                     done_at(0, &done),
                     completed(json!([message("message-g", "final_answer", "Other.")])),
                 ],
-                "re-identified completed message item 'message-f' with different content",
+                "item at output_index 0 differs",
             ),
             (
-                "omitted",
+                "drifted reasoning summary",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    completed(json!([reasoning("I", "Other plan", "c2")])),
+                ],
+                "item at output_index 0 differs",
+            ),
+            (
+                "a reasoning field on one side only",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    completed(json!([with_status])),
+                ],
+                "item at output_index 0 differs",
+            ),
+            (
+                "another kind in the slot",
                 vec![
                     done_at(0, &done),
                     completed(json!([{"type":"reasoning","id":"rs_g","summary":[]}])),
                 ],
-                "omitted completed message item 'message-f'",
+                "a reasoning at output_index 0",
             ),
             (
-                "ambiguous",
+                "more terminal items than slots",
                 vec![
                     done_at(0, &done),
                     completed(json!([
@@ -1447,198 +1898,166 @@ mod tests {
                         message("message-k", "final_answer", "Done.")
                     ])),
                 ],
-                "no one-to-one match for re-identified completed message item 'message-f'",
+                "output_index 1 the stream never announced",
             ),
             (
-                "conflicting index",
-                vec![
-                    done_at(0, &done),
-                    done_at(0, &message("message-h", "final_answer", "More.")),
-                    completed(json!([done])),
-                ],
-                "conflicting Responses output items completed at output_index 0",
-            ),
-            (
-                "repeated terminal id",
-                vec![
-                    done_at(0, &done),
-                    completed(json!([
-                        message("message-g", "final_answer", "Done."),
-                        message("message-g", "final_answer", "Other.")
-                    ])),
-                ],
-                "terminal Responses output repeats message id 'message-g'",
-            ),
-            (
-                "reused completed id",
-                vec![
-                    done_at(0, &done),
-                    done_at(1, &message("message-f", "final_answer", "Other.")),
-                    completed(json!([
-                        message("message-g", "final_answer", "Done."),
-                        message("message-h", "final_answer", "Other.")
-                    ])),
-                ],
-                "completed Responses message id 'message-f' is reused by two completed items",
-            ),
-            (
-                "one canonical id for two slots",
-                vec![
-                    json!({"type":"response.output_item.added","output_index":0,"item":message("A", "final_answer", "Left.")}),
-                    json!({"type":"response.output_text.delta","item_id":"D0","output_index":0,"delta":"Left."}),
-                    json!({"type":"response.output_item.added","output_index":1,"item":message("A", "final_answer", "Right.")}),
-                    json!({"type":"response.output_text.delta","item_id":"D1","output_index":1,"delta":"Right."}),
-                    done_at(1, &message("F", "final_answer", "Right.")),
-                    completed(json!([message("G", "final_answer", "Right.")])),
-                ],
-                "Responses output item id 'A' added at output_index 0 and 1",
-            ),
-            (
-                "fresh lifecycle at a completed slot",
-                vec![
-                    json!({"type":"response.output_item.added","output_index":0,"item":message("A", "final_answer", "Done.")}),
-                    done_at(0, &message("F", "final_answer", "Done.")),
-                    json!({"type":"response.output_item.added","output_index":0,"item":message("B", "final_answer", "Later.")}),
-                    json!({"type":"response.output_text.delta","item_id":"D1","output_index":0,"delta":"Later."}),
-                    completed(json!([message("G", "final_answer", "Done.")])),
-                ],
-                "conflicting Responses output items added at output_index 0",
-            ),
-            (
-                "orphan delta id",
-                vec![
-                    json!({"type":"response.output_text.delta","item_id":"orphan","output_index":0,"delta":"Done."}),
-                    done_at(0, &done),
-                    completed(json!([done])),
-                ],
-                "omitted streamed assistant message 'orphan'",
-            ),
-            (
-                "function call",
-                vec![done_at(0, &call_f), completed(json!([call_g]))],
-                "omitted completed function_call item 'call_f'",
-            ),
-            (
-                "reasoning visible change",
-                vec![
-                    done_at(0, &reasoning("B", "Plan", "c1")),
-                    completed(json!([reasoning("I", "Other plan", "c2")])),
-                ],
-                "re-identified completed reasoning item 'B' with different content",
-            ),
-            (
-                "reasoning omitted",
-                vec![
-                    done_at(0, &reasoning("B", "Plan", "c1")),
-                    completed(json!([done])),
-                ],
-                "omitted completed reasoning item 'B'",
-            ),
-            (
-                "two reasoning slots, one candidate",
+                "fewer terminal items than slots",
                 vec![
                     done_at(0, &reasoning("B", "Plan", "c1")),
                     done_at(1, &reasoning("C", "Plan", "c2")),
                     completed(json!([reasoning("I", "Plan", "c3")])),
                 ],
-                "no one-to-one match for re-identified completed reasoning item 'C'",
+                "output_index 1 is missing",
             ),
             (
-                "indistinguishable reasoning candidates",
+                "reordered distinct reasoning",
                 vec![
-                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    done_at(0, &reasoning("B", "A plan", "c1")),
+                    done_at(1, &reasoning("C", "B plan", "c2")),
                     completed(json!([
-                        reasoning("I", "Plan", "c2"),
-                        reasoning("J", "Plan", "c3")
+                        reasoning("J", "B plan", "c4"),
+                        reasoning("I", "A plan", "c3")
                     ])),
                 ],
-                "no one-to-one match for re-identified completed reasoning item 'B'",
+                "item at output_index 0 differs",
             ),
             (
-                "group too many terminal",
+                "one id at two slots",
                 vec![
-                    done_at(0, &reasoning("B", "Plan", "c1")),
-                    done_at(1, &reasoning("C", "Plan", "c2")),
-                    completed(json!([
-                        reasoning("I", "Plan", "c3"),
-                        reasoning("J", "Plan", "c4"),
-                        reasoning("K", "Plan", "c5")
-                    ])),
+                    added_at(0, &message("A", "final_answer", "Left.")),
+                    json!({"type":"response.output_text.delta","item_id":"D0","output_index":0,"delta":"Left."}),
+                    added_at(1, &message("A", "final_answer", "Right.")),
+                    done_at(1, &message("F", "final_answer", "Right.")),
+                    completed(json!([message("G", "final_answer", "Right.")])),
                 ],
-                "no one-to-one match for re-identified completed reasoning item 'B'",
+                "id 'A' appears at output_index 0 and 1",
             ),
             (
-                "group member changed",
+                "added again as a different item",
                 vec![
-                    done_at(0, &reasoning("B", "Plan", "c1")),
-                    done_at(1, &reasoning("C", "Plan", "c2")),
-                    completed(json!([
-                        reasoning("I", "Plan", "c3"),
-                        reasoning("J", "Other", "c4")
-                    ])),
+                    added_at(0, &message("A", "final_answer", "Done.")),
+                    done_at(0, &message("F", "final_answer", "Done.")),
+                    added_at(0, &message("B", "final_answer", "Later.")),
+                    json!({"type":"response.output_text.delta","item_id":"D1","output_index":0,"delta":"Later."}),
+                    completed(json!([message("G", "final_answer", "Done.")])),
                 ],
-                "no one-to-one match for re-identified completed reasoning item 'C'",
+                "output_index 0 was added again as a different item",
             ),
             (
-                "group too few terminal",
+                "completed again as a different item",
                 vec![
-                    done_at(0, &reasoning("B", "Plan", "c1")),
-                    done_at(1, &reasoning("C", "Plan", "c2")),
-                    done_at(2, &reasoning("D", "Plan", "c3")),
-                    completed(json!([
-                        reasoning("I", "Plan", "c4"),
-                        reasoning("J", "Plan", "c5")
-                    ])),
+                    done_at(0, &done),
+                    done_at(0, &message("message-h", "final_answer", "More.")),
+                    completed(json!([done])),
                 ],
-                "no one-to-one match for re-identified completed reasoning item 'D'",
+                "output_index 0 was completed again as a different item",
             ),
             (
-                "unrelated reasoning completion",
+                "a function call that changed its call_id",
+                vec![done_at(0, &call_f), completed(json!([call_g]))],
+                "item at output_index 0 differs",
+            ),
+            (
+                "a reasoning completion at a slot the terminal lacks",
                 vec![
                     json!({"type":"response.reasoning_summary.done","output_index":5,"item":reasoning("X", "Plan", "c0")}),
                     done_at(0, &reasoning("B", "Plan", "c1")),
                     completed(json!([reasoning("B", "Plan", "c1")])),
                 ],
-                "omitted streamed reasoning 'X'",
+                "output_index 5 is missing",
+            ),
+            (
+                "an empty terminal output",
+                vec![
+                    added_at(0, &message("A", "final_answer", "Done.")),
+                    json!({"type":"response.output_text.delta","item_id":"C","output_index":0,"delta":"Done."}),
+                    done_at(0, &message("F", "final_answer", "Done.")),
+                    completed(json!([])),
+                ],
+                "output_index 0 is missing",
+            ),
+            (
+                "a terminal response without output",
+                vec![
+                    added_at(0, &message("A", "final_answer", "Done.")),
+                    done_at(0, &message("F", "final_answer", "Done.")),
+                    json!({"type":"response.done","response":{"id":"resp_1","status":"completed"}}),
+                ],
+                "output_index 0 is missing",
+            ),
+            (
+                "a delta of an id no slot carries",
+                vec![
+                    json!({"type":"response.output_text.delta","item_id":"stray","delta":"Done."}),
+                    done_at(0, &done),
+                    completed(json!([message("message-g", "final_answer", "Done.")])),
+                ],
+                "omitted streamed assistant message 'stray'",
+            ),
+            (
+                "a terminal item whose output_index is not an unsigned integer",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    completed(json!([{"type":"reasoning","id":"I","output_index":"seven",
+                        "summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"c2"}])),
+                ],
+                "an output_index that is not an unsigned integer",
+            ),
+            (
+                "an argument delta at a message's slot",
+                vec![
+                    added_at(0, &message("A", "final_answer", "Done.")),
+                    json!({"type":"response.function_call_arguments.delta","item_id":"X","output_index":0,"delta":"{}"}),
+                    done_at(0, &message("F", "final_answer", "Done.")),
+                    completed(json!([message("G", "final_answer", "Done.")])),
+                ],
+                "a function_call at output_index 0, which holds a message",
+            ),
+            (
+                "two terminal items at one output_index",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    completed(json!([
+                        at_index(reasoning("I", "Plan", "c2"), 0),
+                        at_index(reasoning("J", "Plan", "c3"), 0)
+                    ])),
+                ],
+                "two items at output_index 0",
+            ),
+            (
+                "an atomic message replaced",
+                vec![
+                    done_at(0, &message("msg_atomic", "commentary", "Working.")),
+                    completed(json!([other])),
+                ],
+                "item at output_index 0 differs",
+            ),
+            (
+                "an atomic reasoning replaced by a message",
+                vec![
+                    done_at(
+                        0,
+                        &json!({"type":"reasoning","id":"rs_atomic","summary":[],"encrypted_content":"atomic-cipher"}),
+                    ),
+                    completed(json!([other])),
+                ],
+                "a message at output_index 0",
+            ),
+            (
+                "an atomic web search replaced by a message",
+                vec![
+                    done_at(
+                        0,
+                        &json!({"type":"web_search_call","id":"ws_atomic","status":"completed"}),
+                    ),
+                    completed(json!([other])),
+                ],
+                "a message at output_index 0",
             ),
         ];
-        for (case, events, expected) in cases {
-            let (client, server) = copilot_stub(events).await;
-            let Err(error) = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
-                .stream_response(&[], &[], 1000, None, None)
-                .await
-            else {
-                panic!("{case}: refused");
-            };
-            server.abort();
-            assert!(error.to_string().contains(expected), "{case}: {error}");
-        }
-    }
-
-    /// The pruned-terminal negative holds with the Copilot compatibility on:
-    /// a different terminal message never stands in for a completed item.
-    #[tokio::test]
-    async fn copilot_pruned_terminal_output_cannot_discard_atomic_completed_items() {
-        for item in [
-            message("msg_atomic", "commentary", "Working."),
-            json!({"type":"reasoning","id":"rs_atomic","summary":[],"encrypted_content":"atomic-cipher"}),
-            json!({"type":"web_search_call","id":"ws_atomic","status":"completed"}),
-        ] {
-            let (client, server) = copilot_stub(vec![
-                json!({"type":"response.output_item.done","output_index":0,"item":item}),
-                json!({"type":"response.completed","response":{"status":"completed","output":[message("other","final_answer","Done")]}}),
-            ]).await;
-            let request = LlmRequest::new("gpt-6-astra", vec![]);
-            let events = client.stream(&request).collect::<Vec<_>>().await;
-            assert!(matches!(
-                events.last().unwrap(),
-                Ok(LlmEvent::Done {
-                    outcome: LlmDoneOutcome::Error {
-                        error: LlmError::StreamParseError { .. }
-                    }
-                })
-            ));
-            server.abort();
+        for (case, events, detail) in cases {
+            let events = copilot_events(events, false).await;
+            assert_copilot_mismatch(&events, detail, case);
         }
     }
 

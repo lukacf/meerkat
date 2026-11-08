@@ -40,6 +40,15 @@ const ref = (name = 'notes.md', index = 1, id = guide.id) => ({ id: String(index
 const storage = values => ({ getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value),
   removeItem: key => values.delete(key), key: index => [...values.keys()][index] ?? null, get length() { return values.size; } });
 const pause = () => new Promise(resolve => setTimeout(resolve, 5));
+// The inert transport reads File bytes asynchronously before its response hook,
+// so a test waits for what an upload changes, never for a fixed number of ticks.
+async function until(condition, what) {
+  for (let step = 0; step < 400; step++) {
+    if (condition()) return;
+    await act(pause);
+  }
+  assert.fail(`Timed out waiting for ${what}.`);
+}
 
 async function mount({ session = new Map(), state = structuredClone(guide), onPost, onRead, local: retainedLocal, draft = '  Keep my unsent context. Å  ', selected = ['current'], mode = 'chat', otherGuides = [], savedToolkit, narrow = false, setupDom } = {}, verify) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
@@ -125,6 +134,7 @@ test('removing one rejected file leaves an explicit retry for the remaining atta
     const retry = () => [...document.querySelectorAll('.setup-attachments button')].find(node => node.textContent === 'Retry upload');
     const retained = local.get(input.key);
     await choose([{ name: 'bad.md', text: 'Rejected fixture' }, { name: 'keep.md', text: '  Useful source context.\nKeep these original bytes.  ' }]);
+    await until(() => document.querySelector('.setup-attachments [role="alert"]') !== null, 'the rejected upload');
     assert.match(document.querySelector('.setup-attachments [role="alert"]').textContent, /bad.md is not readable/);
     assert.ok(retry(), 'The original failed batch offers its existing Retry action.');
     assert.equal(document.querySelectorAll('.setup-attachments li').length, 2);
@@ -141,8 +151,7 @@ test('removing one rejected file leaves an explicit retry for the remaining atta
     assert.deepEqual(JSON.parse(local.get(input.key)).selected, input.selected);
     assert.equal(local.get(input.key), retained);
     await act(async () => { retry().click(); await pause(); });
-    // The inert transport reads File bytes asynchronously before its response hook.
-    for (let step = 0; sent.length < 2 && step < 40; step++) await act(pause);
+    await until(() => sent.length === 2, 'the retried upload');
     assert.equal(sent.length, 2);
     assert.equal(retry() === undefined, true, 'An active upload cannot start another Retry.');
     assert.equal(document.querySelector('[aria-label="Remove attachment keep.md"]').disabled, true);

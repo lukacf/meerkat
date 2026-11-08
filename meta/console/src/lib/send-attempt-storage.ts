@@ -22,10 +22,112 @@ export function loadConsoleSendAttempts(storage: ConsoleSendStorage, namespace: 
 /**
  * The queue the predecessor (pre-0.9) console saved for this scope, read only
  * for the explicit "Older queued messages" import. Never consulted by
- * {@link loadConsoleSendAttempts}; its bytes are preserved after import.
+ * {@link loadConsoleSendAttempts}; an import removes its bytes
+ * ({@link removeOlderConsoleQueues}).
  */
 export function readPredecessorConsoleQueue(storage: ConsoleSendStorage, namespace: string, destination: string, now = Date.now()): ConsoleSendLoad {
   return parseConsoleSendDocument(storage.getItem(predecessorConsoleSendStorageKey(namespace, destination)), namespace, destination, now);
+}
+
+/** The key of the unscoped queue the first console kept for every user. */
+export const legacyConsoleQueueKey = (destination: string): string => `mobkit-pending-stack:${destination}`;
+
+export interface ConsoleRemovableStorage {
+  removeItem(key: string): void;
+}
+
+/**
+ * Removes the older queues an import moved into `namespace`, so they are
+ * offered once and no other user of this browser is offered them: the
+ * unscoped queue, the predecessor console's queue of this scope, and a queue
+ * kept under the host's namespace alone (`hostOnlyNamespace`, before the
+ * console combined it with the user's scope), with the storage lock's records
+ * of those queues. The storage removals are done when it returns; the promise
+ * settles once the lock records are gone too.
+ */
+export function removeOlderConsoleQueues(storage: ConsoleRemovableStorage, namespace: string, destination: string, hostOnlyNamespace: string | null): Promise<void> {
+  const older = [predecessorConsoleSendStorageKey(namespace, destination)];
+  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) older.push(consoleSendStorageKey(hostOnlyNamespace, destination));
+  storage.removeItem(legacyConsoleQueueKey(destination));
+  for (const key of older) storage.removeItem(key);
+  return forgetConsoleQueueLockRecords(older, []);
+}
+
+export interface ConsoleEnumerableStorage extends ConsoleRemovableStorage {
+  readonly length: number;
+  key(index: number): string | null;
+}
+
+function removeKeysWithPrefixes(storage: ConsoleEnumerableStorage | null, prefixes: readonly string[]): void {
+  if (!storage) return;
+  try {
+    const doomed: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key && prefixes.some((prefix) => key.startsWith(prefix))) doomed.push(key);
+    }
+    for (const key of doomed) storage.removeItem(key);
+  } catch {
+    // Storage denied: nothing could have been kept there either.
+  }
+}
+
+/**
+ * Signing out: removes what this browser keeps for one user's console scope,
+ * the queued messages of every agent (this console's and the predecessor
+ * console's keys) from `local`, and the composer drafts from this tab's
+ * `session` storage. Preferences stay. The storage removals are done when it
+ * returns; the promise settles once the storage lock's records of the queues
+ * are gone too.
+ */
+export function purgeConsoleSendScope(local: ConsoleEnumerableStorage | null, session: ConsoleEnumerableStorage | null, namespace: string): Promise<void> {
+  const scope = encodeURIComponent(namespace);
+  const queues = [`meta-send-attempts:v1:${scope}:`, `mobkit-send-attempts:v1:${scope}:`];
+  removeKeysWithPrefixes(local, queues);
+  removeKeysWithPrefixes(session, [`meta-composer-draft:v1:${scope}:`, `meta-composer-draft:v2:${scope}:`]);
+  return forgetConsoleQueueLockRecords([], queues);
+}
+
+/**
+ * Deletes the records the storage lock (`send-storage-lock.ts`) keeps in
+ * IndexedDB for the given queue keys and key prefixes. A record holds the
+ * last value its queue key had, so a queue removed from localStorage would
+ * otherwise stay readable there. A browser that never kept such records has
+ * no database, and none is created. Never rejects.
+ */
+async function forgetConsoleQueueLockRecords(keys: readonly string[], prefixes: readonly string[]): Promise<void> {
+  if (typeof indexedDB === "undefined" || !indexedDB) return;
+  // The lock helper's database and store (its source stays as reviewed).
+  const database = await new Promise<IDBDatabase | null>((resolve) => {
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open("meta-console-queue-locks");
+    } catch {
+      resolve(null);
+      return;
+    }
+    // No database yet: nothing to delete, and none is created.
+    request.onupgradeneeded = () => request.transaction?.abort();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+  if (!database) return;
+  try {
+    if (!database.objectStoreNames.contains("locks")) return;
+    await new Promise<void>((resolve) => {
+      const transaction = database.transaction("locks", "readwrite");
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => resolve();
+      const store = transaction.objectStore("locks");
+      for (const key of keys) store.delete(key);
+      for (const prefix of prefixes) store.delete(IDBKeyRange.bound(prefix, prefix + String.fromCharCode(0xffff)));
+    });
+  } catch {
+    // Storage denied or closing: nothing more can be removed here.
+  } finally {
+    database.close();
+  }
 }
 
 function parseConsoleSendDocument(raw: string | null, namespace: string, destination: string, now: number): ConsoleSendLoad {
@@ -102,7 +204,7 @@ export function consoleLegacyQueueImported(storage: ConsoleSendStorage, namespac
 }
 
 export function readLegacyConsoleQueue(storage: ConsoleSendStorage, destination: string): Array<{ id: string; text: string; addedAt: number }> {
-  const raw = storage.getItem(`mobkit-pending-stack:${destination}`);
+  const raw = storage.getItem(legacyConsoleQueueKey(destination));
   if (!raw) return [];
   const data: unknown = JSON.parse(raw);
   if (!Array.isArray(data) || data.some((item) => !item || typeof item.id !== "string" || typeof item.text !== "string" || !Number.isFinite(item.addedAt))) {

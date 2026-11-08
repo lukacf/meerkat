@@ -61,7 +61,15 @@ pub enum MemberBuildPrepared {
 #[non_exhaustive]
 pub enum MemberBuildPreparationRefusal {
     /// Not now: the member stays dormant and the caller that needed it gets
-    /// a typed retryable refusal; a later delivery tries again.
+    /// a typed retryable refusal
+    /// ([`crate::MemberWakeRefusal::BuildPreparationRetry`]). MobMachine
+    /// records the retry, and every wake of the member is refused for it
+    /// without asking the host again until the host retries it
+    /// ([`crate::MobHandle::resolve_member_build_preparation`]) or the
+    /// mob's retry timer does, at the wake retry backoff
+    /// ([`crate::MobBuilder::with_member_wake_retry_backoff`]); the timer
+    /// then wakes the member only for work it still owes, and asks the
+    /// host again with that wake.
     Retryable { reason: String },
     /// Never as it stands: the member is recorded broken with `reason`, as a
     /// failed restore is.

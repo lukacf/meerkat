@@ -1,21 +1,86 @@
 //! Native Linux lowering of the existing immutable confinement requirement.
 //!
 //! Restricted paths use an empty private mount view, not content-only Landlock
-//! grants. No host procfs is exposed. This module owns no permission policy or
-//! child supervisor; it adapts the retained requirement and transfers the one
-//! spawned child into NativeChild.
+//! grants. This module owns no permission policy or child supervisor; it
+//! adapts the retained requirement and transfers the one spawned child into
+//! NativeChild.
+//!
+//! # Processes of a launch
+//!
+//! Every launch is a pid namespace of its own, with new user, mount, IPC and
+//! cgroup namespaces, and a new network namespace when the requirement grants
+//! no IP access. The host creates its first process directly in them
+//! (`clone(2)`): that process is pid 1 of the namespace and the one direct
+//! child NativeChild owns, the leader of the launch's process group. It runs
+//! the setup below, starts the command as pid 2, and replaces its own image
+//! with the backend's init (`init_image_bounds`), a small static program
+//! executed from a sealed memory file. So no process of the launch is a copy
+//! of the host once the command runs: the init holds no host memory, and the
+//! command waits for the init before it executes its program.
+//!
+//! The init runs under the command's seccomp filter, chroot and dropped
+//! capabilities. It makes itself non-dumpable, so the command can open none
+//! of its memory, descriptors, environment or executable through `/proc`;
+//! reaps every process the namespace orphans; and when the command ends,
+//! reports the command's wait status to the host and exits, which ends every
+//! other process of the namespace. NativeChild reports that status: the
+//! command's exit code, or the signal that ended it. A SIGKILL of the
+//! launch's PID from the host ends the namespace at once. A signal to the
+//! launch's process group reaches the command and everything it started
+//! (none of them can leave the group). The init installs no signal handler,
+//! and pid 1 of a pid namespace ignores every signal it has no handler for
+//! that comes from inside its namespace, and every one from the host but
+//! SIGKILL and SIGSTOP, so the init never ends early by one.
+//!
+//! # The launch's procfs
+//!
+//! No host procfs is exposed. The launch gets a procfs of its own pid
+//! namespace at `/proc`, read-only and with task entries only
+//! (`subset=pid`): `/proc/self/exe` resolves, which a Rust toolchain needs,
+//! while host-wide state such as `/proc/sys` and `/proc/net` is absent, and
+//! only the launch's own processes are listed. `/proc/self/net` shows the
+//! launch's network namespace: its own loopback interface when IP is denied,
+//! the host's shared namespace when IP is granted. `/proc/self/cgroup` shows
+//! the launch's cgroup namespace, rooted at its own cgroup, never the host's
+//! cgroup path. `/proc/self/mountinfo` still shows the source device,
+//! filesystem and options of each mount bound into the launch. The mount is
+//! best effort: a host that refuses it (a masked or overmounted `/proc`, or a
+//! kernel without `subset=pid`) still launches, without `/proc`.
+//!
+//! # Granted paths
+//!
+//! Every granted path is canonical, with one exception: a read-only literal
+//! file grant may name a symbolic link as its final component
+//! (`/etc/resolv.conf` on a systemd-resolved host), when the link's own text
+//! alone names its regular-file target, in one hop, outside `/proc`, `/sys`
+//! and `/dev`, and only root or the effective uid can replace the link
+//! (`grantable_link_text`). The target is pinned at compile time and bound
+//! read-only at the link's own path. Every launch checks that the link keeps
+//! its text and still resolves to the pinned target. A target replaced under
+//! its own name (a new file renamed into place, as systemd-resolved rewrites
+//! its stub file) is captured again by the same rules and pinned in its place
+//! (`Mount::bind`); a link replaced with other text, or a target replaced by
+//! anything those rules refuse, refuses the launch. Setup reopens the target
+//! only while it is the object the launch validated, which the launch holds
+//! until its setup is done, so no other object can take its identity
+//! meanwhile.
+//!
+//! Every granted path, the baseline included, is opened by its canonical name
+//! with no symbolic link in any component (`open_no_symlinks`): when the
+//! requirement compiles, when a final link's target is captured again, and at
+//! setup. A writer of a directory partway down cannot swap a link in and get
+//! another object pinned or bound.
 #![allow(unsafe_code)]
 
+use std::convert::Infallible;
 use std::ffi::{CStr, CString, OsStr};
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use meerkat_core::confinement::{FilesystemAccess, IpNetworkAccess, PathAccess};
@@ -24,11 +89,15 @@ use tokio::process::{ChildStderr, ChildStdout};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::native_stdio::{duplicate, inherit, input, output};
-use crate::{ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunchSpec, SpawnIo};
+use crate::{
+    ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunchSpec, SpawnIo,
+    UnmetHostRequirement,
+};
 
 // These are compatibility resources, not a bind of the host root. Missing
 // optional distribution paths are omitted; /bin/sh and the target still have
-// to resolve inside this view at actual exec. No /proc, /sys, home or scratch.
+// to resolve inside this view at actual exec. No host /proc, /sys, home or
+// scratch; the launch's own procfs is mounted by setup (`PROCFS_FLAGS`).
 const BASELINE_DIRECTORIES: &[&str] = &[
     "/bin",
     "/sbin",
@@ -50,16 +119,47 @@ const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
 // supported 64-bit architectures. These are syscall command numbers only.
 const F_SETOWN_EX: libc::c_int = 15;
 const F_SETSIG: libc::c_int = 10;
+// Linux UAPI linux/memfd.h (6.3): an executable memory file, on a host whose
+// vm.memfd_noexec would otherwise create it without exec permission.
+const MFD_EXEC: libc::c_uint = 0x10;
 // A probe child whose setup step fails exits with this base plus the step's
 // number, so the refused step can be read from its exit status (for example
 // in `strace -f`). The refusal itself stays BackendUnavailable.
 const PROBE_STEP_STATUS_BASE: i32 = 64;
+// The launch's procfs: read-only, nosuid, nodev, noexec, task entries only.
+const PROCFS_FLAGS: libc::c_ulong =
+    libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+// The namespaces every launch's first process is created in; a launch
+// without IP access also gets a network namespace of its own. The cgroup
+// namespace roots the launch's /proc/self/cgroup at its own cgroup, so the
+// launch's procfs does not show the host's cgroup path.
+const LAUNCH_NAMESPACES: libc::c_int = libc::CLONE_NEWUSER
+    | libc::CLONE_NEWNS
+    | libc::CLONE_NEWIPC
+    | libc::CLONE_NEWPID
+    | libc::CLONE_NEWCGROUP;
+// The stack each of a launch's two processes runs its setup on, until it
+// executes its program: far more than their allocation-free code needs.
+const LAUNCH_STACK_BYTES: usize = 256 * 1024;
+// Every descriptor a launch's processes keep for themselves (the report,
+// status and release pipes, the init image) is placed at or above this, so
+// the command's stdio and custody gate (0 to 3) and init's own pipes (3 and
+// 4) can be installed without overwriting one of them.
+const LAUNCH_DESCRIPTOR_FLOOR: libc::c_int = 10;
+// The descriptors the backend's init is executed with: the write end of the
+// status pipe, and the write end of the pipe that releases the command.
+const INIT_STATUS_DESCRIPTOR: libc::c_int = 3;
+const INIT_RELEASE_DESCRIPTOR: libc::c_int = 4;
+// The command's pid in its launch's pid namespace: the first process pid 1
+// starts there. The init waits for this pid (`init_image_bounds`).
+const COMMAND_PID: libc::pid_t = 2;
 
-/// The steps of `LinuxPolicy::apply`, numbered for the probe's exit status.
+/// The steps of a launch's setup (`LinuxPolicy::apply` and the processes
+/// around it), numbered for the probe's exit status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetupStep {
     NoNewPrivileges = 1,
-    Unshare = 2,
+    ProcessGroup = 2,
     Setgroups = 3,
     UidMap = 4,
     GidMap = 5,
@@ -79,6 +179,13 @@ enum SetupStep {
     Capabilities = 19,
     CloseRange = 20,
     Seccomp = 21,
+    ProcTarget = 22,
+    Command = 23,
+    Init = 24,
+    Directory = 25,
+    Stdio = 26,
+    Gate = 27,
+    Exec = 28,
 }
 
 impl SetupStep {
@@ -100,34 +207,72 @@ struct SetupFailure {
 
 struct Mount {
     path: PathBuf,
+    // A read-only file grant whose final component is a symbolic link (see
+    // `grantable_link_text`): the link's text at capture, which the link must
+    // keep at every launch.
+    link: Option<PathBuf>,
     canonical: PathBuf,
     // The canonical name, opened again in the new mount namespace at setup.
     source: CString,
-    file: File,
+    // The canonical name's components, prebuilt for the symlink-free walk
+    // setup falls back to on a kernel without openat2 (`open_no_symlinks`).
+    // `components` holds the granted path's, which differ for a final link
+    // and a baseline alias.
+    source_components: Vec<CString>,
+    components: Vec<CString>,
+    destination: CString,
+    directory: bool,
+    writable: bool,
+    device: bool,
+    // The pinned object. Only a final link's target replaced under its own
+    // name is ever pinned again (`Mount::bind`); a launch's `Bound` keeps the
+    // object it validated alive past that.
+    pin: Mutex<Pin>,
+}
+
+/// The host object a mount pins.
+struct Pin {
+    file: Arc<File>,
     identity: (u64, u64),
     // fstat (st_dev, st_ino, st_rdev) of the pinned object. st_rdev also
     // tells the three baseline devices apart; it is zero for directories and
     // files.
     pinned: (libc::dev_t, libc::ino_t, libc::dev_t),
     ancestors: Vec<(PathBuf, u64, u64)>,
-    components: Vec<CString>,
-    destination: CString,
-    directory: bool,
-    writable: bool,
-    device: bool,
     // The host mount is noexec, which the bind remount must keep.
     noexec: bool,
 }
 
+/// What one launch binds of a mount, copied from its pin when the launch is
+/// validated, before fork, so setup reads no lock: the identity the reopened
+/// source must have, and the host mount's noexec. It also holds the pinned
+/// object itself until the launch drops it, after its setup is done, so the
+/// identity cannot pass to another object meanwhile: once a re-capture drops
+/// the pin of a replaced file, the file's last reference would otherwise go,
+/// and a filesystem may give its inode number to the next object made there
+/// (ext4 often does).
+#[derive(Clone, Debug)]
+struct Bound {
+    _held: Arc<File>,
+    pinned: (libc::dev_t, libc::ino_t, libc::dev_t),
+    noexec: bool,
+}
+
 /// Mechanical compiled resources. Every file descriptor pins the exact host
-/// object selected at setup. Per-launch checks cannot retarget these handles.
-/// Setup binds a source opened again by name in the new mount namespace, and
-/// only while it is still that pinned object.
+/// object selected at setup. Per-launch checks cannot retarget these handles;
+/// the one object they pin again is a final link's target replaced under its
+/// own name, by the capture-time rules (`Mount::bind`). Setup binds a source
+/// opened again by name in the new mount namespace, and only while it is
+/// still the object the launch validated.
 pub(super) struct LinuxPolicy {
     mounts: Vec<Mount>,
     filter: Vec<libc::sock_filter>,
     uid_map: Vec<u8>,
     gid_map: Vec<u8>,
+    // The namespaces each launch's first process is created in.
+    namespaces: libc::c_int,
+    // The sealed init image every launch's pid 1 executes (`sealed_init`).
+    init: OwnedFd,
 }
 
 impl LinuxPolicy {
@@ -157,11 +302,7 @@ impl LinuxPolicy {
                 }
                 for access in read {
                     let path = access.path();
-                    if path == Path::new("/")
-                        || ["/proc", "/sys", "/dev"]
-                            .iter()
-                            .any(|root| path.starts_with(root))
-                    {
+                    if reserved_read_root(path) {
                         return Err(ConfinementRefusal::UnsupportedRequirement);
                     }
                     let mount = Mount::capture(path, false, write.contains(access))?;
@@ -184,25 +325,35 @@ impl LinuxPolicy {
             // Mixed dimensions also need an exact metadata/write lowering.
             _ => return Err(ConfinementRefusal::UnsupportedRequirement),
         }
+        let ip = matches!(spec.network, IpNetworkAccess::Unrestricted);
         let policy = Arc::new(Self {
             mounts,
-            filter: filter(
-                architecture,
-                matches!(spec.network, IpNetworkAccess::Unrestricted),
-            ),
+            filter: filter(architecture, ip),
             // Only fixed decimal mapping data is read after fork.
             uid_map: format!("0 {} 1\n", unsafe { libc::geteuid() }).into_bytes(),
             gid_map: format!("0 {} 1\n", unsafe { libc::getegid() }).into_bytes(),
+            // Without IP the launch's /proc/self/net shows a namespace of its
+            // own, with only a loopback interface, never the host's sockets.
+            namespaces: if ip {
+                LAUNCH_NAMESPACES
+            } else {
+                LAUNCH_NAMESPACES | libc::CLONE_NEWNET
+            },
+            init: sealed_init()?,
         });
-        policy.validate()?;
-        policy.probe()?;
+        let bound = policy.bind_mounts()?;
+        policy.probe(&bound)?;
         Ok(policy)
     }
 
-    pub(super) fn validate(&self) -> Result<(), ConfinementRefusal> {
-        for mount in &self.mounts {
-            mount.validate()?;
-        }
+    /// Checks every mount for a launch (see [`Mount::bind`]) and the staging
+    /// root, and returns what the launch binds of each mount.
+    fn bind_mounts(&self) -> Result<Vec<Bound>, ConfinementRefusal> {
+        let bound = self
+            .mounts
+            .iter()
+            .map(Mount::bind)
+            .collect::<Result<Vec<_>, _>>()?;
         {
             let stage = std::fs::symlink_metadata("/tmp")
                 .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
@@ -210,14 +361,24 @@ impl LinuxPolicy {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
         }
-        Ok(())
+        Ok(bound)
     }
 
     pub(super) fn validate_launch(
         &self,
         launch: &ProcessLaunchSpec,
     ) -> Result<(), ConfinementRefusal> {
-        self.validate()?;
+        self.launch_bindings(launch)?;
+        Ok(())
+    }
+
+    /// [`Self::bind_mounts`] for `launch`, whose program and working
+    /// directory must be visible in its view.
+    fn launch_bindings(
+        &self,
+        launch: &ProcessLaunchSpec,
+    ) -> Result<Vec<Bound>, ConfinementRefusal> {
+        let bound = self.bind_mounts()?;
         {
             let visible = |path: &Path| {
                 self.mounts.iter().any(|mount| {
@@ -228,34 +389,32 @@ impl LinuxPolicy {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
         }
-        Ok(())
+        Ok(bound)
     }
 
     // Capability setup runs once per compiled host profile. It never executes
-    // the requested target. Only the exact probe PID is waited/killed here.
-    fn probe(&self) -> Result<(), ConfinementRefusal> {
-        // One slot per mount for setup's reopened sources, allocated before
-        // fork: the child only writes its own copy.
-        let mut sources = vec![-1; self.mounts.len()];
-        // A launch site of the confinement backend: the capability probe.
-        #[allow(clippy::disallowed_methods)]
-        let pid = unsafe { libc::fork() };
-        if pid == -1 {
-            return Err(ConfinementRefusal::BackendUnavailable);
-        }
-        if pid == 0 {
-            let status = match self.apply(&mut sources) {
-                Ok(()) => 0,
-                Err(failure) => failure.step.probe_status(),
-            };
-            unsafe { libc::_exit(status) };
-        }
+    // the requested target: the probe is a launch whose command exits at
+    // once instead, so it runs every setup step, starts a command and runs
+    // the init. Only the exact probe PID is waited/killed here. `bound` is
+    // what the probe binds of each mount, validated before the clone; the
+    // caller holds it until the probe returns, its processes gone.
+    fn probe(&self, bound: &[Bound]) -> Result<(), ConfinementRefusal> {
+        let unavailable = |_| ConfinementRefusal::BackendUnavailable;
+        let started = self.start(bound, None).map_err(unavailable)?;
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut status = 0;
         loop {
-            let result = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
-            if result == pid {
-                return if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+            let result = unsafe { libc::waitpid(started.pid, &raw mut status, libc::WNOHANG) };
+            if result == started.pid {
+                // Every process that held a write end of either pipe is gone,
+                // so neither read below waits.
+                let report = read_report(started.report).map_err(unavailable)?;
+                let command = reported_status(&started.status);
+                return if libc::WIFEXITED(status)
+                    && libc::WEXITSTATUS(status) == 0
+                    && report.is_none()
+                    && command == Some(0)
+                {
                     Ok(())
                 } else {
                     Err(ConfinementRefusal::BackendUnavailable)
@@ -277,29 +436,77 @@ impl LinuxPolicy {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        loop {
-            if unsafe { libc::waitpid(pid, &raw mut status, 0) } != -1
-                || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
-            {
-                break;
-            }
-        }
+        reap(started.pid, true);
         Err(ConfinementRefusal::BackendUnavailable)
     }
 
-    // Called only between fork and exec, or in the disposable capability probe.
-    // This path performs raw syscalls and reads preallocated data only. No
+    /// Creates a launch's first process: pid 1 of new user, mount, IPC, pid
+    /// and cgroup namespaces (and a network namespace without IP), and the
+    /// leader of a new process group. It runs the setup, starts the command
+    /// (which executes `target`, or for the probe, exits at once) and becomes
+    /// the launch's init (`LaunchPlan`). Returns its PID and the host's ends of
+    /// the report and status pipes; the caller owns that PID from here, and
+    /// keeps `bound` and `target` until the launch's setup is done.
+    fn start(&self, bound: &[Bound], target: Option<&Target>) -> io::Result<Started> {
+        let (report, report_write) = launch_pipe(0)?;
+        let (status, status_write) = launch_pipe(libc::O_NONBLOCK)?;
+        // One slot per mount for setup's reopened sources, and the two
+        // processes' stacks, allocated here: each process only writes its
+        // own copy.
+        let mut sources = vec![-1; self.mounts.len()];
+        let mut stacks = vec![0_u8; 2 * LAUNCH_STACK_BYTES];
+        let (launch_stack, command_stack) = stacks.split_at_mut(LAUNCH_STACK_BYTES);
+        let (launch_stack, command_stack) = (stack_top(launch_stack), stack_top(command_stack));
+        let mut plan = LaunchPlan {
+            policy: self,
+            bound,
+            sources: &mut sources,
+            target,
+            report: report_write.as_raw_fd(),
+            status: status_write.as_raw_fd(),
+            release: [-1, -1],
+            command_stack,
+        };
+        // The new process starts with every signal blocked, so no handler
+        // of the host's runs in it. The command unblocks them right before
+        // its exec, and the init right after its own, when no handler is
+        // left.
+        let mut every = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        unsafe {
+            libc::sigfillset(every.as_mut_ptr());
+            libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), previous.as_mut_ptr());
+        }
+        let pid = clone_process(
+            enter_launch,
+            launch_stack,
+            self.namespaces | libc::SIGCHLD,
+            (&raw mut plan).cast(),
+        );
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, previous.as_ptr(), std::ptr::null_mut());
+        }
+        if pid == -1 {
+            return Err(error);
+        }
+        Ok(Started {
+            pid,
+            report,
+            status,
+        })
+    }
+
+    // Called only in a launch's first process (pid 1 of its namespaces,
+    // created by `start`) between its clone and the init's exec. This path
+    // performs raw syscalls and reads preallocated data only. No
     // allocation, host lock, callback, Rust destructor or async operation.
-    // `sources` is preallocated with one slot per mount.
-    fn apply(&self, sources: &mut [i32]) -> Result<(), SetupFailure> {
+    // `sources` is preallocated with one slot per mount, and `bound` holds
+    // what the launch validated of each mount.
+    fn apply(&self, bound: &[Bound], sources: &mut [i32]) -> Result<(), SetupFailure> {
         raw(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
             .map_err(SetupStep::NoNewPrivileges.failed())?;
         {
-            raw(unsafe {
-                libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC)
-            })
-            .map_err(SetupStep::Unshare.failed())?;
             write_file(c"/proc/self/setgroups", b"deny").map_err(SetupStep::Setgroups.failed())?;
             write_file(c"/proc/self/uid_map", &self.uid_map).map_err(SetupStep::UidMap.failed())?;
             write_file(c"/proc/self/gid_map", &self.gid_map).map_err(SetupStep::GidMap.failed())?;
@@ -319,15 +526,15 @@ impl LinuxPolicy {
             // a descriptor pinned in the host namespace cannot be a bind
             // source here. Each source is opened again by its canonical name,
             // before the staging tmpfs covers /tmp, and is used only while it
-            // is still the pinned object.
-            if sources.len() != self.mounts.len() {
+            // is still the object the launch validated.
+            if sources.len() != self.mounts.len() || bound.len() != self.mounts.len() {
                 return Err(SetupFailure {
                     step: SetupStep::MountSource,
                     errno: libc::EINVAL,
                 });
             }
-            for (source, mount) in sources.iter_mut().zip(&self.mounts) {
-                *source = mount.reopen()?;
+            for ((source, mount), bound) in sources.iter_mut().zip(&self.mounts).zip(bound) {
+                *source = mount.reopen(bound.pinned)?;
             }
             raw(unsafe {
                 libc::mount(
@@ -346,10 +553,30 @@ impl LinuxPolicy {
                 )
             })
             .map_err(SetupStep::StageOpen.failed())?;
-            for (mount, &source) in self.mounts.iter().zip(sources.iter()) {
-                mount.install(root, source)?;
+            for ((mount, &source), bound) in self.mounts.iter().zip(sources.iter()).zip(bound) {
+                mount.install(root, source, bound.noexec)?;
             }
             raw(unsafe { libc::close(root) }).map_err(SetupStep::StageOpen.failed())?;
+            // The launch's own procfs, of its own pid namespace: read-only,
+            // task entries only. No grant lands under /proc
+            // (`reserved_read_root`), so the directory is new. Best effort:
+            // a host that refuses the mount (a masked or overmounted host
+            // /proc, a kernel without subset=pid) launches without /proc,
+            // the view a launch had before the backend mounted one.
+            raw(unsafe { libc::mkdir(c"/tmp/proc".as_ptr(), 0o555) })
+                .map_err(SetupStep::ProcTarget.failed())?;
+            if unsafe {
+                libc::mount(
+                    c"proc".as_ptr(),
+                    c"/tmp/proc".as_ptr(),
+                    c"proc".as_ptr(),
+                    PROCFS_FLAGS,
+                    c"subset=pid".as_ptr().cast(),
+                )
+            } == -1
+            {
+                unsafe { libc::rmdir(c"/tmp/proc".as_ptr()) };
+            }
             // The synthetic ancestors are not writable scratch. Child mounts
             // keep their separately assigned read/write flags.
             raw(unsafe {
@@ -404,9 +631,11 @@ impl LinuxPolicy {
             libc::syscall(libc::SYS_capset, std::ptr::addr_of!(header), data.as_ptr())
         })
         .map_err(SetupStep::Capabilities.failed())?;
-        // Mark, rather than close, std::process's private exec-error pipe.
-        // It must survive failed setup and disappear with all ambient handles
-        // at the first exec. A declared custody fd3 is installed afterward.
+        // Mark, rather than close, every descriptor above stdio: the
+        // launch's pipes, the init image and the command's stdio sources
+        // must survive until the exec of each process, and every handle
+        // inherited from the host disappears at it. The command's stdio and
+        // custody gate, and the init's pipes, are installed afterward.
         raw_long(unsafe {
             libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, CLOSE_RANGE_CLOEXEC)
         })
@@ -427,6 +656,771 @@ impl LinuxPolicy {
     }
 }
 
+/// A launch's first process, just created by [`LinuxPolicy::start`], and the
+/// host's ends of its pipes.
+struct Started {
+    pid: libc::pid_t,
+    // Read end of the pipe a failed setup step or exec reports its errno
+    // through. It reaches EOF without data once both processes executed
+    // their programs.
+    report: OwnedFd,
+    // Read end (nonblocking) of the pipe the init writes the command's raw
+    // wait status to before it exits.
+    status: OwnedFd,
+}
+
+/// A launch's program, prepared before the launch's first process is
+/// created: its exec arguments, environment and working directory as C
+/// strings, with their pointer arrays, and its stdio and custody gate.
+struct Target {
+    program: CString,
+    _arguments: Vec<CString>,
+    argv: Vec<*const libc::c_char>,
+    _environment: Vec<CString>,
+    envp: Vec<*const libc::c_char>,
+    directory: CString,
+    // The descriptors the command gets as stdin, stdout and stderr; each is
+    // above stdio (`native_stdio`), so installing one cannot overwrite
+    // another's source.
+    stdio: [libc::c_int; 3],
+    // The custody gate's read end, installed as descriptor 3.
+    gate: Option<libc::c_int>,
+}
+
+impl Target {
+    fn new(
+        launch: &ProcessLaunchSpec,
+        gate: Option<(&OsStr, libc::c_int)>,
+        stdio: [libc::c_int; 3],
+    ) -> io::Result<Self> {
+        // ProcessLaunchSpec and the gate's caller refuse NUL bytes already.
+        let c_string = |value: &OsStr| {
+            CString::new(value.as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid confined launch"))
+        };
+        let mut arguments = Vec::new();
+        let program = if let Some((token, _)) = gate {
+            const PROLOGUE: &str = "IFS= read -r meerkat_custody_gate <&3 || exit 125; case $meerkat_custody_gate in \"$1\") ;; *) exit 125 ;; esac; exec 3<&-; shift; exec \"$@\"";
+            for value in [
+                OsStr::new("/bin/sh"),
+                OsStr::new("-c"),
+                OsStr::new(PROLOGUE),
+                OsStr::new("meerkat-custody-gate"),
+                token,
+                launch.program.as_os_str(),
+            ] {
+                arguments.push(c_string(value)?);
+            }
+            c"/bin/sh".to_owned()
+        } else {
+            arguments.push(c_string(launch.program.as_os_str())?);
+            c_string(launch.program.as_os_str())?
+        };
+        for argument in &launch.arguments {
+            arguments.push(c_string(argument)?);
+        }
+        let environment = launch
+            .environment
+            .iter()
+            .map(|(key, value)| {
+                let mut entry = key.clone();
+                entry.push("=");
+                entry.push(value);
+                c_string(&entry)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let pointers = |values: &[CString]| {
+            values
+                .iter()
+                .map(|value| value.as_ptr())
+                .chain(std::iter::once(std::ptr::null()))
+                .collect::<Vec<_>>()
+        };
+        Ok(Self {
+            program,
+            argv: pointers(&arguments),
+            _arguments: arguments,
+            envp: pointers(&environment),
+            _environment: environment,
+            directory: c_string(launch.directory.as_os_str())?,
+            stdio,
+            gate: gate.map(|(_, descriptor)| descriptor),
+        })
+    }
+
+    // In the command, between its clone and exec: enters the working
+    // directory inside the view, installs stdio and the custody gate, sets
+    // every caught signal and SIGPIPE to its default action and unblocks
+    // every signal, as posix_spawn and std's spawn leave them, and executes
+    // the program. Returns only the failure. Allocation-free raw syscalls
+    // only.
+    fn exec(&self) -> SetupFailure {
+        match self.enter() {
+            Err(failure) => failure,
+            Ok(never) => match never {},
+        }
+    }
+
+    fn enter(&self) -> Result<Infallible, SetupFailure> {
+        raw(unsafe { libc::chdir(self.directory.as_ptr()) })
+            .map_err(SetupStep::Directory.failed())?;
+        for (target, &source) in (0..).zip(&self.stdio) {
+            raw(unsafe { libc::dup2(source, target) }).map_err(SetupStep::Stdio.failed())?;
+        }
+        if let Some(gate) = self.gate {
+            raw(unsafe { libc::dup2(gate, 3) }).map_err(SetupStep::Gate.failed())?;
+            raw(unsafe { libc::fcntl(3, libc::F_SETFD, 0) }).map_err(SetupStep::Gate.failed())?;
+        }
+        // Raw system calls only, never glibc's sigaction: this process is a
+        // raw clone of the multithreaded host (`kernel_signal_action`).
+        default_signal_actions().map_err(SetupStep::Exec.failed())?;
+        let mut unblocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        unsafe {
+            libc::sigemptyset(unblocked.as_mut_ptr());
+        }
+        raw(unsafe {
+            libc::sigprocmask(libc::SIG_SETMASK, unblocked.as_ptr(), std::ptr::null_mut())
+        })
+        .map_err(SetupStep::Exec.failed())?;
+        // A launch site of the confinement backend: the command's program.
+        #[allow(clippy::disallowed_methods)]
+        unsafe {
+            libc::execve(
+                self.program.as_ptr(),
+                self.argv.as_ptr(),
+                self.envp.as_ptr(),
+            )
+        };
+        Err(SetupStep::Exec.failed()(errno()))
+    }
+}
+
+/// What a launch's two processes read between their clone and exec,
+/// prepared by [`LinuxPolicy::start`] before the first clone. Each process
+/// works on its own copy: nothing here is allocated, locked or dropped
+/// after the clone.
+struct LaunchPlan<'a> {
+    policy: &'a LinuxPolicy,
+    bound: &'a [Bound],
+    sources: &'a mut [i32],
+    // `None` for the capability probe, whose command executes nothing.
+    target: Option<&'a Target>,
+    // Write ends of the report and status pipes (`Started`).
+    report: libc::c_int,
+    status: libc::c_int,
+    // The pipe through which the init releases the command: made by pid 1
+    // after setup, read by the command, written by the init.
+    release: [libc::c_int; 2],
+    command_stack: *mut libc::c_void,
+}
+
+impl LaunchPlan<'_> {
+    // Pid 1 of the launch's namespaces: setup, then the command (pid 2),
+    // then the init image. Returns only the failure.
+    fn run(&mut self) -> SetupFailure {
+        match self.become_init() {
+            Err(failure) => failure,
+            Ok(never) => match never {},
+        }
+    }
+
+    fn become_init(&mut self) -> Result<Infallible, SetupFailure> {
+        // The leader of the launch's process group, which every process of
+        // the launch stays in (the filter refuses setpgid and setsid).
+        raw(unsafe { libc::setpgid(0, 0) }).map_err(SetupStep::ProcessGroup.failed())?;
+        // std's spawn leaves the command SIGPIPE at its default action. The
+        // raw system call, as every call up to the exec (`kernel_signal_action`).
+        kernel_signal_action(libc::SIGPIPE, true).map_err(SetupStep::ProcessGroup.failed())?;
+        self.policy.apply(self.bound, self.sources)?;
+        let mut release = [-1; 2];
+        raw(unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) })
+            .map_err(SetupStep::Command.failed())?;
+        for (slot, descriptor) in self.release.iter_mut().zip(release) {
+            *slot = above_floor(descriptor).map_err(SetupStep::Command.failed())?;
+        }
+        let command = clone_process(
+            enter_command,
+            self.command_stack,
+            libc::SIGCHLD,
+            std::ptr::from_mut(self).cast(),
+        );
+        if command == -1 {
+            return Err(SetupStep::Command.failed()(errno()));
+        }
+        if command != COMMAND_PID {
+            // Not the pid the init waits for. This process's exit ends the
+            // command with the namespace.
+            return Err(SetupStep::Command.failed()(libc::ESRCH));
+        }
+        // The init keeps exactly two descriptors: the status pipe as 3 and
+        // the release pipe's write end as 4. Both sources sit above the
+        // floor, so neither install overwrites the other or the report pipe
+        // and the init image this process still needs.
+        let failed = SetupStep::Init.failed();
+        raw(unsafe { libc::dup2(self.status, INIT_STATUS_DESCRIPTOR) }).map_err(&failed)?;
+        raw(unsafe { libc::dup2(self.release[1], INIT_RELEASE_DESCRIPTOR) }).map_err(&failed)?;
+        // The host's own stdio, inherited at the clone.
+        for descriptor in 0..3 {
+            unsafe { libc::close(descriptor) };
+        }
+        // A SIGCHLD the host left ignored would reap the command before the
+        // init waits for it. Set after the command's clone, so a command
+        // keeps an ignored SIGCHLD, as across any exec.
+        kernel_signal_action(libc::SIGCHLD, true).map_err(&failed)?;
+        let argv = [c"meerkat-init".as_ptr(), std::ptr::null()];
+        let envp = [std::ptr::null()];
+        // A launch site of the confinement backend: the launch's init.
+        #[allow(clippy::disallowed_methods)]
+        unsafe {
+            libc::fexecve(self.policy.init.as_raw_fd(), argv.as_ptr(), envp.as_ptr())
+        };
+        Err(failed(errno()))
+    }
+}
+
+// The launch's first process, from `clone_process` in the host.
+extern "C" fn enter_launch(plan: *mut libc::c_void) -> libc::c_int {
+    // SAFETY: `plan` is the LaunchPlan `LinuxPolicy::start` prepared for
+    // this clone. This process has its own copy of it and of everything it
+    // borrows, and is its only user.
+    let plan = unsafe { &mut *plan.cast::<LaunchPlan<'_>>() };
+    let failure = plan.run();
+    report(plan.report, failure.errno);
+    failure.step.probe_status()
+}
+
+// The command, pid 2, from `clone_process` in the launch's first process.
+extern "C" fn enter_command(plan: *mut libc::c_void) -> libc::c_int {
+    // SAFETY: as in `enter_launch`: this process's own copy of the plan.
+    let plan = unsafe { &*plan.cast::<LaunchPlan<'_>>() };
+    // This process's copy of the release pipe's write end goes first, so a
+    // launch whose init never runs ends the wait below at EOF.
+    unsafe { libc::close(plan.release[1]) };
+    let mut byte = 0_u8;
+    loop {
+        let read = unsafe { libc::read(plan.release[0], (&raw mut byte).cast(), 1) };
+        if read == 1 {
+            break;
+        }
+        if read == -1 && errno() == libc::EINTR {
+            continue;
+        }
+        // Pid 1 failed before the init ran, and reports why. The target
+        // never runs.
+        return 127;
+    }
+    match plan.target {
+        // The capability probe's command executes nothing.
+        None => 0,
+        Some(target) => {
+            let failure = target.exec();
+            report(plan.report, failure.errno);
+            127
+        }
+    }
+}
+
+// The one process creation of the confinement backend: each launch's first
+// process (pid 1 of its namespaces, for the capability probe too) and the
+// command it starts. `entry` runs on `stack` in the new process, with `plan`.
+fn clone_process(
+    entry: extern "C" fn(*mut libc::c_void) -> libc::c_int,
+    stack: *mut libc::c_void,
+    flags: libc::c_int,
+    plan: *mut libc::c_void,
+) -> libc::pid_t {
+    // A launch site of the confinement backend: every launch's processes.
+    #[allow(clippy::disallowed_methods)]
+    unsafe {
+        libc::clone(entry, stack, flags, plan)
+    }
+}
+
+// Writes a failed step's errno to the report pipe, where the host reads it
+// as spawn's error. Allocation-free.
+fn report(report: libc::c_int, errno_value: i32) {
+    let bytes = errno_value.to_ne_bytes();
+    loop {
+        let written = unsafe { libc::write(report, bytes.as_ptr().cast(), bytes.len()) };
+        if written != -1 || errno() != libc::EINTR {
+            break;
+        }
+    }
+}
+
+// `descriptor` moved to the lowest free number at or above the launch's
+// floor, close-on-exec. Allocation-free.
+fn above_floor(descriptor: libc::c_int) -> Result<libc::c_int, i32> {
+    let moved =
+        raw(unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, LAUNCH_DESCRIPTOR_FLOOR) });
+    unsafe { libc::close(descriptor) };
+    moved
+}
+
+/// A close-on-exec pipe whose two ends sit above the launch's descriptor
+/// floor, the read end with `read_flags` (such as `O_NONBLOCK`) added.
+fn launch_pipe(read_flags: libc::c_int) -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut ends = [-1; 2];
+    if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let [read, write] = ends.map(|end| {
+        above_floor(end)
+            .map(|moved| unsafe { OwnedFd::from_raw_fd(moved) })
+            .map_err(io::Error::from_raw_os_error)
+    });
+    let (read, write) = (read?, write?);
+    if read_flags != 0 {
+        let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFL) };
+        if flags == -1
+            || unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFL, flags | read_flags) } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok((read, write))
+}
+
+/// What a launch's report pipe holds once every process holding a write end
+/// executed its program or exited: `None` when both executed (the command
+/// and the init), else the errno of the step that failed.
+fn read_report(report: OwnedFd) -> io::Result<Option<i32>> {
+    let mut report = File::from(report);
+    let mut bytes = [0_u8; 4];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match report.read(&mut bytes[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match filled {
+        0 => Ok(None),
+        4 => Ok(Some(i32::from_ne_bytes(bytes))),
+        _ => Err(io::ErrorKind::UnexpectedEof.into()),
+    }
+}
+
+/// The command's raw wait status, as the launch's init wrote it to its
+/// status pipe before exiting; `None` when it wrote none (it was killed
+/// first, or never ran). Read once the init is reaped, when no writer is
+/// left: the read end is nonblocking either way.
+pub(crate) fn reported_status(status: &OwnedFd) -> Option<i32> {
+    let mut bytes = [0_u8; 4];
+    let read = loop {
+        let read =
+            unsafe { libc::read(status.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+        if read != -1 || errno() != libc::EINTR {
+            break read;
+        }
+    };
+    (read == 4).then(|| i32::from_ne_bytes(bytes))
+}
+
+/// Reaps `pid`, a launch's first process the host still owns, killing it
+/// first when `kill`. Retries an interrupted wait only.
+fn reap(pid: libc::pid_t, kill: bool) {
+    if kill {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    loop {
+        if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } != -1
+            || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+        {
+            break;
+        }
+    }
+}
+
+/// In the command, before it unblocks signals: every caught signal back to
+/// its default action, as posix_spawn does, since a signal that arrives
+/// before the exec would otherwise run a copy of a host handler where its
+/// default action ends the command before its program runs; and SIGPIPE,
+/// which the host ignores, at its default action, as std's spawn leaves it,
+/// so a pipeline behaves as outside the launch. Other ignored signals stay
+/// ignored, as across any exec. 32 and 33 are glibc's own (thread
+/// cancellation and setxid), whose handlers act only on what glibc itself
+/// sends; they keep theirs. Raw system calls only (`kernel_signal_action`).
+/// Allocation-free.
+fn default_signal_actions() -> Result<(), i32> {
+    // Signals 1 to 64, Linux's SIGRTMAX.
+    for number in 1..=64 {
+        if [libc::SIGKILL, libc::SIGSTOP, 32, 33].contains(&number) {
+            continue;
+        }
+        let handler = kernel_signal_action(number, false)?;
+        if handler == libc::SIG_DFL || (handler == libc::SIG_IGN && number != libc::SIGPIPE) {
+            continue;
+        }
+        kernel_signal_action(number, true)?;
+    }
+    Ok(())
+}
+
+/// The kernel's `struct sigaction` of rt_sigaction(2) on x86_64 and aarch64,
+/// whose uapi headers both define SA_RESTORER: handler, flags, restorer and a
+/// mask of 64 signals. glibc's `struct sigaction` is another layout.
+#[repr(C)]
+struct KernelSignalAction {
+    handler: libc::sighandler_t,
+    flags: libc::c_ulong,
+    restorer: usize,
+    mask: u64,
+}
+const _: () = assert!(std::mem::size_of::<KernelSignalAction>() == 32);
+
+/// Returns `number`'s current handler and, when `default` is set, sets its
+/// action to the default first, by the rt_sigaction system call itself.
+/// Between a launch's clone and its exec only async-signal-safe raw system
+/// calls are safe: each process of a launch is a raw clone of the
+/// multithreaded host, holding glibc's internal locks in whatever state
+/// another host thread left them, and nothing resets them as fork does.
+/// glibc's own sigaction is not: from 2.41 on, it takes the abort lock for
+/// SIGABRT, which another thread's posix_spawn holds until its child has
+/// executed, so a copied holder would wait forever. Allocation-free.
+fn kernel_signal_action(number: libc::c_int, default: bool) -> Result<libc::sighandler_t, i32> {
+    let action = KernelSignalAction {
+        handler: libc::SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+    let mut previous = KernelSignalAction {
+        handler: libc::SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+    raw_long(unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigaction,
+            libc::c_long::from(number),
+            if default {
+                &raw const action
+            } else {
+                std::ptr::null()
+            },
+            &raw mut previous,
+            std::mem::size_of::<u64>(),
+        )
+    })?;
+    Ok(previous.handler)
+}
+
+/// The top of a stack in `region`, 16-byte aligned: stacks grow down.
+fn stack_top(region: &mut [u8]) -> *mut libc::c_void {
+    region
+        .as_mut_ptr_range()
+        .end
+        .map_addr(|address| address & !15)
+        .cast()
+}
+
+/// The backend's init image (see `init_image_bounds`) in an anonymous
+/// memory file, sealed against any change, as a read-only descriptor above
+/// the launch's floor that each launch's pid 1 executes. Read-only, since
+/// some kernels refuse to execute a file that is open for writing.
+fn sealed_init() -> Result<OwnedFd, ConfinementRefusal> {
+    fn unavailable<E>(_: E) -> ConfinementRefusal {
+        ConfinementRefusal::BackendUnavailable
+    }
+    let image = init_image();
+    if image.is_empty() {
+        return Err(ConfinementRefusal::BackendUnavailable);
+    }
+    let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    let mut descriptor = unsafe { libc::memfd_create(c"meerkat-init".as_ptr(), flags | MFD_EXEC) };
+    if descriptor == -1 && errno() == libc::EINVAL {
+        // A kernel before 6.3, which has neither MFD_EXEC nor memory files
+        // without exec permission.
+        descriptor = unsafe { libc::memfd_create(c"meerkat-init".as_ptr(), flags) };
+    }
+    if descriptor == -1 {
+        return Err(ConfinementRefusal::BackendUnavailable);
+    }
+    let mut writable = unsafe { File::from_raw_fd(descriptor) };
+    writable.write_all(image).map_err(unavailable)?;
+    raw(unsafe {
+        libc::fcntl(
+            writable.as_raw_fd(),
+            libc::F_ADD_SEALS,
+            libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL,
+        )
+    })
+    .map_err(unavailable)?;
+    let readable =
+        File::open(format!("/proc/self/fd/{}", writable.as_raw_fd())).map_err(unavailable)?;
+    above_floor(readable.into_raw_fd())
+        .map(|moved| unsafe { OwnedFd::from_raw_fd(moved) })
+        .map_err(unavailable)
+}
+
+/// The host settings this backend needs and the host refuses, as far as it
+/// can tell (see `crate::unmet_host_requirements`): an executable memory
+/// file, which `sealed_init` needs, refused with EACCES is
+/// `vm.memfd_noexec` at 2. A kernel before 6.3 has no such setting.
+pub(super) fn unmet_host_requirements() -> Vec<UnmetHostRequirement> {
+    let descriptor =
+        unsafe { libc::memfd_create(c"meerkat-check".as_ptr(), libc::MFD_CLOEXEC | MFD_EXEC) };
+    if descriptor != -1 {
+        drop(unsafe { OwnedFd::from_raw_fd(descriptor) });
+        return Vec::new();
+    }
+    if errno() == libc::EACCES {
+        vec![UnmetHostRequirement::ExecutableMemoryFiles]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The init image's bytes, in this binary's own code.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn init_image() -> &'static [u8] {
+    let bounds = init_image_bounds();
+    // SAFETY: both bounds point into one immutable span of this binary's
+    // code, `start` first; see `init_image_bounds`.
+    unsafe {
+        std::slice::from_raw_parts(
+            bounds.start,
+            usize::try_from(bounds.end.offset_from(bounds.start)).unwrap_or(0),
+        )
+    }
+}
+
+/// No init on another architecture: the backend refuses every requirement
+/// there (`native_audit_arch`) before it would need one.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn init_image() -> &'static [u8] {
+    &[]
+}
+
+/// Where the init image sits in this binary's code.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[repr(C)]
+struct ImageBounds {
+    start: *const u8,
+    end: *const u8,
+}
+
+// The backend's init, pid 1 of every launch's pid namespace: a static ELF
+// executable of one read-and-execute segment holding the whole file, loaded
+// at 0x400000, plus a non-executable stack. The assembler builds it, header
+// included, from the source below for the target architecture; the code is
+// position independent. It is executed (`sealed_init`, `LaunchPlan`) under
+// the launch's seccomp filter, chroot and dropped capabilities, with
+// exactly two descriptors: 3, the write end of the status pipe, and 4, the
+// write end of the pipe the command waits on. It:
+//
+// 1. unblocks every signal: its process blocked them all before the exec,
+//    so that no handler of the host's could run there, and a blocked signal
+//    would stay queued where an unblocked one is discarded;
+// 2. prctl(PR_SET_DUMPABLE, 0): the command can open none of its memory,
+//    descriptors, environment or executable through /proc;
+// 3. prctl(PR_SET_NAME, "meerkat-init");
+// 4. writes one byte to descriptor 4 and closes it, which lets the command
+//    (pid 2) execute its program;
+// 5. reaps every process of the namespace, wait4(-1, __WALL), until pid 2;
+// 6. writes pid 2's raw wait status to descriptor 3, and exits with pid 2's
+//    exit code, or 128 plus the signal that ended it (a pid namespace's
+//    init cannot end by a signal it sends itself), or 127 if it has no child
+//    left without having reaped pid 2. Its exit ends every other process of
+//    the namespace.
+//
+// It installs no signal handler: as pid 1 of its namespace it ignores every
+// signal from inside it, and from the host every one but SIGKILL and
+// SIGSTOP.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+extern "C" fn init_image_bounds() -> ImageBounds {
+    core::arch::naked_asm!(
+        "lea rax, [rip + 2f]",
+        "lea rdx, [rip + 3f]",
+        "ret",
+        ".balign 8",
+        "2:",
+        // ELF header: 64-bit, little-endian, version 1, System V ABI.
+        ".byte 0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0",
+        // ET_EXEC, EM_X86_64, EV_CURRENT, entry, program and section header
+        // offsets, flags, header sizes and counts.
+        ".short 2, 62",
+        ".long 1",
+        ".quad 0x400000 + (4f - 2b), 64, 0",
+        ".long 0",
+        ".short 64, 56, 2, 64, 0, 0",
+        // PT_LOAD: the whole file, read and execute, at 0x400000.
+        ".long 1, 5",
+        ".quad 0, 0x400000, 0x400000, 3f - 2b, 3f - 2b, 0x1000",
+        // PT_GNU_STACK: read and write, no execute.
+        ".long 0x6474e551, 6",
+        ".quad 0, 0, 0, 0, 0, 16",
+        "4:",
+        // rt_sigprocmask(SIG_SETMASK, &empty, NULL, 8)
+        "sub rsp, 16",
+        "mov qword ptr [rsp], 0",
+        "mov eax, 14",
+        "mov edi, 2",
+        "mov rsi, rsp",
+        "xor edx, edx",
+        "mov r10d, 8",
+        "syscall",
+        // prctl(PR_SET_DUMPABLE, 0)
+        "mov eax, 157",
+        "mov edi, 4",
+        "xor esi, esi",
+        "syscall",
+        // prctl(PR_SET_NAME, name)
+        "mov eax, 157",
+        "mov edi, 15",
+        "lea rsi, [rip + 5f]",
+        "syscall",
+        // write(4, &1, 1); close(4)
+        "mov byte ptr [rsp], 1",
+        "mov eax, 1",
+        "mov edi, 4",
+        "mov rsi, rsp",
+        "mov edx, 1",
+        "syscall",
+        "mov eax, 3",
+        "mov edi, 4",
+        "syscall",
+        // wait4(-1, &status, __WALL, NULL) until it returns 2
+        "6:",
+        "mov eax, 61",
+        "mov edi, -1",
+        "mov rsi, rsp",
+        "mov edx, 0x40000000",
+        "xor r10d, r10d",
+        "syscall",
+        "cmp eax, 2",
+        "je 7f",
+        "cmp eax, -4",
+        "je 6b",
+        "test eax, eax",
+        "jg 6b",
+        "mov edi, 127",
+        "jmp 8f",
+        // write(3, &status, 4); the exit code, or 128 plus the signal
+        "7:",
+        "mov eax, 1",
+        "mov edi, 3",
+        "mov rsi, rsp",
+        "mov edx, 4",
+        "syscall",
+        "mov eax, dword ptr [rsp]",
+        "mov edi, eax",
+        "and edi, 0x7f",
+        "jz 9f",
+        "add edi, 128",
+        "jmp 8f",
+        "9:",
+        "shr eax, 8",
+        "movzx edi, al",
+        // exit_group(code)
+        "8:",
+        "mov eax, 231",
+        "syscall",
+        "5:",
+        ".asciz \"meerkat-init\"",
+        "3:",
+    )
+}
+
+// The same init for 64-bit ARM (see the x86_64 one): the asm-generic system
+// call numbers, and a 64 KiB segment alignment for kernels with 64 KiB
+// pages.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+extern "C" fn init_image_bounds() -> ImageBounds {
+    core::arch::naked_asm!(
+        "adr x0, 2f",
+        "adr x1, 3f",
+        "ret",
+        ".balign 8",
+        "2:",
+        ".byte 0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0",
+        // ET_EXEC, EM_AARCH64
+        ".short 2, 183",
+        ".long 1",
+        ".quad 0x400000 + (4f - 2b), 64, 0",
+        ".long 0",
+        ".short 64, 56, 2, 64, 0, 0",
+        ".long 1, 5",
+        ".quad 0, 0x400000, 0x400000, 3f - 2b, 3f - 2b, 0x10000",
+        ".long 0x6474e551, 6",
+        ".quad 0, 0, 0, 0, 0, 16",
+        "4:",
+        // rt_sigprocmask(SIG_SETMASK, &empty, NULL, 8)
+        "sub sp, sp, 16",
+        "str xzr, [sp]",
+        "mov x8, 135",
+        "mov x0, 2",
+        "mov x1, sp",
+        "mov x2, 0",
+        "mov x3, 8",
+        "svc 0",
+        // prctl(PR_SET_DUMPABLE, 0)
+        "mov x8, 167",
+        "mov x0, 4",
+        "mov x1, 0",
+        "svc 0",
+        // prctl(PR_SET_NAME, name)
+        "mov x8, 167",
+        "mov x0, 15",
+        "adr x1, 5f",
+        "svc 0",
+        // write(4, &1, 1); close(4)
+        "mov w9, 1",
+        "strb w9, [sp]",
+        "mov x8, 64",
+        "mov x0, 4",
+        "mov x1, sp",
+        "mov x2, 1",
+        "svc 0",
+        "mov x8, 57",
+        "mov x0, 4",
+        "svc 0",
+        // wait4(-1, &status, __WALL, NULL) until it returns 2
+        "6:",
+        "mov x8, 260",
+        "mov x0, -1",
+        "mov x1, sp",
+        "mov x2, 0x40000000",
+        "mov x3, 0",
+        "svc 0",
+        "cmp w0, 2",
+        "b.eq 7f",
+        "cmn w0, 4",
+        "b.eq 6b",
+        "cmp w0, 0",
+        "b.gt 6b",
+        "mov x0, 127",
+        "b 8f",
+        // write(3, &status, 4); the exit code, or 128 plus the signal
+        "7:",
+        "mov x8, 64",
+        "mov x0, 3",
+        "mov x1, sp",
+        "mov x2, 4",
+        "svc 0",
+        "ldr w9, [sp]",
+        "and w0, w9, 0x7f",
+        "cbz w0, 9f",
+        "add w0, w0, 128",
+        "b 8f",
+        "9:",
+        "ubfx w0, w9, 8, 8",
+        // exit_group(code)
+        "8:",
+        "mov x8, 94",
+        "svc 0",
+        "5:",
+        ".asciz \"meerkat-init\"",
+        "3:",
+    )
+}
+
 fn push_disjoint(mounts: &mut Vec<Mount>, mount: Mount) -> Result<(), ConfinementRefusal> {
     if mounts
         .iter()
@@ -436,6 +1430,17 @@ fn push_disjoint(mounts: &mut Vec<Mount>, mount: Mount) -> Result<(), Confinemen
     }
     mounts.push(mount);
     Ok(())
+}
+
+/// Whether a read grant of `path` is refused whatever it holds: `/` itself,
+/// and `/proc`, `/sys`, `/dev` and anything in them. A granted path is held
+/// to it when the requirement compiles, and a final link's target when the
+/// link is captured.
+fn reserved_read_root(path: &Path) -> bool {
+    path == Path::new("/")
+        || ["/proc", "/sys", "/dev"]
+            .iter()
+            .any(|root| path.starts_with(root))
 }
 
 fn validate_baseline_kind(
@@ -468,18 +1473,111 @@ fn validate_baseline_kind(
     }
 }
 
+/// The text of the symbolic link at `path`, the final component of a
+/// read-only file grant, when the link may stand for `canonical`, the path it
+/// resolves to:
+///
+/// - One hop: the link's own text, resolved lexically from the link's
+///   directory, is `canonical` itself, so the text alone names the target.
+///   A text the kernel resolves elsewhere through another link (a link to a
+///   link, a target under a linked directory) is refused, whoever can
+///   replace that link.
+/// - Only root or the effective uid can retarget the link: the link and
+///   every directory from `/` down to its own are owned by one of them, and
+///   none of those directories is writable by group or others unless it is
+///   sticky (in a sticky directory only an entry's owner, the directory's
+///   owner or root can rename or remove the entry).
+///
+/// Both rules read owners, modes and link text as the filesystem reports
+/// them. On a FUSE or network filesystem those are whatever its server
+/// says, so a link there is trusted as far as that server is.
+///
+/// `None` when the link may not, and on any metadata error.
+fn grantable_link_text(path: &Path, canonical: &Path) -> Option<PathBuf> {
+    grantable_link_text_for(path, canonical, unsafe { libc::geteuid() })
+}
+
+/// [`grantable_link_text`] with `user` as the one trusted owner besides root.
+fn grantable_link_text_for(path: &Path, canonical: &Path, user: libc::uid_t) -> Option<PathBuf> {
+    const STICKY: u32 = 0o1000;
+    const GROUP_OR_OTHER_WRITE: u32 = 0o022;
+    let directory = path.parent()?;
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return None;
+    }
+    let text = std::fs::read_link(path).ok()?;
+    let mut target = directory.to_path_buf();
+    for component in text.components() {
+        match component {
+            Component::RootDir => target = PathBuf::from("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `/..` is `/`, as for the kernel.
+                target.pop();
+            }
+            Component::Normal(name) => target.push(name),
+            Component::Prefix(_) => return None,
+        }
+    }
+    if target != canonical {
+        return None;
+    }
+    let trusted_owner =
+        |metadata: &std::fs::Metadata| metadata.uid() == 0 || metadata.uid() == user;
+    let trusted = std::fs::symlink_metadata(path)
+        .is_ok_and(|link| link.file_type().is_symlink() && trusted_owner(&link))
+        && directory.ancestors().all(|ancestor| {
+            std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && trusted_owner(&metadata)
+                    && (metadata.mode() & GROUP_OR_OTHER_WRITE == 0
+                        || metadata.mode() & STICKY != 0)
+            })
+        });
+    trusted.then_some(text)
+}
+
 impl Mount {
+    /// Captures one granted path. Every granted path is canonical, except
+    /// that a read-only file grant may name a symbolic link as its final
+    /// component (`/etc/resolv.conf` on a systemd-resolved host): its
+    /// regular-file target, outside the reserved roots a granted path is
+    /// held to ([`reserved_read_root`]), is pinned here and bound read-only
+    /// at the link's own path, when [`grantable_link_text`] accepts the link,
+    /// whose text is kept.
     fn capture(path: &Path, baseline: bool, writable: bool) -> Result<Self, ConfinementRefusal> {
         let canonical =
             std::fs::canonicalize(path).map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
-        if !baseline && canonical != path {
-            return Err(ConfinementRefusal::UnsupportedRequirement);
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&canonical)
-            .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
+        let link = if !baseline && canonical != path {
+            if writable || reserved_read_root(&canonical) {
+                return Err(ConfinementRefusal::UnsupportedRequirement);
+            }
+            Some(
+                grantable_link_text(path, &canonical)
+                    .ok_or(ConfinementRefusal::UnsupportedRequirement)?,
+            )
+        } else {
+            None
+        };
+        // The canonical name and its components, for the symlink-free opens
+        // here, at every re-capture and at setup.
+        let source = CString::new(canonical.as_os_str().as_bytes())
+            .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
+        let source_components =
+            normal_components(&canonical).ok_or(ConfinementRefusal::UnsupportedRequirement)?;
+        // No symbolic link in any component: a writer of a directory partway
+        // down cannot swap a link in after canonicalize and get another
+        // object pinned.
+        let file = open_no_symlinks(
+            &source,
+            &source_components,
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+        .map(|descriptor| unsafe { File::from_raw_fd(descriptor) })
+        .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
         let metadata = file
             .metadata()
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
@@ -493,7 +1591,9 @@ impl Mount {
         if !metadata.is_dir() && !metadata.is_file() && !device {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
-        if metadata.is_file() && metadata.nlink() != 1 {
+        // A final link stands only for a regular file.
+        if (metadata.is_file() && metadata.nlink() != 1) || (link.is_some() && !metadata.is_file())
+        {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
@@ -524,8 +1624,6 @@ impl Mount {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         let noexec = (unsafe { mount_flags.assume_init() }.f_flag & libc::ST_NOEXEC) != 0;
-        let source = CString::new(canonical.as_os_str().as_bytes())
-            .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
         let mut ancestors = Vec::new();
         for ancestor in canonical.ancestors().skip(1) {
             let value = std::fs::symlink_metadata(ancestor)
@@ -556,28 +1654,63 @@ impl Mount {
         .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
         Ok(Self {
             path: path.to_path_buf(),
+            link,
             canonical,
             source,
-            file,
-            identity: (metadata.dev(), metadata.ino()),
-            pinned,
-            ancestors,
+            source_components,
             components,
             destination,
             directory: metadata.is_dir(),
             writable,
             device,
-            noexec,
+            pin: Mutex::new(Pin {
+                file: Arc::new(file),
+                identity: (metadata.dev(), metadata.ino()),
+                pinned,
+                ancestors,
+                noexec,
+            }),
         })
     }
 
-    fn validate(&self) -> Result<(), ConfinementRefusal> {
+    /// Checks this mount for a launch and returns what the launch binds.
+    ///
+    /// A final link whose target was replaced under its own name (a new file
+    /// renamed into place, as systemd-resolved rewrites its stub file) is
+    /// captured again by the capture-time rules, unchanged, and the new
+    /// target is pinned in its place, for this launch and every later one.
+    /// Every other failed check refuses the launch: a link replaced with
+    /// other text, a link that no longer reaches the same canonical path in
+    /// one hop, a target replaced by anything the capture-time rules refuse,
+    /// and any other grant whose object or directories were replaced.
+    fn bind(&self) -> Result<Bound, ConfinementRefusal> {
+        let mut pin = self.pin.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(refusal) = self.check(&pin) {
+            *pin = self.recapture(&pin).ok_or(refusal)?;
+        }
+        Ok(Bound {
+            _held: Arc::clone(&pin.file),
+            pinned: pin.pinned,
+            noexec: pin.noexec,
+        })
+    }
+
+    /// Whether this mount still names `pin`'s object as captured: the
+    /// granted path resolves to the same canonical path, a final link keeps
+    /// its text, the canonical path's ancestors are the same directories, and
+    /// the object at the canonical path is the pinned one.
+    fn check(&self, pin: &Pin) -> Result<(), ConfinementRefusal> {
         let current = std::fs::canonicalize(&self.path)
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
         if current != self.canonical {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
-        for (path, device, inode) in &self.ancestors {
+        if let Some(link) = &self.link
+            && std::fs::read_link(&self.path).ok().as_ref() != Some(link)
+        {
+            return Err(ConfinementRefusal::BackendUnavailable);
+        }
+        for (path, device, inode) in &pin.ancestors {
             let current = std::fs::symlink_metadata(path)
                 .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
             if !current.is_dir()
@@ -589,33 +1722,53 @@ impl Mount {
         }
         let named = std::fs::symlink_metadata(&self.canonical)
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
-        let pinned = self
+        let pinned = pin
             .file
             .metadata()
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
         if named.file_type().is_symlink()
-            || (named.dev(), named.ino()) != self.identity
-            || (pinned.dev(), pinned.ino()) != self.identity
+            || (named.dev(), named.ino()) != pin.identity
+            || (pinned.dev(), pinned.ino()) != pin.identity
         {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         Ok(())
     }
 
-    // Between fork and exec, in the new mount namespace: opens this mount's
-    // object again by its canonical name and returns it only while it is
-    // still the pinned object.
-    fn reopen(&self) -> Result<i32, SetupFailure> {
-        let kind = if self.directory { libc::O_DIRECTORY } else { 0 };
-        let source = raw(unsafe {
-            libc::open(
-                self.source.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | kind,
-            )
+    /// A new pin for a final link whose canonical path no longer names the
+    /// pinned object: the link captured again by the capture-time rules,
+    /// unchanged, accepted only while the link keeps its captured text and
+    /// reaches the same canonical path. `None` for every other mount, and
+    /// while the canonical path still names the pinned object.
+    fn recapture(&self, pin: &Pin) -> Option<Pin> {
+        let link = self.link.as_ref()?;
+        let named = std::fs::symlink_metadata(&self.canonical).ok()?;
+        if (named.dev(), named.ino()) == pin.identity {
+            return None;
+        }
+        let fresh = Self::capture(&self.path, false, self.writable).ok()?;
+        (fresh.link.as_ref() == Some(link) && fresh.canonical == self.canonical).then(|| {
+            fresh
+                .pin
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
         })
+    }
+
+    // Between fork and exec, in the new mount namespace: opens this mount's
+    // object again by its canonical name, following no symbolic link in any
+    // component, and returns it only while it is still `pinned`, the object
+    // the launch validated.
+    fn reopen(&self, pinned: (libc::dev_t, libc::ino_t, libc::dev_t)) -> Result<i32, SetupFailure> {
+        let kind = if self.directory { libc::O_DIRECTORY } else { 0 };
+        let source = open_no_symlinks(
+            &self.source,
+            &self.source_components,
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | kind,
+        )
         .map_err(SetupStep::MountSource.failed())?;
         match stat_identity(source) {
-            Ok(identity) if identity == self.pinned => Ok(source),
+            Ok(identity) if identity == pinned => Ok(source),
             outcome => {
                 unsafe { libc::close(source) };
                 Err(SetupFailure {
@@ -627,8 +1780,8 @@ impl Mount {
     }
 
     // Binds `source`, this mount's reopened object, at its destination and
-    // closes it.
-    fn install(&self, root: i32, source: i32) -> Result<(), SetupFailure> {
+    // closes it. `noexec` is the host mount's flag the launch validated.
+    fn install(&self, root: i32, source: i32, noexec: bool) -> Result<(), SetupFailure> {
         let mut parent = raw(unsafe { libc::fcntl(root, libc::F_DUPFD_CLOEXEC, 3) })
             .map_err(SetupStep::MountTarget.failed())?;
         for (index, name) in self.components.iter().enumerate() {
@@ -686,7 +1839,7 @@ impl Mount {
                 std::ptr::null(),
                 destination,
                 std::ptr::null(),
-                Self::remount_flags(self.device, self.writable, self.noexec),
+                Self::remount_flags(self.device, self.writable, noexec),
                 std::ptr::null(),
             )
         })
@@ -721,6 +1874,95 @@ fn stat_identity(descriptor: i32) -> Result<(libc::dev_t, libc::ino_t, libc::dev
     raw(unsafe { libc::fstat(descriptor, status.as_mut_ptr()) })?;
     let status = unsafe { status.assume_init() };
     Ok((status.st_dev, status.st_ino, status.st_rdev))
+}
+
+/// The normal components of the absolute `path`; `None` for a relative
+/// path, a `.` or `..` component, or a NUL byte.
+fn normal_components(path: &Path) -> Option<Vec<CString>> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.components()
+        .filter(|component| !matches!(component, Component::RootDir))
+        .map(|component| match component {
+            Component::Normal(name) => CString::new(name.as_bytes()).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Opens the absolute canonical name `path`, whose normal `components` are
+/// prebuilt, with `flags`, following no symbolic link in any component, so
+/// a writer of a directory partway down cannot get another object opened by
+/// swapping a link in. It uses openat2 with RESOLVE_NO_SYMLINKS, and on a
+/// kernel without openat2 (ENOSYS only) the same walk by hand
+/// ([`walk_no_symlinks`]); any other error refuses. A final component that
+/// is a symbolic link opens as the link itself under O_PATH | O_NOFOLLOW,
+/// both ways, for the caller's type or identity check to refuse. It
+/// allocates nothing, so setup calls it between fork and exec. Returns the
+/// descriptor or the errno.
+fn open_no_symlinks(path: &CStr, components: &[CString], flags: libc::c_int) -> Result<i32, i32> {
+    match openat2_no_symlinks(path, flags) {
+        Err(libc::ENOSYS) => walk_no_symlinks(components, flags),
+        outcome => outcome,
+    }
+}
+
+/// [`open_no_symlinks`] by openat2 with RESOLVE_NO_SYMLINKS.
+fn openat2_no_symlinks(path: &CStr, flags: libc::c_int) -> Result<i32, i32> {
+    // `open_how` is non-exhaustive: zeroed, then its fields set.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = flags as u64;
+    how.resolve = libc::RESOLVE_NO_SYMLINKS;
+    let descriptor = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            std::ptr::addr_of!(how),
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if descriptor == -1 {
+        Err(errno())
+    } else {
+        Ok(descriptor as i32)
+    }
+}
+
+/// [`open_no_symlinks`] by a walk from `/`: every directory above the last
+/// component is opened O_PATH | O_DIRECTORY | O_NOFOLLOW from its parent's
+/// descriptor, so a symbolic link there fails (ENOTDIR), and every
+/// intermediate descriptor is closed.
+fn walk_no_symlinks(components: &[CString], flags: libc::c_int) -> Result<i32, i32> {
+    let Some((last, directories)) = components.split_last() else {
+        return Err(libc::EINVAL);
+    };
+    let mut directory = raw(unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    })?;
+    for name in directories {
+        let next = unsafe {
+            libc::openat(
+                directory,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        let error = errno();
+        unsafe { libc::close(directory) };
+        if next == -1 {
+            return Err(error);
+        }
+        directory = next;
+    }
+    let opened = unsafe { libc::openat(directory, last.as_ptr(), flags | libc::O_NOFOLLOW) };
+    let error = errno();
+    unsafe { libc::close(directory) };
+    if opened == -1 { Err(error) } else { Ok(opened) }
 }
 
 fn fd_path(descriptor: i32, bytes: &mut [u8; 32]) -> *const libc::c_char {
@@ -862,9 +2104,10 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         code.push(jump(equal, syscall as u32, 0, 1));
         code.push(statement(ret, refuse));
     }
-    // The host and target do not share filesystem/IPC views, but retain
-    // kernel PID numbers. Never let a PID-targeted mutator reach another
-    // process. Pid zero means this task and preserves ordinary local setup.
+    // Each launch is a pid namespace of its own, so its processes cannot name
+    // a host process by PID at all; these rules stay as defence in depth:
+    // no PID-targeted mutator reaches another process, even one of the
+    // launch. Pid zero means this task and preserves ordinary local setup.
     for syscall in [
         libc::SYS_prlimit64,
         libc::SYS_sched_setparam,
@@ -954,9 +2197,7 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         statement(ret, allow),
     ]);
     // Only IP sockets from this process can exist. No AF_UNIX, netlink, packet
-    // or alternate-family connection can bypass IP/Unix separation. A Unix
-    // datagram pair can be retargeted, so pairs are supported only when every
-    // address-bearing operation below is denied. No pair is allowed with IP.
+    // or alternate-family connection can bypass IP/Unix separation.
     code.extend([
         jump(equal, libc::SYS_socket as u32, 0, 6),
         statement(load, 16),
@@ -966,13 +2207,42 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         statement(ret, if ip { allow } else { refuse }),
         statement(ret, refuse),
     ]);
+    // A Unix pair is connected at creation and has no address, so it reaches
+    // nothing outside itself, except that a datagram pair's sendto and
+    // sendmsg take an address. Without IP every address-bearing call below
+    // is refused and every Unix pair is allowed. With IP those calls are
+    // allowed, and so only stream and seqpacket pairs are, whose address
+    // argument the kernel refuses or ignores: std's fork-and-exec spawn, the
+    // path cargo and rustc's linker call take, opens its error channel with
+    // a seqpacket pair. The type is the low four bits of the second
+    // argument (SOCK_NONBLOCK and SOCK_CLOEXEC sit above them): stream (1)
+    // and seqpacket (5) have bit 0 set and bits 1 and 3 clear, and every
+    // other type fails one of those three tests.
     code.extend([
-        jump(equal, libc::SYS_socketpair as u32, 0, 4),
+        jump(
+            equal,
+            libc::SYS_socketpair as u32,
+            0,
+            if ip { 11 } else { 4 },
+        ),
         statement(load, 16),
         jump(equal, libc::AF_UNIX as u32, 1, 0),
         statement(ret, refuse),
-        statement(ret, if ip { refuse } else { allow }),
     ]);
+    if ip {
+        code.extend([
+            statement(load, 24),
+            jump(bits, 0x2, 0, 1),
+            statement(ret, refuse),
+            jump(bits, 0x8, 0, 1),
+            statement(ret, refuse),
+            jump(bits, 0x1, 1, 0),
+            statement(ret, refuse),
+            statement(ret, allow),
+        ]);
+    } else {
+        code.push(statement(ret, allow));
+    }
     if !ip {
         for syscall in [
             libc::SYS_connect,
@@ -1033,7 +2303,11 @@ pub(super) fn spawn(
     streams: SpawnIo,
     gate: Option<(BorrowedFd<'_>, &OsStr)>,
 ) -> io::Result<NativeChild> {
-    policy.validate_launch(&launch).map_err(io::Error::other)?;
+    // What this launch binds of each mount, validated here, before the
+    // launch's first process is created. It stays alive until that
+    // process's setup is done and the command executed its program (the
+    // report pipe's EOF), so each validated object stays alive through setup.
+    let bound = policy.launch_bindings(&launch).map_err(io::Error::other)?;
     let inherited_stdin = inherit(streams.stdin, libc::STDIN_FILENO)?;
     let inherited_stdout = inherit(streams.stdout, libc::STDOUT_FILENO)?;
     let inherited_stderr = inherit(streams.stderr, libc::STDERR_FILENO)?;
@@ -1061,72 +2335,49 @@ pub(super) fn spawn(
     let stderr = stderr
         .map(|fd| ChildStderr::from_std(fd.into()))
         .transpose()?;
-    let mut command = if let Some((_, token)) = gate {
-        const PROLOGUE: &str = "IFS= read -r meerkat_custody_gate <&3 || exit 125; case $meerkat_custody_gate in \"$1\") ;; *) exit 125 ;; esac; exec 3<&-; shift; exec \"$@\"";
-        // A launch site of the confinement backend: the gated launch.
-        #[allow(clippy::disallowed_methods)]
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            OsStr::new("-c"),
-            OsStr::new(PROLOGUE),
-            OsStr::new("meerkat-custody-gate"),
-            token,
-            launch.program.as_os_str(),
-        ]);
-        command.args(&launch.arguments);
-        command
-    } else {
-        // A launch site of the confinement backend: the confined launch.
-        #[allow(clippy::disallowed_methods)]
-        let mut command = Command::new(&launch.program);
-        command.args(&launch.arguments);
-        command
-    };
-    command
-        .env_clear()
-        .envs(&launch.environment)
-        .process_group(0)
-        .stdin(Stdio::from(stdin_source))
-        .stdout(Stdio::from(stdout_source))
-        .stderr(Stdio::from(stderr_source));
-    // Command's own pre-exec cwd would retain an outside directory through
-    // chroot. Set cwd only after the complete private view is installed.
-    let directory = CString::new(launch.directory.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid confinement cwd"))?;
-    let gate = gate
+    let gate_source = gate
         .map(|(descriptor, _)| duplicate(descriptor.as_raw_fd()))
         .transpose()?;
-    // One slot per mount for setup's reopened sources, allocated here: the
-    // pre-exec child only writes its own copy.
-    let mut sources = vec![-1; policy.mounts.len()];
-    // SAFETY: The closure invokes only syscall helpers using preallocated
-    // strings, buffers, policy and FDs. Returning an error uses Command's
-    // existing owned error pipe; spawn does not report success after a setup
-    // failure.
-    unsafe {
-        command.pre_exec(move || {
-            policy
-                .apply(&mut sources)
-                .map_err(|failure| io::Error::from_raw_os_error(failure.errno))?;
-            raw(libc::chdir(directory.as_ptr())).map_err(io::Error::from_raw_os_error)?;
-            if let Some(gate) = &gate {
-                raw(libc::dup2(gate.as_raw_fd(), 3)).map_err(io::Error::from_raw_os_error)?;
-                raw(libc::fcntl(3, libc::F_SETFD, 0)).map_err(io::Error::from_raw_os_error)?;
-            }
-            Ok(())
-        });
+    let target = Target::new(
+        &launch,
+        gate.zip(gate_source.as_ref())
+            .map(|((_, token), source)| (token, source.as_raw_fd())),
+        [
+            stdin_source.as_raw_fd(),
+            stdout_source.as_raw_fd(),
+            stderr_source.as_raw_fd(),
+        ],
+    )?;
+    let started = policy.start(&bound, Some(&target))?;
+    // The launch's processes hold their own copies of every descriptor they
+    // need; the host's ends close here, as the pipes' write ends did in
+    // `start`. Only the command and the init now hold the report pipe's
+    // write end, until each executes its program.
+    drop((stdin_source, stdout_source, stderr_source, gate_source));
+    match read_report(started.report) {
+        Ok(None) => {}
+        Ok(Some(error)) => {
+            // A setup step or the command's exec failed: the launch ends on
+            // its own, with no target code run.
+            reap(started.pid, false);
+            return Err(io::Error::from_raw_os_error(error));
+        }
+        Err(error) => {
+            reap(started.pid, true);
+            return Err(error);
+        }
     }
-    let child = command.spawn()?;
-    // std::process::Child has no drop reaper. Its configured streams were
-    // prepared above, so no fallible conversion or await separates successful
-    // spawn from this single native PID owner.
-    let owned = NativeChild::from_spawned_pid(child.id() as i32, sigchld, stdin, stdout, stderr);
-    drop(child);
-    Ok(owned)
+    // `bound` and `target` lived until the command executed its program,
+    // past every use of each validated object. No fallible conversion or
+    // await separates the started launch from its single native PID owner.
+    Ok(
+        NativeChild::from_spawned_pid(started.pid, sigchld, stdin, stdout, stderr)
+            .with_reported_status(started.status),
+    )
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1143,6 +2394,8 @@ mod tests {
             filter: Vec::new(),
             uid_map: Vec::new(),
             gid_map: Vec::new(),
+            namespaces: LAUNCH_NAMESPACES,
+            init: sealed_init().unwrap(),
         });
         let launch = ProcessLaunchSpec::new(
             work.join("target"),
@@ -1198,21 +2451,810 @@ mod tests {
         let null = Mount::capture(Path::new("/dev/null"), true, false).unwrap();
         let directory = Mount::capture(&work, false, true).unwrap();
         for mount in [&null, &directory] {
-            let source = mount.reopen().unwrap();
-            assert_eq!(stat_identity(source), Ok(mount.pinned));
+            let pinned = mount.bind().unwrap().pinned;
+            let source = mount.reopen(pinned).unwrap();
+            assert_eq!(stat_identity(source), Ok(pinned));
             unsafe { libc::close(source) };
         }
-        assert_eq!(null.pinned.2, libc::makedev(1, 3));
+        assert_eq!(null.bind().unwrap().pinned.2, libc::makedev(1, 3));
 
+        let pinned = directory.bind().unwrap().pinned;
         std::fs::rename(&work, root.join("retained-work")).unwrap();
         std::fs::create_dir(&work).unwrap();
         assert_eq!(
-            directory.reopen(),
+            directory.reopen(pinned),
             Err(SetupFailure {
                 step: SetupStep::MountIdentity,
                 errno: libc::ESTALE,
             })
         );
+        // Only a final link's target is ever captured again.
+        assert_eq!(
+            directory.bind().err(),
+            Some(ConfinementRefusal::BackendUnavailable)
+        );
+    }
+
+    // Sets `path`'s permission bits exactly, whatever the umask made them.
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A read-only file grant may name a symbolic link as its final
+    /// component (`/etc/resolv.conf` on a systemd-resolved host) when the
+    /// link's own text alone names its regular-file target: the target is
+    /// pinned and bound read-only at the link's own path. A link whose text
+    /// a second link resolves elsewhere is refused, whoever can replace that
+    /// second link. No namespace is entered.
+    #[test]
+    fn a_final_link_is_granted_only_when_it_names_its_target_in_one_hop() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        // No directory below is group- or other-writable, whatever the umask.
+        set_mode(&root, 0o700);
+        let etc = root.join("etc");
+        let run = root.join("run");
+        let shared = root.join("shared");
+        for directory in [&etc, &run, &shared] {
+            std::fs::create_dir(directory).unwrap();
+            set_mode(directory, 0o755);
+        }
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        // One hop, relative, as systemd-resolved installs it.
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink("../run/stub-resolv.conf", &link).unwrap();
+
+        let mount = Mount::capture(&link, false, false)
+            .expect("a read-only grant of a trusted one-hop final link is captured");
+        assert_eq!(mount.path, link);
+        assert_eq!(mount.canonical, target);
+        assert_eq!(mount.source.as_bytes(), target.as_os_str().as_bytes());
+        assert_eq!(
+            mount.destination.as_bytes(),
+            Path::new("/tmp")
+                .join(link.strip_prefix("/").unwrap())
+                .as_os_str()
+                .as_bytes()
+        );
+        assert!(!mount.directory && !mount.writable);
+        assert_eq!(
+            mount.link.as_deref(),
+            Some(Path::new("../run/stub-resolv.conf")),
+            "the link's text is kept"
+        );
+        let pinned = mount.bind().unwrap().pinned;
+        let source = mount.reopen(pinned).unwrap();
+        assert_eq!(stat_identity(source), Ok(pinned));
+        unsafe { libc::close(source) };
+        // Setup's fallback walk follows the resolved target's components,
+        // not the granted path's.
+        assert_eq!(
+            Some(mount.source_components.clone()),
+            normal_components(&target)
+        );
+        let walked = walk_no_symlinks(
+            &mount.source_components,
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+        .unwrap();
+        assert_eq!(stat_identity(walked), Ok(pinned));
+        unsafe { libc::close(walked) };
+
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+        // The second hop sits in a directory anyone may write, so its owner
+        // could choose what the grant exposes: refused.
+        let hop = shared.join("hop");
+        std::os::unix::fs::symlink(&target, &hop).unwrap();
+        set_mode(&shared, 0o777);
+        let chained = etc.join("chained.conf");
+        std::os::unix::fs::symlink("../shared/hop", &chained).unwrap();
+        assert_eq!(Mount::capture(&chained, false, false).err(), refused);
+        // Refused when every link of the chain is trusted, too: the grant's
+        // own text alone must name the target.
+        set_mode(&shared, 0o755);
+        assert_eq!(Mount::capture(&chained, false, false).err(), refused);
+    }
+
+    // A directory `root/name` with exactly `mode`, for the final-link rows.
+    fn directory(root: &Path, name: &str, mode: u32) -> PathBuf {
+        let directory = root.join(name);
+        std::fs::create_dir(&directory).unwrap();
+        set_mode(&directory, mode);
+        directory
+    }
+
+    /// A final link is granted only where no less-trusted party can retarget
+    /// it: a link in a directory that group or others may write is refused
+    /// unless that directory is sticky, and so is a link under such an
+    /// ancestor or one owned by another user. No namespace is entered.
+    #[test]
+    fn a_final_link_is_granted_only_where_no_other_user_can_retarget_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let shared = directory(&root, "shared", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = shared.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+
+        assert!(Mount::capture(&link, false, false).is_ok());
+        // World-writable without the sticky bit: anyone may replace the link.
+        set_mode(&shared, 0o777);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        // Group-writable alone is refused too.
+        set_mode(&shared, 0o775);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        // Sticky: only the link's owner, the directory's owner or root may
+        // rename or remove it, as under /tmp.
+        set_mode(&shared, 0o1777);
+        assert!(Mount::capture(&link, false, false).is_ok());
+        // A shared writable ancestor further up refuses as well.
+        set_mode(&shared, 0o755);
+        set_mode(&root, 0o777);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        set_mode(&root, 0o700);
+        assert!(Mount::capture(&link, false, false).is_ok());
+        // This test's link and directories belong to the effective uid: with
+        // another uid trusted, they are another user's.
+        let euid = unsafe { libc::geteuid() };
+        assert!(grantable_link_text_for(&link, &target, euid).is_some());
+        if euid != 0 {
+            assert_eq!(
+                grantable_link_text_for(&link, &target, euid.wrapping_add(1)),
+                None
+            );
+        }
+    }
+
+    /// A path in `directory` that no other test run uses: `prefix`, this
+    /// process's id and the time.
+    fn unique_path(directory: &Path, prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        directory.join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    /// Removes a file or link made outside a temporary directory when the
+    /// test ends, passed or failed.
+    struct RemoveOnDrop(PathBuf);
+
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The link-owner rule on its own: a link directly in `/tmp`, root's
+    /// sticky directory under root's `/`, has every directory above it
+    /// trusted, so its own owner decides. It is granted while its owner is
+    /// trusted and refused while only root and another uid are, as a link
+    /// another user planted there is. No namespace is entered.
+    #[test]
+    fn a_final_link_in_tmp_is_granted_only_when_its_owner_is_trusted() {
+        let trusted_directory = |path: &str, sticky: bool| {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && (metadata.mode() & 0o022 == 0 || (sticky && metadata.mode() & 0o1000 != 0))
+        };
+        assert!(
+            trusted_directory("/", false) && trusted_directory("/tmp", true),
+            "this row needs root's /, and root's sticky /tmp"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().canonicalize().unwrap().join("app.conf");
+        std::fs::write(&target, b"granted").unwrap();
+        let link = RemoveOnDrop(unique_path(Path::new("/tmp"), "meerkat-final-link-owner"));
+        std::os::unix::fs::symlink(&target, &link.0).unwrap();
+        let euid = unsafe { libc::geteuid() };
+        // The link's owner, and a uid that is neither root nor that owner.
+        // Root's own link is trusted whoever else is, so as root the link
+        // goes to another uid.
+        let (owner, other) = if euid == 0 {
+            let name = CString::new(link.0.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::lchown(name.as_ptr(), 65534, 65534) }, 0);
+            (65534, 0)
+        } else {
+            (euid, euid.wrapping_add(1))
+        };
+        assert_eq!(
+            grantable_link_text_for(&link.0, &target, owner),
+            Some(target.clone()),
+            "a link whose owner is trusted is granted"
+        );
+        assert_eq!(
+            grantable_link_text_for(&link.0, &target, other),
+            None,
+            "a link another user owns is refused, though every directory above it is trusted"
+        );
+        if euid != 0 {
+            assert!(Mount::capture(&link.0, false, false).is_ok());
+        }
+    }
+
+    /// Only a read-only grant of a final link to a regular file with one
+    /// name is captured: a writable grant, a link to a directory, a dangling
+    /// link, a link under a linked directory and a link to a hard-linked
+    /// file are refused. No namespace is entered.
+    #[test]
+    fn a_final_link_grant_is_read_only_and_names_a_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let target = run.join("stub-resolv.conf");
+        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+
+        assert!(Mount::capture(&link, false, false).is_ok());
+        assert_eq!(Mount::capture(&link, false, true).err(), refused);
+        let directory_link = etc.join("run");
+        std::os::unix::fs::symlink(&run, &directory_link).unwrap();
+        assert_eq!(Mount::capture(&directory_link, false, false).err(), refused);
+        let dangling = etc.join("dangling");
+        std::os::unix::fs::symlink(run.join("missing"), &dangling).unwrap();
+        assert_eq!(Mount::capture(&dangling, false, false).err(), refused);
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&etc, &alias).unwrap();
+        assert_eq!(
+            Mount::capture(&alias.join("resolv.conf"), false, false).err(),
+            refused
+        );
+        std::fs::hard_link(&target, run.join("second-name")).unwrap();
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+    }
+
+    /// A final link's target is held to the granted path's own rule: never
+    /// `/`, and nothing in `/proc`, `/sys` or `/dev`. A trusted one-hop link
+    /// to a regular file in `/dev/shm` (tmpfs, which the filesystem-type
+    /// check lets through) is refused, as a grant of that file itself is,
+    /// before any namespace is probed.
+    #[test]
+    fn a_final_link_to_a_file_under_dev_is_refused() {
+        use meerkat_core::confinement::{ConfinementSpec, PlatformBaseline};
+        let target = RemoveOnDrop(unique_path(
+            Path::new("/dev/shm"),
+            "meerkat-final-link-target",
+        ));
+        std::fs::write(&target.0, b"nameserver 192.0.2.1\n").unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&target.0).unwrap(),
+            target.0,
+            "this row needs a /dev/shm that is no symbolic link"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target.0, &link).unwrap();
+        assert_eq!(
+            grantable_link_text(&link, &target.0),
+            Some(target.0.clone()),
+            "the link itself passes the one-hop and owner rules"
+        );
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        let compile = |path: &Path| {
+            let spec = ConfinementSpec {
+                baseline: PlatformBaseline::CommandRuntimeV1,
+                read: FilesystemAccess::Paths(vec![PathAccess::Literal(path.to_path_buf())]),
+                write: FilesystemAccess::Paths(Vec::new()),
+                deny_read: Vec::new(),
+                deny_write: Vec::new(),
+                unix_connect: Vec::new(),
+                network: IpNetworkAccess::Unrestricted,
+                require_descendant_termination: false,
+            };
+            LinuxPolicy::compile(&ExecutionConfinement::try_from(spec).unwrap()).err()
+        };
+        assert_eq!(compile(&target.0), refused, "a grant of the file itself");
+        assert_eq!(compile(&link), refused, "a grant of the link to it");
+    }
+
+    /// A launch binds the target it validated: once a final link's replaced
+    /// target is captured again, setup checks the reopened source against
+    /// the new file and refuses the replaced one, and a file swapped in after
+    /// the launch validated is refused at setup's identity step as before. No
+    /// namespace is entered.
+    #[test]
+    fn a_launch_binds_the_final_link_target_it_captured_again() {
+        let identity_refused = Err(SetupFailure {
+            step: SetupStep::MountIdentity,
+            errno: libc::ESTALE,
+        });
+        let fixture = ResolverFixture::new();
+        let mount = &fixture.policy.mounts[1];
+        let before = mount.bind().unwrap();
+        fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
+
+        let bound = fixture
+            .policy
+            .launch_bindings(&fixture.launch)
+            .unwrap()
+            .swap_remove(1);
+        let replacement = std::fs::metadata(&fixture.target).unwrap();
+        assert_eq!(
+            (bound.pinned.0, bound.pinned.1),
+            (replacement.dev(), replacement.ino()),
+            "the launch binds the new file"
+        );
+        assert_ne!(bound.pinned, before.pinned);
+        assert_eq!(
+            mount.bind().unwrap().pinned,
+            bound.pinned,
+            "the new file stays pinned"
+        );
+        let source = mount.reopen(bound.pinned).unwrap();
+        assert_eq!(stat_identity(source), Ok(bound.pinned));
+        unsafe { libc::close(source) };
+        assert_eq!(mount.reopen(before.pinned), identity_refused);
+
+        fixture.replace_target(b"nameserver 192.0.2.2\n");
+        assert_eq!(mount.reopen(bound.pinned), identity_refused);
+    }
+
+    /// A policy over a work directory and a read-only grant of the link
+    /// `etc/resolv.conf`, which names `../run/stub-resolv.conf` in one hop as
+    /// systemd-resolved installs it, with a launch in the work directory. No
+    /// namespace is probed or entered.
+    struct ResolverFixture {
+        _temp: tempfile::TempDir,
+        run: PathBuf,
+        target: PathBuf,
+        link: PathBuf,
+        policy: LinuxPolicy,
+        launch: ProcessLaunchSpec,
+    }
+
+    impl ResolverFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            // No directory below is group- or other-writable, whatever the
+            // umask.
+            set_mode(&root, 0o700);
+            let etc = directory(&root, "etc", 0o755);
+            let run = directory(&root, "run", 0o755);
+            let work = directory(&root, "work", 0o755);
+            let target = run.join("stub-resolv.conf");
+            std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+            let link = etc.join("resolv.conf");
+            std::os::unix::fs::symlink("../run/stub-resolv.conf", &link).unwrap();
+            let policy = LinuxPolicy {
+                mounts: vec![
+                    Mount::capture(&work, false, true).unwrap(),
+                    Mount::capture(&link, false, false).unwrap(),
+                ],
+                filter: Vec::new(),
+                uid_map: Vec::new(),
+                gid_map: Vec::new(),
+                namespaces: LAUNCH_NAMESPACES,
+                init: sealed_init().unwrap(),
+            };
+            let launch =
+                ProcessLaunchSpec::new(work.join("target"), Vec::new(), work, Default::default())
+                    .unwrap();
+            assert_eq!(policy.validate_launch(&launch), Ok(()));
+            Self {
+                _temp: temp,
+                run,
+                target,
+                link,
+                policy,
+                launch,
+            }
+        }
+
+        /// Replaces the target the way systemd-resolved rewrites its stub
+        /// file: a new file written beside it and renamed over its name.
+        fn replace_target(&self, contents: &[u8]) {
+            let staged = self.run.join(".stub-resolv.conf.new");
+            std::fs::write(&staged, contents).unwrap();
+            std::fs::rename(&staged, &self.target).unwrap();
+        }
+
+        /// Replaces the target the same way with a FIFO, which no capture
+        /// accepts.
+        fn replace_target_with_fifo(&self) {
+            let staged = self.run.join(".stub-resolv.conf.new");
+            let name = CString::new(staged.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe { libc::mkfifo(name.as_ptr(), 0o644) },
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+            std::fs::rename(&staged, &self.target).unwrap();
+        }
+
+        /// Replaces the grant's link with one whose text is `text`.
+        fn relink(&self, text: &Path) {
+            std::fs::remove_file(&self.link).unwrap();
+            std::os::unix::fs::symlink(text, &self.link).unwrap();
+        }
+
+        fn validate_launch(&self) -> Result<(), ConfinementRefusal> {
+            self.policy.validate_launch(&self.launch)
+        }
+    }
+
+    /// R1: a final link's target replaced under its own name, as
+    /// systemd-resolved rewrites its stub file when its DNS settings change,
+    /// is captured again at the next launch, and the launch proceeds; so do
+    /// the launches after it, and after the next replacement.
+    #[test]
+    fn a_final_link_target_replaced_by_rename_is_captured_again_at_launch() {
+        let fixture = ResolverFixture::new();
+        fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
+        assert_eq!(
+            fixture.validate_launch(),
+            Ok(()),
+            "a target replaced under its name is captured again and the launch proceeds"
+        );
+        assert_eq!(fixture.validate_launch(), Ok(()));
+        fixture.replace_target(b"nameserver 127.0.0.53\n");
+        assert_eq!(fixture.validate_launch(), Ok(()));
+    }
+
+    /// R2: a target path replaced by a symbolic link is refused at launch,
+    /// whatever that link names: the grant's link would reach its target in
+    /// two hops, even when the second hop leads to the file pinned before.
+    #[test]
+    fn a_final_link_target_path_replaced_by_a_symlink_is_refused_at_launch() {
+        let refused = Err(ConfinementRefusal::BackendUnavailable);
+        // Another file, behind a link at the target's name.
+        let fixture = ResolverFixture::new();
+        std::fs::write(fixture.run.join("other.conf"), b"nameserver 192.0.2.1\n").unwrap();
+        std::fs::remove_file(&fixture.target).unwrap();
+        std::os::unix::fs::symlink("other.conf", &fixture.target).unwrap();
+        assert_eq!(fixture.validate_launch(), refused);
+        // The pinned file itself, moved and named through a link.
+        let fixture = ResolverFixture::new();
+        std::fs::rename(&fixture.target, fixture.run.join("moved.conf")).unwrap();
+        std::os::unix::fs::symlink("moved.conf", &fixture.target).unwrap();
+        assert_eq!(fixture.validate_launch(), refused);
+    }
+
+    /// R3: a retargeted final link is refused at launch, and so is a link
+    /// replaced with other text that still names the same file, with its
+    /// target replaced or not: only the target file may be replaced, under
+    /// the link as captured.
+    #[test]
+    fn a_retargeted_final_link_is_refused_at_launch() {
+        let refused = Err(ConfinementRefusal::BackendUnavailable);
+        let fixture = ResolverFixture::new();
+        std::fs::write(fixture.run.join("other.conf"), b"nameserver 192.0.2.1\n").unwrap();
+        fixture.relink(Path::new("../run/other.conf"));
+        assert_eq!(fixture.validate_launch(), refused);
+
+        let fixture = ResolverFixture::new();
+        fixture.relink(&fixture.target);
+        assert_eq!(
+            fixture.validate_launch(),
+            refused,
+            "the link was replaced with other text, though it names the same file"
+        );
+
+        let fixture = ResolverFixture::new();
+        fixture.relink(&fixture.target);
+        fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
+        assert_eq!(fixture.validate_launch(), refused);
+    }
+
+    /// R4: only a target that is no longer the pinned file is captured
+    /// again. The pinned file moved into a replacement of its directory keeps
+    /// its identity, and the replaced directory refuses the launch as before.
+    #[test]
+    fn a_final_link_target_directory_replaced_around_the_pinned_file_is_refused_at_launch() {
+        let fixture = ResolverFixture::new();
+        let retired = fixture.run.with_file_name("run.retired");
+        std::fs::rename(&fixture.run, &retired).unwrap();
+        std::fs::create_dir(&fixture.run).unwrap();
+        set_mode(&fixture.run, 0o755);
+        std::fs::rename(retired.join("stub-resolv.conf"), &fixture.target).unwrap();
+        assert_eq!(
+            fixture.validate_launch(),
+            Err(ConfinementRefusal::BackendUnavailable)
+        );
+    }
+
+    /// R5: a launch holds the object it validated until its setup is done.
+    /// Launch L1 validates its bindings. The target's directory writer
+    /// renames a new file over the target, and launch L2 captures it again,
+    /// dropping the pin of the file L1 validated. The writer then renames
+    /// another object over the target: a FIFO every other round, which no
+    /// capture accepts, else a file. L1's setup refuses it every round, also
+    /// on a filesystem that hands a freed inode number to a new object (ext4
+    /// often does), where that object would otherwise carry the identity L1
+    /// validated.
+    #[test]
+    fn a_launch_refuses_an_object_put_in_place_after_a_concurrent_recapture() {
+        const ROUNDS: u32 = 400;
+        let fixture = ResolverFixture::new();
+        let mount = &fixture.policy.mounts[1];
+        let (mut fifos, mut files) = (0_u32, 0_u32);
+        for round in 0..ROUNDS {
+            let first = fixture.policy.launch_bindings(&fixture.launch).unwrap();
+            fixture.replace_target(&round.to_le_bytes());
+            let second = fixture.policy.launch_bindings(&fixture.launch).unwrap();
+            assert_ne!(
+                second[1].pinned, first[1].pinned,
+                "L2 captured the new file again"
+            );
+            let fifo = round % 2 == 0;
+            if fifo {
+                fixture.replace_target_with_fifo();
+            } else {
+                fixture.replace_target(b"nameserver 192.0.2.1\n");
+            }
+            // L1's setup, while L1 still holds what it validated.
+            if let Ok(source) = mount.reopen(first[1].pinned) {
+                if fifo {
+                    fifos += 1;
+                } else {
+                    files += 1;
+                }
+                unsafe { libc::close(source) };
+            }
+            // Both launches' setup is done.
+            drop((first, second));
+            if fifo {
+                // A regular file again, for the next round's first launch.
+                fixture.replace_target(b"nameserver 127.0.0.53\n");
+            }
+        }
+        assert_eq!(
+            (fifos, files),
+            (0, 0),
+            "setup accepted objects no launch validated in {ROUNDS} rounds: \
+             {fifos} FIFOs, {files} files"
+        );
+    }
+
+    /// What one race phase of
+    /// `a_racing_intermediate_directory_never_gets_another_object_pinned`
+    /// saw.
+    #[derive(Debug, Default)]
+    struct RaceTally {
+        attempts: u64,
+        captured: u64,
+        wrong_pins: u64,
+        exchanges: u64,
+    }
+
+    /// Runs `attempt` for `duration` while another thread exchanges the
+    /// directory `real` with `flip`, a symbolic link to another directory
+    /// (renameat2 RENAME_EXCHANGE), as a writer of their parent could; then
+    /// leaves `real` the directory again. `attempt` answers `None` when
+    /// nothing was pinned, else whether the other directory's object was.
+    fn race(
+        real: &Path,
+        flip: &Path,
+        duration: Duration,
+        mut attempt: impl FnMut() -> Option<bool>,
+    ) -> RaceTally {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let names = [real, flip].map(|path| CString::new(path.as_os_str().as_bytes()).unwrap());
+        let exchange = |names: &[CString; 2]| unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                names[0].as_ptr(),
+                libc::AT_FDCWD,
+                names[1].as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let exchanger = {
+            let (names, stop) = (names.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut exchanges = 0_u64;
+                while !stop.load(Ordering::Relaxed) {
+                    if exchange(&names) == 0 {
+                        exchanges += 1;
+                    }
+                }
+                exchanges
+            })
+        };
+        let mut tally = RaceTally::default();
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline {
+            tally.attempts += 1;
+            if let Some(wrong) = attempt() {
+                tally.captured += 1;
+                tally.wrong_pins += u64::from(wrong);
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        tally.exchanges = exchanger.join().unwrap();
+        if std::fs::symlink_metadata(real)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+        {
+            assert_eq!(exchange(&names), 0);
+        }
+        tally
+    }
+
+    /// Replaces `name` in the directory open as `directory`: a new file
+    /// written beside it and renamed over it, through that descriptor, so
+    /// whatever the directory's own name points at meanwhile.
+    fn replace_in(directory: &File, name: &CStr, contents: &[u8]) {
+        let stage = c".stage";
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                stage.as_ptr(),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        assert!(descriptor >= 0, "{}", io::Error::last_os_error());
+        let written = unsafe { libc::write(descriptor, contents.as_ptr().cast(), contents.len()) };
+        assert_eq!(written, contents.len() as isize);
+        unsafe { libc::close(descriptor) };
+        let renamed = unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                stage.as_ptr(),
+                directory.as_raw_fd(),
+                name.as_ptr(),
+            )
+        };
+        assert_eq!(renamed, 0, "{}", io::Error::last_os_error());
+    }
+
+    // The (st_dev, st_ino) a mount pins.
+    fn pinned_identity(mount: &Mount) -> (u64, u64) {
+        let pin = mount.pin.lock().unwrap();
+        (pin.pinned.0, pin.pinned.1)
+    }
+
+    /// A writer of a directory partway down a granted path exchanges that
+    /// directory, again and again, with a symbolic link to another directory
+    /// of the host's user while the grant is captured: a direct file grant,
+    /// a writable subtree grant, a final link, and a final link captured
+    /// again at launch after its target was replaced. No capture ever pins
+    /// the other directory's object. Bounded: a little over a second a
+    /// phase.
+    #[test]
+    fn a_racing_intermediate_directory_never_gets_another_object_pinned() {
+        const PHASE: Duration = Duration::from_millis(1200);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let real = directory(&run, "real", 0o755);
+        directory(&real, "work", 0o755);
+        std::fs::write(real.join("app.conf"), b"granted").unwrap();
+        let secret = directory(&root, "secret", 0o700);
+        directory(&secret, "work", 0o700);
+        std::fs::write(secret.join("app.conf"), b"never granted").unwrap();
+        let identity = |path: &Path| {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            (metadata.dev(), metadata.ino())
+        };
+        let secret_file = identity(&secret.join("app.conf"));
+        let secret_work = identity(&secret.join("work"));
+        let flip = run.join("flip");
+        std::os::unix::fs::symlink(&secret, &flip).unwrap();
+        let link = etc.join("app.conf");
+        std::os::unix::fs::symlink("../run/real/app.conf", &link).unwrap();
+        let capture = |grant: &Path, writable: bool, secret: (u64, u64)| {
+            Mount::capture(grant, false, writable)
+                .ok()
+                .map(|mount| pinned_identity(&mount) == secret)
+        };
+
+        let mut tallies = Vec::new();
+        let file = real.join("app.conf");
+        tallies.push((
+            "direct file grant",
+            race(&real, &flip, PHASE, || capture(&file, false, secret_file)),
+        ));
+        let work = real.join("work");
+        tallies.push((
+            "writable subtree grant",
+            race(&real, &flip, PHASE, || capture(&work, true, secret_work)),
+        ));
+        tallies.push((
+            "final link",
+            race(&real, &flip, PHASE, || capture(&link, false, secret_file)),
+        ));
+        let mount = Mount::capture(&link, false, false).unwrap();
+        let real_directory = File::open(&real).unwrap();
+        let mut round = 0_u64;
+        tallies.push((
+            "final link captured again at launch",
+            race(&real, &flip, PHASE, || {
+                round += 1;
+                replace_in(&real_directory, c"app.conf", &round.to_le_bytes());
+                mount
+                    .bind()
+                    .ok()
+                    .map(|bound| (bound.pinned.0, bound.pinned.1) == secret_file)
+            }),
+        ));
+
+        for (phase, tally) in &tallies {
+            eprintln!("RACE {phase}: {tally:?}");
+        }
+        for (phase, tally) in &tallies {
+            assert!(
+                tally.exchanges > 0 && tally.captured > 0,
+                "{phase}: the race ran and grants were captured: {tally:?}"
+            );
+            assert_eq!(
+                tally.wrong_pins, 0,
+                "{phase}: a capture pinned the other directory's object: {tallies:?}"
+            );
+        }
+    }
+
+    /// The symlink-free open refuses a name with a symbolic link in a
+    /// directory partway down, by openat2 and by the fallback walk alike,
+    /// and opens a symlink-free name to the same object both ways. A final
+    /// component that is a link opens as the link itself both ways
+    /// (O_PATH | O_NOFOLLOW), for the caller's type or identity check to
+    /// refuse. The walk is called directly: no supported kernel lacks
+    /// openat2.
+    #[test]
+    fn the_symlink_free_open_refuses_an_intermediate_link_both_ways() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let file = real.join("app.conf");
+        std::fs::write(&file, b"granted").unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let trailing = root.join("trailing");
+        std::os::unix::fs::symlink(&file, &trailing).unwrap();
+        let identity = |metadata: std::fs::Metadata| (metadata.dev(), metadata.ino());
+        let flags = libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        let openat2 = |path: &Path| {
+            openat2_no_symlinks(&CString::new(path.as_os_str().as_bytes()).unwrap(), flags)
+        };
+        let walk = |path: &Path| walk_no_symlinks(&normal_components(path).unwrap(), flags);
+        let ways: [(&str, &dyn Fn(&Path) -> Result<i32, i32>); 2] =
+            [("openat2", &openat2), ("walk", &walk)];
+        for (way, open) in ways {
+            let descriptor = open(&file).expect(way);
+            assert_eq!(
+                stat_identity(descriptor).map(|status| (status.0, status.1)),
+                Ok(identity(std::fs::metadata(&file).unwrap())),
+                "{way}: a symlink-free name opens its object"
+            );
+            unsafe { libc::close(descriptor) };
+
+            let through_link = open(&alias.join("app.conf"));
+            assert!(
+                through_link.is_err(),
+                "{way}: a link partway down is refused, got {through_link:?}"
+            );
+
+            let descriptor = open(&trailing).unwrap();
+            assert_eq!(
+                stat_identity(descriptor).map(|status| (status.0, status.1)),
+                Ok(identity(std::fs::symlink_metadata(&trailing).unwrap())),
+                "{way}: a final link opens as the link itself"
+            );
+            unsafe { libc::close(descriptor) };
+        }
     }
 
     /// A bind remount may not clear a flag of the host mount in the
@@ -1240,7 +3282,10 @@ mod tests {
             0
         );
         let host = unsafe { host.assume_init() };
-        assert_eq!(null.noexec, (host.f_flag & libc::ST_NOEXEC) != 0);
+        assert_eq!(
+            null.bind().unwrap().noexec,
+            (host.f_flag & libc::ST_NOEXEC) != 0
+        );
     }
 
     // Runs `program` on one native syscall the way the kernel does and
@@ -1328,5 +3373,192 @@ mod tests {
                 refuse
             );
         }
+    }
+
+    /// With IP, a Unix stream or seqpacket pair is admitted (std's
+    /// fork-and-exec spawn opens its error channel with one) and every other
+    /// pair type is refused: a datagram pair's sendto could name a host
+    /// socket. Without IP every Unix pair is admitted, as no address-bearing
+    /// call is. No other family ever gets a pair.
+    #[test]
+    fn seccomp_admits_unix_stream_and_seqpacket_pairs_with_ip() {
+        let Some(architecture) = native_audit_arch() else {
+            return;
+        };
+        let refuse = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        let allow = libc::SECCOMP_RET_ALLOW;
+        // The kernel takes the type's flags above its low four bits.
+        let flags = u64::from((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32);
+        for ip in [false, true] {
+            let program = filter(architecture, ip);
+            let pair = |domain: libc::c_int, kind: libc::c_int| {
+                run_filter(
+                    &program,
+                    architecture,
+                    libc::SYS_socketpair as u32,
+                    [
+                        u64::from(domain as u32),
+                        u64::from(kind as u32) | flags,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                )
+            };
+            for kind in [libc::SOCK_STREAM, libc::SOCK_SEQPACKET] {
+                assert_eq!(pair(libc::AF_UNIX, kind), allow, "ip {ip}, type {kind}");
+            }
+            // 10 is the obsolete SOCK_PACKET.
+            for kind in [
+                libc::SOCK_DGRAM,
+                libc::SOCK_RAW,
+                libc::SOCK_RDM,
+                libc::SOCK_DCCP,
+                10,
+            ] {
+                let expected = if ip { refuse } else { allow };
+                assert_eq!(pair(libc::AF_UNIX, kind), expected, "ip {ip}, type {kind}");
+            }
+            for domain in [libc::AF_INET, libc::AF_INET6, libc::AF_NETLINK] {
+                assert_eq!(pair(domain, libc::SOCK_STREAM), refuse, "domain {domain}");
+            }
+            // The rules after the pair rule are still reached.
+            assert_eq!(
+                run_filter(&program, architecture, libc::SYS_connect as u32, [0; 6]),
+                if ip { allow } else { refuse }
+            );
+            assert_eq!(
+                run_filter(&program, architecture, libc::SYS_getpid as u32, [0; 6]),
+                allow
+            );
+        }
+    }
+
+    /// The init image is a static ELF executable of this architecture: one
+    /// read-and-execute segment holding the whole file at 0x400000, a
+    /// non-executable stack, its entry in the code after the headers, and
+    /// its name at the end.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn the_init_image_is_a_static_executable_of_this_architecture() {
+        let image = init_image();
+        let u16_at = |at: usize| u16::from_le_bytes(image[at..at + 2].try_into().unwrap());
+        let u32_at = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(image[at..at + 8].try_into().unwrap());
+        let length = image.len() as u64;
+        assert_eq!(
+            &image[..8],
+            b"\x7fELF\x02\x01\x01\x00",
+            "64-bit, little-endian"
+        );
+        let machine = if cfg!(target_arch = "x86_64") {
+            62
+        } else {
+            183
+        };
+        assert_eq!(
+            (u16_at(16), u16_at(18)),
+            (2, machine),
+            "ET_EXEC, this machine"
+        );
+        assert_eq!(
+            (u64_at(32), u16_at(54), u16_at(56)),
+            (64, 56, 2),
+            "two headers"
+        );
+        // PT_LOAD: read and execute, the whole file at 0x400000.
+        assert_eq!((u32_at(64), u32_at(68)), (1, 5));
+        assert_eq!((u64_at(72), u64_at(80)), (0, 0x40_0000));
+        assert_eq!((u64_at(96), u64_at(104)), (length, length));
+        // PT_GNU_STACK: read and write only.
+        assert_eq!((u32_at(120), u32_at(124)), (0x6474_e551, 6));
+        assert!(
+            (0x40_0000 + 176..0x40_0000 + length).contains(&u64_at(24)),
+            "the entry is in the code"
+        );
+        assert!(image.ends_with(b"meerkat-init\0"));
+    }
+
+    /// The init is executed from a memory file that holds exactly the
+    /// image and is sealed against any change, through a read-only
+    /// descriptor above the launch's floor.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn the_init_image_is_executed_from_a_sealed_read_only_memory_file() {
+        let init = sealed_init().unwrap();
+        let descriptor = init.as_raw_fd();
+        assert!(descriptor >= LAUNCH_DESCRIPTOR_FLOOR);
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
+        assert_ne!(
+            unsafe { libc::fcntl(descriptor, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let seals = unsafe { libc::fcntl(descriptor, libc::F_GET_SEALS) };
+        let required =
+            libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
+        assert_eq!(seals & required, required);
+        let mut contents = Vec::new();
+        File::from(init).read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, init_image());
+    }
+
+    extern "C" fn caught(_: libc::c_int) {}
+
+    /// The command's signal reset (`default_signal_actions`), in a forked
+    /// child: a caught standard signal, a caught real-time signal and an
+    /// ignored SIGPIPE end at their default actions; another ignored signal
+    /// stays ignored. glibc reads back what the raw system calls set, which
+    /// also checks the kernel's `struct sigaction` layout.
+    #[test]
+    fn default_signal_actions_reset_caught_signals_and_sigpipe_only() {
+        let caught_handler = caught as *const () as libc::sighandler_t;
+        // A test's own child, not a launch: signal actions are per process.
+        #[allow(clippy::disallowed_methods)]
+        let pid = unsafe { libc::fork() };
+        assert_ne!(pid, -1);
+        if pid == 0 {
+            // The child allocates nothing and cannot panic; its exit code
+            // names the step that failed.
+            let code = unsafe {
+                let handler = |number: libc::c_int| {
+                    let mut current: libc::sigaction = std::mem::zeroed();
+                    libc::sigaction(number, std::ptr::null(), &raw mut current);
+                    current.sa_sigaction
+                };
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = caught_handler;
+                let realtime = libc::SIGRTMIN() + 5;
+                if libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()) != 0 {
+                    10
+                } else if libc::sigaction(realtime, &raw const action, std::ptr::null_mut()) != 0 {
+                    11
+                } else if libc::signal(libc::SIGPIPE, libc::SIG_IGN) == libc::SIG_ERR {
+                    12
+                } else if libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR {
+                    13
+                } else if handler(libc::SIGUSR1) != caught_handler {
+                    14
+                } else if default_signal_actions().is_err() {
+                    15
+                } else if handler(libc::SIGUSR1) != libc::SIG_DFL {
+                    20
+                } else if handler(realtime) != libc::SIG_DFL {
+                    21
+                } else if handler(libc::SIGPIPE) != libc::SIG_DFL {
+                    22
+                } else if handler(libc::SIGHUP) != libc::SIG_IGN {
+                    23
+                } else {
+                    0
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "{status:#x}");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "the child's failed step");
     }
 }

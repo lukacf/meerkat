@@ -8097,6 +8097,91 @@ comms = true
         assert!(bridge.state.lock().await.pending.is_empty());
     }
 
+    /// The host's error answer to `callback/build_agent` refuses the build
+    /// typed, on both build paths: structured data of Meta's own kind with
+    /// the host's reason, beside the message operators read. A callback that
+    /// never completed (its transport closed) stays the retryable tool
+    /// failure it was.
+    ///
+    /// RED before the builder typed the answer: the host's refusal was a
+    /// tool failure whose text carried it.
+    #[tokio::test(start_paused = true)]
+    async fn the_hosts_build_refusal_is_typed_on_both_build_paths() {
+        for taking_tools in [false, true] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
+            let builder = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let mut build = Box::pin(async {
+                if taking_tools {
+                    builder.build_agent_taking_tools(&mut req, event_tx).await
+                } else {
+                    builder.build_agent(&req, event_tx).await
+                }
+            });
+            assert!(futures::poll!(&mut build).is_pending());
+            let request: Value =
+                serde_json::from_str(&stdout_rx.recv().await.expect("callback request"))
+                    .expect("callback JSON");
+            builder
+                .bridge
+                .route_callback_response(json!({
+                    "id": request["id"], "error": {"message": "the host's gate refused the member"},
+                }))
+                .await;
+            let Err(error) = build.await else {
+                panic!("taking_tools={taking_tools}: the host's refusal fails the build");
+            };
+            let SessionError::FailedWithData { message, data } = &error else {
+                panic!("taking_tools={taking_tools}: the refusal is typed: {error:?}");
+            };
+            assert_eq!(data["kind"], "meta_host_rejected_build", "{data}");
+            assert_eq!(
+                data["reason"], "the host's gate refused the member",
+                "{data}"
+            );
+            assert!(
+                message.contains("the host's gate refused the member"),
+                "{message}"
+            );
+
+            let (stdout_tx, _stdout_rx) = mpsc::channel(1);
+            let closed = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            closed.bridge.close().await;
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let failed = if taking_tools {
+                closed.build_agent_taking_tools(&mut req, event_tx).await
+            } else {
+                closed.build_agent(&req, event_tx).await
+            };
+            let Err(error) = failed else {
+                panic!("taking_tools={taking_tools}: a closed transport fails the build");
+            };
+            assert!(
+                matches!(error, SessionError::Agent(_)),
+                "taking_tools={taking_tools}: a transport failure stays the tool failure: {error:?}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn callback_reliable_notification_reports_blocked_and_closed_stdout() {
         let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
@@ -12239,6 +12324,26 @@ fn gateway_shutdown_response_at_exit(
     })
 }
 
+/// How a callback round trip failed: the host answered it with an error, or
+/// it never completed (its transport closed, its response channel dropped,
+/// it timed out).
+#[derive(Debug)]
+enum CallbackFailure {
+    /// The host's own error answer, with its message.
+    HostAnswered(String),
+    /// The round trip did not complete.
+    Transport(String),
+}
+
+impl std::fmt::Display for CallbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostAnswered(message) => write!(f, "callback error: {message}"),
+            Self::Transport(detail) => f.write_str(detail),
+        }
+    }
+}
+
 impl StdioCallbackBridge {
     fn new(stdout_tx: mpsc::Sender<GatewayStdoutLine>) -> Self {
         Self {
@@ -12306,6 +12411,14 @@ impl StdioCallbackBridge {
 
     /// Send a callback request to Python and wait for the response.
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_typed(method, params)
+            .await
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::call`], telling the host's own error answer apart from a
+    /// callback that never completed.
+    async fn call_typed(&self, method: &str, params: Value) -> Result<Value, CallbackFailure> {
         // Admission and response share the existing provider callback window.
         let deadline = tokio::time::Instant::now() + PROVIDER_CALLBACK_TIMEOUT;
         let id = self
@@ -12317,7 +12430,9 @@ impl StdioCallbackBridge {
         {
             let mut state = self.state.lock().await;
             if state.closed {
-                return Err("callback transport closed".to_string());
+                return Err(CallbackFailure::Transport(
+                    "callback transport closed".to_string(),
+                ));
             }
             state.pending.insert(id_str.clone(), tx);
         }
@@ -12332,7 +12447,7 @@ impl StdioCallbackBridge {
             Ok(l) => l,
             Err(e) => {
                 self.state.lock().await.pending.remove(&id_str);
-                return Err(e.to_string());
+                return Err(CallbackFailure::Transport(e.to_string()));
             }
         };
         if let Err(error) = self
@@ -12340,31 +12455,33 @@ impl StdioCallbackBridge {
             .await
         {
             self.state.lock().await.pending.remove(&id_str);
-            return Err(error);
+            return Err(CallbackFailure::Transport(error));
         }
 
         // Wait for Python to respond (routed by the stdin multiplexer)
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(value)) => {
                 if let Some(error) = value.get("error") {
-                    Err(format!(
-                        "callback error: {}",
+                    Err(CallbackFailure::HostAnswered(
                         error
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown")
+                            .to_string(),
                     ))
                 } else {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 }
             }
-            Ok(Err(_)) => Err("callback response channel dropped".to_string()),
+            Ok(Err(_)) => Err(CallbackFailure::Transport(
+                "callback response channel dropped".to_string(),
+            )),
             Err(_) => {
                 self.state.lock().await.pending.remove(&id_str);
-                Err(format!(
+                Err(CallbackFailure::Transport(format!(
                     "callback timed out after {}s; execution outcome unknown",
                     PROVIDER_CALLBACK_TIMEOUT.as_secs()
-                ))
+                )))
             }
         }
     }
@@ -15339,7 +15456,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         // app_context flows from SpawnMemberSpec.context → build.app_context.
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        let callback_result = self.bridge.call("callback/build_agent", params).await;
+        let callback_result = self.bridge.call_typed("callback/build_agent", params).await;
 
         match callback_result {
             Ok(result) => {
@@ -15352,13 +15469,11 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .await?;
                 self.inner.build_agent(&modified_req, event_tx).await
             }
-            Err(err) => {
+            Err(failure) => {
                 // Propagate the error — before_create failure aborts session creation.
                 // This is an intentional breaking change from v0.5.x where failures
                 // were silently swallowed with a fallback to default build.
-                Err(SessionError::Agent(agent_tool_error(format!(
-                    "callback/build_agent failed: {err}"
-                ))))
+                Err(build_callback_failure(failure))
             }
         }
     }
@@ -15396,7 +15511,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
             .and_then(|build| build.external_tools.take());
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        match self.bridge.call("callback/build_agent", params).await {
+        match self.bridge.call_typed("callback/build_agent", params).await {
             Ok(result) => {
                 let mut modified_req = self
                     .answered_build_request(req, owned_tools, &result, &scope_id)
@@ -15405,10 +15520,30 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .build_agent_taking_tools(&mut modified_req, event_tx)
                     .await
             }
-            Err(err) => Err(SessionError::Agent(agent_tool_error(format!(
-                "callback/build_agent failed: {err}"
-            )))),
+            Err(failure) => Err(build_callback_failure(failure)),
         }
+    }
+}
+
+/// The session error a failed `callback/build_agent` round trip refuses the
+/// build with. The host's own error answer is its typed refusal of the
+/// build: structured data of Meta's kind
+/// ([`crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND`]) with the
+/// host's reason, beside the message operators read, which every surface
+/// classifies by the kind. A round trip that never completed stays the
+/// retryable tool failure.
+fn build_callback_failure(failure: CallbackFailure) -> SessionError {
+    match failure {
+        CallbackFailure::HostAnswered(reason) => SessionError::FailedWithData {
+            message: format!("callback/build_agent failed: callback error: {reason}"),
+            data: json!({
+                "kind": crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND,
+                "reason": reason,
+            }),
+        },
+        transport @ CallbackFailure::Transport(_) => SessionError::Agent(agent_tool_error(
+            format!("callback/build_agent failed: {transport}"),
+        )),
     }
 }
 
@@ -19102,23 +19237,20 @@ external_addressable = true
     } else {
         None
     };
-    // Each identity with a pending first-boot row or a rotation a crash
-    // interrupted waits for the roster pass's seat step: the mob
-    // materializes none of them at start, and refuses their wakes retryable
-    // until the seat step for each ends the mark.
-    let mut host_pending_seeded = Vec::new();
+    // Each identity with a pending first-boot row waits for the roster
+    // pass's declaration of it: the mob materializes none of them at start,
+    // and refuses their wakes retryable until the declaration that carries
+    // the row out ends the mark.
     let mob_spec = match (boot_roster.as_deref(), launch_mob_id.as_deref()) {
-        (Some(roster), Some(launch_mob_id)) => {
+        (Some(roster), Some(_)) => {
             let first_boot = persistent_state
                 .clone()
                 .map(crate::identity_first::first_boot_manifest::FirstBootLocation::StateDir);
             let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
                 first_boot.as_ref(),
-                Some((persistent_metadata.as_ref(), launch_mob_id)),
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec.with_host_pending_members(host_pending)
         }
         _ => mob_spec,
@@ -19691,9 +19823,6 @@ external_addressable = true
         member_build_wiring
             .bind(&irt, runtime.mob_runtime().session_service().cloned())
             .await;
-        // Every seat step ends the host-pending mark of each identity seeded
-        // before the mob build.
-        irt.seed_host_pending(std::mem::take(&mut host_pending_seeded));
 
         init_progress.enter(InitPhase::Roster);
         if shutdown_requested.load(Ordering::Acquire) {

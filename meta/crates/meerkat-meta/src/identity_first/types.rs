@@ -1524,7 +1524,7 @@ pub enum IdentityBootstrapState {
 }
 
 /// Where one identity's restore stands, published on the bootstrap status
-/// once the pass's seat step answers: every member of the pass settles
+/// once the pass's declaration answers: every member of the pass settles
 /// together, each with its own typed outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case")]
@@ -1600,13 +1600,12 @@ pub enum DeferredIdentityReason {
     /// Its first-boot manifest row starts it on a fresh session, replacing
     /// its live member.
     FirstBootFresh,
-    /// A member would be spawned onto its stored session, which Core holds
+    /// A member would be seated on its stored session, which Core holds
     /// and journals the member of: Core holds no live member for it (a
-    /// dormant or retired identity, or a first-boot `Resume` row), or its
-    /// live member is one Meta 0.9.3 spawned without the durable-identity
-    /// marker, which the roster pass respawns onto the same session. The
-    /// lowest precedence: an identity another reason also covers reports
-    /// that one.
+    /// retired identity, or a first-boot `Resume` row), or Core would
+    /// restamp its live member's runtime mode on that session. The lowest
+    /// precedence: an identity another reason also covers reports that
+    /// one.
     ResumeMember,
 }
 

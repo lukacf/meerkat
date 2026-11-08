@@ -60,9 +60,16 @@ esac
 
 mkdir -p "${install_dir}"
 bb_bin="${install_dir}/bb"
-if [[ -x "${bb_bin}" ]] && "${bb_bin}" version 2>/dev/null | grep -q "bb ${version}"; then
-  printf '%s\n' "${bb_bin}"
-  exit 0
+# Reuse an installed binary only when its bytes match the pinned digest. The
+# check reads the file and never runs it: `bb version` also starts Bazel, and
+# piping it into `grep -q` ended in SIGPIPE (exit 141), which pipefail turned
+# into a failed check and a fresh download on every run.
+if [[ -x "${bb_bin}" ]]; then
+  installed="$(shasum -a 256 "${bb_bin}" 2>/dev/null | awk '{print $1}')" || installed=""
+  if [[ "${installed}" == "${sha256}" ]]; then
+    printf '%s\n' "${bb_bin}"
+    exit 0
+  fi
 fi
 
 tmp="$(mktemp "${TMPDIR:-/tmp}/buildbuddy-cli.XXXXXX")"

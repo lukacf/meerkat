@@ -939,7 +939,7 @@ const CONFINEMENT_REFUSAL_MESSAGES = {
   unsupported_requirement: "required execution confinement is unsupported by this backend",
   backend_unavailable: "required execution confinement backend is unavailable",
   preparation_failed: "confined process preparation failed",
-  untrusted_configuration_source: "launch configuration comes from a source a confined process can write",
+  untrusted_configuration_source: "launch configuration comes from a source the host does not trust",
 } as const satisfies Record<ConfinementRefusal, string>;
 
 function parseHookFailureReason(raw: unknown): HookFailureReason {

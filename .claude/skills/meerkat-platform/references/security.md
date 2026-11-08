@@ -379,9 +379,11 @@ lists.
 
 `ConfinementRefusal` values (wire names): `invalid_requirement`,
 `invalid_launch`, `unsupported_requirement`, `backend_unavailable`,
-`preparation_failed`, `untrusted_configuration_source` (0.9.1: the launch is
-defined by a source a confined process can write). A refusal happens before
-any target code runs and is never retried unconfined.
+`preparation_failed`, `untrusted_configuration_source` (the launch is defined
+by a source the host does not trust: one a confined process can write
+(0.9.1), or a hook file whose content the host's hook source trust refused).
+A refusal happens before any target code runs and is never retried
+unconfined.
 
 - Shell: tool error `{"error":"confinement_refused","message":"...","data":{"refusal":"backend_unavailable"}}`
   for foreground, background and monitor launches. A command that starts and

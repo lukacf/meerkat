@@ -167,7 +167,10 @@ impl Realm {
             .await
             .expect("a live durable identity registers");
         }
-        identity_runtime.register(durable_spec("dormant")).await;
+        identity_runtime
+            .register(durable_spec("dormant"))
+            .await
+            .expect("the identity registers");
 
         let entry = RuntimeEntry {
             registration_id: uuid::Uuid::new_v4(),

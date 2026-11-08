@@ -2301,7 +2301,7 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "runtime/handle.rs",
-        &["pub async fn adopt_legacy_identity_entry("],
+        &["pub(super) async fn adopt_listed_legacy_member("],
         "the legacy adoption's custody guard",
     ),
     (

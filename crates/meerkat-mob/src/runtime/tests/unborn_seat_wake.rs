@@ -857,3 +857,33 @@ async fn a_member_whose_session_is_unborn_reads_an_empty_history() {
         .await
         .expect("the history of the created session reads");
 }
+
+/// A seat's first create that the session builder refuses with structured
+/// data (the build a fresh identity's first wake makes) keeps that data on
+/// the member's restore failure, on the first wake and on a later wake
+/// answered from the member's record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seats_first_create_refused_with_structured_data_keeps_it() {
+    let mob = SeatedMob::new("seat-first-create-refused-with-data").await;
+    assert!(mob.unborn(), "the seat built nothing");
+    mob.service
+        .set_create_session_failure_error(&mob.session, host_build_refusal)
+        .await;
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+    for wake in ["the first wake", "a later wake"] {
+        let error = tokio::time::timeout(STEP, mob.handle.ensure_member_live(&mob.identity))
+            .await
+            .expect("the wake answers")
+            .expect_err("the wake fails");
+        assert!(
+            matches!(error, MobError::MemberRestoreFailed { .. }),
+            "{wake}: {error:?}"
+        );
+        assert_eq!(
+            restore_failure_cause_data(&error),
+            expected,
+            "{wake}: the restore failure keeps the build's structured data"
+        );
+    }
+}

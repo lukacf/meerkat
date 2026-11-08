@@ -77,7 +77,10 @@ async fn a_member_embodied_after_the_freshness_read_refuses_the_held_pass() {
     let embodied_flag = Arc::clone(&embodied_outside);
     identity_runtime.set_held_after_freshness_hook(Box::new(move || {
         Box::pin(async move {
-            competitor.register(competing_spec).await;
+            competitor
+                .register(competing_spec)
+                .await
+                .expect("the identity registers");
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
                 competitor.materialize(&competing_identity),

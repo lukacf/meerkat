@@ -75,6 +75,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }

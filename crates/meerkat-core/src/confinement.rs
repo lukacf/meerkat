@@ -224,11 +224,13 @@ pub enum ConfinementRefusal {
     BackendUnavailable,
     #[error("confined process preparation failed")]
     PreparationFailed,
-    // The launch is defined by a configuration source that a confined
-    // process can write, so the host does not run it: it is refused before
-    // its definition is expanded, authorized, connected or spawned. (A plain
-    // comment: a documented variant would split the schema's string enum.)
-    #[error("launch configuration comes from a source a confined process can write")]
+    // The launch is defined by a configuration source the host does not
+    // trust (a confined process can write it, or the host's hook source
+    // trust refused the content the build read), so the host does not run
+    // it: it is refused before its definition is expanded, authorized,
+    // connected or spawned. (A plain comment: a documented variant would
+    // split the schema's string enum.)
+    #[error("launch configuration comes from a source the host does not trust")]
     UntrustedConfigurationSource,
 }
 

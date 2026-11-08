@@ -2157,7 +2157,8 @@ impl IdentityRuntime {
                 Ok(Some(binding)) if binding.is_live() && binding.session_id() == session.as_ref()
             );
             if goes_on {
-                self.hand_back_owed_compaction(&identity, generation).await;
+                self.hand_back_owed_compaction(&identity, generation, false)
+                    .await;
             }
         }
     }

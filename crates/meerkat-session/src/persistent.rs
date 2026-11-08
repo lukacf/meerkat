@@ -61157,5 +61157,47 @@ mod tests {
                 .await
                 .expect("a later wake prepares the session's resume");
         }
+
+        /// A materialization holds the session's recovery gate while it
+        /// makes the session live. The cold settle waits behind it,
+        /// finalizing and acknowledging nothing, and settles once the gate
+        /// is free.
+        #[tokio::test]
+        async fn the_cold_settle_waits_behind_a_held_recovery_gate() {
+            let (service, runtime_store, id, intent, finalizations) =
+                owed_whole_blob_session(false).await;
+            let runtime_id =
+                PersistentSessionService::<FinalizingBuilder>::runtime_id_for_session(&id);
+            let gate = service.recovery_gate_for_session(&id).await;
+            let held = gate.lock_owned().await;
+            let mut settle = Box::pin(service.settle_owed_compaction_projections(&id));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(500), &mut settle)
+                    .await
+                    .is_err(),
+                "the settle waits behind the held recovery gate"
+            );
+            assert_eq!(
+                finalizations.load(Ordering::SeqCst),
+                0,
+                "the waiting settle finalizes nothing"
+            );
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox"),
+                vec![intent],
+                "the outbox still owes the projection"
+            );
+            drop(held);
+            let settled = settle
+                .await
+                .expect("the settle answers once the gate is free");
+            assert!(
+                matches!(settled, crate::OwedCompactionSettlement::Settled { .. }),
+                "the settle finalizes the owed batch: {settled:?}"
+            );
+        }
     }
 }

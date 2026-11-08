@@ -1465,6 +1465,27 @@ class TestErrorEvent:
         assert r.context["effect"] == "exit_interview"
         assert r.is_resolution is False
 
+    def test_a_failed_compaction_harvest_does_not_say_it_is_not_run_again(self):
+        r = ErrorEvent.from_dict(
+            {
+                "category": "lifecycle_effect_failed",
+                "identity": "keeper",
+                "agent_runtime_id": "rt:keeper:2",
+                "session_id": "s-1",
+                "effect": "compaction_harvest",
+                "attempts": 1,
+                "error": "the harvest of the settled compaction batch failed (timed out); "
+                "a fallback harvest of the session's memory follows",
+            }
+        )
+        assert r.category == ErrorCategory.LIFECYCLE_EFFECT_FAILED
+        assert r.message == (
+            "the compaction_harvest of keeper (rt:keeper:2) failed after 1 attempts: "
+            "the harvest of the settled compaction batch failed (timed out); "
+            "a fallback harvest of the session's memory follows"
+        )
+        assert r.context["effect"] == "compaction_harvest"
+
     def test_lifecycle_projection_off_carries_its_detail(self):
         r = ErrorEvent.from_dict(
             {

@@ -955,6 +955,39 @@ fn an_uncertain_owner_still_releases_its_lease_at_close() {
     }
 }
 
+/// A revoke on an owner whose custody ended answers `Unavailable` for every
+/// caller, before the controller mutation custody is entered: a caller who
+/// could not revoke is not told `Denied`, and the configured root never
+/// reaches the controller custody.
+#[test]
+fn a_released_owner_refuses_every_revoke_before_the_controller_custody() {
+    struct NeverEntered;
+    impl ControllerGrantMutationCustody for NeverEntered {
+        fn with_unreferenced_controller_grant<T, E>(
+            &mut self,
+            _reference: &GrantLineageRef,
+            _mutate: impl FnOnce() -> Result<T, E>,
+        ) -> Result<Result<T, E>, ControllerCustodyRefusal> {
+            Err(ControllerCustodyRefusal::ControllerInUse)
+        }
+    }
+    let owner = durable(Arc::new(InMemoryGrantOwnerStore::new()));
+    let kept = issue(&owner, "kept");
+    owner
+        .release_custody()
+        .expect("the host's close releases custody");
+    assert_eq!(
+        owner.revoke(&who("stranger"), &kept, &mut NeverEntered),
+        Err(GrantRefusal::Unavailable),
+        "a caller who could not revoke learns only that the owner is unavailable"
+    );
+    assert_eq!(
+        owner.revoke(&who("root"), &kept, &mut NeverEntered),
+        Err(GrantRefusal::Unavailable),
+        "the configured root never enters the controller custody"
+    );
+}
+
 /// A conjunct window open far beyond the fixture clock.
 fn open() -> ChildGrantValidity {
     ChildGrantValidity {

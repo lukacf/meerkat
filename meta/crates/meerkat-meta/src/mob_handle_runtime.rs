@@ -2304,7 +2304,8 @@ struct AutoWireParentMobToolDispatcher {
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
     /// The member whose agent this surface serves: a member private to a
     /// person convenes no council, and a member hidden from it is checked
-    /// as a name no member holds. `None` for a surface built for no member.
+    /// and retired as a name no member holds. `None` for a surface built for
+    /// no member.
     caller: Option<MobToolCaller>,
 }
 
@@ -2429,9 +2430,9 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             ));
         }
         // A member private to a person the caller is not private to is
-        // checked as a name no member holds: nothing tells the caller it
-        // exists.
-        if call.name == "mob_check_member"
+        // checked and retired as a name no member holds: nothing tells the
+        // caller it exists, and nothing is done to it.
+        if matches!(call.name, "mob_check_member" | "mob_retire_member")
             && let Some(caller) = self.caller.as_ref()
         {
             let args = serde_json::from_str::<Value>(call.args.get()).map_err(|error| {
@@ -10883,6 +10884,9 @@ impl MobRuntime {
                 spec.private_owners.spawn_customizer(),
             ),
         );
+        // A member private to a person is known to no other member's own
+        // operator tools but those of the members private to the same person.
+        builder = builder.with_member_tool_audience(spec.private_owners.member_tool_audience());
         if let Some(hook) = spec.member_runtime_registration_hook.clone() {
             builder = builder.with_member_runtime_registration_hook(hook);
         }

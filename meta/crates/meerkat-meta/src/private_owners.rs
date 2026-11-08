@@ -541,6 +541,14 @@ impl PrivateOwners {
         })
     }
 
+    /// Who the members' own operator tools may know of
+    /// ([`meerkat_mob::MemberToolAudience`]): a member private to a person is
+    /// hidden from every member not private to that person, as far as this
+    /// record knows the members.
+    pub(crate) fn member_tool_audience(&self) -> Arc<dyn meerkat_mob::MemberToolAudience> {
+        Arc::new(self.clone())
+    }
+
     /// The Steward's source of the members private to a person in
     /// `handle`'s mob and the mobs its members created: every one this
     /// record knows, once the seed landed (until then the Steward dreams
@@ -680,6 +688,24 @@ impl crate::memory::steward::PrivateMemberSource for StewardPrivateMembers {
             );
         }
         Ok(self.owners.memory_owners().into_keys().collect())
+    }
+}
+
+/// [`PrivateOwners::member_tool_audience`].
+impl meerkat_mob::MemberToolAudience for PrivateOwners {
+    fn hides(
+        &self,
+        mob_id: &meerkat_mob::MobId,
+        caller: Option<&meerkat_mob::AgentIdentity>,
+        target: &meerkat_mob::AgentIdentity,
+    ) -> bool {
+        let Some(owner) = self.owner_of(mob_id.as_str(), target.as_str()) else {
+            return false;
+        };
+        caller
+            .and_then(|caller| self.owner_of(mob_id.as_str(), caller.as_str()))
+            .as_deref()
+            != Some(owner.as_str())
     }
 }
 

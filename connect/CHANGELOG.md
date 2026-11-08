@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- A reply, message or request that a member's governed work sends to another
+  member in the same process now runs under the sending work's requester.
+  Connect binds the receiving work with the sending member as its ingress
+  actor and every work of the sending work as a contributor, as Core 0.9.11
+  requires, and each operation of the receiving work is narrowed by the
+  sending work's current grants for that target. Host-triggered deliveries,
+  deliveries from members that run no governed work and deliveries over a
+  network are bound as before, under the receiving member's own standing
+  grants.
+
+- Connect refuses, before it records anything, a governed delivery it cannot
+  bind so: one whose sending work is in another realm or ingress domain, or
+  whose origin names another agent than the member that delivered it
+  (`origin_unverifiable`); one whose sending work has a host-policy or
+  service-mandate original (`sender_basis_unbounded`); one whose sending work
+  names more than 64 works (`contributor_bound_exceeded`). The delivery ends
+  rejected.
+
 ### Fixed
 
 - Service finalization reads its retained documents (the receipt, the MCP
@@ -12,6 +32,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   from a regular file of at most 1 MiB. A symbolic link, a FIFO or another
   special file at that path is now refused before any read, so finalization
   no longer waits on a FIFO that has no writer.
+
+### Upgrade notes
+
+- Downgrade: the source row of a governed peer delivery records the sending
+  work's requester, agent and works. A Connect without this change refuses to
+  open a source store that holds such a row. Rows written before the upgrade
+  are unchanged and read as before.
+
+### Known limitations
+
+- A member's work cannot answer a reply, message or request that another
+  member's governed work sent it in the same process. Each operation of the
+  work that such a delivery starts must also be allowed by the sending
+  work's grants, and a member's standing grants allow only replies to that
+  member's own sender and writes to its own Recorder. So the receiving work
+  runs its model, but Core refuses its replies, its other peer sends and its
+  Recorder writes. Work started by a message the host sends to a member is
+  not limited this way.
+
+- Only in-process deliveries carry the sending work. A delivery over a network
+  is bound under the receiving member's own standing grants.
 
 ## [0.9.10] - 2026-11-05
 

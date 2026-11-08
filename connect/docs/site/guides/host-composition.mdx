@@ -227,6 +227,28 @@ replay or incoming message content. This receiver path still awaits native
 validation. See the
 [current development status](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#native-collaboration-and-recorder-gap).
 
+When a member's governed work sends to another member in the same process (a
+reply, a message or a request), Core carries that work's origin with the
+delivery. Connect binds the receiving work under that work's requester, with
+the sending member as its ingress actor and the sending work as its
+contributors; the receiver's selected targets stay its own. Every operation of
+the receiving work is also narrowed by the sending work's current grants for
+that target, so the receiver's standing grants never widen it. Connect refuses
+such a delivery before it records anything when its origin names another
+realm, another ingress domain or another agent than the member that delivered
+it (`origin_unverifiable`), when an original of the sending work narrows
+nothing (`sender_basis_unbounded`), or when the sending work names more than
+64 works (`contributor_bound_exceeded`). A host-triggered delivery, one from a
+member that runs no governed work and one over a network carry no origin and
+keep the receiver's own standing selection.
+
+A member's work therefore cannot answer a delivery that another member's
+governed work sent it. Standing member grants allow only replies to the
+member's own sender and writes to its own Recorder, so the receiving work runs
+its model, but Core refuses its replies, its other peer sends and its Recorder
+writes. Work started by a message the host sends to a member is not limited
+this way.
+
 Member admission and standing grants do not declare peer topology. Select the
 intended peer relationship through the existing native topology owner before
 sending; that relationship alone grants no operation authority.

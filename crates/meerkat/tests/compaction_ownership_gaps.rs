@@ -1,20 +1,20 @@
-//! Compaction ownership gaps on the runtime-backed facade path.
+//! Compaction ownership gaps on the runtime-backed facade path, now closed.
 //!
 //! The runtime owns the compaction trigger, the transcript rewrite commit and
-//! the memory projection. These tests pin three places where a host cannot
-//! get what it needs from that ownership today:
+//! the memory projection. These tests pin what a host gets from that
+//! ownership in three places that were gaps:
 //!
 //! - the `CompactionCompleted` observation of a compaction whose durable
-//!   memory projection is finalized by a later actor never reaches a session
-//!   event stream;
-//! - a per-build `auto_compact_threshold_override` is not recorded with the
-//!   session, so the runtime's recovery lowering rebuilds the session without
-//!   it;
-//! - there is no typed request to compact a session now.
-//!
-//! Each gap is an `#[ignore]`d test stating the intended behaviour and, where
-//! today's behaviour is observable, a passing `today_` sibling pinning it. The
-//! siblings are deleted with the fix and the ignored tests un-ignored.
+//!   memory projection the runtime finalizes after the run reaches the
+//!   session's event stream after the run, also when the actor that ran it
+//!   is replaced before the session's next run;
+//! - a per-build `auto_compact_threshold_override` holds for the build that
+//!   names it and is not recorded with the session, a documented contract
+//!   (the session contracts reference, "Persistent mode"): the runtime's
+//!   recovery lowering rebuilds the session without it;
+//! - a host asks the runtime to compact a live session now, without a
+//!   rebuild and without changing its thresholds
+//!   (`MeerkatMachine::request_compaction`).
 //!
 //! Every "host lifetime" here is reconstructed inside one OS process and ends
 //! with `stand_down`, as in `cold_restart_resume_after_compaction.rs`.
@@ -588,8 +588,8 @@ mod tests {
         }
     }
 
-    /// INTENDED (missing API): a host asks the runtime to compact an idle
-    /// session now, without a rebuild and without lowering its threshold.
+    /// A host asks the runtime to compact an idle session now, without a
+    /// rebuild and without lowering its threshold.
     /// The test asserts each part of that contract:
     ///
     /// - order: the summary call is served before the next ordinary model
@@ -604,11 +604,9 @@ mod tests {
     ///   default policy still does not compact over
     ///   `TURNS_AFTER_RECOVERY` further turns, which is enough for
     ///   threshold 1 to compact again past `min_turns_between_compactions`
-    ///   (the control in `today_recovered_session_loses_its_compaction_threshold`
-    ///   shows it).
-    ///
-    /// There is no `today_` sibling: before `request_compaction` there was
-    /// nothing to call.
+    ///   (the control in
+    ///   `recovery_does_not_restore_a_per_build_compaction_threshold` shows
+    ///   it).
     #[tokio::test]
     async fn compact_now_compacts_before_the_next_model_call_without_a_rebuild() {
         let temp = tempfile::tempdir().expect("tempdir");

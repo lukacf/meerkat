@@ -2867,12 +2867,13 @@ impl SpiRealm {
     /// A load of `state`'s scope met a typed conflict: `conflicted`, the
     /// scope itself or a chunk it references, holds two batches at
     /// `version`. The scope is quarantined under its key, recorded with the
-    /// conflicted name: for its own conflict that name is its own, and it
-    /// leaves the baseline, as the open's listing would have left it out;
-    /// for a chunk's, the chunk's own entry is recorded too, and the scope
-    /// stays in the baseline, its head unchanged (its record names the
-    /// chunk, never itself). `state` caches the classification the machine
-    /// then holds. Answers the call's refusal.
+    /// conflicted name: for its own conflict that name is its own; for a
+    /// chunk's, the chunk's own entry is recorded too. The conflicted
+    /// incarnation, the scope's own or the chunk, is quarantined for its own
+    /// conflict, so it leaves the baseline, as the open's listing would have
+    /// left it out; a chunk's owner stays in it, its head unchanged (its
+    /// record names the chunk, never itself). `state` caches the
+    /// classification the machine then holds. Answers the call's refusal.
     fn quarantine_at_load(
         &self,
         state: &mut ScopeState,
@@ -2890,7 +2891,7 @@ impl SpiRealm {
             );
         }
         let recorded = self.record_quarantine(&key, &conflicted.name, version, BTreeSet::new());
-        if own && let Some(known) = lock(&self.known_heads).as_mut() {
+        if let Some(known) = lock(&self.known_heads).as_mut() {
             known.remove(&(conflicted.kind, conflicted.name.as_str().to_string()));
         }
         state.classification = lock(&self.writer_fence).classification(&key, state.name.as_ref());

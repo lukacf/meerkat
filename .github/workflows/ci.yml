@@ -1290,7 +1290,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1576,7 +1578,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
 
       - name: Confinement eligibility on this runner (evidence before and after)
         shell: bash
@@ -1696,7 +1700,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1814,7 +1820,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1927,7 +1935,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2021,7 +2031,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2144,7 +2156,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2260,7 +2274,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2351,7 +2367,9 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 

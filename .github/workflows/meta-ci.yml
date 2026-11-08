@@ -389,7 +389,9 @@ jobs:
           shared-key: ci-registry
           cache-targets: "false"
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
       # Meta's tests run on the 16 MiB thread stack its product line sets
       # (ci/products.json test_stack); the root's Cargo configuration gives 8.
       - name: Lib tests
@@ -448,7 +450,9 @@ jobs:
         run: ./scripts/repo-cargo build -p meerkat-meta --examples
       - name: Install nextest
         if: github.event_name == 'pull_request'
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
       - name: Bin tests and meta-extension-state's suite
         if: github.event_name == 'pull_request'
         working-directory: .
@@ -501,7 +505,9 @@ jobs:
           shared-key: ci-registry
           cache-targets: "false"
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
       - name: meta-store-conformance tests
         working-directory: .
         env:
@@ -582,7 +588,9 @@ jobs:
           shared-key: ci-registry
           cache-targets: "false"
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
       # One --test per pattern; read splits the list without expanding the
       # globs against the checkout.
       - name: Integration tests

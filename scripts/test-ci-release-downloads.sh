@@ -8,15 +8,23 @@
 #   failure (no token, no gh, three failed tries) exits non-zero with no
 #   partial file left and the reason on stderr, never the token;
 # - each caller (setup-tlc-ci's jar, setup-mold-ci's archive, every wasm-pack
-#   install) passes the job's own token, downloads its anonymous release URL
-#   as before only when that fails or there is no token, and unsets the token
-#   before anything else runs;
+#   install, setup-cargo-tool-ci's nextest and cargo-deny) passes the job's
+#   own token, downloads its anonymous release URL as before only when that
+#   fails or there is no token, and unsets the token before anything else
+#   runs;
 # - setup-tlc-ci checks the jar's sha256 whichever way it came, and a
 #   mismatch fails the step without trying the other way;
 # - setup-mold-ci unpacks mold into /usr/local and links the system's ld to
 #   it as rui314/setup-mold did, with the same wget command when it falls back;
+# - setup-cargo-tool-ci (run with the real tar, sha256sum and install on
+#   stand-in archives laid out like the releases) checks the archive's sha256
+#   before it unpacks anything, refuses a mismatch from either route without
+#   trying the other, and installs where taiki-e/install-action did:
+#   $CARGO_HOME/bin when the cargo on PATH is there, else
+#   $HOME/.install-action/bin, added to PATH;
 # - no run step of the CI workflows downloads a release URL without the API
-#   attempt first, and none uses rui314/setup-mold.
+#   attempt first, none uses rui314/setup-mold or taiki-e/install-action, and
+#   every setup-cargo-tool-ci step names a tool it installs.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,8 +42,21 @@ root, out = Path(sys.argv[1]), Path(sys.argv[2])
 sys.path.insert(0, str(root / "scripts"))
 import check_release_workflow_contract as contract
 
-WORKFLOWS = ["ci.yml", "meta-ci.yml", "cargo.yml", "nightly.yml", "mob-dense-topology.yml"]
-ACTIONS = ["./.github/actions/setup-tlc-ci", "./.github/actions/setup-mold-ci"]
+WORKFLOWS = [
+    "ci.yml",
+    "meta-ci.yml",
+    "cargo.yml",
+    "nightly.yml",
+    "mob-dense-topology.yml",
+    "published-crates-standalone.yml",
+]
+ACTIONS = [
+    "./.github/actions/setup-tlc-ci",
+    "./.github/actions/setup-mold-ci",
+    "./.github/actions/setup-cargo-tool-ci",
+    "./.github/actions/run-nextest-archive",
+]
+CARGO_TOOLS = {"nextest", "cargo-deny"}
 
 
 def step_named(action, name):
@@ -57,6 +78,12 @@ mold = step_named(mold_action, "Install mold")
 (out / "mold-version").write_text(mold.env.get("MOLD_VERSION", "") + "\n", encoding="utf-8")
 (out / "mold-token").write_text(mold.env.get("GH_TOKEN", "") + "\n", encoding="utf-8")
 
+tool_action = contract._local_action(ACTIONS[2], root)
+tool = step_named(tool_action, "Install the tool")
+(out / "cargo-tool.sh").write_text(tool.raw_run, encoding="utf-8")
+for key in ("NEXTEST_VERSION", "NEXTEST_SHA256", "CARGO_DENY_VERSION", "CARGO_DENY_SHA256", "GH_TOKEN", "TOOL"):
+    (out / f"cargo-tool-{key}").write_text(tool.env.get(key, "") + "\n", encoding="utf-8")
+
 
 def jobs_of(text):
     names, in_jobs = [], False
@@ -72,6 +99,7 @@ def jobs_of(text):
 
 problems = []
 wasm = 0
+tool_uses = 0
 steps_by_place = []
 for workflow in WORKFLOWS:
     text = (root / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
@@ -86,8 +114,16 @@ for uses in ACTIONS:
     steps_by_place.extend((uses[2:], step) for step in action.steps)
 
 for place, step in steps_by_place:
-    if "rui314/setup-mold" in step.fields.get("uses", ""):
+    uses = step.fields.get("uses", "")
+    if "rui314/setup-mold" in uses:
         problems.append(f"{place}: `{step.name}` installs mold through rui314/setup-mold")
+    if "taiki-e/install-action" in uses:
+        problems.append(f"{place}: `{step.name}` installs through taiki-e/install-action")
+    if uses == "./.github/actions/setup-cargo-tool-ci":
+        tool_uses += 1
+        named = step.nested("with").get("tool", "")
+        if named not in CARGO_TOOLS:
+            problems.append(f"{place}: `{step.name}` asks setup-cargo-tool-ci for `{named}`")
     # `run` holds a one-line value too; raw_run only a block scalar.
     if "/releases/download/" in step.run and "ci-release-asset-download" not in step.run:
         problems.append(f"{place}: `{step.name}` downloads a release URL with no API attempt first")
@@ -97,6 +133,7 @@ for place, step in steps_by_place:
         (out / f"wasm-{wasm}.place").write_text(place + "\n", encoding="utf-8")
         (out / f"wasm-{wasm}.token").write_text(step.env.get("GH_TOKEN", "") + "\n", encoding="utf-8")
 (out / "wasm-count").write_text(f"{wasm}\n", encoding="utf-8")
+(out / "cargo-tool-uses").write_text(f"{tool_uses}\n", encoding="utf-8")
 (out / "guard-problems").write_text("".join(f"{p}\n" for p in problems), encoding="utf-8")
 PY
 
@@ -137,7 +174,7 @@ printf '%s token=%s\n' "$*" "${GH_TOKEN:+set}" >> "$STUB_LOG_DIR/curl.log"
 out=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
-  if [[ "${args[i]}" == "--output" ]]; then out="${args[i + 1]}"; fi
+  if [[ "${args[i]}" == "--output" || "${args[i]}" == "-o" ]]; then out="${args[i + 1]}"; fi
 done
 case "$STUB_CURL_MODE" in
   serve) cp "$STUB_CURL_SERVE" "$out" ;;
@@ -513,19 +550,185 @@ for ((n = 1; n <= wasm_count; n++)); do
   check "wasm-pack ($place) no-token: the anonymous URL is" calls_are curl 1
 done
 
+# --- setup-cargo-tool-ci: Install the tool ----------------------------------
+# The real tar, sha256sum and install, on stand-in archives laid out like the
+# releases (cargo-nextest at the root, cargo-deny under its versioned
+# directory) whose binaries record how they ran; stubs for gh, curl and cargo.
+nextest_version="$(cat "$TEST_ROOT/cargo-tool-NEXTEST_VERSION")"
+deny_version="$(cat "$TEST_ROOT/cargo-tool-CARGO_DENY_VERSION")"
+nextest_asset="cargo-nextest-${nextest_version}-x86_64-unknown-linux-gnu.tar.gz"
+deny_asset="cargo-deny-${deny_version}-x86_64-unknown-linux-musl.tar.gz"
+deny_member="cargo-deny-${deny_version}-x86_64-unknown-linux-musl/cargo-deny"
+TOOL_STUBS="$TEST_ROOT/tool-stubs"
+mkdir -p "$TOOL_STUBS"
+cp "$STUB_BIN/gh" "$STUB_BIN/curl" "$STUB_BIN/sleep" "$TOOL_STUBS/"
+make_tool_archive() {
+  local label="$1" member="$2"
+  local src="$TEST_ROOT/tool-src-$label"
+  mkdir -p "$src/$(dirname "$member")"
+  cat > "$src/$member" <<'EOF'
+#!/usr/bin/env bash
+echo "$0 $* token=${GH_TOKEN:+set}" >> "$STUB_LOG_DIR/ran.log"
+EOF
+  printf 'echo "stand-in %s"\n' "$label" >> "$src/$member"
+  chmod +x "$src/$member"
+  if [[ "$member" == */* ]]; then printf 'readme\n' > "$src/${member%/*}/README.md"; fi
+  tar -czf "$TEST_ROOT/$label.tar.gz" -C "$src" "${member%%/*}"
+}
+make_tool_archive nextest cargo-nextest
+make_tool_archive nextest-tampered cargo-nextest
+make_tool_archive deny "$deny_member"
+make_tool_archive deny-tampered "$deny_member"
+nextest_sha="$(sha256sum "$TEST_ROOT/nextest.tar.gz" | cut -d' ' -f1)"
+deny_sha="$(sha256sum "$TEST_ROOT/deny.tar.gz" | cut -d' ' -f1)"
+
+# <label> <tool> <toolchain|cargo-home: where the cargo on PATH lives> [VAR=value...]
+tool_case() {
+  local label="$1" tool="$2" cargo_at="$3" dir cargo_dir
+  shift 3
+  dir="$TEST_ROOT/case-tool-$label"
+  if [[ "$cargo_at" == cargo-home ]]; then cargo_dir="$dir/cargo-home/bin"; else cargo_dir="$dir/toolchain/bin"; fi
+  mkdir -p "$cargo_dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$cargo_dir/cargo"
+  chmod +x "$cargo_dir/cargo"
+  run_case "tool-$label" "$TOOL_STUBS:$cargo_dir:$PATH" "$TEST_ROOT/cargo-tool.sh" \
+    GITHUB_ACTION_PATH="$REPO_ROOT/.github/actions/setup-cargo-tool-ci" RUNNER_OS=Linux RUNNER_ARCH=X64 \
+    CARGO_HOME="$dir/cargo-home" TOOL="$tool" \
+    NEXTEST_VERSION="$nextest_version" NEXTEST_SHA256="$nextest_sha" \
+    CARGO_DENY_VERSION="$deny_version" CARGO_DENY_SHA256="$deny_sha" "$@"
+}
+work_of() { printf '%s/runner-temp/setup-cargo-tool-ci/%s' "$case_dir" "$1"; }
+# The directory install-action used when the cargo on PATH is not in $CARGO_HOME/bin.
+action_bin() { printf '%s/home/.install-action/bin' "$case_dir"; }
+nextest_gh_args() {
+  log_is gh "release download cargo-nextest-${nextest_version} --repo nextest-rs/nextest --pattern ${nextest_asset} --output $(work_of nextest)/${nextest_asset} --clobber token=set"
+}
+nextest_curl_args() {
+  log_is curl "--proto =https --tlsv1.2 -fsSL --retry 10 -o $(work_of nextest)/${nextest_asset} https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${nextest_version}/${nextest_asset} token="
+}
+deny_gh_args() {
+  log_is gh "release download ${deny_version} --repo EmbarkStudios/cargo-deny --pattern ${deny_asset} --output $(work_of cargo-deny)/${deny_asset} --clobber token=set"
+}
+deny_curl_args() {
+  log_is curl "--proto =https --tlsv1.2 -fsSL --retry 10 -o $(work_of cargo-deny)/${deny_asset} https://github.com/EmbarkStudios/cargo-deny/releases/download/${deny_version}/${deny_asset} token="
+}
+installed_in() { [[ -x "$1/$2" ]] && cmp -s "$1/$2" "$TEST_ROOT/tool-src-$3/$4"; }
+path_is() { [[ "$(cat "$case_dir/github-path")" == "$1" ]]; }
+ran_version() { log_is ran "$1/$2 $3 --version token="; }
+nothing_unpacked() { [[ ! -e "$(work_of "$1")/$2" ]]; }
+no_tool_binary() { [[ ! -e "$(action_bin)/$1" && ! -e "$case_dir/cargo-home/bin/$1" ]]; }
+tool_installed() {
+  local label="$1" dir="$2" bin="$3" src="$4" member="$5"
+  check "$label: exit 0" exit_is 0
+  check "$label: the pinned archive's binary is installed in $(basename "$(dirname "$dir")")/$(basename "$dir")" installed_in "$dir" "$bin" "$src" "$member"
+  check "$label: it ran once, for its version, without the token" ran_version "$dir" "$bin" "${bin#cargo-}"
+  check "$label: nothing after the download saw the token" no_tool_saw_token
+  check "$label: the token is never printed" token_never_printed
+}
+tool_refused() {
+  local label="$1" tool="$2" member="$3" bin="$4"
+  check "$label: the step fails" exit_is_not 0
+  check "$label: on the sha256 check" says stdout ": FAILED"
+  check "$label: nothing was unpacked" nothing_unpacked "$tool" "$member"
+  check "$label: nothing was installed" no_tool_binary "$bin"
+  check "$label: nothing reaches PATH" log_is_empty_path
+  check "$label: no tool binary ran" not_called ran
+}
+
+tool_case nextest-api nextest toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/nextest.tar.gz" STUB_CURL_MODE=fail
+check "nextest api: the release comes through gh with the job token" nextest_gh_args
+check "nextest api: the anonymous URL is not tried" not_called curl
+tool_installed "nextest api" "$(action_bin)" cargo-nextest nextest cargo-nextest
+check "nextest api: install-action's directory reaches PATH" path_is "$(action_bin)"
+
+tool_case nextest-api-down nextest toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=fail STUB_CURL_MODE=serve STUB_CURL_SERVE="$TEST_ROOT/nextest.tar.gz"
+check "nextest api-down: gh is tried three times" calls_are gh 3
+check "nextest api-down: then install-action's anonymous curl, without the token" nextest_curl_args
+tool_installed "nextest api-down" "$(action_bin)" cargo-nextest nextest cargo-nextest
+
+tool_case nextest-no-token nextest toolchain \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/nextest.tar.gz" STUB_CURL_MODE=serve STUB_CURL_SERVE="$TEST_ROOT/nextest.tar.gz"
+check "nextest no-token: gh is not called" not_called gh
+check "nextest no-token: the anonymous URL is" nextest_curl_args
+tool_installed "nextest no-token" "$(action_bin)" cargo-nextest nextest cargo-nextest
+
+tool_case nextest-api-tampered nextest toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/nextest-tampered.tar.gz" \
+  STUB_CURL_MODE=serve STUB_CURL_SERVE="$TEST_ROOT/nextest.tar.gz"
+check "nextest api-tampered: the anonymous URL is not tried after a mismatch" not_called curl
+tool_refused "nextest api-tampered" nextest cargo-nextest cargo-nextest
+
+tool_case nextest-curl-tampered nextest toolchain \
+  STUB_CURL_MODE=serve STUB_CURL_SERVE="$TEST_ROOT/nextest-tampered.tar.gz"
+tool_refused "nextest curl-tampered" nextest cargo-nextest cargo-nextest
+
+tool_case nextest-both-down nextest toolchain GH_TOKEN="$TOKEN_VALUE" STUB_GH_MODE=fail STUB_CURL_MODE=fail
+check "nextest both-down: the step fails" exit_is_not 0
+check "nextest both-down: nothing was installed" no_tool_binary cargo-nextest
+check "nextest both-down: nothing reaches PATH" log_is_empty_path
+
+tool_case nextest-cargo-home nextest cargo-home GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/nextest.tar.gz"
+tool_installed "nextest cargo-home" "$case_dir/cargo-home/bin" cargo-nextest nextest cargo-nextest
+check "nextest cargo-home: \$CARGO_HOME/bin is left to PATH as it is" log_is_empty_path
+check "nextest cargo-home: install-action's own directory is not used" absent "$(action_bin)/cargo-nextest"
+
+tool_case deny-api cargo-deny toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/deny.tar.gz" STUB_CURL_MODE=fail
+check "cargo-deny api: the release comes through gh with the job token" deny_gh_args
+check "cargo-deny api: the anonymous URL is not tried" not_called curl
+tool_installed "cargo-deny api" "$(action_bin)" cargo-deny deny "$deny_member"
+check "cargo-deny api: install-action's directory reaches PATH" path_is "$(action_bin)"
+
+tool_case deny-api-down cargo-deny toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=fail STUB_CURL_MODE=serve STUB_CURL_SERVE="$TEST_ROOT/deny.tar.gz"
+check "cargo-deny api-down: then install-action's anonymous curl, without the token" deny_curl_args
+tool_installed "cargo-deny api-down" "$(action_bin)" cargo-deny deny "$deny_member"
+
+tool_case deny-api-tampered cargo-deny toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/deny-tampered.tar.gz" \
+  STUB_CURL_MODE=serve STUB_CURL_SERVE="$TEST_ROOT/deny.tar.gz"
+check "cargo-deny api-tampered: the anonymous URL is not tried after a mismatch" not_called curl
+tool_refused "cargo-deny api-tampered" cargo-deny "$deny_member" cargo-deny
+
+tool_case unknown-tool cargo-audit toolchain GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/nextest.tar.gz"
+check "unknown tool: the step fails" exit_is_not 0
+check "unknown tool: says which tools it installs" says stderr "installs nextest or cargo-deny, not 'cargo-audit'"
+check "unknown tool: gh is not called" not_called gh
+
+tool_case other-runner nextest toolchain RUNNER_OS=macOS RUNNER_ARCH=ARM64 GH_TOKEN="$TOKEN_VALUE" \
+  STUB_GH_MODE=serve STUB_GH_SERVE="$TEST_ROOT/nextest.tar.gz"
+check "other runner: the step fails" exit_is_not 0
+check "other runner: says it pins Linux x86_64 builds only" says stderr "pins Linux x86_64 builds only, not macOS/ARM64"
+check "other runner: gh is not called" not_called gh
+
 # --- the steps' own wiring ----------------------------------------------------
 case_dir="$TEST_ROOT/structure"
 tlc_token_is_the_jobs() { [[ "$(cat "$TEST_ROOT/tlc-token")" == "$JOB_TOKEN" ]]; }
 check "setup-tlc-ci's GH_TOKEN is the job's own token" tlc_token_is_the_jobs
 mold_token_is_the_jobs() { [[ "$(cat "$TEST_ROOT/mold-token")" == "$JOB_TOKEN" ]]; }
 check "setup-mold-ci's GH_TOKEN is the job's own token" mold_token_is_the_jobs
+tool_env_is() { [[ "$(cat "$TEST_ROOT/cargo-tool-$1")" =~ $2 ]]; }
+# shellcheck disable=SC2016 # the expressions as the action writes them
+check "setup-cargo-tool-ci's GH_TOKEN is the job's own token" tool_env_is GH_TOKEN '^\$\{\{ github\.token \}\}$'
+# shellcheck disable=SC2016
+check "setup-cargo-tool-ci's TOOL is its tool input" tool_env_is TOOL '^\$\{\{ inputs\.tool \}\}$'
+check "setup-cargo-tool-ci pins an exact nextest release" tool_env_is NEXTEST_VERSION '^[0-9]+\.[0-9]+\.[0-9]+$'
+check "setup-cargo-tool-ci pins nextest's sha256" tool_env_is NEXTEST_SHA256 '^[0-9a-f]{64}$'
+check "setup-cargo-tool-ci pins an exact cargo-deny release" tool_env_is CARGO_DENY_VERSION '^[0-9]+\.[0-9]+\.[0-9]+$'
+check "setup-cargo-tool-ci pins cargo-deny's sha256" tool_env_is CARGO_DENY_SHA256 '^[0-9a-f]{64}$'
+installs_through_tool_action() { (( $(cat "$TEST_ROOT/cargo-tool-uses") > 0 )); }
+check "the workflows install their cargo tools through setup-cargo-tool-ci" installs_through_tool_action
 no_guard_problems() {
   if [[ -s "$TEST_ROOT/guard-problems" ]]; then
     sed 's/^/    /' "$TEST_ROOT/guard-problems" >&2
     return 1
   fi
 }
-check "every CI release download tries the API first, and none uses rui314/setup-mold" no_guard_problems
+check "every CI release download tries the API first; none uses rui314/setup-mold or taiki-e/install-action" no_guard_problems
 
 if (( failures > 0 )); then
   printf '%d CI release download check(s) failed\n' "$failures" >&2

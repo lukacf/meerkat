@@ -362,7 +362,9 @@ jobs:
           shared-key: ci-nextest-unit-archive
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -456,7 +458,9 @@ jobs:
           shared-key: ci-nextest-integration-archives
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -588,7 +592,9 @@ jobs:
           shared-key: ci-int-${{ matrix.group }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -638,7 +644,9 @@ jobs:
           shared-key: ci-e2e
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1123,7 +1131,9 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@c95a8e71b2aa92ca779c9c822b9d41038c0fc503 # cargo-deny
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: cargo-deny
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 

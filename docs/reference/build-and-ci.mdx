@@ -491,21 +491,24 @@ graph.
   installed, a server that stops answering mid-job degrades a compile to a
   plain rustc run (`SCCACHE_IGNORE_SERVER_IO_ERROR`) instead of failing it.
 - The lanes fetch the mold linker (`.github/actions/setup-mold-ci`, in
-  place of `rui314/setup-mold`), the TLC jar (`setup-tlc-ci`) and wasm-pack
-  from their GitHub releases the same way: through the GitHub API with the
-  job's own token first (`scripts/ci-release-asset-download`; a fork's pull
-  request gets a read-only token, which is enough), and from the anonymous
-  release URL as before only when there is no token or that fails. The TLC
-  jar's sha256 check applies either way. A token sent to the anonymous URL
-  is not enough: on 2026-11-08 that host answered anonymous downloads with
-  504 for hours, also those an action sent with the job's token, while the
-  API's downloads kept working. Downloads inside third-party actions stay
-  on that URL, since no input of theirs routes them through the API:
-  `taiki-e/install-action` (nextest and cargo-deny; its token reaches only
-  its cargo-binstall fallback), `bazelbuild/setup-bazelisk`,
-  `mozilla-actions/sccache-action`, and `actions/setup-python` and
-  `actions/setup-node` for a version the runner image does not cache
-  (Python 3.10 and Node.js 18 in Meta CI's `meta-checks`).
+  place of `rui314/setup-mold`), cargo-nextest and cargo-deny
+  (`setup-cargo-tool-ci`, in place of `taiki-e/install-action`: the releases
+  and sha256 values its manifest named, installed where it installed them),
+  the TLC jar (`setup-tlc-ci`) and wasm-pack from their GitHub releases the
+  same way: through the GitHub API with the job's own token first
+  (`scripts/ci-release-asset-download`; a fork's pull request gets a
+  read-only token, which is enough), and from the anonymous release URL as
+  before only when there is no token or that fails. The TLC jar, nextest and
+  cargo-deny are checked against their pinned sha256 either way, before
+  anything is unpacked or installed; mold and wasm-pack pin a release, as
+  before, but no checksum. A token sent to the
+  anonymous URL is not enough: on 2026-11-08 that host answered anonymous
+  downloads with 504 for hours, also those an action sent with the job's
+  token, while the API's downloads kept working.
+- `actions/setup-python` and `actions/setup-node` (for a version the runner
+  image does not cache), `bazelbuild/setup-bazelisk` and
+  `mozilla-actions/sccache-action` still download from the anonymous
+  release URL: no input of theirs routes the download through the API.
 - A release job whose checkout can be an older tag runs its setup action
   from `.release-tooling`, a sparse checkout of the workflow's own commit,
   but a local action that action calls in turn (`uses: ./.github/actions/...`)

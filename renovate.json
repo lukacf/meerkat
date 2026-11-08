@@ -37,6 +37,23 @@
       "depNameTemplate": "rui314/mold",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "The cargo-nextest release setup-cargo-tool-ci installs (its release tags are cargo-nextest-<version>), whose pinned NEXTEST_SHA256 an update must change too: the install fails until it matches.",
+      "managerFilePatterns": ["/^\\.github/actions/setup-cargo-tool-ci/action\\.yml$/"],
+      "matchStrings": ["NEXTEST_VERSION: \"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\""],
+      "depNameTemplate": "nextest-rs/nextest",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^cargo-nextest-(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "The cargo-deny release setup-cargo-tool-ci installs, whose pinned CARGO_DENY_SHA256 an update must change too: the install fails until it matches.",
+      "managerFilePatterns": ["/^\\.github/actions/setup-cargo-tool-ci/action\\.yml$/"],
+      "matchStrings": ["CARGO_DENY_VERSION: \"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\""],
+      "depNameTemplate": "EmbarkStudios/cargo-deny",
+      "datasourceTemplate": "github-releases"
     }
   ],
   "packageRules": [
@@ -59,7 +76,7 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "What the customManagers above pin (container digests, the sccache and mold releases) builds CI and the release: proposed a week after its release, in a group of its own, and never automerged.",
+      "description": "What the customManagers above pin (container digests, the sccache, mold, cargo-nextest and cargo-deny releases) builds CI and the release: proposed a week after its release, in a group of its own, and never automerged.",
       "matchManagers": ["custom.regex"],
       "groupName": "pinned images and tools",
       "groupSlug": "pinned-images-and-tools",

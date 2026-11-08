@@ -1845,7 +1845,7 @@ EdgesCandidate ==
 EdgesDeclare ==
     DeclareIdentityEntrySeatOwed(Id1, ApplyShape[1], ApplyShape[2], ApplyShape[3], ApplyShape[4],
                                  ApplyShape[5], ApplyShape[6], ApplyShape[7], ApplyShape[8],
-                                 ApplyShape[9], FALSE, FALSE)
+                                 ApplyShape[9], FALSE, FALSE, FALSE, FALSE, 0)
 EdgesSeated == Seated(Id1) /\ Seated(Id2)
 EdgesNoEndBegun ==
     /\ identity_entry_removing = {}
@@ -2105,7 +2105,7 @@ AdoptionCandidate ==
 AdoptionDeclare ==
     DeclareIdentityEntrySeatOwed(Id1, ApplyShape[1], ApplyShape[2], ApplyShape[3], ApplyShape[4],
                                  ApplyShape[5], ApplyShape[6], ApplyShape[7], ApplyShape[8],
-                                 ApplyShape[9], FALSE, FALSE)
+                                 ApplyShape[9], FALSE, FALSE, FALSE, FALSE, 0)
 AdoptionBound == Id2 \in DOMAIN member_session_bindings
 AdoptionSeated == AdoptionBound /\ Seated(Id1)
 AdoptionNoneAdopted == Origin(Id1) # Some("Created") /\ Origin(Id2) = None
@@ -2340,7 +2340,7 @@ CycleCandidate ==
 CycleDeclare ==
     DeclareIdentityEntrySeatOwed(Id1, ApplyShape[1], ApplyShape[2], ApplyShape[3], ApplyShape[4],
                                  ApplyShape[5], ApplyShape[6], ApplyShape[7], ApplyShape[8],
-                                 ApplyShape[9], FALSE, FALSE)
+                                 ApplyShape[9], FALSE, FALSE, FALSE, FALSE, 0)
 CycleSeed ==
     /\ composition_authority = "Authoritative"
     /\ \/ Id2 \notin DOMAIN identity_to_runtime /\ A2Recover

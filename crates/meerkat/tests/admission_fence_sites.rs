@@ -146,6 +146,9 @@ const ACQUISITIONS: &[&str] = &[
     "AdmissionHold::try_acquire",
     "take_realm_fence",
     "take_realm_fence_now",
+    "acquire_fences",
+    "realm_removal_fence",
+    "copy_admission_fence",
 ];
 
 /// Every fence acquisition in shipped code, pinned to the function it sits
@@ -156,12 +159,37 @@ const ACQUISITIONS: &[&str] = &[
 /// An acquisition moved into another function (after a custody that function
 /// takes, say) fails the guard until it is listed there.
 const ACQUISITION_SITES: &[(&str, &str, &str, usize)] = &[
-    // The config runtime's own writes (set, patch, patch_entered), and the
-    // file store's public writes, which run through a runtime of their own.
+    // The config runtime's fences, through its helper: each of its own
+    // writes takes them first, before the document's custody (the file
+    // store's public writes run through a runtime of their own).
     (
         "crates/meerkat-core/src/config_runtime.rs",
         "acquire_fences",
         "AdmissionGuard::acquire",
+        1,
+    ),
+    (
+        "crates/meerkat-core/src/config_runtime.rs",
+        "set",
+        "acquire_fences",
+        1,
+    ),
+    (
+        "crates/meerkat-core/src/config_runtime.rs",
+        "patch",
+        "acquire_fences",
+        1,
+    ),
+    (
+        "crates/meerkat-core/src/config_runtime.rs",
+        "patch_with_warnings",
+        "acquire_fences",
+        1,
+    ),
+    (
+        "crates/meerkat-core/src/config_runtime.rs",
+        "patch_entered",
+        "acquire_fences",
         1,
     ),
     // The credential coordinator's entries (refresh and exclusive
@@ -262,19 +290,38 @@ const ACQUISITION_SITES: &[(&str, &str, &str, usize)] = &[
         "AdmissionGuard::acquire",
         1,
     ),
-    // Realm delete and prune, before the lease check: without waiting.
+    // Realm delete and prune, through their helper, first: before the
+    // lease check, without waiting.
     (
         "crates/meerkat-cli/src/main.rs",
         "realm_removal_fence",
         "AdmissionGuard::try_acquire",
         1,
     ),
-    // The storage-migrate split-brain archive, before each maintenance
-    // fence: without waiting.
+    (
+        "crates/meerkat-cli/src/main.rs",
+        "delete_realm",
+        "realm_removal_fence",
+        1,
+    ),
+    (
+        "crates/meerkat-cli/src/main.rs",
+        "prune_realms_inner",
+        "realm_removal_fence",
+        1,
+    ),
+    // The storage-migrate split-brain archive, through its helper: every
+    // copy's fence before each maintenance fence, without waiting.
     (
         "crates/meerkat-cli/src/storage_migrate.rs",
         "copy_admission_fence",
         "AdmissionGuard::try_acquire",
+        1,
+    ),
+    (
+        "crates/meerkat-cli/src/storage_migrate.rs",
+        "resolve_split_brain",
+        "copy_admission_fence",
         1,
     ),
 ];

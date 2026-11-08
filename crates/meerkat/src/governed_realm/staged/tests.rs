@@ -430,7 +430,7 @@ async fn a_held_fence_refuses_the_staged_grant_at_once_with_nothing_issued() {
         "{refused:?}"
     );
     assert!(
-        waited < Duration::from_millis(500),
+        waited < meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT / 2,
         "under the stage's custody the realm's fence is taken without waiting: {waited:?}"
     );
     assert_eq!(std::fs::read(&log).ok(), before, "nothing was appended");

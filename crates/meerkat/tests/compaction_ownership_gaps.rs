@@ -67,20 +67,35 @@ mod tests {
     /// Scripted model: an ordinary request answers `ok`; a compaction request
     /// answers with the user texts it summarizes, so the summary (and the
     /// memory record of the discarded history) carries recognizable text.
-    /// Counts the compaction requests it serves.
+    /// Counts the compaction requests it serves and records the kind of
+    /// every request in the order it is served.
     struct SummarizingClient {
         compaction_requests: AtomicUsize,
+        served: Mutex<Vec<RequestKind>>,
+    }
+
+    /// The kind of one model request the scripted client served.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RequestKind {
+        Compaction,
+        Ordinary,
     }
 
     impl SummarizingClient {
         fn new() -> Self {
             Self {
                 compaction_requests: AtomicUsize::new(0),
+                served: Mutex::new(Vec::new()),
             }
         }
 
         fn compactions(&self) -> usize {
             self.compaction_requests.load(Ordering::SeqCst)
+        }
+
+        /// Every request served so far, in order.
+        fn served(&self) -> Vec<RequestKind> {
+            self.served.lock().expect("served requests").clone()
         }
     }
 
@@ -91,7 +106,16 @@ mod tests {
         }
 
         fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
-            let text = if is_compaction_request(request) {
+            let compaction = is_compaction_request(request);
+            self.served
+                .lock()
+                .expect("served requests")
+                .push(if compaction {
+                    RequestKind::Compaction
+                } else {
+                    RequestKind::Ordinary
+                });
+            let text = if compaction {
                 self.compaction_requests.fetch_add(1, Ordering::SeqCst);
                 request
                     .messages
@@ -621,10 +645,26 @@ mod tests {
     }
 
     /// INTENDED (missing API): a host asks the runtime to compact an idle
-    /// session now, without a rebuild and without lowering its threshold;
-    /// the compaction (summary call, committed summary) happens before the
-    /// next ordinary model call. There is no `today_` sibling: today there is
-    /// nothing to call, which is what `request_compaction_now` returns.
+    /// session now, without a rebuild and without lowering its threshold.
+    /// The test asserts each part of that contract:
+    ///
+    /// - order: the summary call is served before the next ordinary model
+    ///   request (the served-request log after the call reads exactly
+    ///   `[Compaction, Ordinary]`), and the summary is committed;
+    /// - no rebuild: the runtime registration current before the call is
+    ///   still the current one afterwards and has not ended (a retire and
+    ///   re-materialize gives the session a new registration incarnation),
+    ///   and the event subscription opened before the call observes the
+    ///   following turn (a rebuilt actor publishes on a new stream);
+    /// - policy kept: the request is a one-shot force, so after it the
+    ///   default policy still does not compact over
+    ///   `TURNS_AFTER_RECOVERY` further turns, which is enough for
+    ///   threshold 1 to compact again past `min_turns_between_compactions`
+    ///   (the control in `today_recovered_session_loses_its_compaction_threshold`
+    ///   shows it).
+    ///
+    /// There is no `today_` sibling: today there is nothing to call, which is
+    /// what `request_compaction_now` returns.
     #[tokio::test]
     #[ignore = "no typed compact-now request (SessionService::compact_session / session/compact); see the PR"]
     async fn compact_now_compacts_before_the_next_model_call_without_a_rebuild() {
@@ -635,24 +675,70 @@ mod tests {
         let id = session.id().clone();
         // Default policy: the model-aware threshold never fires on these turns.
         host.materialize(session, create_request(None)).await;
+        let log = host.record_events(&id).await;
         host.run_prompt(&id, "first turn fact").await;
         host.run_prompt(&id, "second turn").await;
+        log.settle().await;
         assert_eq!(
             client.compactions(),
             0,
             "setup: the default policy does not compact these turns"
         );
+        let runs_completed =
+            |log: &EventLog| log.count(|event| matches!(event, AgentEvent::RunCompleted { .. }));
+        assert_eq!(
+            runs_completed(&log),
+            2,
+            "setup: the subscription observes the session's turns"
+        );
+        let registrations = host.adapter.current_session_registration_witnesses().await;
+        assert_eq!(
+            registrations.len(),
+            1,
+            "setup: the session has exactly one current runtime registration"
+        );
+        let registration = registrations[0].clone();
+        assert_eq!(registration.session_id(), &id);
+        let served_before = client.served().len();
 
         request_compaction_now(&host, &id)
             .await
             .expect("request a compaction of the idle session");
         host.run_prompt(&id, "turn after compact now").await;
+        log.settle().await;
+        assert_eq!(
+            client.served()[served_before..],
+            [RequestKind::Compaction, RequestKind::Ordinary],
+            "the requested compaction's summary call precedes the next ordinary model request"
+        );
+        assert_eq!(compaction_summaries(&host.authoritative(&id).await), 1);
+
+        assert!(
+            !registration.has_ended(),
+            "compact-now must not retire the session's runtime registration"
+        );
+        assert_eq!(
+            host.adapter.current_session_registration_witnesses().await,
+            vec![registration],
+            "compact-now must not re-materialize the session (same registration incarnation)"
+        );
+        assert_eq!(
+            runs_completed(&log),
+            3,
+            "the subscription opened before compact-now observes the next turn (same actor)"
+        );
+
+        for turn in 0..TURNS_AFTER_RECOVERY {
+            host.run_prompt(&id, &format!("turn {turn} after compact now"))
+                .await;
+        }
         assert_eq!(
             client.compactions(),
             1,
-            "the requested compaction runs before the next model call"
+            "compact-now is a one-shot force: the default policy still does not compact \
+             afterwards (served: {:?})",
+            client.served()
         );
-        assert_eq!(compaction_summaries(&host.authoritative(&id).await), 1);
         host.stand_down().await;
     }
 }

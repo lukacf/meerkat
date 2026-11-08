@@ -26084,32 +26084,9 @@ PrepareMemberInstructionDeliveryNotOwedStopped(agent_identity) ==
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
-PrepareMemberInstructionDeliveryPlacedRunning(agent_identity) ==
-    /\ phase = "Running"
-    /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = TRUE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_instruction_owed' = MapRemove(member_instruction_owed, agent_identity)
-    /\ member_instruction_blocked' = MapSet(member_instruction_blocked, agent_identity, "MemberHostUnsupported")
-    /\ UnchangedFrame_294738fabeaf94f9
-
-
-PrepareMemberInstructionDeliveryPlacedStopped(agent_identity) ==
-    /\ phase = "Stopped"
-    /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = TRUE)
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_instruction_owed' = MapRemove(member_instruction_owed, agent_identity)
-    /\ member_instruction_blocked' = MapSet(member_instruction_blocked, agent_identity, "MemberHostUnsupported")
-    /\ UnchangedFrame_294738fabeaf94f9
-
-
 PrepareMemberInstructionDeliveryUnbornRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -26119,7 +26096,6 @@ PrepareMemberInstructionDeliveryUnbornRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryUnbornStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = TRUE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
@@ -26129,7 +26105,6 @@ PrepareMemberInstructionDeliveryUnbornStopped(agent_identity) ==
 PrepareMemberInstructionDeliveryUnboundRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26141,7 +26116,6 @@ PrepareMemberInstructionDeliveryUnboundRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryUnboundStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26153,7 +26127,6 @@ PrepareMemberInstructionDeliveryUnboundStopped(agent_identity) ==
 PrepareMemberInstructionDeliveryRetiringRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
     /\ phase' = "Running"
@@ -26164,7 +26137,6 @@ PrepareMemberInstructionDeliveryRetiringRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryRetiringStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
     /\ phase' = "Stopped"
@@ -26175,7 +26147,6 @@ PrepareMemberInstructionDeliveryRetiringStopped(agent_identity) ==
 PrepareMemberInstructionDeliveryDeliverRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26188,7 +26159,6 @@ PrepareMemberInstructionDeliveryDeliverRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryDeliverStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26201,7 +26171,6 @@ PrepareMemberInstructionDeliveryDeliverStopped(agent_identity) ==
 PrepareMemberInstructionDeliverySpawningRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26214,7 +26183,6 @@ PrepareMemberInstructionDeliverySpawningRunning(agent_identity) ==
 PrepareMemberInstructionDeliverySpawningStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -28627,8 +28595,6 @@ Next ==
     \/ (phase = "Running") /\ \E generation \in 0..2 : RecoverOperatorInstructionGenerationHighwaterKept(generation)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryNotOwedRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryNotOwedStopped(agent_identity)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryPlacedRunning(agent_identity)
-    \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryPlacedStopped(agent_identity)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryUnbornRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryUnbornStopped(agent_identity)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryUnboundRunning(agent_identity)

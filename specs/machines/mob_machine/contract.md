@@ -19528,30 +19528,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `MemberInstructionDeliveryDeferred`
 - To: `Stopped`
 
-### `PrepareMemberInstructionDeliveryPlacedRunning`
-- From: `Running`
-- On: `PrepareMemberInstructionDelivery`(agent_identity)
-- Guards:
-  - `owed`
-  - `member_is_placed`
-- Emits: `MemberInstructionTargetBlocked`
-- To: `Running`
-
-### `PrepareMemberInstructionDeliveryPlacedStopped`
-- From: `Stopped`
-- On: `PrepareMemberInstructionDelivery`(agent_identity)
-- Guards:
-  - `owed`
-  - `member_is_placed`
-- Emits: `MemberInstructionTargetBlocked`
-- To: `Stopped`
-
 ### `PrepareMemberInstructionDeliveryUnbornRunning`
 - From: `Running`
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_unborn`
 - Emits: `MemberInstructionDeliveryDeferred`
 - To: `Running`
@@ -19561,7 +19542,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_unborn`
 - Emits: `MemberInstructionDeliveryDeferred`
 - To: `Stopped`
@@ -19571,7 +19551,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `session_unbound`
   - `member_not_retiring`
@@ -19583,7 +19562,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `session_unbound`
   - `member_not_retiring`
@@ -19595,7 +19573,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `member_retiring`
 - Emits: `MemberInstructionDeliveryDeferred`
@@ -19606,7 +19583,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `member_retiring`
 - Emits: `MemberInstructionDeliveryDeferred`
@@ -19617,7 +19593,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `session_bound`
   - `member_not_retiring`
@@ -19630,7 +19605,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `session_bound`
   - `member_not_retiring`
@@ -19643,7 +19617,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `session_bound`
   - `member_not_retiring`
@@ -19656,7 +19629,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `PrepareMemberInstructionDelivery`(agent_identity)
 - Guards:
   - `owed`
-  - `member_is_local`
   - `seat_session_born`
   - `session_bound`
   - `member_not_retiring`

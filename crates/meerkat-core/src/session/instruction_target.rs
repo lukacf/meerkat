@@ -279,6 +279,10 @@ pub enum InstructionSetErrorCode {
     DurabilityUnavailable,
     MobTerminal,
     MalformedInstructionHistory,
+    // A governed runtime admits a write only with prepared authorization,
+    // which this release does not mint for operator instructions: a retry
+    // without it is refused the same way.
+    PreparedAuthorizationRequired,
 }
 
 /// Why the recorded target or the session's entry rows cannot be read.
@@ -328,6 +332,14 @@ pub enum InstructionWriteError {
     SlotManagedByActivation { slot: InstructionSlot },
     #[error(transparent)]
     Malformed(#[from] InstructionStateError),
+    /// The runtime is governed: it admits an operator-instruction write only
+    /// with prepared authorization, which this release does not mint. The
+    /// refusal is final for the write; retrying it changes nothing.
+    #[error(
+        "operator instruction writes on a governed runtime need prepared authorization, which \
+         this release does not provide"
+    )]
+    PreparedAuthorizationRequired,
 }
 
 impl InstructionWriteError {
@@ -351,6 +363,9 @@ impl InstructionWriteError {
                 InstructionSetErrorCode::SlotManagedByActivation
             }
             Self::Malformed(_) => InstructionSetErrorCode::MalformedInstructionHistory,
+            Self::PreparedAuthorizationRequired => {
+                InstructionSetErrorCode::PreparedAuthorizationRequired
+            }
         }
     }
 }
@@ -415,7 +430,9 @@ pub struct InstructionTargetRecord {
     pub slots: Vec<InstructionTargetRecordSlot>,
 }
 
+/// What a mob's record did to the member session's target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionRecordDisposition {
     /// The snapshot replaced the target.
@@ -434,6 +451,7 @@ pub struct InstructionRecordReceipt {
 
 /// What a release by a member's mob did to the member session's target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionReleaseDisposition {
     /// The mob's target is now empty and unowned; the next fresh run start

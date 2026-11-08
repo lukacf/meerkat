@@ -27,7 +27,11 @@ import type {
   ForkNoticeTools,
   ForkToolsNotComparedReason,
   GeminiImageMetadata,
+  InstructionContentDigest,
+  InstructionEntryKind,
+  InstructionKey,
   InstructionKeyRef,
+  InstructionNamespace,
   InteractionId,
   InterruptedInputKind,
   InterruptedToolRunDisposition,
@@ -656,6 +660,42 @@ export interface DisputedTurnUsageAccountingIdentity {
   reported_model: string;
   reported_provider: Provider;
 }
+
+/**
+ * A slot's revision: at least 1, strictly increasing per slot within the
+ * owner that mints it.
+ */
+export type InstructionRevision = number;
+
+/**
+ * One slot of the active set an entry leaves in effect.
+ */
+export interface InstructionActiveRef {
+  body_bytes: number;
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+}
+
+/**
+ * One change a delta entry carries.
+ */
+export type InstructionChange = {
+  body_bytes: number;
+  change: "activate";
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  supersedes?: InstructionRevision | null;
+} | {
+  change: "revoke";
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  revokes: InstructionRevision;
+};
 
 /**
  * Typed reason an interaction stream was abandoned before normal terminal
@@ -1750,6 +1790,14 @@ export type AgentEvent = {
   results: BoundedToolResult[];
   run_id: RunId;
   type: "tool_results_bounded_for_request";
+} | {
+  active?: InstructionActiveRef[];
+  changes?: InstructionChange[];
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  run_id?: RunId | null;
+  session_id: SessionId;
+  type: "operator_instructions_applied";
 };
 
 /**

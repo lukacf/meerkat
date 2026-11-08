@@ -13,8 +13,10 @@
 
 use super::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use crate::error::AgentError;
+use crate::event::AgentEvent;
 use crate::lifecycle::RunId;
 use crate::session::RunStartInstructionApplication;
+use crate::types::Message;
 use crate::{
     InstructionLowering, InstructionRunStart, ModelProfileWitness, RunStartInstructionOutcome,
 };
@@ -24,6 +26,9 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct UnconcludedRunStartInstructions {
     application: RunStartInstructionApplication,
+    /// The observation of the entry, published once, when the run its run
+    /// start appended it for starts.
+    observation: Option<Box<AgentEvent>>,
     /// The run loop started the run: the one the entry names.
     run_started: bool,
     /// A run checkpoint of the session landed through its checkpointer (a
@@ -101,9 +106,13 @@ where
             })?;
         if matches!(outcome, RunStartInstructionOutcome::Applied { .. }) {
             self.tool_application_observations.invalidate();
+            let observation = application
+                .as_ref()
+                .and_then(|application| self.entry_observation(application.entry_index()));
             self.unconcluded_run_start_instructions = application.map(|application| {
                 Box::new(UnconcludedRunStartInstructions {
                     application,
+                    observation,
                     run_started: false,
                     committed: false,
                 })
@@ -154,10 +163,27 @@ where
     }
 
     /// The run loop started a run: the entry a run start applied names a
-    /// run that started, and its conclusion keeps it.
-    pub(super) fn note_operator_instruction_run_started(&mut self) {
-        if let Some(unconcluded) = self.unconcluded_run_start_instructions.as_mut() {
-            unconcluded.run_started = true;
+    /// run that started, and its conclusion keeps it. Answers the entry's
+    /// observation the first time, for the run loop to publish once it
+    /// published the run's start.
+    pub(super) fn note_operator_instruction_run_started(&mut self) -> Option<Box<AgentEvent>> {
+        let unconcluded = self.unconcluded_run_start_instructions.as_mut()?;
+        unconcluded.run_started = true;
+        unconcluded.observation.take()
+    }
+
+    /// The observation of the operator-instruction entry row at `index`
+    /// ([`AgentEvent::OperatorInstructionsApplied`]): an observation only;
+    /// the session's instruction read is the authority.
+    fn entry_observation(&self, index: usize) -> Option<Box<AgentEvent>> {
+        match self.session.messages().get(index) {
+            Some(Message::System(system)) => system.instruction_entry.as_ref().map(|entry| {
+                Box::new(AgentEvent::operator_instructions_applied(
+                    self.session.id().clone(),
+                    entry,
+                ))
+            }),
+            _ => None,
         }
     }
 

@@ -63,6 +63,7 @@ KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({
     "request_reasoning_lowered",
     "run_resumed",
     "tool_results_bounded_for_request",
+    "operator_instructions_applied",
 })
 
 

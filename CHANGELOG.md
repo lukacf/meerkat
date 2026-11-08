@@ -260,6 +260,67 @@ them.
   `SettleRetainedRunNotRetainedStopped` and `SettleRetainedRunInertDestroyed`.
   An exhaustive match needs their arms.
 
+- `meerkat-core`: `InstructionWriteError` gains the variant
+  `PreparedAuthorizationRequired`, and `InstructionSetErrorCode` gains
+  `PreparedAuthorizationRequired` (wire `prepared_authorization_required`),
+  each appended last. Both enums are exhaustive, so a match over either
+  needs the new arm. `SessionInstructionError::code` and
+  `OperatorInstructionError::code` answer the new code for it.
+
+- `meerkat-session`, `meerkat-mob` (behaviour; the semver gate cannot see
+  it): on a governed runtime (a runtime machine with a native work
+  authorization host) an operator-instruction write is refused and nothing
+  is written. `SessionServiceInstructionExt::set_session_instruction` on
+  `PersistentSessionService` answers
+  `SessionInstructionError::Refused(InstructionWriteError::PreparedAuthorizationRequired)`
+  where it recorded the write before, and `MobHandle::set_operator_instruction`
+  and `revoke_operator_instruction` answer
+  `OperatorInstructionError::Refused(InstructionWriteError::PreparedAuthorizationRequired)`
+  before anything is journaled. A governed runtime admits an
+  operator-instruction write only with prepared authorization, which this
+  release does not mint, so a retry is refused the same way. Plain System
+  context appends were already refused on a governed runtime.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
+  mob machine prepares a placed member's operator-instruction delivery as
+  it prepares a local member's (see Added). The arm that blocked every
+  placed member is gone, so the kernel `generated::mob::TransitionId` loses
+  `PrepareMemberInstructionDeliveryPlacedRunning` and
+  `PrepareMemberInstructionDeliveryPlacedStopped`, and the discriminant of
+  every `TransitionId::*` variant after them moves down by two.
+  `TransitionId` has no repr and (de)serializes by variant name, so only an
+  integer cast, or a match or a serialized value that names one of the two
+  variants, observes it.
+
+- `meerkat-runtime`: `SupervisorBridgeCommandKind` gains
+  `RecordMemberInstructionTarget` and `ReleaseMemberInstructionTarget`,
+  appended last, so no existing variant's implicit discriminant moves. The
+  enum is exhaustive, so a downstream exhaustive match needs the new arms,
+  or a wildcard arm.
+
+- `meerkat-contracts`: `BridgeMaterializePayload` gains
+  `instruction_target: Option<BridgeInstructionTarget>` (serde default; a
+  placed member born with its operator-instruction snapshot, see Added);
+  `meerkat-mob`: `runtime::host_materialize::MaterializeServingContext`
+  gains `instruction_target: Option<InstructionTargetRecord>`, and
+  `MaterializeServeError` gains `InstructionTargetRefused { code, detail }`.
+  Code that builds the structs with a struct literal sets the new field,
+  normally to `None`; an exhaustive match of `MaterializeServeError` needs
+  the new arm.
+
+- `meerkat-core`: `CompactionProjectionIntent` gains the public field
+  `instruction_snapshot` (`Option<InstructionEntryIdentity>`, serde default):
+  the operator-instruction snapshot a staged compaction's fold inserted,
+  published as `OperatorInstructionsApplied` when the runtime commits the
+  compaction. A struct literal needs the field (`instruction_snapshot:
+  None`). It takes no part in the intent's equality, which is now
+  implemented by hand over the other fields. Downgrade: 0.9.10 ignores the
+  field (the intent has no `deny_unknown_fields`; `Session::compaction_projection_intents`
+  and the runtime store's outbox decode it with serde's default), so a 0.9.10
+  process that commits a compaction a 0.9.11 process staged reports its
+  `CompactionCompleted` without the snapshot observation, and the two
+  versions' copies of an intent compare equal.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -577,6 +638,93 @@ them.
   through the store-wide scan, and the SQLite and in-memory stores answer it
   for the one runtime.
 
+- `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`, `meerkat-mob`:
+  operator instructions on JSON-RPC. `session/set_instruction`,
+  `session/revoke_instruction` and `session/instruction_status` write and
+  read a session's own operator instructions; `mob/set_instruction`,
+  `mob/revoke_instruction` and `mob/instruction_status` write and read a
+  mob's, for the members a target selects (`{"kind": "mob"}`, a profile or
+  one member). A write answers once it is durable; the status reads report
+  per slot what is recorded, the entry in effect and why a change is still
+  pending, and per member its residency and delivery, and never wake a
+  member. A refusal answers `INVALID_PARAMS` (a malformed instruction
+  history `INTERNAL_ERROR`) with its closed code in
+  `error.data.instruction_set_code` (`InstructionSetErrorData`). The wire
+  types are `MobSetInstructionParams`, `MobRevokeInstructionParams`,
+  `MobInstructionWriteResult`, `MobInstructionStatusParams`,
+  `MobInstructionStatusResult`, `SetSessionInstructionParams`,
+  `RevokeSessionInstructionParams`, `SessionInstructionWriteResult`,
+  `SessionInstructionStatusParams` and `SessionInstructionStatusResult`.
+  Dispositions, refusal codes, effects, entry kinds and state kinds are
+  closed; the advisory values (pending reason, block reason, residency,
+  lowering) are tolerant: a value a reader does not know reads as
+  `Unknown` with the value as it was sent. Rust: `MobMcpState::mob_set_instruction`,
+  `mob_revoke_instruction` and `mob_instruction_status`;
+  `SessionRuntime::set_session_instruction` and
+  `read_session_instructions`; `to_wire` on `OperatorInstructionTarget`,
+  `OperatorInstructionReceipt` and `OperatorInstructionStatusPage`.
+
+- Python and TypeScript SDKs: `set_session_instruction`,
+  `revoke_session_instruction`, `session_instruction_status`,
+  `set_mob_instruction`, `revoke_mob_instruction` and
+  `mob_instruction_status` (TypeScript `setSessionInstruction` and so on),
+  and `set_instruction`, `revoke_instruction` and `instruction_status` on
+  `Session` and `Mob`. The status reads keep an advisory value the SDK does
+  not know as `{"unknown": <the value>}` and fail closed on an unknown closed
+  value. `meerkat.errors.instruction_set_code(error)` and
+  `instructionSetCode(error)` read a refusal's closed code.
+
+- `meerkat-core`: `AgentEvent::OperatorInstructionsApplied` (wire
+  `operator_instructions_applied`), appended last. A session publishes it
+  for each operator-instruction entry it applies: a delta once the run whose
+  start appended it starts, a snapshot once the compaction that folded it
+  commits (a staged memory projection's when the runtime commits it, right
+  after its `CompactionCompleted`; a compaction rolled back before its
+  commit is never observed, and its entry sequence goes to the next entry).
+  It reports the instructions now in
+  effect for the live session, not durability: a restart before the entry is
+  durable applies the changes again and publishes the event again. It
+  carries the session, the entry sequence, the kind, the applying run, the
+  active set after the entry and a delta's changes. An observation only: the
+  status read is the authority. The Python, TypeScript and Web SDKs know the
+  event type and keep its payload whole.
+
+- `meerkat-contracts`, `meerkat-mob`: a placed member (one on another host)
+  receives its mob's operator instructions. The mob records the member's
+  snapshot in the member's session on its member host, and releases its
+  target there when the member retires and the host keeps the session,
+  over two new host-addressed supervisor bridge commands of protocol 7:
+  `RecordMemberInstructionTarget` (`BridgeRecordInstructionTargetPayload`,
+  fenced by the member's exact incarnation) and
+  `ReleaseMemberInstructionTarget` (`BridgeReleaseInstructionTargetPayload`,
+  served once no member holds the session), with the replies
+  `MemberInstructionTargetRecorded` and `MemberInstructionTargetReleased`
+  and the rejection cause `InstructionTargetRefused { code }`, which
+  carries the closed refusal code. The member host serves them through its
+  own session service, without waking the member and without holding up
+  its other bridge commands. A member host that does not serve them refuses
+  them before any effect (`unsupported_protocol_version` before protocol 7,
+  `unsupported` for a protocol 7 host from before them), and the mob blocks
+  the member `member_host_unsupported`: no `HostFeatures` probe is asked
+  first. `InstructionRecordDisposition` and `InstructionReleaseDisposition`
+  (meerkat-core) derive a JSON schema under the `schema` feature.
+
+- `meerkat-contracts`, `meerkat-mob`: a member placed while its mob has
+  operator instructions is born with its snapshot, as a local member is, so
+  its first turn (its initial message or kickoff) has the instructions. For
+  a spawn that mints the member's session (a `Fresh` launch) of a mob with
+  instructions, the controller asks the member host's features once, before
+  anything is recorded. A host that lists the new `instruction_target_birth`
+  feature (`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`) is sent the member's
+  snapshot on the protocol 7 `MaterializeMember`
+  (`BridgeMaterializePayload::instruction_target`; refused on a `Resume`
+  launch). It records the snapshot in the session it mints before anything
+  else, so the mob's delivery of that generation finds it recorded
+  (`already_recorded`). A governed member host does not list the feature and
+  refuses a carried snapshot `prepared_authorization_required` before any
+  effect. A snapshot that would not fit the bridge's frame together with the
+  materialize is not carried; the delivery takes it after the spawn.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -700,6 +848,10 @@ them.
   `DurableDecisionService::claim_executor`, the whole-store executor claim of
   0.9.10. It still excludes every claim of a kind and is excluded by them; an
   executor claims each kind it executes with `claim_executor_kind`.
+
+- Docs: instruction activations (`session/activate_instruction`) are
+  deprecated in favour of operator instructions (`session/set_instruction`).
+  The method keeps working.
 
 ### Fixed
 
@@ -1109,6 +1261,45 @@ them.
   realm is poisoned until it is reopened. A store that gives each acquire a
   server-side deadline below Core's acquire timeout
   (`SpiRealmConfig::renew_timeout`) avoids it.
+
+- `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`, Web SDK: operator
+  instructions have no REST route, no MCP tool and no Web SDK method. A
+  browser session keeps no durable session document, so every write would
+  be refused `durability_unavailable`.
+
+- `meerkat-session`, `meerkat-mob`: a governed runtime refuses every
+  operator-instruction write (`prepared_authorization_required`) until a
+  release mints prepared authorization for them. Records a mob journaled
+  before its runtime was composed governed are still delivered to its
+  members.
+
+- `meerkat-mob`: in a mob whose member hosts run different releases, a
+  placed member whose member host runs a release before 0.9.11 answers
+  `member_host_unsupported` (status `blocked`) until its host runs 0.9.11:
+  the host refuses the record before any effect and nothing is recorded,
+  and the member stays blocked until a write selects it again or it is
+  seated again after the upgrade. The status read does not read a placed
+  member's session on its member host: its delivery facts are the mob's,
+  and its `effective_read` is `unreadable`, with the member host named in
+  the reason.
+
+- `meerkat-mob`: a placed member on a governed member host (its runtime has
+  a native work authorization host) is blocked `member_host_unsupported`:
+  the host refuses the record `prepared_authorization_required` before
+  anything is written, since this release provides no prepared
+  authorization for instruction writes. A snapshot whose record would not
+  fit the supervisor bridge's frame (about 1 MiB with its envelope; the
+  mob's 1 MiB active budget can reach it) is not sent, and the placed
+  member is blocked `member_host_unsupported` until a write changes its
+  snapshot.
+
+- `meerkat-mob`: a member placed on a member host before 0.9.11, or on a
+  governed one, is not born with its snapshot. Its spawn-time first turn (an
+  initial message or an autonomous kickoff) runs without its mob's operator
+  instructions, and its delivery after the spawn then blocks it
+  `member_host_unsupported` (see above). A snapshot that does not fit the
+  bridge's frame together with the materialize is not carried either; on a
+  0.9.11 member host its delivery records it after the spawn.
 
 ## [0.9.10] - 2026-11-04
 

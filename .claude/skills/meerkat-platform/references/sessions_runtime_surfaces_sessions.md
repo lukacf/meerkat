@@ -273,21 +273,29 @@ settings before the turn, so REST can change build settings that RPC refuses.
   place, its content becomes the `[meerkat-retired-instruction-v1]` header
   (`status=superseded`), and the newest row of each key keeps its body. The
   1 MiB activation budget counts live bodies only.
-- Operator instructions (0.9.9, Rust API, no wire method): standing
+- Operator instructions (0.9.9 Rust API; since 0.9.11 also JSON-RPC
+  `session/set_instruction`, `session/revoke_instruction` and
+  `session/instruction_status`, and the Python and TypeScript SDKs): standing
   instructions by slot (namespace and key), revision and body.
   `SessionServiceInstructionExt::set_session_instruction` and
   `read_session_instructions` (the persistent service; the ephemeral one
   refuses `durability_unavailable`) record a session-owned write without
   waking anything; the pending changes apply at the session's next fresh run
   start as one System entry before the run's input, and a compaction folds
-  the entries into one snapshot. Limits: 64 slots, 256 KiB a body, 1 MiB of
+  the entries into one snapshot; each applied entry is published as an
+  `operator_instructions_applied` event (an observation; the status read is
+  the authority). Limits: 64 slots, 256 KiB a body, 1 MiB of
   Active bodies; a stale or conflicting revision is refused typed
-  (`InstructionSetErrorCode`). A model that lowers System rows only in its
+  (`InstructionSetErrorCode`, on the wire `error.data.instruction_set_code`).
+  A governed runtime refuses every write `prepared_authorization_required`.
+  A model that lowers System rows only in its
   leading prompt defers them (`leading_prefix_only`), and a backend whose
   wire carries one leading System row keeps them pending
   (`lowering_unavailable`). A mob member's session belongs to its mob
-  (`MobHandle::set_operator_instruction`), and its own host's writes are
-  refused `owned_by_mob`.
+  (`MobHandle::set_operator_instruction`, `mob/set_instruction`), and its own
+  host's writes are refused `owned_by_mob`. Instruction activations
+  (`session/activate_instruction`) are deprecated since 0.9.11 in favour of
+  operator instructions.
 - System-row prune (0.9.9, Rust API):
   `SessionServiceTranscriptEditExt::prune_system_rows` removes ordinary
   System rows a host names (each by its 0-based index and the `sha256:`

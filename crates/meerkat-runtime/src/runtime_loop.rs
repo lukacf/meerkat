@@ -10677,6 +10677,7 @@ mod tests {
             messages_after: 1,
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         };
         session
             .add_compaction_projection_intent(intent.clone())

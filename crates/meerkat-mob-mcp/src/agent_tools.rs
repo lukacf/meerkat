@@ -8948,6 +8948,44 @@ mod tests {
         }
     }
 
+    /// Operator instructions are host verbs (JSON-RPC and the Rust handle):
+    /// no agent mob tool, in any surface form, and no tool of the public mob
+    /// MCP surface sets, revokes or reads them.
+    #[test]
+    fn mob_instruction_verbs_are_absent_from_agent_tool_catalogs() {
+        let mut names = Vec::new();
+        for (store, snapshots, packs) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            names.extend(
+                build_tool_defs_with_profile_support(store, snapshots, packs)
+                    .iter()
+                    .map(|def| def.name.to_string()),
+            );
+        }
+        names.extend(
+            meerkat_mob::AGENT_MOB_TOOL_NAMES
+                .iter()
+                .map(|name| (*name).to_string()),
+        );
+        names.extend(
+            crate::public_mcp::public_tools_list()
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                .map(str::to_string),
+        );
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(
+                !name.contains("instruction"),
+                "tool '{name}' reaches operator instructions, which are host verbs"
+            );
+        }
+    }
+
     #[test]
     fn test_profile_tools_present_when_store_available() {
         let defs = build_tool_defs_with_profile_support(true, false, false);

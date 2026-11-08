@@ -855,8 +855,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverOperatorInstructionGenerationHighwaterKept",
             "PrepareMemberInstructionDeliveryNotOwedRunning",
             "PrepareMemberInstructionDeliveryNotOwedStopped",
-            "PrepareMemberInstructionDeliveryPlacedRunning",
-            "PrepareMemberInstructionDeliveryPlacedStopped",
             "PrepareMemberInstructionDeliveryUnbornRunning",
             "PrepareMemberInstructionDeliveryUnbornStopped",
             "PrepareMemberInstructionDeliveryUnboundRunning",

@@ -347,14 +347,14 @@ fi
 # with a run current, an accept while the registration drains, an accept that
 # records no stop, a busy settle that records the stop, a resume that ignores
 # the stop, and a settlement of a stopped run as a refused resume. 10 steps
-# reach every witness and mutant. It runs in shard audits-r, the lightest;
-# not yet measured on a hosted runner.
+# reach every witness and mutant. It runs in shard audits-b, the lighter of
+# audits-b and audits-c; not yet measured on a hosted runner.
 retained_run_settle_audit="${workspace_root}/specs/machines/meerkat_machine/retained_run_settle_audit.sh"
 if [[ ! -x "${retained_run_settle_audit}" ]]; then
   echo "error: retained-run settle audit runner is missing from workspace runfiles: ${retained_run_settle_audit}" >&2
   exit 1
 fi
-if run_part audits-r; then
+if run_part audits-b; then
   echo "running bounded retained-run settle TLC audit"
   TLC_WORKERS="${tlc_workers}" "${retained_run_settle_audit}" "${RETAINED_RUN_SETTLE_AUDIT_MAX_STEPS:-10}" --mutants
 fi
@@ -622,12 +622,13 @@ fi
 # extension never opens a name and is taken only for a gated server, and the
 # gated stage stages only a gated server. It requires ten witnesses reached
 # and refuses nine seeded defects (--mutants). 5 steps reach every witness.
+# It runs in shard audits-s.
 tool_grant_gate_audit="${workspace_root}/specs/machines/meerkat_machine/tool_grant_gate_audit.sh"
 if [[ ! -x "${tool_grant_gate_audit}" ]]; then
   echo "error: tool grant gate audit runner is missing from workspace runfiles: ${tool_grant_gate_audit}" >&2
   exit 1
 fi
-if run_part audits-r; then
+if run_part audits-s; then
   echo "running bounded tool grant gate TLC audit"
   TLC_WORKERS="${tlc_workers}" "${tool_grant_gate_audit}" "${TOOL_GRANT_GATE_AUDIT_MAX_STEPS:-5}" --mutants
 fi
@@ -1623,7 +1624,11 @@ run_machine_verify() {
 # audits-a = live unregister cleanup 238-341, mob operator grant with
 # --mutants 158-240: 414-602 s;
 # audits-b = durable in-turn steer with its per-kind goal runs 348-610, live
-# delegation steer 34-51: 514-685 s;
+# delegation steer 34-51: 514-685 s, and the retained-run settle audit with
+# --mutants (0.9.11), from audits-r, which it joined as the lighter of
+# audits-b and audits-c: 114 s locally with 4 TLC workers, not yet measured
+# on a hosted runner, about 140-215 s at audits-r's 1.24-1.88x, so about
+# 655-900 s;
 # audits-c = materialization-rollback keep with --mutants 267-309, live
 # worker start after close 25-29, approval entered-step with --mutants
 # 20-24: 656-663 s with the run-start hold audit (242-293), which moved to
@@ -1693,23 +1698,25 @@ run_machine_verify() {
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s (200 s locally with 4 TLC workers), plus the retained-run settle
-# audit with --mutants (0.9.11, not yet measured on a hosted runner), its
-# adoption run (0.9.11; 114 s locally with 4 TLC workers, about 130-190 s at
-# the 1.13-1.66x its archive, unlist, placement and recovered runs took
-# hosted over their 202 s there), the scoped tool grant gate audit with
-# --mutants (0.9.11; its runs 144 s locally, not yet measured on a hosted
-# runner, about 180-270 s at that shard's 1.24-1.88x), the
-# GrantAuthorityMachine custody end audit with --mutants (nineteen runs over
-# the spend arms too, not yet measured hosted; 109 s locally with 4 TLC
-# workers, about 250 s at 2.3x) and the doors run with --mutants (52 s
-# locally with 4 TLC workers, up to about 200 s hosted): about 920-1285 s
-# without the settle audit, past the 720 s target below (to be rebalanced);
+# 248-375 s (200 s locally with 4 TLC workers), its adoption run (0.9.11;
+# 114 s locally with 4 TLC workers, about 130-190 s at the 1.13-1.66x its
+# archive, unlist, placement and recovered runs took hosted over their
+# 202 s there), the GrantAuthorityMachine custody end audit with
+# --mutants (nineteen runs over the spend arms too, not yet measured
+# hosted; 109 s locally with 4 TLC workers, about 250 s at 2.3x) and the
+# doors run with --mutants (52 s locally with 4 TLC workers, up to about
+# 200 s hosted): about 740-1015 s (475 s locally), past the 720 s target
+# below. The retained-run settle audit and the scoped tool grant gate
+# audit (0.9.11) moved to audits-b and audits-s;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s, plus the requester
 # batch audit with --mutants (0.9.11; 90 s locally with 4 workers at 14
-# steps, about 210 s at 2.3x), moved from audits-r: about 570-700 s;
+# steps, about 210 s at 2.3x), moved from audits-r: about 570-700 s, and
+# the scoped tool grant gate audit with --mutants (0.9.11), from audits-r:
+# 136 s locally with 4 TLC workers, not yet measured on a hosted runner,
+# about 170-255 s at audits-r's 1.24-1.88x, so about 740-955 s (394 s
+# locally), past the 720 s target below;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
 # the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
 # (eleven runs, not yet measured hosted; the empty-resume residency audit's

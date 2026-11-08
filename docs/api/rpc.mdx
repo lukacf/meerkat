@@ -2220,7 +2220,14 @@ with `data.kind = "no_decision_store"`.
   refused, never read as no filter.
 - **`decision/get`** reads one decision, and records its expiry when its
   deadline passed. `include_request: true` adds the held request. A row this
-  server cannot read answers `decision_unreadable`.
+  server cannot read answers `decision_unreadable`. An executed decision
+  carries `effect`, what its execution did as its kind names it: an executed
+  `grant.child` decision carries `{"grant_id": ...}`, the id of the
+  approval-carried grant its execution issued. A decision that is not
+  executed, and an executed decision of a kind that names no effect, carries
+  none. Every answer that carries a decision (`decision/list`,
+  `decision/present`, `decision/withdraw`) carries it alike. A later version
+  may add fields to `effect`: read it tolerantly.
 - **`decision/rendering`** returns the one canonical rendering of the held
   request, its renderer and subject digest, and its canonical parts for
   `max_part_bytes` (one part when absent): consecutive byte ranges on character

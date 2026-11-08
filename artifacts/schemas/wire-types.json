@@ -99164,6 +99164,17 @@
             "description": "`decision:` and 64 lowercase hex digits.",
             "type": "string"
           },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
           "ended_at_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -99309,6 +99320,19 @@
             "type": "string"
           }
         ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
@@ -99880,6 +99904,17 @@
             "description": "`decision:` and 64 lowercase hex digits.",
             "type": "string"
           },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
           "ended_at_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -100025,6 +100060,19 @@
             "type": "string"
           }
         ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
@@ -167249,6 +167297,19 @@
           }
         ]
       },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
         "oneOf": [
@@ -167671,6 +167732,17 @@
         "description": "`decision:` and 64 lowercase hex digits.",
         "type": "string"
       },
+      "effect": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionEffect"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+      },
       "ended_at_ms": {
         "format": "uint64",
         "minimum": 0,
@@ -167819,6 +167891,21 @@
       }
     ],
     "title": "WireDecisionAssurance"
+  },
+  "WireDecisionEffect": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+    "properties": {
+      "grant_id": {
+        "description": "The id of the grant the execution issued.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WireDecisionEffect",
+    "type": "object"
   },
   "WireDecisionErrorData": {
     "$defs": {

@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use super::seams::ApprovalOrigin;
 use super::{GRANT_CHILD_KIND, GRANT_CHILD_REQUEST_FORMAT};
+use crate::decision::effect::derived_id;
+
+// The approval-carried grant's id lives with the decision effect table,
+// which names an executed decision's grant by it on every build.
+pub use crate::decision::effect::approval_grant_id;
 
 /// The exact operation an access offer asks for: one tool of one MCP
 /// server, with its exact arguments, and the digest of that exact request
@@ -179,10 +184,6 @@ impl GrantChildRequest {
     }
 }
 
-fn derived_id(decision: &DecisionId, what: &str) -> Option<EvidenceId> {
-    EvidenceId::new(format!("{decision}/{what}")).ok()
-}
-
 /// The id of the approved work of `decision`: the original work of the work
 /// the executed decision admits, the only work its grant serves.
 #[must_use]
@@ -195,12 +196,6 @@ pub(crate) fn decision_of_approved_work(work: &OriginalWorkRef) -> Option<Decisi
     let decision = work.work.as_str().strip_suffix("/approved-work")?;
     let decision = DecisionId::new(decision).ok()?;
     (approved_work_id(&decision).as_ref() == Some(&work.work)).then_some(decision)
-}
-
-/// The id of the approval-carried grant `decision` issues.
-#[must_use]
-pub fn approval_grant_id(decision: &DecisionId) -> Option<EvidenceId> {
-    derived_id(decision, "approval-grant")
 }
 
 /// The id of the controller grant of the approval branch of `decision`.

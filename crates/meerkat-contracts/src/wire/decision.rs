@@ -235,6 +235,18 @@ pub struct WireDecisionOutcome {
     pub evidence: WireDecisionEvidence,
 }
 
+/// What an executed decision did, as its kind names it: each field names
+/// one thing its execution committed. An executed `grant.child` decision
+/// names the grant it issued. Read tolerantly: a field this version does
+/// not know is ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireDecisionEffect {
+    /// The id of the grant the execution issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+}
+
 /// One durable decision, as its row stands at the read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -287,6 +299,10 @@ pub struct WireDecision {
     /// The owner's typed refusal of an execution-refused decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_refusal: Option<String>,
+    /// What the executed decision did, as its kind names it; absent for a
+    /// decision that is not executed and for a kind that names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<WireDecisionEffect>,
     /// The row's revision: 1 at the hold, one more at each write.
     pub revision: u64,
     /// The held request, when the read asked for it (`include_request`).

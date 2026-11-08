@@ -1819,12 +1819,17 @@ export interface WireDecisionOutcome {
   tier: WireDecisionTier;
 }
 
+export interface WireDecisionEffect {
+  grant_id?: string | null;
+}
+
 export interface WireDecision {
   approver_id: string;
   created_at_ms: number;
   deadline_at_ms: number;
   decided_at_ms?: number | null;
   decision_id: string;
+  effect?: WireDecisionEffect | null;
   ended_at_ms?: number | null;
   execution_refusal?: string | null;
   first_presented_to_approver_at_ms?: number | null;

@@ -482,6 +482,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireCanonicalPart",
     "WirePresentationRecord",
     "WireDecisionOutcome",
+    "WireDecisionEffect",
     "WireDecision",
     "WireUnreadableDecision",
     "DecisionPresentationRequest",

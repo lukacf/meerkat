@@ -2276,6 +2276,15 @@ class WireDecisionOutcome:
 
 
 @dataclass
+class WireDecisionEffect:
+    """What an executed decision did, as its kind names it: each field names
+one thing its execution committed. An executed `grant.child` decision
+names the grant it issued. Read tolerantly: a field this version does
+not know is ignored."""
+    grant_id: Optional[str] = None
+
+
+@dataclass
 class WireDecision:
     """One durable decision, as its row stands at the read."""
     approver_id: str
@@ -2295,6 +2304,7 @@ class WireDecision:
     subject_digest: str
     subject_key: str
     decided_at_ms: Optional[int] = None
+    effect: Optional[WireDecisionEffect] = None
     ended_at_ms: Optional[int] = None
     execution_refusal: Optional[str] = None
     first_presented_to_approver_at_ms: Optional[int] = None

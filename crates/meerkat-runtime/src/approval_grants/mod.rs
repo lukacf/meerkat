@@ -69,8 +69,9 @@ pub use tools::DecisionsToolDispatcher;
 
 use crate::decision::{DecisionClock, DurableDecisionService, SystemDecisionClock};
 
-/// The decision kind of access offers.
-pub const GRANT_CHILD_KIND: &str = "grant.child";
+// The kind token lives with the decision effect table, which names an
+// executed decision's grant on every build.
+pub use crate::decision::effect::GRANT_CHILD_KIND;
 /// The renderer of access offers.
 pub const GRANT_CHILD_RENDERER: &str = "grant.render-v1";
 /// The format of an access offer's held request.

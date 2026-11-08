@@ -450,33 +450,16 @@ mod tests {
         (host, log)
     }
 
-    /// Recover the session as `recover` does, then run N+1.
-    async fn recover_and_run(
-        root: &Path,
-        client: &Arc<SummarizingClient>,
-        id: &SessionId,
-        durable: Session,
-    ) -> (Host, EventLog) {
-        let (host, log) = recover(root, client, id, durable).await;
-        host.run_prompt(id, "turn after recovery").await;
-        log.settle().await;
-        (host, log)
-    }
-
-    /// INTENDED (bug): a compaction's `CompactionCompleted` reaches a session
-    /// event stream even when the actor that ran it is replaced before the
-    /// session's next run. Run N compacts and the runtime finalizes the
-    /// memory projection at run N's boundary; the host then stands down and
-    /// the session is recovered on a new host, which runs N+1. The
-    /// completion must be observed while the session is idle, before N+1
-    /// starts: on run N's stream (before the actor goes) or on the idle
-    /// recovered actor's stream, ahead of its first `RunStarted`. A fix that
-    /// only requeues the event until the next turn (the mechanism
-    /// `today_compaction_completed_waits_for_the_next_run_on_a_live_actor`
-    /// pins) does not pass: the recovered stream is inspected before N+1 is
-    /// started.
+    /// A compaction's `CompactionCompleted` reaches a session event stream
+    /// even when the actor that ran it is replaced before the session's next
+    /// run. Run N compacts and the runtime finalizes the memory projection at
+    /// run N's boundary; the host then stands down and the session is
+    /// recovered on a new host, which runs N+1. The completion is observed
+    /// while the session is idle, before N+1 starts: on run N's stream
+    /// (before the actor goes) or on the idle recovered actor's stream, ahead
+    /// of its first `RunStarted`. An event held back until the next turn does
+    /// not pass: the recovered stream is inspected before N+1 is started.
     #[tokio::test]
-    #[ignore = "CompactionCompleted of a finalized durable projection is lost when the actor is replaced before its next run; see the PR"]
     async fn compaction_completed_is_observed_when_the_actor_is_recovered_before_the_next_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let client = Arc::new(SummarizingClient::new());
@@ -520,72 +503,6 @@ mod tests {
         host.stand_down().await;
     }
 
-    /// TODAY (delete with the fix): the completion of the compaction above is
-    /// never observed. Run N's stream ends with `RunCompleted` and no
-    /// `CompactionCompleted`; the recovered actor's stream (subscribed from
-    /// its earliest retained envelope) carries none either, while the
-    /// summary and the memory record exist.
-    #[tokio::test]
-    async fn today_compaction_completed_is_lost_when_the_actor_is_recovered_before_the_next_run() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let client = Arc::new(SummarizingClient::new());
-        let (host, id, run_n_log) = compact_during_run_n(temp.path(), &client).await;
-        assert_eq!(
-            run_n_log.completed(),
-            0,
-            "today run N's stream carries no CompactionCompleted after its RunCompleted"
-        );
-        let durable = host.authoritative(&id).await;
-        host.stand_down().await;
-        assert_eq!(run_n_log.completed(), 0, "standing down delivers nothing");
-
-        let (host, recovered_log) = recover_and_run(temp.path(), &client, &id, durable).await;
-        assert!(
-            recovered_log.count(|event| matches!(event, AgentEvent::RunCompleted { .. })) >= 1,
-            "setup: the recovered actor ran N+1 and its stream observed it"
-        );
-        assert_eq!(
-            recovered_log.completed(),
-            0,
-            "today the recovered actor's stream carries no CompactionCompleted"
-        );
-        assert_eq!(compaction_summaries(&host.authoritative(&id).await), 1);
-        assert_eq!(
-            compaction_memory_records(temp.path(), &id, "first turn fact").await,
-            1
-        );
-        host.stand_down().await;
-    }
-
-    /// TODAY (delete with the fix; it shows the mechanism of the loss above):
-    /// on a live actor the completion of run N's compaction is delivered only
-    /// when the next turn starts: after run N's `RunCompleted`, nothing until
-    /// the N+1 prompt, then the completion just ahead of N+1's `RunStarted`.
-    /// The runtime finalizes the
-    /// projection after run N's boundary commit and publishes the event on
-    /// the agent's default event channel, which the session task reads only
-    /// while a turn runs; the event waits in the channel for the next turn
-    /// and is dropped with the actor if there is none.
-    #[tokio::test]
-    async fn today_compaction_completed_waits_for_the_next_run_on_a_live_actor() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let client = Arc::new(SummarizingClient::new());
-        let (host, id, log) = compact_during_run_n(temp.path(), &client).await;
-        assert_eq!(log.completed(), 0, "nothing is delivered between runs");
-        host.run_prompt(&id, "third turn").await;
-        log.settle().await;
-        let (completed, run_starts) = log.completion_and_run_starts();
-        let completed = completed.expect("run N+1 delivers the deferred CompactionCompleted");
-        assert_eq!(run_starts.len(), 3, "setup: three runs observed");
-        assert!(
-            completed > run_starts[1] && completed < run_starts[2],
-            "today the completion of run N's compaction arrives with the next turn, ahead of \
-             run N+1's RunStarted (completion at {completed}, run starts at {run_starts:?})"
-        );
-        assert_eq!(client.compactions(), 1, "run N+1 does not compact again");
-        host.stand_down().await;
-    }
-
     /// Run run N (compacts at threshold 1), stand down, materialize the
     /// session on a fresh host with `request`, then run `turns` more turns.
     /// Returns the summary calls the recovered host made.
@@ -615,48 +532,15 @@ mod tests {
     /// it).
     const TURNS_AFTER_RECOVERY: usize = 5;
 
-    /// INTENDED (gap): the compaction policy a session was built with is
-    /// recorded with it, so the runtime's recovery lowering rebuilds it with
-    /// the same threshold and the recovered session keeps compacting at 1.
+    /// A per-build `auto_compact_threshold_override` is caller-scoped: it
+    /// holds for the build that names it and is not recorded with the
+    /// session (the session contracts reference, "Persistent mode"). So the
+    /// runtime's recovery lowering leaves it unset, and the recovered session
+    /// falls back to the model-aware default and does not compact in the same
+    /// turns; the same turns with the threshold supplied again by the host
+    /// do compact.
     #[tokio::test]
-    #[ignore = "auto_compact_threshold_override is not recorded with the session; recovery lowers it to None; see the PR"]
-    async fn recovered_session_keeps_its_compaction_threshold() {
-        let lowered = Arc::new(Mutex::new(None));
-        let observed = Arc::clone(&lowered);
-        let compactions = compactions_after_recovery(
-            move |session| {
-                let request = recovered_request(session);
-                *observed.lock().expect("lowered threshold") = Some(
-                    request
-                        .build
-                        .as_ref()
-                        .map(|build| build.auto_compact_threshold_override),
-                );
-                request
-            },
-            TURNS_AFTER_RECOVERY,
-        )
-        .await;
-        assert_eq!(
-            *lowered.lock().expect("lowered threshold"),
-            Some(Some(std::num::NonZeroU64::new(1))),
-            "the recovery lowering must restore exactly the recorded threshold 1, not another \
-             low value or a one-shot force"
-        );
-        assert!(
-            compactions >= 1,
-            "a session built with threshold 1 must still compact at 1 after recovery \
-             (summary calls after recovery: {compactions})"
-        );
-    }
-
-    /// TODAY (delete with the fix): the recovery lowering carries no
-    /// threshold (`auto_compact_threshold_override: None`), so the recovered
-    /// session falls back to the model-aware default and does not compact in
-    /// the same turns; the same turns with the threshold re-supplied by the
-    /// host (what a host has to do today) do compact.
-    #[tokio::test]
-    async fn today_recovered_session_loses_its_compaction_threshold() {
+    async fn recovery_does_not_restore_a_per_build_compaction_threshold() {
         let lowered = Arc::new(Mutex::new(None));
         let observed = Arc::clone(&lowered);
         let compactions = compactions_after_recovery(
@@ -676,18 +560,18 @@ mod tests {
         assert_eq!(
             *lowered.lock().expect("lowered threshold"),
             Some(Some(None)),
-            "today the recovery lowering sets auto_compact_threshold_override to None"
+            "the recovery lowering leaves the per-build auto_compact_threshold_override unset"
         );
         assert_eq!(
             compactions, 0,
-            "today the recovered session does not compact at its build threshold"
+            "without the override the recovered session does not compact at the build's threshold"
         );
 
         let resupplied =
             compactions_after_recovery(|_| create_request(Some(1)), TURNS_AFTER_RECOVERY).await;
         assert!(
             resupplied >= 1,
-            "control: the same turns compact when the host re-supplies threshold 1 \
+            "control: the same turns compact when the host supplies threshold 1 again \
              (summary calls: {resupplied})"
         );
     }

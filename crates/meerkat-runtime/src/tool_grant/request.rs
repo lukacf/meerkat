@@ -327,6 +327,16 @@ pub fn hold_tool_grant_request(
     Ok(decisions.hold(hold, true)?)
 }
 
+/// What an agent's ask was answered with: the request's decision and held
+/// body, and whether the call joined a request already open for its target
+/// instead of holding (or replaying) its own.
+#[derive(Debug, Clone)]
+pub(crate) struct AgentRequestAnswer {
+    pub(crate) decision: StoredDecision,
+    pub(crate) body: ToolGrantIssueBody,
+    pub(crate) joined: bool,
+}
+
 /// Hold an agent's grant request as [`hold_tool_grant_request`] holds one,
 /// keeping one request per target. A replayed call (its run and tool call)
 /// answers the request it held. A call for a target its subject already has
@@ -335,7 +345,8 @@ pub fn hold_tool_grant_request(
 /// past its deadline reads expired before the host records the expiry, and is
 /// not joined), and holds a new request after it ended. Only otherwise is a
 /// decision held. So an agent that asks again and again leaves one request
-/// per target with its approver.
+/// per target with its approver. A joined request keeps its own duration,
+/// which can differ from the one the call asked.
 ///
 /// # Errors
 /// As [`hold_tool_grant_request`], and the decision owner's read failures.
@@ -345,13 +356,22 @@ pub(crate) fn hold_agent_tool_grant_request(
     max_lifetime_ms: u64,
     now_ms: u64,
     request: ToolGrantIssueRequest,
-) -> Result<StoredDecision, ToolGrantRequestError> {
+) -> Result<AgentRequestAnswer, ToolGrantRequestError> {
     let subject = request.subject.clone();
     let target = request.target.clone();
     let (decision_id, hold) = tool_grant_hold(policy, max_lifetime_ms, now_ms, request)?;
+    let held = |hold| -> Result<AgentRequestAnswer, ToolGrantRequestError> {
+        let decision = decisions.hold(hold, true)?;
+        let body = ToolGrantIssueBody::of(&decision)?;
+        Ok(AgentRequestAnswer {
+            decision,
+            body,
+            joined: false,
+        })
+    };
     match decisions.get(&decision_id) {
         // A replay holds again, which answers the decision as it stands.
-        Ok(_) => return Ok(decisions.hold(hold, true)?),
+        Ok(_) => return held(hold),
         Err(DecisionError::NotFound(_)) => {}
         Err(error) => return Err(error.into()),
     }
@@ -364,10 +384,14 @@ pub(crate) fn hold_agent_tool_grant_request(
             ) && body.target == target
                 && body.run_scope.is_none()
         });
-    if let Some((decision, _)) = open {
-        return Ok(decision);
+    if let Some((decision, body)) = open {
+        return Ok(AgentRequestAnswer {
+            decision,
+            body,
+            joined: true,
+        });
     }
-    Ok(decisions.hold(hold, true)?)
+    held(hold)
 }
 
 /// What holding `request` holds, once its target and duration are checked:

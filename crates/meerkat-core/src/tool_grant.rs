@@ -626,13 +626,23 @@ pub struct ToolGrantAgentRequest<'a> {
 
 /// An agent's grant request as its host holds it: the decision a person
 /// approves, the id the grant gets when it is issued, the decision's phase
-/// now (a replayed call answers the request as it stands) and its deadline.
+/// now and its deadline, how long the grant lasts once issued, and whether
+/// the call joined a request already open for its target. A replayed call
+/// answers the request it held, as it stands now; a call that joined a
+/// request answers that request while it is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolGrantRequestReceipt {
     pub decision_id: crate::approval::decision::DecisionId,
     pub grant_id: ToolGrantId,
     pub phase: crate::approval::decision::DecisionPhase,
     pub deadline_at_ms: u64,
+    /// How long the grant lasts from its issuance, in milliseconds: the
+    /// duration the request holds, which for a joined request is that
+    /// request's and can differ from the one the call asked.
+    pub duration_ms: u64,
+    /// Whether the call joined a request already open or approved for its
+    /// subject and target instead of holding its own.
+    pub joined: bool,
 }
 
 /// Why an agent's grant request was not held.

@@ -150,8 +150,8 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
     /// the runtime takes requests with: the requester its host names, the
     /// host policy's approver and deadline, the grant policy's maximum
     /// lifetime, keyed by the call's run and id. A call for a target the
-    /// subject has an open or approved window request for answers that
-    /// request.
+    /// subject has an open or approved window request for joins that
+    /// request, and the receipt says so with that request's duration.
     async fn request_grant(
         &self,
         request: ToolGrantAgentRequest<'_>,
@@ -163,7 +163,7 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             .service
             .now_ms()
             .map_err(|error| ToolGrantAgentRequestRefusal::Unavailable(error.to_string()))?;
-        let decision = hold_agent_tool_grant_request(
+        let answer = hold_agent_tool_grant_request(
             &host.decisions,
             &host.policy,
             self.service.policy().max_lifetime_ms(),
@@ -191,10 +191,12 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             other => ToolGrantAgentRequestRefusal::Unavailable(other.to_string()),
         })?;
         Ok(ToolGrantRequestReceipt {
-            grant_id: ToolGrantId::approved(&decision.decision_id),
-            phase: decision.state.phase,
-            deadline_at_ms: decision.descriptor.deadline_at_ms,
-            decision_id: decision.decision_id,
+            grant_id: ToolGrantId::approved(&answer.decision.decision_id),
+            phase: answer.decision.state.phase,
+            deadline_at_ms: answer.decision.descriptor.deadline_at_ms,
+            duration_ms: answer.body.duration_ms,
+            joined: answer.joined,
+            decision_id: answer.decision.decision_id,
         })
     }
 

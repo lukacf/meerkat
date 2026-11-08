@@ -6,10 +6,13 @@
 //! policy). The tool holds nothing itself. The session's grant seam asks its
 //! host to hold a durable decision ([`super::SessionToolGrants::request_grant`]),
 //! keyed by the call's run and id so a replayed call answers the request it
-//! held (a host may answer a call with the subject's pending request for the
-//! same target), and the call returns at once with the pending request.
-//! Nothing opens until a person approves it and the host issues the grant;
-//! the session is told when the request is decided.
+//! held, and the call returns at once with the pending request. A host may
+//! answer a call with its subject's request already open for the same target
+//! instead, which the answer says (`joined`, with that request's
+//! `duration_ms`): such a call answers that request while it is open, and
+//! holds a new one after it ends. Nothing opens until a person approves it
+//! and the host issues the grant; the session is told when the request is
+//! decided.
 //!
 //! Every grant-gated build mounts it beside its tools (the factory does): a
 //! host that takes no requests answers the call with a tool error. The tool
@@ -124,20 +127,33 @@ impl ToolGrantRequestDispatcher {
     }
 }
 
-/// What the agent reads back: the request as it stands now.
+/// What the agent reads back: the request as it stands now, how long its
+/// grant lasts once issued, and whether the call joined a request already
+/// open for the same target.
 fn answer(receipt: &ToolGrantRequestReceipt) -> serde_json::Value {
     let status = match receipt.phase {
         DecisionPhase::Open | DecisionPhase::Approved => "requested",
         DecisionPhase::Executed => "granted",
         _ => "declined",
     };
+    let mut note = String::from(
+        "A person decides this request. Nothing opens until the grant is issued; the session \
+         is told when the request is decided.",
+    );
+    if receipt.joined {
+        note.push_str(
+            " This call joined a request already open for the same target: the grant lasts \
+             that request's duration_ms, which can differ from the one asked.",
+        );
+    }
     serde_json::json!({
         "status": status,
         "request_id": receipt.decision_id.as_str(),
         "grant_id": receipt.grant_id.to_string(),
         "decide_by": format_unix_ms(receipt.deadline_at_ms),
-        "note": "A person decides this request. Nothing opens until the grant is issued; \
-                 the session is told when the request is decided.",
+        "duration_ms": receipt.duration_ms,
+        "joined": receipt.joined,
+        "note": note,
     })
 }
 

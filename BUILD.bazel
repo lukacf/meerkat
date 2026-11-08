@@ -867,6 +867,7 @@ test_suite(
         "//crates/meerkat-rest:rest_auth_endpoints_test",
         "//crates/meerkat-rest:rest_catalog_regression_test",
         "//crates/meerkat-rest:runtime_backed_ingress_test",
+        "//crates/meerkat-rpc:approval_notice_test",
         "//crates/meerkat-rpc:atif_export_contract_test",
         "//crates/meerkat-rpc:binary_fatal_error_display_test",
         "//crates/meerkat-rpc:binary_sigterm_mcp_attempt_sweep_test",

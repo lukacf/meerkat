@@ -1,0 +1,2072 @@
+#!/usr/bin/env python3
+"""Compose the combined I1-I13 model: the bind attempt (stage A), the generated source,
+offer and component lifetime owners, and the stage B send in the accepted order, in one module.
+
+Usage: generate-combined-composition GENERATED_ORIGINALS NEW_DIRECTORY
+Stage A is models/bind_attempt.tla, instanced byte-exact (the first-send write inventory
+and the service setup observation record, their marks, the partial-issuance and shared-parent
+states, the G3 witness). Stage B follows the accepted order (the stage A/B type map, sections 2
+and 3; Connect's stage B note, section 2): the offer owner is
+prepared first, the door's first-send writes are issued outside protection (looked up again on
+Duplicate), the preparation is sealed, the effect runner records the send intent (Offered with
+its outbox) under the publication writer then the store transaction, records the dispatch start
+in the owner, and only then calls Meta (a peer delivery: before its protected section). Meta's
+protected section binds purely (genuine refusals first, then not-now) and, on Bound, enters
+native admission through the entry fence in the same section; the effect runner records the
+answer through the owner after Meta returns. A not-now waits in Meta or in Core's peer waiter
+and binds again; Held and the peer deadline end only the caller's wait. Every fact that decides
+an owner transition is generated owner state (the preparation's process epoch, each dispatch
+with its epoch, a lost answer against its dispatch, the receipt's dispatch and kind, the
+final-absence evidence, the close's unresolved record); the owner decides, the shell feeds it.
+The peer door runs as Core's drain does: one peer bind per session at a time, the FIFO head
+first; the binder answers Core per outcome (Denied for a verdict only; NotReady for contention, a
+closed admission or a verdict over an ambiguous dispatch); durable deliveries keep Core's claim,
+and a record withdrawn for no verdict is prepared again on Core's re-offer; volatile and
+supervisor deliveries (no claim) end dropped past their deadline, their records kept for the
+sender's retry. Two offer slots of one source and two send tasks; the
+driver observes Core's outcome by the offer's own qualified key; one crash and restart;
+admission closure with the close's join, the close's unresolved record scoped to the closing
+process, and in the stop profiles the process's end after its close and the restart into a new
+component lifetime, whose re-drive and Core's re-offer dispatch the records the close recorded.
+The owner module headers are renamed for INSTANCE,
+their bodies stay exact (an owner mutant composes a copy with one guard conjunct removed). The
+rank table is read from the canonical export (lock_order/ranks.json). A bounded contract model,
+not the Rust code.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+ALL_DOORS = ['Find', 'Launch', 'FindNative', 'ClassInput', 'ClassNative', 'BatchSetup', 'ConfiguredSetup',
+             'SetupRequest', 'Console', 'Peer', 'Helper']
+ALL_INITIAL = ['First', 'Partial', 'Bound', 'Shared']
+OWN_INITIAL = ['First', 'Partial', 'Bound']
+BOTH = ['A', 'B']
+HELD_DOORS = ['Find', 'Launch']
+# Stage B environment dimensions a profile may enable. The full-environment bases take ALL_ENV;
+# the stop (the process ends after its close and restarts into a new component lifetime) runs in
+# profiles of its own.
+ALL_ENV = ['hold', 'revoke', 'session', 'srcclose', 'close', 'crash', 'drop', 'lost', 'corerefuse']
+ENV_TOKENS = ALL_ENV + ['stop']
+
+# The attempt model's own variables (stage A), renamed a_*; the rest are shared with B.
+A_OWN = ['attempt', 'effect', 'decided', 'wrote', 'nested', 'pc', 'step', 'after_store', 'bw', 'answer',
+         'outcome', 'offers', 'waited', 'notnow_seen', 'dup_refused', 'backstop', 'witness', 'silent',
+         'misplaced', 'firstw', 'ended', 'crashed']
+SHARED = ['stage', 'door', 'initial', 'issued', 'issue_count', 'delivery_record', 'gate', 'gate_moves']
+B_VARS = ['mode', 'sp', 'prep', 'jr', 'begun', 'native', 'core_refusals', 'lost_count', 'current_inc', 'auth_ok',
+          'meta_holder', 'pub_holder', 'conn_holder', 'store_pc', 'alive', 'epoch', 'scanned', 'joined',
+          'read_slot', 'raw_read', 'published_read', 'unavail_reads', 'dup_arts', 'prep_refused', 'drop_partial',
+          'held_site', 'entered_after_close', 'claimed', 'lost_reply_seen', 'crashed_offered', 'admitted_stale',
+          'cas_lost', 'replayed', 'close_waited_prep', 'dead_prep', 'a_held', 'refusals', 'life_cur', 'orphan_claim']
+ATTEMPT_FAULTS = ['drop-controller-mark', 'silent-blocking-writer', 'drop-callback-mark', 'drop-callback-leaf-mark',
+                  'drop-class-input-mark', 'drop-service-setup-mark', 'drop-service-observation-mark',
+                  'drop-first-binding-mark', 'drop-configured-setup-mark', 'drop-configured-setup-grant-mark',
+                  'drop-setup-target-mark', 'drop-setup-request-grant-mark', 'drop-native-root-mark',
+                  'drop-native-child-mark', 'drop-peer-operation-mark', 'drop-peer-operation-and-entry-note',
+                  'nested-fresh-attempt', 'peer-entry-unmarked', 'spawned-writer', 'early-decision', 'late-not-now',
+                  'duplicate-issue', 'notnow-after-failed-write', 'refused-waits']
+# The owner fields that decide its transitions, each with the value its I8 mutant writes
+# outside a generated transition and the owner phase in which it does (a forge mutant checks
+# only TypeOK and I8_OwnerFieldsByTransition: the forged value may break other invariants too).
+FORGE_FIELDS = {
+    'preparation_epoch': ('offer_preparation_epoch + 1', 'offer_phase = "Prepared"'),
+    'dispatch_count': ('offer_dispatch_count + 1', 'offer_phase = "Offered"'),
+    'dispatch_epochs': ('[x \\in {9} |-> 1]', 'offer_phase = "Offered"'),
+    'unresolved_dispatches': ('offer_unresolved_dispatches \\cup {9}', 'offer_phase = "Offered"'),
+    'last_dispatch_epoch': ('offer_last_dispatch_epoch + 1', 'offer_phase = "Offered"'),
+    'receipt_kind': ('IF offer_receipt_kind = "Found" THEN "Admitted" ELSE "Found"', 'offer_phase = "CoreObserved"'),
+    'receipt_dispatch': ('offer_receipt_dispatch + 1', 'offer_phase = "CoreObserved"'),
+    'receipt_epoch': ('offer_receipt_epoch + 1', 'offer_phase = "CoreObserved"'),
+    'absence_through': ('offer_absence_through + 1', 'offer_phase = "Offered"'),
+    'close_epoch': ('offer_close_epoch + 1', 'offer_phase = "Offered"'),
+    'withdrawal_cause': ('"PolicyDenied"', 'offer_phase = "Prepared"'),
+}
+
+
+def forge_fault(field):
+    """The I8 mutant of one owner field: forge-field-*, apart from the older forge-admission."""
+    return 'forge-field-' + field.replace('_', '-')
+
+
+FORGE_FAULTS = {forge_fault(field) for field in FORGE_FIELDS}
+# Owner mutants: the generated offer owner with exactly one guard conjunct of one transition
+# replaced (each must match once inside that transition's definition), composed instead of
+# the unchanged owner by a copy of the combined module that differs only in its INSTANCE lines.
+OWNER_MUTANTS = {
+    # The refusal settles while another recorded dispatch is open (in flight or ambiguous) or
+    # unresolved. (The guard's "none unresolved" conjunct is implied by this one: an unresolved
+    # dispatch stays recorded, so it is not mutated alone.)
+    'notadmitted-while-inflight': ('RetainCoreReceipt', '(Cardinality(DOMAIN dispatch_epochs) = 1)', 'TRUE'),
+    # The final absence is recorded before this process dispatched the record (its re-drive
+    # or Core's re-offer still owed).
+    'absence-without-redispatch': ('RecordFinalAbsence', '(last_dispatch_epoch = epoch)', 'TRUE'),
+    # The final absence is recorded while a dispatch of this process is open or unresolved.
+    'absence-in-process': ('RecordFinalAbsence', '\\A dispatch \\in DOMAIN dispatch_epochs :',
+                           '\\A dispatch \\in {} :'),
+    # The close's unresolved record blocks every later dispatch start, in every later process
+    # (the record is never driven again after a stop and restart).
+    'close-blocks-later-process': ('RecordDispatchStart', '(close_epoch < epoch)', '(close_epoch = 0)'),
+}
+# Actions present in Next but enabled only by a fault; no clean base takes them.
+FAULT_ONLY_ACTIONS = (['A_SpawnedWrite', 'B_StoreHook', 'B_ForgetAmbiguity']
+                      + ['B_Forge_' + field for field in FORGE_FIELDS])
+# The attempt model's own stage B actions: stage B here is the composition's own send.
+A_STAGE_B_ONLY = {'PrepareOutside', 'PeerWaiter', 'PeerWaitExpire'}
+PROC = [('p', 'Procs')]
+SLOT = [('i', 'Slots')]
+SLOT_PROC = [('i', 'Slots'), ('p', 'Procs')]
+
+
+def owner(root, directory, prefix, output, name):
+    raw = (root / directory / 'model.tla').read_bytes()
+    header = b'---- MODULE model ----\n'
+    if not raw.startswith(header):
+        raise ValueError('unexpected generated module header')
+    renamed = f'---- MODULE {name} ----\n'.encode() + raw[len(header):]
+    (output / (name + '.tla')).write_bytes(renamed)
+    text = raw.decode()
+    fields = re.search(r'^VARIABLES (.+)$', text, re.MULTILINE)[1].split(', ')
+    constants = re.search(r'^CONSTANTS (.+)$', text, re.MULTILINE)[1].split(', ')
+    config = (root / directory / 'ci.cfg').read_text()
+    invariants = config.split('INVARIANTS\n', 1)[1].split('CONSTRAINTS\n', 1)[0].split()
+    instance = (f'{prefix} == INSTANCE {name} WITH\n    '
+                + ',\n    '.join(f'{field} <- {prefix}_{field}' for field in fields))
+    provenance = {'generated_sha256': sha(raw), 'renamed_sha256': sha(renamed),
+                  'body_sha256': sha(raw[len(header):])}
+    return [f'{prefix}_{field}' for field in fields], fields, constants, invariants, instance, provenance
+
+
+def attempt_actions(text):
+    body = text.split('\nNext ==\n', 1)[1].split('\n\n', 1)[0]
+    actions = []
+    for line in body.splitlines():
+        name = line.strip().removeprefix('\\/ ').strip()
+        quantified = name.startswith('\\E ')
+        if quantified:
+            name = name.split(':', 1)[1].strip()
+        name = name.split('(', 1)[0]
+        if not name.isidentifier():
+            raise ValueError(f'unexpected Next disjunct: {line!r}')
+        actions.append((name, quantified))
+    return actions
+
+
+def held_rows():
+    rows = {}
+    for stage in BOTH:
+        for door in HELD_DOORS:
+            for site in ['P', 'A']:
+                for initial in OWN_INITIAL:
+                    rows[f'NotRowHeld_{stage}_{door}_{site}_{initial}'] = (
+                        f'~(stage = "{stage}" /\\ door = "{door}" /\\ initial = "{initial}" /\\ HeldAt = "{site}")')
+    return rows
+
+
+def build_model(root, output):
+    catalog = Path(__file__).resolve().parents[1]
+    attempt_source = catalog / 'models' / 'bind_attempt.tla'
+    attempt = attempt_source.read_bytes()
+    table = json.loads((root / 'lock_order' / 'ranks.json').read_text())
+    (output / attempt_source.name).write_bytes(attempt)
+    src_vars, _, src_consts, src_invs, src_instance, src_prov = owner(root, 'source_record', 'src', output,
+                                                                      'source_owner')
+    offer_vars, offer_fields, offer_consts, offer_invs, offer_instance, offer_prov = owner(
+        root, 'original_offer', 'offer', output, 'offer_owner')
+    offer2_vars, _, _, _, offer2_instance, offer2_prov = owner(root, 'original_offer', 'offer2', output,
+                                                               'offer_owner')
+    if offer2_prov != offer_prov:
+        raise ValueError('the two offer slots must instance the same generated owner')
+    life_vars, _, life_consts, life_invs, life_instance, life_prov = owner(root, 'component_lifetime', 'life',
+                                                                           output, 'lifetime_owner')
+    # The next process's component lifetime (a new incarnation), opened by the restart after a stop.
+    life2_vars, _, _, _, life2_instance, life2_prov = owner(root, 'component_lifetime', 'life2', output,
+                                                            'lifetime_owner')
+    if life2_prov != life_prov:
+        raise ValueError('the two lifetimes must instance the same generated owner')
+    a_vars = ['a_' + v for v in A_OWN]
+    variables = SHARED + a_vars + src_vars + offer_vars + offer2_vars + life_vars + life2_vars + B_VARS
+    constants = sorted(set(src_consts) | set(offer_consts) | set(life_consts))
+    SRC, LIFE, LIFE2 = set(src_vars), set(life_vars), set(life2_vars)
+    OFFERS = set(offer_vars) | set(offer2_vars)
+    actions, definitions = [], []
+
+    def frame(changed):
+        return '    /\\ UNCHANGED <<' + ', '.join(v for v in variables if v not in changed) + '>>'
+
+    def action(name, expressions, changed, stage='B', params=None):
+        unknown = set(changed) - set(variables)
+        if unknown:
+            raise ValueError(f'{name}: unknown variables {sorted(unknown)}')
+        actions.append(name)
+        ACTION_PARAMS[name] = list(params or [])
+        body = [f'stage = "{stage}"'] + list(expressions)
+        text = '\n'.join('    /\\ ' + e for e in body) + '\n' + frame(changed)
+        if params:
+            args = ', '.join(v for v, _ in params)
+            definitions.append(f'{name}Of({args}) ==\n' + text)
+            bound = ', '.join(f'{v} \\in {d}' for v, d in params)
+            definitions.append(f'{name} == \\E {bound} : {name}Of({args})')
+        else:
+            definitions.append(name + ' ==\n' + text)
+
+    # Stage A: one wrapper per action of the attempt model. The held site is recorded for
+    # the held rows (its converted sites (P) and (A), and SH:1505 for the helper).
+    held_update = {
+        'SiteP': "a_held' = IF RecordRows /\\ a_pc' = \"Answered\" THEN \"P\" ELSE a_held",
+        'SiteA': "a_held' = IF RecordRows /\\ a_pc' \\in {\"Answered\", \"WaitInPlace\"} THEN \"A\" ELSE a_held",
+        'HelperCheck': "a_held' = IF RecordRows /\\ a_pc' = \"Answered\" THEN \"H\" ELSE a_held",
+    }
+    for name, quantified in attempt_actions(attempt.decode()):
+        if name in A_STAGE_B_ONLY:
+            continue
+        call = f'\\E w \\in BA!Attempts : BA!{name}(w)' if quantified else f'BA!{name}'
+        expressions, changed = [call], set(SHARED) | set(a_vars)
+        if name in held_update:
+            expressions.append(held_update[name])
+            changed.add('a_held')
+        action('A_' + name, expressions, changed, stage='A')
+
+    # ---- Stage B: the environment. ----
+    # The source owner: registered and made ready at the start; it may close (and its
+    # cancellation be confirmed) while a send is under way or an offer is not terminal,
+    # an Offered one included (the note: closing a source does not settle an offered input).
+    action('B_SrcRegister', ['src!RegisterSource("source1", "scope1", "Ordinary", "", "source-prep1")'], SRC)
+    action('B_SrcReady', ['src!MakeSourceReady(src_source_key, src_revision, src_preparation_id, "source-ready1")'],
+           SRC)
+    action('B_SrcClose', ['"srcclose" \\in Env', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
+                          'src!CloseSourceEligibility(src_source_key, src_revision, "cancel1")'], SRC)
+    action('B_SrcCancel', ['"srcclose" \\in Env', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
+                           'src!ConfirmSourceCancellation(src_source_key, src_revision, src_cancellation_id, '
+                           'src_revision, "revoked1", "published1")'], SRC)
+    # The component lifetime: staged and opened at the start; admission closes while
+    # anything is under way. The close's join waits for every running preparer, every
+    # send task and the driver's read; then each Offered record is recorded durably unresolved
+    # through its owner (RecordCloseUnresolved, with this process's epoch: no dispatch of this
+    # process follows it), and only then is the lifetime settled. One close per behavior: the
+    # next process's lifetime (after a stop) does not close.
+    action('B_LifeStage', ['life!StageComponent("inc1", "component1", "activation1")'], LIFE)
+    action('B_LifeOpen', ['life!OpenComponent(life_incarnation, life_revision)'], LIFE)
+    action('B_LifeBeginClose', ['"close" \\in Env', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
+                                'life!CloseAdmission(life_incarnation, life_revision, "close1", "stop", FALSE)',
+                                "close_waited_prep' = (close_waited_prep \\/ (RecordRows /\\ \\E n \\in Preparers : prep[n].st = \"Running\"))"],
+           LIFE | {'close_waited_prep'})
+    action('B_JoinDriver', ['LPhase = "Closing"', '~joined',
+                            '(\\A n \\in Preparers : prep[n].st # "Running") \\/ Fault = "close-skips-preparers"',
+                            '\\A p \\in Procs : ~Live(p)', 'read_slot = 0', "joined' = TRUE"],
+           {'joined'})
+    action('B_CloseRecord', ['LPhase = "Closing"', 'joined', 'OPhase(i) = "Offered"', 'OCloseEpoch(i) = 0',
+                             'OCloseRecord(i)'],
+           OFFERS, params=SLOT)
+    action('B_LifeSettle', ['joined \\/ Fault = "close-without-join"',
+                            '(\\A i \\in Slots : OPhase(i) = "Offered" => OCloseEpoch(i) > 0)\n'
+                            '       \\/ Fault \\in {"close-without-join", "close-forgets-unresolved"}',
+                            'life!SettleClosed(life_incarnation, life_revision, life_close_id)'], LIFE)
+    # The stop: after its close settled, the process ends (the ordinary shutdown) while a record
+    # is not terminal or Core holds a queued claim. Its in-process obligations end with it; the
+    # owner records, their outboxes and Core's queued claims stay.
+    action('B_Stop', ['"stop" \\in Env', 'alive', 'epoch = 1', 'life_phase = "Closed"',
+                      '(\\E i \\in Slots : NonTerminal(i)) \\/ QueuedClaim', "alive' = FALSE",
+                      "jr' = [i \\in Slots |-> [jr[i] EXCEPT !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n"
+                      '                              !.held = FALSE]]'],
+           {'alive', 'jr'})
+    # The next process's component lifetime, a new incarnation, staged and opened after a restart
+    # that followed a stop.
+    action('B_Life2Stage', ['life_cur = 2', 'alive', 'life2!StageComponent("inc2", "component1", "activation2")'],
+           LIFE2)
+    action('B_Life2Open', ['life_cur = 2', 'alive', 'life2!OpenComponent(life2_incarnation, life2_revision)'],
+           LIFE2)
+    # The source gate (an owner change holds the source) moves while a send is under way.
+    action('B_Hold', ['"hold" \\in Env', 'Busy', 'gate = "Free"', 'gate_moves < GateBound', "gate' = \"Held\"",
+                      "gate_moves' = gate_moves + 1"], {'gate', 'gate_moves'})
+    action('B_Release', ['Busy', 'gate = "Held"', 'gate_moves < GateBound', "gate' = \"Free\"",
+                         "gate_moves' = gate_moves + 1"], {'gate', 'gate_moves'})
+    # A grant change (a revocation included) takes the publication writer; a session reset
+    # (meta/reset) takes the identity's lifecycle lock, so it never lands inside Meta's
+    # section between a bind and its native admission (only at any other time).
+    action('B_Revoke', ['"revoke" \\in Env', 'auth_ok', 'pub_holder = "none"', 'Busy', "auth_ok' = FALSE"],
+           {'auth_ok'})
+    action('B_ReplaceSession', ['"session" \\in Env', 'current_inc = "inc1"', 'meta_holder = 0',
+                                'Busy \\/ \\E i \\in Slots : NonTerminal(i)', "current_inc' = \"inc2\""],
+           {'current_inc'})
+
+    # ---- Stage B: the send in the accepted order. ----
+    # A caller's send of the original begins (a door's send, a same-key replay of it, or a
+    # peer delivery): only while the component admits and the source was made ready. A peer
+    # delivery is Core's drain's: one peer bind per session at a time, and Core's FIFO head (a
+    # queued claim, with or without a record) before any later delivery (the
+    # peer-binds-concurrently mutant ignores both, peer-skips-queued-claim the second).
+    action('B_Begin', ['~Live(p)', 'begun < SendBound', 'alive', 'scanned', 'src_readiness # "Preparing"',
+                       'Admission', '\\E i \\in Slots : OPhase(i) # "Withdrawn" /\\ ~ObservedNotAdmitted(i)',
+                       'door = "Peer" /\\ Fault # "peer-binds-concurrently"\n'
+                       '       => (DrainFree /\\ (Fault = "peer-skips-queued-claim" \\/ ~QueuedClaim))',
+                       "begun' = begun + 1",
+                       "sp' = [sp EXCEPT ![p] = [FreshProc EXCEPT !.pc = \"Lookup\", !.n = begun + 1,\n"
+                       '                                             !.kind = "caller"]]',
+                       "entered_after_close' = (entered_after_close \\/ LPhase # \"Open\")"],
+           {'begun', 'sp', 'entered_after_close'}, params=PROC)
+    # The lookup by original: a non-terminal offer is used (a same-key replay of an Offered
+    # one dispatches its kept intent); an admitted original answers Admitted; else a
+    # new offer is created in a free slot (only after a terminal one). The
+    # replay-reprepares mutant prepares a second offer instead of using the kept one. With both
+    # offer slots used by terminal records, a new offer is outside the model's bound: the send
+    # ends Bounded (no outcome; production prepares a further offer). A durable peer delivery
+    # that meets a closed admission before its record exists answers Core NotReady: Core keeps
+    # its claim (with no record yet) for the next process (the closed-admission-denied mutant
+    # ends it).
+    action('B_Lookup', ['sp[p].pc = "Lookup"', 'alive',
+                        'LET nt == {i \\in Slots : NonTerminal(i)}\n'
+                        '           free == {i \\in Slots : OPhase(i) = "Absent"}\n'
+                        '           use == CHOOSE i \\in nt : TRUE\n'
+                        '           fresh == Fault = "replay-reprepares" /\\ nt # {} /\\ OPhase(use) = "Offered" /\\ free # {}\n'
+                        '       IN IF nt # {} /\\ ~fresh\n'
+                        "          THEN /\\ sp' = [sp EXCEPT ![p] = UseOffer(sp[p], use)]\n"
+                        "               /\\ prep' = IF OPhase(use) = \"Prepared\" /\\ ~OSealed(use) THEN StartPrep(sp[p].n) ELSE prep\n"
+                        "               /\\ replayed' = (replayed \\/ (RecordRows /\\ OPhase(use) = \"Offered\"))\n"
+                        '               /\\ UNCHANGED orphan_claim\n'
+                        '          ELSE IF (\\E i \\in Slots : ObservedAdmitted(i)) /\\ ~fresh\n'
+                        "          THEN /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Admitted\", \"None\")]\n"
+                        '               /\\ UNCHANGED <<prep, replayed, orphan_claim>>\n'
+                        '          ELSE IF free # {} /\\ SourceOpen /\\ Admission\n'
+                        "          THEN /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Create\", !.slot = MinSlot(free)]]\n"
+                        '               /\\ UNCHANGED <<prep, replayed, orphan_claim>>\n'
+                        '          ELSE IF SourceOpen /\\ Admission\n'
+                        "          THEN /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Bounded\", \"None\")]\n"
+                        '               /\\ UNCHANGED <<prep, replayed, orphan_claim>>\n'
+                        '          ELSE IF ~Admission /\\ ClaimedPeer /\\ Fault # "closed-admission-denied"\n'
+                        "          THEN /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Pending\", \"AdmissionClosed\")]\n"
+                        "               /\\ orphan_claim' = TRUE\n"
+                        '               /\\ UNCHANGED <<prep, replayed>>\n'
+                        "          ELSE /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Refused\",\n"
+                        '                                     IF ~Admission THEN "AdmissionClosed" ELSE "SourceClosed")]\n'
+                        '               /\\ UNCHANGED <<prep, replayed, orphan_claim>>'],
+           {'sp', 'prep', 'replayed', 'orphan_claim'}, params=PROC)
+    # The owner first (the note's Prepare): the Prepared record, with its preparing
+    # process's epoch, exists before any grant. The CAS's loser reads the winner back and uses
+    # its offer: no second offer, no refusal. The effects-before-owner mutant issues
+    # the grants first and prepares the owner after them (the earlier order).
+    action('B_Create', ['sp[p].pc = "Create"', 'alive',
+                        'LET i == sp[p].slot\n'
+                        '       IN IF OPhase(i) = "Absent"\n'
+                        '          THEN /\\ IF Fault = "effects-before-owner" THEN UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                        '                  ELSE OPrepare(i)\n'
+                        "               /\\ prep' = StartPrep(sp[p].n)\n"
+                        "               /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Prepare\", !.key = Key(i)]]\n"
+                        "               /\\ delivery_record' = (delivery_record \\/ door = \"Peer\")\n"
+                        '               /\\ UNCHANGED cas_lost\n'
+                        "          ELSE /\\ cas_lost' = (cas_lost \\/ RecordRows)\n"
+                        '               /\\ UNCHANGED <<Offer1Vars, Offer2Vars, delivery_record>>\n'
+                        '               /\\ IF NonTerminal(i)\n'
+                        "                  THEN /\\ sp' = [sp EXCEPT ![p] = UseOffer(sp[p], i)]\n"
+                        "                       /\\ prep' = IF OPhase(i) = \"Prepared\" /\\ ~OSealed(i) THEN StartPrep(sp[p].n) ELSE prep\n"
+                        "                  ELSE /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Lookup\", !.slot = 0]]\n"
+                        '                       /\\ UNCHANGED prep'],
+           OFFERS | {'prep', 'sp', 'delivery_record', 'cas_lost'}, params=PROC)
+    # The preparation outside protection: every first-send write of the door (the write
+    # inventory and the service setup observation record, FI:533, PO:1610), each looked up,
+    # then issued; Duplicate looks it up again and continues with the issued one, never
+    # refused. Concurrent preparers of one original are the normal case. A dropped send's
+    # preparer runs on.
+    action('B_PrepLookup', ['prep[n].st = "Running" /\\ prep[n].phase = "lookup"',
+                            'LET found == BA!Steps(door)[prep[n].pos].art \\in issued\n'
+                            '           last == prep[n].pos = Len(BA!Steps(door))\n'
+                            "       IN prep' = [prep EXCEPT ![n] = IF ~found THEN [@ EXCEPT !.phase = \"issue\"]\n"
+                            '                                      ELSE IF last THEN [@ EXCEPT !.st = "Done"]\n'
+                            '                                      ELSE [@ EXCEPT !.pos = @ + 1]]'],
+           {'prep'}, params=[('n', 'Preparers')])
+    action('B_PrepIssue', ['prep[n].st = "Running" /\\ prep[n].phase = "issue"',
+                           'LET art == BA!Steps(door)[prep[n].pos].art\n'
+                           '           dup == art \\in issued\n'
+                           '           last == prep[n].pos = Len(BA!Steps(door))\n'
+                           "       IN /\\ issued' = issued \\cup {art}\n"
+                           "          /\\ issue_count' = IF dup THEN issue_count ELSE [issue_count EXCEPT ![art] = @ + 1]\n"
+                           "          /\\ dup_arts' = IF dup /\\ RecordRows THEN dup_arts \\cup {art} ELSE dup_arts\n"
+                           "          /\\ prep_refused' = (prep_refused \\/ (dup /\\ Fault = \"no-relookup-b\"))\n"
+                           "          /\\ prep' = [prep EXCEPT ![n] =\n"
+                           '                 IF dup THEN (IF Fault = "no-relookup-b" THEN [@ EXCEPT !.st = "Refused"]\n'
+                           '                              ELSE [@ EXCEPT !.phase = "lookup"])\n'
+                           '                 ELSE IF last THEN [@ EXCEPT !.st = "Done"]\n'
+                           '                 ELSE [@ EXCEPT !.pos = @ + 1, !.phase = "lookup"]]'],
+           {'issued', 'issue_count', 'dup_arts', 'prep_refused', 'prep'}, params=[('n', 'Preparers')])
+    # The send goes on once its preparer and any other preparer have ended (a preparer that
+    # runs on can only find the writes issued); the effects-before-owner mutant prepares its
+    # owner only now.
+    action('B_PrepDone', ['sp[p].pc = "Prepare"', 'alive', 'prep[sp[p].n].st \\in {"Done", "Refused"}',
+                          '\\A m \\in Preparers : prep[m].st # "Running"',
+                          'IF prep[sp[p].n].st = "Refused"\n'
+                          "       THEN /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Refused\", \"PreparationRefused\")]\n"
+                          '            /\\ UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                          "       ELSE /\\ sp' = [sp EXCEPT ![p].pc = \"Seal\"]\n"
+                          '            /\\ IF OPhase(sp[p].slot) = "Absent" THEN OPrepare(sp[p].slot)\n'
+                          '               ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>'],
+           OFFERS | {'sp'}, params=PROC)
+    # The seal accepts the matching preparation; its CAS's loser reads the winner back. A
+    # send whose offer was withdrawn or settled under it ends typed. The
+    # send-before-owner mutant dispatches the sealed offer before its send intent.
+    action('B_Seal', ['sp[p].pc = "Seal"', 'alive',
+                      'LET i == sp[p].slot\n'
+                      '       IN CASE OPhase(i) = "Prepared" /\\ ~OSealed(i) ->\n'
+                      '                 /\\ OSeal(i)\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p].pc = IF Fault = \"send-before-owner\" THEN \"Call\" ELSE \"Commit\"]\n"
+                      '                 /\\ UNCHANGED cas_lost\n'
+                      '            [] OPhase(i) = "Prepared" ->\n'
+                      '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p].pc = \"Commit\"]\n"
+                      "                 /\\ cas_lost' = (cas_lost \\/ RecordRows)\n"
+                      '            [] OPhase(i) = "Offered" ->\n'
+                      '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p].pc = \"Call\"]\n"
+                      "                 /\\ cas_lost' = (cas_lost \\/ RecordRows)\n"
+                      '            [] OTHER ->\n'
+                      '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars, cas_lost>>\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p] = EndUnder(sp[p], i)]"],
+           OFFERS | {'sp', 'cas_lost'}, params=PROC)
+    # The effect runner records the send intent outside protection: the publication writer,
+    # then the store transaction (I10), feeding the owner the source (open, ready, the
+    # snapshot's revision), admission, the current incarnation and the authority read inside
+    # it; the owner decides (RecordOriginalSendIntent, or RefuseOriginalSendIntent below).
+    # Offered and the outbox commit together before Meta is entered (the type map, section
+    # 2). A lost CAS reply is read back. The CAS's loser reads the winner's Offered record
+    # back and dispatches it.
+    action('B_CommitPub', ['sp[p].pc = "Commit"', 'alive', 'pub_holder = "none"', "pub_holder' = Runner(p)",
+                           "sp' = [sp EXCEPT ![p].pc = \"CommitTx\"]"], {'pub_holder', 'sp'}, params=PROC)
+    action('B_CommitStore', ['sp[p].pc = "CommitTx"', 'alive', 'conn_holder = "none"',
+                             'LET i == sp[p].slot\n'
+                             '       IN \\/ /\\ OPhase(i) = "Prepared" /\\ OSealed(i)\n'
+                             '             /\\ ORecord(i)\n'
+                             "             /\\ jr' = [jr EXCEPT ![i].outbox = (Fault # \"commit-without-outbox\"), ![i].ie = epoch,\n"
+                             '                                 ![i].crev = src_revision, ![i].cinc = current_inc]\n'
+                             '             /\\ \\E lost \\in BOOLEAN :\n'
+                             "                    /\\ sp' = [sp EXCEPT ![p].pc = IF lost THEN \"ReadBack\" ELSE \"Call\"]\n"
+                             "                    /\\ lost_reply_seen' = (lost_reply_seen \\/ (RecordRows /\\ lost))\n"
+                             "             /\\ entered_after_close' = (entered_after_close \\/ LPhase # \"Open\")\n"
+                             '             /\\ UNCHANGED cas_lost\n'
+                             '          \\/ /\\ OPhase(i) = "Offered"\n'
+                             '             /\\ UNCHANGED <<Offer1Vars, Offer2Vars, jr, lost_reply_seen, entered_after_close>>\n'
+                             "             /\\ sp' = [sp EXCEPT ![p].pc = \"Call\"]\n"
+                             "             /\\ cas_lost' = (cas_lost \\/ RecordRows)",
+                             "pub_holder' = \"none\""],
+           OFFERS | {'jr', 'sp', 'lost_reply_seen', 'entered_after_close', 'cas_lost', 'pub_holder'}, params=PROC)
+    # A failed check: the owner withdraws the unsent preparation (never Offered), recording the
+    # cause, and the send refuses typed by the check's cause; an offer withdrawn or settled
+    # under the send ends it typed. A durable peer delivery whose cause is no verdict (a closed
+    # admission, a replaced session) answers Core NotReady: Core keeps its claim and re-offers
+    # it, and the same delivery is prepared again (the closed-admission-denied mutant ends it).
+    action('B_CommitRefuse', ['sp[p].pc = "CommitTx"', 'alive', 'conn_holder = "none"',
+                              'LET i == sp[p].slot\n'
+                              '           c == CommitCause(i)\n'
+                              '           keep == ClaimedPeer /\\ c \\in NotVerdictCauses /\\ Fault # "closed-admission-denied"\n'
+                              '       IN \\/ /\\ OPhase(i) = "Prepared" /\\ OSealed(i)\n'
+                              '             /\\ ORefuse(i)\n'
+                              "             /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], IF keep THEN \"Pending\" ELSE \"Refused\",\n"
+                              '                         IF Fault = "untyped-commit-refusal" THEN "None" ELSE c)]\n'
+                              "             /\\ jr' = IF keep THEN [jr EXCEPT ![i].fifo = TRUE] ELSE jr\n"
+                              '          \\/ /\\ OPhase(i) \\in {"Withdrawn", "CoreObserved"}\n'
+                              '             /\\ UNCHANGED <<Offer1Vars, Offer2Vars, jr>>\n'
+                              "             /\\ sp' = [sp EXCEPT ![p] = EndUnder(sp[p], i)]",
+                              "pub_holder' = \"none\""],
+           OFFERS | {'sp', 'pub_holder', 'jr'}, params=PROC)
+    # A lost commit reply is resolved against the same transaction: the record is read back
+    # and its intent dispatched, never a second offer (I3; the mutant prepares one).
+    action('B_ReadBack', ['sp[p].pc = "ReadBack"', 'alive',
+                          'IF Fault = "lost-reply-reprepare" /\\ \\E j \\in Slots : OPhase(j) = "Absent"\n'
+                          "       THEN sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Create\",\n"
+                          '                                      !.slot = MinSlot({j \\in Slots : OPhase(j) = "Absent"})]]\n'
+                          "       ELSE sp' = [sp EXCEPT ![p].pc = \"Call\"]"],
+           {'sp'}, params=PROC)
+    # Executing the intent: the dispatch start is recorded in the owner (its id and this
+    # process's epoch: RecordDispatchStart), then Meta is called (a peer delivery enters its
+    # protected section) once: the production effect runner, or a declared fixture's
+    # stand-in (I12). A dispatch of the record in this process, a caller's same-key replay
+    # included, discharges the restart's re-drive (owed until this process dispatched the
+    # record: the owner's last dispatch epoch). A send whose offer was settled or withdrawn
+    # under it ends typed. The call-without-dispatch-record mutant calls Meta without the
+    # record; send-before-owner calls it over a Prepared record; fresh-key-replay replays
+    # under a new raw key after a restart.
+    for name, mode in [('B_Call', 'production'), ('B_FixtureCall', 'fixture')]:
+        action(name, ['sp[p].pc = "Call"', 'alive', '~joined', f'mode = "{mode}"',
+                      'LET i == sp[p].slot\n'
+                      '           d == ODispatchCount(i) + 1\n'
+                      '           key == IF Fault = "fresh-key-replay" /\\ sp[p].kind = "driver" THEN "k3" ELSE Key(i)\n'
+                      '       IN CASE OPhase(i) = "Offered" ->\n'
+                      '                 /\\ IF Fault = "call-without-dispatch-record" THEN UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                      '                    ELSE ODispatch(i, d)\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Lock\", !.key = key, !.d = d]]\n"
+                      "                 /\\ jr' = [jr EXCEPT ![i].redrive = FALSE]\n"
+                      '            [] Fault = "send-before-owner" /\\ OPhase(i) = "Prepared" ->\n'
+                      '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars, jr>>\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Lock\", !.key = key, !.d = d]]\n"
+                      '            [] OTHER ->\n'
+                      '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars, jr>>\n'
+                      "                 /\\ sp' = [sp EXCEPT ![p] = EndUnder(sp[p], i)]"],
+               OFFERS | {'sp', 'jr'}, params=PROC)
+    # The bind's protected section. Meta's doors: the identity's lifecycle lock, held from the
+    # bind through native submission (stage A runtime.rs:10988-11185), a FIFO tokio mutex. The
+    # peer door: the peer binder's section inside Core's drain (one peer bind per session at a
+    # time); it takes no Meta lock. Each bind reads its snapshot fresh (the cached-authority
+    # mutant keeps the first bind's authority across the wait, for the bind and the entry
+    # fence).
+    for name, which in [('B_Lock', 'door # "Peer"'), ('B_PeerSection', 'door = "Peer"')]:
+        action(name, ['sp[p].pc = "Lock"', 'alive', which, 'meta_holder = 0', "meta_holder' = p",
+                      "sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = IF door = \"Helper\" THEN \"DecideA\" ELSE \"DecideP\",\n"
+                      '                                  !.dec = "Pending",\n'
+                      '                                  !.view = IF Fault = "cached-authority" /\\ sp[p].waited\n'
+                      '                                           THEN sp[p].view ELSE auth_ok]]'],
+               {'meta_holder', 'sp'}, params=PROC)
+    # The pure decision at (P) and (A): a closed or expired source and a denied authority are
+    # genuine refusals, checked first (I9); a held source and a replaced session answer
+    # not-now (OriginalAdmissionPending: cross-session re-preparation stays closed); Bound
+    # goes on to native admission in the same section. No write, wait or blocking lock
+    # (I1; the block-in-protected mutant waits for the gate inside the section).
+    for site, nxt in [('P', 'DecideP'), ('A', 'DecideA')]:
+        action(f'B_Decide{site}', [f'sp[p].pc = "{nxt}"', 'meta_holder = p', 'alive',
+                                   'Fault = "block-in-protected" => gate = "Free"',
+                                   f'Decide(p, "{site}", DecisionAt(p, "{site}"))'],
+               {'sp', 'meta_holder', 'held_site'}, params=PROC)
+    # Native admission behind the entry fence, in the bind's section: the fence reads the
+    # authority, the source and admission fresh (the entry-without-fence mutant reuses the
+    # bind's view); Core admits the qualified key <<session, raw key>> once (a replay
+    # deduplicates; a re-offered claim of an admitted record is bound with that record's own
+    # key), may refuse it (NotAdmitted), or the answer is lost (AdmissionUnresolved: admitted
+    # or not). Core's and the fence's refusals are Core's facts, recorded per dispatch. A
+    # durable peer claim whose answer was lost stays Core's FIFO head (the drain's call failed;
+    # a re-offer of an admitted key is deduplicated). A re-offered claim whose record Core
+    # admitted passes no new fence: Core's dedup answers it (the readmitted-fence mutant fences
+    # it again).
+    action('B_Entry', ['sp[p].pc = "Entry"', 'meta_holder = p', 'alive',
+                       'LET r == sp[p]\n'
+                       '           fence == \\/ r.kind = "core" /\\ ObservedAdmitted(r.slot) /\\ Fault # "readmitted-fence"\n'
+                       '                    \\/ /\\ (IF Fault = "entry-without-fence" \\/ (Fault = "cached-authority" /\\ r.waited)\n'
+                       '                           THEN r.view ELSE auth_ok)\n'
+                       '                       /\\ SourceOpen /\\ Admission\n'
+                       '           inc == IF r.kind = "core" /\\ ObservedAdmitted(r.slot) THEN OInc(r.slot) ELSE current_inc\n'
+                       '           dup == KeyAdmitted(inc, r.key)\n'
+                       '       IN \\E res \\in EntryResults(fence, dup) :\n'
+                       "            /\\ native' = IF res \\in {\"Admitted\", \"LostAfter\"} /\\ ~dup\n"
+                       '                         THEN native \\cup {<<inc, r.key, epoch, r.d>>} ELSE native\n'
+                       "            /\\ admitted_stale' = (admitted_stale \\/ (res \\in {\"Admitted\", \"LostAfter\"} /\\ ~dup /\\ ~auth_ok))\n"
+                       "            /\\ core_refusals' = IF res = \"NotAdmitted\" THEN core_refusals + 1 ELSE core_refusals\n"
+                       "            /\\ refusals' = CASE res = \"NotAdmitted\" -> refusals \\cup {<<r.slot, r.d, \"CoreRefused\">>}\n"
+                       "                            [] res = \"EntryRefused\" -> refusals \\cup {<<r.slot, r.d, \"EntryRefused\">>}\n"
+                       '                            [] OTHER -> refusals\n'
+                       "            /\\ lost_count' = IF res \\in {\"LostAfter\", \"LostBefore\"} THEN lost_count + 1 ELSE lost_count\n"
+                       "            /\\ jr' = IF res \\in {\"LostAfter\", \"LostBefore\"} /\\ ClaimedPeer\n"
+                       "                      THEN [jr EXCEPT ![r.slot].fifo = TRUE] ELSE jr\n"
+                       "            /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Settle\",\n"
+                       '                         !.ans = CASE res \\in {"LostAfter", "LostBefore"} -> "Unresolved"\n'
+                       '                                   [] res = "NotAdmitted" -> "CoreRefused"\n'
+                       '                                   [] OTHER -> res]]',
+                       "meta_holder' = 0"],
+           {'native', 'admitted_stale', 'core_refusals', 'refusals', 'lost_count', 'jr', 'sp', 'meta_holder'},
+           params=PROC)
+    # After Meta returns (nothing durable inside its section or the entry's callbacks), the
+    # effect runner feeds the dispatch's answer to the owner, which decides: an admission
+    # settles (RetainCoreReceipt); a refusal settles only when its dispatch is the only one
+    # recorded and none is unresolved, and otherwise leaves the journal
+    # (RecordDispatchAnswer); a lost answer is recorded against its dispatch
+    # (PreserveUnresolvedOffer) with a read by key owed (the forget-lost-reply mutant owes
+    # none); a dispatch that ended without native submission (a held or refused bind, a
+    # transport drop) leaves the journal. A durable delivery's bind the section refused for no
+    # verdict is answered NotReady (KeepClaim) and Core keeps the claim queued: for a closed
+    # admission, until the next process; for a verdict met while another dispatch of the record
+    # may have admitted, the claim is held (Core re-offers it every second, and each re-offer
+    # of this process meets the same verdict over the same ambiguity, so the model takes none
+    # until the record changes) and a read by key is owed: a Found read settles the record (the
+    # next re-offer binds), a final absence ends the ambiguity (the next re-offer is denied).
+    # The lost-as-not-submitted mutant feeds a lost answer as not submitted; receipt-wrong-kind
+    # feeds the fence's refusal as Core's.
+    action('B_Settle', ['sp[p].pc = "Settle"', 'alive',
+                        'LET r == sp[p]\n'
+                        '           i == r.slot\n'
+                        '           open == OPhase(i) = "Offered" /\\ r.d \\in OOpen(i)\n'
+                        '           fed == CASE Fault = "lost-as-not-submitted" /\\ r.ans = "Unresolved" -> "NotSubmitted"\n'
+                        '                    [] Fault = "receipt-wrong-kind" /\\ r.ans = "EntryRefused" -> "CoreRefused"\n'
+                        '                    [] OTHER -> r.ans\n'
+                        '           keep == KeepClaim(r)\n'
+                        '           hold == keep /\\ r.cause # "AdmissionClosed" /\\ OPhaseNext(i) = "Offered"\n'
+                        '       IN /\\ IF open THEN OAnswer(i, r.d, fed) ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                        "          /\\ jr' = [jr EXCEPT ![i] =\n"
+                        '                 IF keep THEN [(IF OPhaseNext(i) = "CoreObserved" THEN Settled(@) ELSE @)\n'
+                        '                               EXCEPT !.fifo = TRUE, !.held = hold, !.read_owed = @ \\/ hold]\n'
+                        '                 ELSE IF OPhaseNext(i) = "CoreObserved" THEN Settled(@)\n'
+                        '                 ELSE IF r.ans = "Unresolved" /\\ Fault # "forget-lost-reply"\n'
+                        '                 THEN [@ EXCEPT !.read_owed = TRUE]\n'
+                        '                 ELSE @]\n'
+                        "          /\\ claimed' = (claimed \\/ (r.ans = \"Admitted\" /\\ (mode = \"production\" \\/ Fault = \"fixture-claims\")))\n"
+                        "          /\\ sp' = [sp EXCEPT ![p] = CASE r.ans = \"Admitted\" -> EndRec(r, \"Admitted\", r.cause)\n"
+                        '                                     [] r.ans = "CoreRefused" -> EndRec(r, "NotAdmitted", "None")\n'
+                        '                                     [] r.ans = "EntryRefused" -> EndRec(r, "Refused", "EntryRefused")\n'
+                        '                                     [] r.ans = "Unresolved" -> EndRec(r, "Unresolved", "None")\n'
+                        '                                     [] keep -> [Finish(r) EXCEPT !.out = "Pending"]\n'
+                        '                                     [] OTHER -> Finish(r)]',
+                        # A read by key that started before this lost answer cannot speak for it
+                        # (the stale-read-clears mutant lets it discharge the new read owed).
+                        "read_slot' = IF StaleRead(p) THEN 0 ELSE read_slot",
+                        "raw_read' = IF StaleRead(p) THEN \"Unread\" ELSE raw_read",
+                        "published_read' = IF StaleRead(p) THEN \"Unread\" ELSE published_read"],
+           OFFERS | {'jr', 'claimed', 'sp', 'read_slot', 'raw_read', 'published_read'}, params=PROC)
+    # Meta's wait (one deadline per send, at most 3 free rebinds) and Core's peer waiter (one
+    # deadline per delivery). The wait ends when its condition clears (a rebind of the same
+    # input and key), or at the deadline, which passes only while the condition persists:
+    # then Held (Meta: the dispatch answered not submitted after Meta returns), or Pending (a
+    # durable peer delivery: Core keeps its claim queued and the dispatch stays open), or a
+    # transport drop (a volatile drop or a supervisor NotReady: no claim, the dispatch answered
+    # not submitted, never a native verdict). None ends the offer: it stays Offered with its
+    # intent. The never-rebind mutant's waiter never wakes on a cleared condition, so
+    # its send runs into the deadline and gives up; discard-parked drops the queued claim;
+    # discard-clears-obligation also clears the intent's outbox; drop-as-verdict feeds a
+    # transport drop to the owner as Core's refusal.
+    for who, waitpc, limit in [('Meta', 'MetaWait', True), ('Peer', 'PeerWait', False)]:
+        rb = "sp[p].rb + 1" if limit else "sp[p].rb"
+        action(f'B_{who}Rebind', [f'sp[p].pc = "{waitpc}"', 'alive', 'Cleared(p)', '~sp[p].dl',
+                                  'Fault # "never-rebind"',
+                                  f"sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Lock\", !.rb = {rb},\n"
+                                  '                                  !.waited = sp[p].waited \\/ RecordRows]]'],
+               {'sp'}, params=PROC)
+    action('B_Deadline', ['Waiting(p)', 'alive', '~sp[p].dl', '~Cleared(p) \\/ Fault = "never-rebind"',
+                          "sp' = [sp EXCEPT ![p].dl = TRUE]"],
+           {'sp'}, params=PROC)
+    action('B_MetaExpire', ['sp[p].pc = "MetaWait"', 'alive', 'sp[p].dl',
+                            "sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Settle\", !.ans = \"NotSubmitted\", !.out = \"Held\"]]"],
+           {'sp'}, params=PROC)
+    action('B_PeerExpire', ['sp[p].pc = "PeerWait"', 'alive', 'sp[p].dl',
+                            'IF PeerClaims\n'
+                            "       THEN /\\ sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Pending\", sp[p].cause)]\n"
+                            '            /\\ jr\' = [jr EXCEPT ![sp[p].slot].fifo = Fault \\notin {"discard-parked", "discard-clears-obligation"},\n'
+                            '                                ![sp[p].slot].pend = TRUE,\n'
+                            '                                ![sp[p].slot].outbox = @ /\\ Fault # "discard-clears-obligation"]\n'
+                            "       ELSE /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Settle\", !.out = \"Dropped\",\n"
+                            '                        !.ans = IF Fault = "drop-as-verdict" THEN "CoreRefused" ELSE "NotSubmitted"]]\n'
+                            '            /\\ UNCHANGED jr'],
+           {'sp', 'jr'}, params=PROC)
+    # A caller's send is dropped at an await point before it enters Meta (Meta's send runs in
+    # its foreground set and is not dropped by its caller; a peer delivery waits only to its
+    # deadline): the preparer runs on; the guard changes no owner state (I8: the
+    # drop-mutates-phase mutant withdraws the record, its cause included, and drop-clears-seal
+    # clears the seal, without a generated transition).
+    action('B_DropSend', ['"drop" \\in Env', 'door # "Peer"', 'sp[p].pc \\in {"Prepare", "Seal", "Commit"}',
+                          'sp[p].kind = "caller"',
+                          "sp' = [sp EXCEPT ![p] = EndRec(sp[p], \"Gone\", \"None\")]",
+                          "drop_partial' = (drop_partial \\/ (RecordRows /\\ sp[p].pc = \"Prepare\" /\\ PartialIssuance))",
+                          "offer_phase' = IF Fault = \"drop-mutates-phase\" /\\ sp[p].slot = 1 /\\ offer_phase = \"Prepared\"\n"
+                          '                       THEN "Withdrawn" ELSE offer_phase',
+                          "offer_withdrawal_cause' = IF Fault = \"drop-mutates-phase\" /\\ sp[p].slot = 1 /\\ offer_phase = \"Prepared\"\n"
+                          '                                  THEN "ProcessEnded" ELSE offer_withdrawal_cause',
+                          "offer_preparation_receipt' = IF Fault = \"drop-clears-seal\" /\\ sp[p].slot = 1\n"
+                          '                                    THEN "" ELSE offer_preparation_receipt'],
+           {'sp', 'drop_partial', 'offer_phase', 'offer_withdrawal_cause', 'offer_preparation_receipt'}, params=PROC)
+
+    # ---- Stage B: the driver. ----
+    # Reads by the offer's own qualified key when one is owed (a lost answer, a restart):
+    # Found, a successful Absent or Unavailable (I13: unavailable is never absence; the
+    # mutant publishes it as Absent). Core and storage are unavailable for at most
+    # UnavailBound reads (the core-unavailable-forever profile drops the bound).
+    action('B_ReadCore', ['alive', 'scanned', '~joined', 'read_slot = 0', 'OPhase(i) = "Offered"', 'jr[i].read_owed',
+                          '\\E available \\in AvailChoices :\n'
+                          "        /\\ raw_read' = IF ~available THEN \"Unavailable\" ELSE IF OfferAdmitted(i) THEN \"Found\" ELSE \"Absent\"\n"
+                          "        /\\ published_read' = IF Fault = \"unavailable-as-absent\" /\\ ~available THEN \"Absent\" ELSE raw_read'\n"
+                          "        /\\ unavail_reads' = IF available \\/ Fault = \"core-unavailable-forever\" THEN unavail_reads\n"
+                          '                            ELSE unavail_reads + 1',
+                          "read_slot' = i"],
+           {'raw_read', 'published_read', 'unavail_reads', 'read_slot'}, params=SLOT)
+    # The observation through the owner: Found is Core's admission (RetainFoundReceipt); a
+    # successful Absent keeps the record Offered (never NotAdmitted: the absent-terminates
+    # mutant feeds it as Core's refusal of the last open dispatch) and, when the owner finds
+    # it final (every open or unresolved dispatch made by an ended process, and this process
+    # has dispatched the record: no re-drive or re-offer owed), records the evidence with the
+    # dispatches it covers (RecordFinalAbsence); Unavailable keeps it Offered and owes another
+    # read. An Unavailable or non-final Absent read changes no owner field and is no owner
+    # input.
+    action('B_ObserveRead', ['alive', 'read_slot # 0',
+                             'LET i == read_slot\n'
+                             '           open == OPhase(i) = "Offered"\n'
+                             '       IN CASE published_read = "Found" \\/ (Fault = "forge-admission" /\\ published_read = "Unavailable") ->\n'
+                             '                 /\\ IF open THEN ORetainFound(i) ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                             "                 /\\ jr' = [jr EXCEPT ![i] = Settled(@)]\n"
+                             "                 /\\ claimed' = (claimed \\/ mode = \"production\" \\/ Fault = \"fixture-claims\")\n"
+                             '            [] published_read = "Absent" /\\ Fault = "absent-terminates" ->\n'
+                             '                 /\\ IF open /\\ OOpen(i) # {} THEN OAnswer(i, MaxOf(OOpen(i)), "CoreRefused")\n'
+                             '                    ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                             "                 /\\ jr' = [jr EXCEPT ![i] = IF OPhaseNext(i) = \"CoreObserved\" THEN Settled(@)\n"
+                             '                                            ELSE [@ EXCEPT !.read_owed = FALSE]]\n'
+                             '                 /\\ UNCHANGED claimed\n'
+                             '            [] published_read = "Absent" ->\n'
+                             '                 LET final == open /\\ ENABLED OFinalAbsence(i)\n'
+                             '                 IN /\\ IF final THEN OFinalAbsence(i) ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
+                             "                    /\\ jr' = [jr EXCEPT ![i].read_owed = FALSE, ![i].held = @ /\\ ~final]\n"
+                             '                    /\\ UNCHANGED claimed\n'
+                             '            [] OTHER ->\n'
+                             '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars, jr, claimed>>',
+                             "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\""],
+           OFFERS | {'jr', 'claimed', 'read_slot', 'raw_read', 'published_read'})
+    # After a restart the driver dispatches each enumerated record's intent once more, with
+    # the same key and input (the note: replay after a crash uses Core's dedup): every door's
+    # record but a peer delivery's. A durable peer delivery's dispatcher is Core's claim;
+    # a volatile or supervisor delivery has none, and nothing in production re-drives it (the
+    # binder's only production caller is Core's drain, which offers only queued claims): its
+    # record stays kept for its sender's retry. Core re-offers a queued durable claim from its
+    # FIFO, whatever Connect's record says (Core does not read it): the binder answers it by the
+    # record. A re-offer reuses the dispatch its delivery opened in this process; otherwise
+    # it records a new one. A re-offer of a record withdrawn for no verdict (a closed admission,
+    # a replaced session, an ended process) prepares the same delivery again (the
+    # withdrawn-always-refused mutant refuses it); so does Core's re-offer of a claim that has no
+    # record yet. A peer bind takes the session's drain. None starts while admission is closed.
+    action('B_Redrive', ['alive', 'scanned', '~joined', 'LPhase = "Open"', 'OPhase(i) = "Offered"', 'jr[i].redrive',
+                         '~Live(p)', 'door = "Peer" /\\ Fault # "peer-binds-concurrently" => DrainFree',
+                         "sp' = [sp EXCEPT ![p] = [FreshProc EXCEPT !.pc = \"Call\", !.slot = i, !.kind = \"driver\",\n"
+                         '                                             !.key = Key(i)]]',
+                         "jr' = [jr EXCEPT ![i].redrive = FALSE]"],
+           {'sp', 'jr'}, params=SLOT_PROC)
+    action('B_CoreReoffer', ['alive', 'scanned', '~joined', 'LPhase = "Open"', 'jr[i].fifo', '~jr[i].held',
+                             '~Live(p)', 'Fault = "peer-binds-concurrently" \\/ DrainFree',
+                             'LET c == ClaimDispatch(i)\n'
+                             "       IN sp' = [sp EXCEPT ![p] =\n"
+                             '                 IF Reprepare(i) THEN [FreshProc EXCEPT !.pc = "Lookup", !.kind = "core"]\n'
+                             '                 ELSE [FreshProc EXCEPT !.pc = IF OPhase(i) = "Offered" /\\ c = 0 THEN "Call" ELSE "Lock",\n'
+                             '                                        !.slot = i, !.kind = "core", !.key = Key(i), !.d = c]]',
+                             "jr' = [jr EXCEPT ![i].fifo = FALSE, ![i].pend = FALSE]"],
+           {'sp', 'jr'}, params=SLOT_PROC)
+    action('B_CoreReofferFresh', ['alive', 'scanned', '~joined', 'LPhase = "Open"', 'orphan_claim', '~Live(p)',
+                                  'Fault = "peer-binds-concurrently" \\/ DrainFree',
+                                  "sp' = [sp EXCEPT ![p] = [FreshProc EXCEPT !.pc = \"Lookup\", !.kind = \"core\"]]",
+                                  "orphan_claim' = FALSE"],
+           {'sp', 'orphan_claim'}, params=PROC)
+    # One crash and restart: the send tasks, preparers, Meta's section, the store write and
+    # the read die; the owner records (their dispatch journals included), outboxes, Core's
+    # admissions and its queued claims survive, and the claim of a durable peer delivery still
+    # in flight (or answered NotReady) is kept queued by Core, with its record or, before the
+    # record exists, without one. A dispatch open at the crash stays open in the owner:
+    # its outcome is unknown, and no later refusal settles the record over it (the type map,
+    # section 3; the crash-clears-ambiguity mutant answers it as not submitted at the scan).
+    action('B_Crash', ['"crash" \\in Env', 'alive', 'epoch = 1', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
+                       "alive' = FALSE",
+                       "sp' = [q \\in Procs |-> IF Live(q) THEN [FreshProc EXCEPT !.out = \"Crashed\", !.slot = sp[q].slot,\n"
+                       '                                                         !.kind = sp[q].kind]\n'
+                       '                           ELSE sp[q]]',
+                       "prep' = [n \\in Preparers |-> IF prep[n].st = \"Running\" THEN [prep[n] EXCEPT !.st = \"Dead\"] ELSE prep[n]]",
+                       "dead_prep' = (dead_prep \\/ (RecordRows /\\ \\E n \\in Preparers : prep[n].st = \"Running\"))",
+                       "pub_holder' = \"none\"", "conn_holder' = \"none\"", "meta_holder' = 0",
+                       "store_pc' = IF store_pc \\in {\"hook\", \"write\"} THEN \"done\" ELSE store_pc",
+                       "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\"",
+                       "jr' = [i \\in Slots |-> [jr[i] EXCEPT !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n"
+                       '                              !.held = FALSE,\n'
+                       '                              !.fifo = @ \\/ (ClaimedPeer /\\ OPhase(i) # "Absent"\n'
+                       '                                             /\\ \\E q \\in Procs : Live(q) /\\ sp[q].slot = i\n'
+                       '                                                /\\ (sp[q].pc # "Settle" \\/ KeepClaim(sp[q])))]]',
+                       "orphan_claim' = (orphan_claim \\/ (ClaimedPeer /\\ \\E q \\in Procs : Live(q)\n"
+                       '                                    /\\ (sp[q].slot = 0 \\/ OPhase(sp[q].slot) = "Absent")))',
+                       "crashed_offered' = (crashed_offered \\/ (RecordRows /\\ \\E i \\in Slots : OPhase(i) = \"Offered\"))"],
+           {'alive', 'sp', 'prep', 'dead_prep', 'pub_holder', 'conn_holder', 'meta_holder', 'store_pc', 'read_slot',
+            'raw_read', 'published_read', 'jr', 'crashed_offered', 'orphan_claim'})
+    # The restart: a new process (epoch 2) scans before anything else. After a stop (the stop
+    # profiles), its component is a new lifetime (staged and opened above) with no join of its
+    # own yet; otherwise the model keeps the one lifetime across the crash.
+    action('B_Restart', ['~alive', 'epoch = 1', "alive' = TRUE", "epoch' = 2", "scanned' = FALSE",
+                         "life_cur' = IF NewLifetime THEN 2 ELSE life_cur",
+                         "joined' = IF NewLifetime THEN FALSE ELSE joined"],
+           {'alive', 'epoch', 'scanned', 'life_cur', 'joined'})
+    # The restart scan enumerates every non-terminal record: a Prepared one is withdrawn
+    # through its owner, which accepts only an ended process's preparation (its epoch: the
+    # durable basis); every Offered one with its outbox is parked and a read by key owed, its
+    # intent re-driven by the driver, except a peer delivery's (a durable one's dispatcher is
+    # Core's claim; a volatile or supervisor one is kept for its sender's retry). The
+    # skip-restart-scan mutant parks none; scan-first-record-only stops after the first record
+    # (the I11 mutant over two).
+    action('B_ScanWithdraw', ['alive', '~scanned', 'OPhase(i) = "Prepared"', 'OWithdraw(i)'],
+           OFFERS, params=SLOT)
+    action('B_ForgetAmbiguity', ['Fault = "crash-clears-ambiguity"', 'alive', '~scanned', 'OPhase(i) = "Offered"',
+                                 '\\E d \\in OOpen(i) : ODispatchEpochs(i)[d] < epoch /\\ OAnswer(i, d, "NotSubmitted")'],
+           OFFERS, params=SLOT)
+    action('B_Scan', ['alive', '~scanned', '~\\E i \\in Slots : OPhase(i) = "Prepared" /\\ OPrepEpoch(i) < epoch',
+                      "scanned' = TRUE",
+                      "jr' = [i \\in Slots |-> LET pk == /\\ OPhase(i) = \"Offered\" /\\ jr[i].outbox\n"
+                      '                                   /\\ Fault # "skip-restart-scan"\n'
+                      '                                   /\\ ~(Fault = "scan-first-record-only" /\\ i = 2)\n'
+                      '                       IN [jr[i] EXCEPT !.parked = pk, !.redrive = pk /\\ door # "Peer", !.read_owed = pk]]'],
+           {'scanned', 'jr'})
+    # The I8 mutants: each writes one owner field outside a generated transition.
+    for field, (value, condition) in FORGE_FIELDS.items():
+        action('B_Forge_' + field, [f'Fault = "{forge_fault(field)}"', 'alive', condition,
+                                    f"offer_{field}' = {value}"],
+               {'offer_' + field})
+    # Another store write around a commit: the connection, and in the I10 mutant the
+    # record-change hook's publication writer inside the transaction (A's inversion).
+    action('B_StoreBegin', ['store_pc = "idle"', 'conn_holder = "none"',
+                            '\\E p \\in Procs : sp[p].pc \\in {"Commit", "CommitTx"}', "conn_holder' = \"store\"",
+                            "store_pc' = IF Fault = \"publication-inside-store\" THEN \"hook\" ELSE \"write\""],
+           {'conn_holder', 'store_pc'})
+    action('B_StoreHook', ['store_pc = "hook"', 'pub_holder = "none"', "pub_holder' = \"store\"",
+                           "store_pc' = \"write\""], {'pub_holder', 'store_pc'})
+    action('B_StoreEnd', ['store_pc = "write"', "conn_holder' = \"none\"",
+                          "pub_holder' = IF pub_holder = \"store\" THEN \"none\" ELSE pub_holder",
+                          "store_pc' = \"done\""], {'conn_holder', 'pub_holder', 'store_pc'})
+    action('B_Finished', ['\\A p \\in Procs : ~Live(p)', '\\A n \\in Preparers : prep[n].st # "Running"',
+                          'store_pc \\in {"idle", "done"}', 'read_slot = 0'], set())
+
+    init = ['BA!Init', 'stage = "B" => gate = "Free"', 'src!Init', 'offer!Init', 'offer2!Init', 'life!Init',
+            'life2!Init',
+            'mode \\in (IF stage = "B" THEN ModeValues ELSE {"production"})',
+            'sp = [p \\in Procs |-> FreshProc]',
+            'prep = [n \\in Preparers |-> [st |-> "Idle", pos |-> 0, phase |-> "lookup"]]',
+            'jr = [i \\in Slots |-> NoJournal]',
+            'begun = 0', 'native = {}', 'core_refusals = 0', 'lost_count = 0', 'current_inc = "inc1"',
+            'auth_ok = TRUE', 'meta_holder = 0', 'pub_holder = "none"', 'conn_holder = "none"', 'store_pc = "idle"',
+            'alive = TRUE', 'epoch = 1', 'scanned = TRUE', 'joined = FALSE', 'read_slot = 0', 'raw_read = "Unread"',
+            'published_read = "Unread"', 'unavail_reads = 0', 'dup_arts = {}', 'prep_refused = FALSE',
+            'drop_partial = FALSE', 'held_site = ""', 'entered_after_close = FALSE', 'claimed = FALSE',
+            'lost_reply_seen = FALSE', 'crashed_offered = FALSE', 'admitted_stale = FALSE', 'cas_lost = FALSE',
+            'replayed = FALSE', 'close_waited_prep = FALSE', 'dead_prep = FALSE', 'a_held = ""', 'refusals = {}',
+            'life_cur = 1', 'orphan_claim = FALSE']
+    initialized = {re.match(r'(\w+)', e)[1] for e in init[7:]}
+    if initialized != set(B_VARS):
+        raise ValueError(f'B init mismatch: {sorted(initialized ^ set(B_VARS))}')
+    ba_instance = ('BA == INSTANCE bind_attempt WITH\n    Fault <- AFault,\n    '
+                   + ',\n    '.join(f'{v} <- a_{v}' for v in A_OWN))
+    ranks = ', '.join(f'{entry["lock"]} |-> {entry["rank"]}' for entry in table)
+
+    def per_slot(field):
+        return f'O{field}(i) == IF i = 1 THEN offer_{field} ELSE offer2_{field}'
+
+    def owner_op(name, call, args=''):
+        sig = f'(i{", " + args if args else ""})'
+        one = call.replace('$', 'offer')
+        two = call.replace('$', 'offer2')
+        return (f'O{name}{sig} ==\n'
+                f'    IF i = 1\n    THEN offer!{one}\n         /\\ UNCHANGED Offer2Vars\n'
+                f'    ELSE offer2!{two}\n         /\\ UNCHANGED Offer1Vars')
+
+    identity = '$_offer_key, $_revision, $_input_digest, $_incarnation'
+    commit_view = ('$_offer_key, $_revision, src_source_key,\n'
+                   '        IF Fault = "stale-snapshot" THEN $_source_revision ELSE src_revision,\n'
+                   '        IF Fault = "cached-incarnation" THEN $_incarnation ELSE current_inc,\n'
+                   '        Fault = "stale-snapshot" \\/ src_phase = "Open",\n'
+                   '        Fault = "stale-snapshot" \\/ src_readiness = "Ready", Admission, auth_ok')
+    helpers = [
+        'Procs == 1..ProcBound',
+        'Sends == 1..SendBound',
+        '\\* The preparers: one per caller send, and index 0 for Core\'s re-offer of a delivery',
+        '\\* prepared again (one at a time: the drain binds one peer delivery at a time).',
+        'Preparers == 0..SendBound',
+        'Slots == {1, 2}',
+        '\\* Meta binds again at most OWNER_CHANGE_FREE_REBUILDS times (owner_change_wait.rs:55).',
+        'RebindLimit == 3',
+        'Key(i) == IF i = 1 THEN "k1" ELSE "k2"',
+        'Runner(p) == IF p = 1 THEN "runner1" ELSE "runner2"',
+        'MinSlot(s) == IF 1 \\in s THEN 1 ELSE 2',
+        'MaxOf(s) == CHOOSE x \\in s : \\A y \\in s : y <= x',
+        '\\* The current process\'s component lifetime: the first, or the next process\'s new one (a\n'
+        '\\* restart after a stop, the stop profiles).',
+        'LPhase == IF life_cur = 2 THEN life2_phase ELSE life_phase',
+        'NewLifetime == "stop" \\in Env /\\ life_phase = "Closed"',
+        'Admission == LPhase = "Open" \\/ (Fault = "admit-after-close" /\\ LPhase = "Closing")',
+        'SourceOpen == src_phase = "Open" /\\ src_readiness = "Ready"',
+        'Offer1Vars == <<' + ', '.join(offer_vars) + '>>',
+        'Offer2Vars == <<' + ', '.join(offer2_vars) + '>>',
+        *[per_slot(field) for field in offer_fields if field != 'phase'],
+        per_slot('phase'),
+        'OPhase(i) == Ophase(i)',
+        'OSrcRev(i) == Osource_revision(i)',
+        'OInc(i) == Oincarnation(i)',
+        'OSealed(i) == Opreparation_receipt(i) # ""',
+        'OPrepEpoch(i) == Opreparation_epoch(i)',
+        'ODispatchCount(i) == Odispatch_count(i)',
+        'ODispatchEpochs(i) == Odispatch_epochs(i)',
+        'OUnresolved(i) == Ounresolved_dispatches(i)',
+        'OLastDispatchEpoch(i) == Olast_dispatch_epoch(i)',
+        'OReceiptKind(i) == Oreceipt_kind(i)',
+        'OReceiptDispatch(i) == Oreceipt_dispatch(i)',
+        'OReceiptEpoch(i) == Oreceipt_epoch(i)',
+        'OAbsenceThrough(i) == Oabsence_through(i)',
+        '\\* The close\'s unresolved record, with the closing process\'s epoch (0: none). One close per\n'
+        '\\* behavior: the record is written once.',
+        'OCloseEpoch(i) == Oclose_epoch(i)',
+        '\\* Why an offer was withdrawn: a verdict on the delivery (a denied authority, a closed or\n'
+        '\\* changed source) or not (a closed admission, a replaced session, an ended process), when the\n'
+        '\\* same delivery is prepared again.',
+        'OWithdrawalCause(i) == Owithdrawal_cause(i)',
+        'OVerdictWithdrawal(i) == OWithdrawalCause(i) \\in {"PolicyDenied", "SourceClosed"}',
+        'Reprepare(i) == OPhase(i) = "Withdrawn" /\\ ~OVerdictWithdrawal(i) /\\ Fault # "withdrawn-always-refused"',
+        'NotVerdictCauses == {"AdmissionClosed", "PreparationStale"}',
+        '\\* The dispatches recorded and not answered: in flight, or of an ended process (ambiguous).',
+        'OOpen(i) == DOMAIN ODispatchEpochs(i) \\ OUnresolved(i)',
+        '\\* Another dispatch of the record than d may have admitted: open (in flight, or an ended\n'
+        '\\* process\'s) or unresolved, and not covered by the final-absence evidence.',
+        'Ambiguous(i, d) == \\E x \\in (OOpen(i) \\ {d}) \\cup OUnresolved(i) : x > OAbsenceThrough(i)',
+        'OPhaseNext(i) == IF i = 1 THEN offer_phase\' ELSE offer2_phase\'',
+        'AdmittedReceipt(i) == "admitted-" \\o Key(i)',
+        'RefusalReceipt(i) == "refused-" \\o Key(i)',
+        'ReceiptFor(i, a) == CASE a = "Admitted" -> AdmittedReceipt(i)\n'
+        '                     [] a \\in {"CoreRefused", "EntryRefused"} -> RefusalReceipt(i)\n'
+        '                     [] OTHER -> ""',
+        '\\* The generated offer owner\'s transitions, for one slot; the other slot is unchanged.',
+        owner_op('Prepare', 'PrepareOriginalOffer(IF i = 1 THEN "offer1" ELSE "offer2", "source1", src_revision, '
+                            'current_inc, IF i = 1 THEN "input1" ELSE "input2", IF i = 1 THEN "digest1" ELSE "digest2", '
+                            'IF i = 1 THEN "binding1" ELSE "binding2", IF i = 1 THEN "prep1" ELSE "prep2", epoch)'),
+        owner_op('Seal', 'SealOriginalPreparation($_offer_key, $_revision, $_preparation_id, $_input_digest, '
+                         'IF i = 1 THEN "sealed1" ELSE "sealed2")'),
+        '\\* The send intent, fed what the commit read (the owner decides whether it commits or\n'
+        '\\* refuses): the stale-snapshot mutant passes the offer\'s own revision and claims the\n'
+        '\\* source open and ready; cached-incarnation passes the offer\'s own incarnation.',
+        owner_op('Record', 'RecordOriginalSendIntent(' + commit_view + ')'),
+        owner_op('Refuse', 'RefuseOriginalSendIntent(' + commit_view + ')'),
+        owner_op('Withdraw', 'WithdrawUnsentPreparation($_offer_key, $_revision, epoch)'),
+        owner_op('Dispatch', 'RecordDispatchStart($_offer_key, $_revision, epoch, d)', 'd'),
+        owner_op('RetainDispatch', f'RetainCoreReceipt({identity}, d, a, ReceiptFor(i, a))', 'd, a'),
+        owner_op('PruneDispatch', f'RecordDispatchAnswer({identity}, d, a, ReceiptFor(i, a))', 'd, a'),
+        owner_op('UnresolvedDispatch', f'PreserveUnresolvedOffer({identity}, d, a, "")', 'd, a'),
+        '\\* A dispatch\'s answer, fed to the owner: exactly one of its three transitions accepts it.',
+        'OAnswer(i, d, a) == ORetainDispatch(i, d, a) \\/ OPruneDispatch(i, d, a) \\/ OUnresolvedDispatch(i, d, a)',
+        owner_op('RetainFound', f'RetainFoundReceipt({identity}, epoch, "Admitted", AdmittedReceipt(i))'),
+        owner_op('FinalAbsence', f'RecordFinalAbsence({identity}, epoch, "Absent", "")'),
+        owner_op('CloseRecord', 'RecordCloseUnresolved($_offer_key, $_revision, "close1", epoch)'),
+        'NonTerminal(i) == OPhase(i) \\in {"Prepared", "Offered"}',
+        'ObservedAdmitted(i) == OPhase(i) = "CoreObserved" /\\ OReceiptKind(i) \\in {"Admitted", "Found"}',
+        'ObservedNotAdmitted(i) == OPhase(i) = "CoreObserved" /\\ OReceiptKind(i) \\in {"CoreRefused", "EntryRefused"}',
+        '\\* Core\'s admitted qualified keys: <<session, raw key, epoch of the admitting process,\n'
+        '\\* the admitting dispatch>>.',
+        'KeyAdmitted(inc, k) == \\E x \\in native : x[1] = inc /\\ x[2] = k',
+        'NativeKeys == {<<x[1], x[2], x[3]>> : x \\in native}',
+        'OfferAdmitted(i) == OPhase(i) # "Absent" /\\ KeyAdmitted(OInc(i), Key(i))',
+        'FreshProc == [pc |-> "Idle", n |-> 0, slot |-> 0, kind |-> "", key |-> "", out |-> "", cause |-> "None",\n'
+        '              dec |-> "Pending", dl |-> FALSE, rb |-> 0, view |-> TRUE, waited |-> FALSE, ans |-> "", d |-> 0]',
+        '\\* The record\'s effect intent (its outbox), the driver\'s in-process obligations (parked,\n'
+        '\\* re-drive, read), Core\'s queued claim (fifo, pend, and held: Core\'s re-offers of this\n'
+        '\\* process meet the same verdict over the same ambiguity until the record changes; Core\'s\n'
+        '\\* facts, never Connect\'s), and the commit\'s view for I2 and I11 (ie, crev, cinc). No fact\n'
+        '\\* here decides an owner transition.',
+        'NoJournal == [outbox |-> FALSE, parked |-> FALSE, redrive |-> FALSE, read_owed |-> FALSE, fifo |-> FALSE,\n'
+        '              pend |-> FALSE, held |-> FALSE, ie |-> 0, crev |-> 0, cinc |-> ""]',
+        'Live(p) == sp[p].pc \\notin {"Idle", "Done"}',
+        'Busy == \\E p \\in Procs : Live(p)',
+        'Waiting(p) == sp[p].pc \\in {"MetaWait", "PeerWait"}',
+        '\\* The peer door: a durable delivery keeps Core\'s claim; Core\'s drain binds one peer\n'
+        '\\* delivery of the session at a time, its FIFO head (a queued claim, with or without a\n'
+        '\\* record) first.',
+        'ClaimedPeer == door = "Peer" /\\ PeerClaims',
+        'DrainFree == \\A q \\in Procs : ~Live(q)',
+        'QueuedClaim == orphan_claim \\/ \\E i \\in Slots : jr[i].fifo',
+        '\\* The binder\'s answer to Core for a durable delivery its section refused: NotReady (Core\n'
+        '\\* keeps the claim) for a closed admission, and for a verdict met while another dispatch of\n'
+        '\\* the record may have admitted; Denied (the claim ends) for any other verdict. The\n'
+        '\\* closed-admission-denied and denied-over-ambiguity mutants deny the first two.',
+        'KeepClaim(r) == /\\ ClaimedPeer /\\ r.out = "Refused" /\\ r.ans = "NotSubmitted"\n'
+        '                /\\ \\/ r.cause = "AdmissionClosed" /\\ Fault # "closed-admission-denied"\n'
+        '                   \\/ /\\ r.cause \\in {"PolicyDenied", "SourceClosed"} /\\ Ambiguous(r.slot, r.d)\n'
+        '                      /\\ Fault # "denied-over-ambiguity"',
+        '\\* A re-offered claim reuses the dispatch its delivery opened in this process, if any.',
+        'ClaimDispatch(i) == LET cur == {d \\in OOpen(i) : ODispatchEpochs(i)[d] = epoch}\n'
+        '                    IN IF OPhase(i) = "Offered" /\\ cur # {} THEN MaxOf(cur) ELSE 0',
+        '\\* A wait\'s condition has cleared: the source gate is free, or the offer\'s session is current.',
+        'Cleared(p) == CASE sp[p].cause = "SourceHeld" -> gate = "Free"\n'
+        '                [] sp[p].cause = "OriginalAdmissionPending" -> current_inc = OInc(sp[p].slot)\n'
+        '                [] OTHER -> TRUE',
+        '\\* A kept record: Offered, the process scanned, nothing owed by the driver (no re-drive or\n'
+        '\\* read), nothing in flight but Core\'s own re-offers of a queued peer claim before entry,\n'
+        '\\* and, unless it is a peer delivery\'s (a durable claim\'s, or a volatile or supervisor\n'
+        '\\* delivery\'s kept for its sender\'s retry), dispatched by this process (no restart\n'
+        '\\* re-drive owed). Its intent stays durable; a caller\'s same-key replay, Core\'s re-offer of\n'
+        '\\* a queued peer claim, a sender\'s retry, a restart or the close discharges it.',
+        'CoreOwned(p) == sp[p].kind = "core" /\\ sp[p].pc \\in {"Lock", "DecideP", "DecideA", "PeerWait"}',
+        'Kept(i) == /\\ alive /\\ scanned /\\ OPhase(i) = "Offered" /\\ ~jr[i].redrive /\\ ~jr[i].read_owed\n'
+        '           /\\ read_slot # i\n'
+        '           /\\ \\A p \\in Procs : (sp[p].slot = i /\\ Live(p)) => CoreOwned(p)\n'
+        '           /\\ door = "Peer" \\/ OLastDispatchEpoch(i) = epoch',
+        'StartPrep(n) == [prep EXCEPT ![n] = IF Len(BA!Steps(door)) = 0 THEN [st |-> "Done", pos |-> 0, phase |-> "lookup"]\n'
+        '                                     ELSE [st |-> "Running", pos |-> 1, phase |-> "lookup"]]',
+        'UseOffer(r, i) == [r EXCEPT !.slot = i, !.key = Key(i),\n'
+        '                            !.pc = IF OPhase(i) = "Offered" THEN "Call" ELSE IF OSealed(i) THEN "Commit" ELSE "Prepare"]',
+        'EndRec(r, o, c) == [r EXCEPT !.pc = "Done", !.out = o, !.cause = c, !.dec = "Pending", !.dl = FALSE, !.ans = ""]',
+        '\\* A send whose dispatch was answered without native submission ends with the outcome it\n'
+        '\\* already carries (Held, Refused or a transport drop).',
+        'Finish(r) == [r EXCEPT !.pc = "Done", !.dl = FALSE, !.ans = ""]',
+        'EndUnder(r, i) == EndRec(r, IF OPhase(i) = "Withdrawn" THEN "Refused" ELSE IF ObservedAdmitted(i) THEN "Admitted"\n'
+        '                            ELSE "NotAdmitted",\n'
+        '                         IF OPhase(i) = "Withdrawn" THEN "PreparationWithdrawn" ELSE "None")',
+        '\\* Settled: the driver owes nothing more (Core\'s queued claim is Core\'s and stays; a held\n'
+        '\\* claim is re-offered again: the record changed).',
+        'Settled(r) == [r EXCEPT !.outbox = FALSE, !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n'
+        '                        !.held = FALSE]',
+        'CommitCause(i) == CASE ~Admission -> "AdmissionClosed"\n'
+        '                    [] ~SourceOpen \\/ src_revision # OSrcRev(i) -> "SourceClosed"\n'
+        '                    [] ~auth_ok -> "PolicyDenied"\n'
+        '                    [] OTHER -> "PreparationStale"',
+        'RefusalCauses == {"PolicyDenied", "SourceClosed", "AdmissionClosed", "PreparationStale", "PreparationRefused",\n'
+        '                  "PreparationWithdrawn", "EntryRefused", "OfferNotAdmitted"}',
+        '\\* The pure decision over the bind\'s snapshot, genuine refusals first. A re-offered\n'
+        '\\* durable claim whose record is terminal: Bound with the record\'s own key for an\n'
+        '\\* admitted record (Core deduplicates and settles the claim), typed Refused for a\n'
+        '\\* NotAdmitted one and for one withdrawn for a verdict (the claim ends RuntimeRejected); a\n'
+        '\\* record withdrawn for no verdict is prepared again instead (Core\'s re-offer, above). In\n'
+        '\\* Core\'s vocabulary the peer binder answers Denied only for a verdict, never over another\n'
+        '\\* dispatch that may have admitted; a closed admission and contention (a held source, a\n'
+        '\\* replaced session: a not-now, waited out in Core\'s waiter within the delivery\'s one\n'
+        '\\* deadline) answer NotReady, the claim staying queued (B_Settle, B_CommitRefuse, B_Lookup).\n'
+        '\\* The held-refused and stale-refused mutants refuse contention.',
+        'DecisionAt(p, site) ==\n'
+        '    LET r == sp[p]\n'
+        '        closed == ~SourceOpen \\/ ~Admission\n'
+        '        held == gate = "Held"\n'
+        '        stale == site = "A" /\\ current_inc # OInc(r.slot) /\\ Fault # "dispatch-current-session"\n'
+        '        ccause == IF ~Admission THEN "AdmissionClosed" ELSE "SourceClosed"\n'
+        '    IN CASE r.kind = "core" /\\ ObservedAdmitted(r.slot) -> [k |-> IF site = "P" THEN "Next" ELSE "Bound", c |-> "None"]\n'
+        '         [] r.kind = "core" /\\ OPhase(r.slot) \\in {"Withdrawn", "CoreObserved"} ->\n'
+        '                [k |-> "Refused", c |-> IF OPhase(r.slot) = "Withdrawn" THEN "PreparationWithdrawn" ELSE "OfferNotAdmitted"]\n'
+        '         [] Fault = "held-before-closed" /\\ held -> [k |-> "NotNow", c |-> "SourceHeld"]\n'
+        '         [] closed -> [k |-> IF Fault = "closed-as-notnow" THEN "NotNow" ELSE "Refused", c |-> ccause]\n'
+        '         [] ~r.view -> [k |-> IF Fault = "refusal-as-notnow" THEN "NotNow" ELSE "Refused", c |-> "PolicyDenied"]\n'
+        '         [] held -> IF Fault = "held-refused" THEN [k |-> "Refused", c |-> "SourceClosed"]\n'
+        '                    ELSE [k |-> "NotNow", c |-> "SourceHeld"]\n'
+        '         [] stale -> IF Fault = "stale-refused" THEN [k |-> "Refused", c |-> "PolicyDenied"]\n'
+        '                     ELSE [k |-> "NotNow", c |-> "OriginalAdmissionPending"]\n'
+        '         [] OTHER -> [k |-> IF site = "P" THEN "Next" ELSE "Bound", c |-> "None"]',
+        '\\* A not-now releases the section and waits (Meta, or Core\'s peer waiter); past Meta\'s free\n'
+        '\\* rebinds it is Held at once (its dispatch answered not submitted after Meta returns). The\n'
+        '\\* drop-retry-owner mutant hands the not-now to the caller.',
+        'NotNowRec(r, c) ==\n'
+        '    IF Fault = "drop-retry-owner" THEN [EndRec(r, "NotNow", c) EXCEPT !.dec = "NotNow"]\n'
+        '    ELSE IF door # "Peer" /\\ r.rb >= RebindLimit\n'
+        '         THEN [r EXCEPT !.pc = "Settle", !.ans = "NotSubmitted", !.out = "Held", !.cause = c, !.dec = "NotNow"]\n'
+        '    ELSE [r EXCEPT !.pc = IF door = "Peer" THEN "PeerWait" ELSE "MetaWait", !.dec = "NotNow", !.cause = c,\n'
+        '                   !.dl = FALSE]',
+        'Decide(p, site, d) ==\n'
+        '    CASE d.k = "Next" ->\n'
+        "            /\\ sp' = [sp EXCEPT ![p].pc = \"DecideA\"]\n"
+        '            /\\ UNCHANGED <<meta_holder, held_site>>\n'
+        '      [] d.k = "Bound" ->\n'
+        "            /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Entry\", !.dec = \"Bound\"]]\n"
+        '            /\\ UNCHANGED <<meta_holder, held_site>>\n'
+        '      [] d.k = "Refused" ->\n'
+        "            /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Settle\", !.ans = \"NotSubmitted\", !.out = \"Refused\",\n"
+        '                                               !.cause = d.c, !.dec = "Refused"]]\n'
+        "            /\\ meta_holder' = 0\n"
+        '            /\\ UNCHANGED held_site\n'
+        '      [] OTHER ->\n'
+        "            /\\ sp' = [sp EXCEPT ![p] = NotNowRec(sp[p], d.c)]\n"
+        "            /\\ meta_holder' = 0\n"
+        "            /\\ held_site' = IF RecordRows /\\ d.c = \"SourceHeld\" THEN site ELSE held_site",
+        'EntryResults(fence, dup) ==\n'
+        '    (IF ~fence THEN {"EntryRefused"}\n'
+        '     ELSE {"Admitted"} \\cup (IF ~dup /\\ "corerefuse" \\in Env /\\ core_refusals < CoreRefuseBound\n'
+        '                             THEN {"NotAdmitted"} ELSE {}))\n'
+        '    \\cup (IF "lost" \\in Env /\\ lost_count < LostBound\n'
+        '          THEN (IF fence THEN {"LostAfter", "LostBefore"} ELSE {"LostBefore"}) ELSE {})',
+        'AvailChoices == IF Fault = "core-unavailable-forever" THEN {FALSE}\n'
+        '                ELSE IF unavail_reads < UnavailBound THEN BOOLEAN ELSE {TRUE}',
+        '\\* A read by key in flight when a send of the same record answers AdmissionUnresolved started\n'
+        '\\* before that answer: it is discarded and the read owed after it starts again.',
+        'StaleRead(p) == sp[p].ans = "Unresolved" /\\ read_slot = sp[p].slot /\\ Fault # "stale-read-clears"',
+        'Issued2(x, y) == x \\in issued /\\ y \\notin issued',
+        'PartialIssuance ==\n'
+        '    CASE door \\in {"ClassInput", "ClassNative"} -> Issued2("callback_root", "callback_leaves")\n'
+        '                                                   \\/ Issued2("callback_leaves", "class_input_selection")\n'
+        '      [] door = "FindNative" -> Issued2("native_operation_root", "native_operation_child")\n'
+        '      [] door = "BatchSetup" -> Issued2("service_child", "service_setup_observation")\n'
+        '      [] door = "ConfiguredSetup" -> Issued2("configured_setup_child", "configured_setup_targets")\n'
+        '      [] door = "SetupRequest" -> Issued2("setup_request_child", "setup_request_targets")\n'
+        '      [] OTHER -> LET arts == BA!StepArts(door) IN arts \\cap issued # {} /\\ ~(arts \\subseteq issued)',
+        '\\* The one rank table (toolkit-catalog lock_order.rs, exported as lock_order/ranks.json).',
+        'Rank == [' + ranks + ']',
+        'Threads == {Runner(p) : p \\in Procs} \\cup {"store"}',
+        'Holder(l) == IF l = "PUB" THEN pub_holder ELSE IF l = "CONN" THEN conn_holder ELSE "none"',
+        'HeldLocks(t) == {l \\in {"PUB", "CONN"} : Holder(l) = t}',
+        'NextLock(t) ==\n'
+        '    IF t = "store" THEN (IF store_pc = "hook" THEN "PUB" ELSE "")\n'
+        '    ELSE LET p == IF t = "runner1" THEN 1 ELSE 2\n'
+        '         IN IF sp[p].pc = "Commit" THEN "PUB" ELSE IF sp[p].pc = "CommitTx" THEN "CONN" ELSE ""',
+        'HeldAt == IF stage = "A" THEN a_held ELSE held_site',
+    ]
+    attempt_invs = ['G3_WitnessQuiet', 'G3_NoSilentUnmarkedWrite', 'MarkReflectsWrites', 'I4_NoNotNowAfterEffect',
+                    'MetaNeverWaitsAfterEffect', 'G4_BackstopQuiet', 'DecisionPlacement', 'GrantUnique']
+    owner_fields = {
+        'src': [v for v in src_vars if v != 'src_model_step_count'],
+        'offer': [v for v in offer_vars if v != 'offer_model_step_count'],
+        'offer2': [v for v in offer2_vars if v != 'offer2_model_step_count'],
+        'life': [v for v in life_vars if v != 'life_model_step_count'],
+        'life2': [v for v in life2_vars if v != 'life2_model_step_count'],
+    }
+    invariants = {
+        'TypeOK': ('BA!TypeOK /\\ begun \\in 0..SendBound /\\ meta_holder \\in 0..ProcBound\n'
+                   '    /\\ pub_holder \\in {"none", "store", "runner1", "runner2"} /\\ conn_holder \\in {"none", "store"}\n'
+                   '    /\\ current_inc \\in {"inc1", "inc2"} /\\ dup_arts \\subseteq BA!AllArts /\\ life_cur \\in {1, 2}\n'
+                   '    /\\ native \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
+                   '    /\\ refusals \\subseteq (Slots \\X (0..9) \\X {"CoreRefused", "EntryRefused"})'),
+        'OwnerCanonical': ' /\\ '.join(['src!' + i for i in src_invs] + ['offer!' + i for i in offer_invs]
+                                        + ['offer2!' + i for i in offer_invs] + ['life!' + i for i in life_invs]
+                                        + ['life2!' + i for i in life_invs]),
+        **{name: 'BA!' + name for name in attempt_invs},
+        # I1: a step inside Meta's protected section never blocks: whatever the environment
+        # holds, the decision and the entry can always be taken.
+        'I1_ProtectedStepsNeverBlock': ('\\A p \\in Procs : (alive /\\ meta_holder = p /\\ sp[p].pc \\in {"DecideP", "DecideA", "Entry"})\n'
+                                        '    => ENABLED (B_DecidePOf(p) \\/ B_DecideAOf(p) \\/ B_EntryOf(p))'),
+        # I2: the send intent is recorded over the source revision and the incarnation current at
+        # the commit.
+        'I2_FreshSnapshotAtCommit': ('\\A i \\in Slots : OPhase(i) \\in {"Offered", "CoreObserved"}\n'
+                                     '    => (OSrcRev(i) = jr[i].crev /\\ OInc(i) = jr[i].cinc)'),
+        # I3: at most one native admission per original, only under its offer's own qualified key.
+        'I3_OneNativeAdmission': ('Cardinality({<<x[1], x[2]>> : x \\in native}) <= 1\n'
+                                  '    /\\ \\A x \\in native : \\E i \\in Slots : OPhase(i) # "Absent" /\\ x[1] = OInc(i) /\\ x[2] = Key(i)'),
+        'I3_OneOfferPerSource': 'Cardinality({i \\in Slots : NonTerminal(i)}) <= 1',
+        # I4: no durable attempt without a durable owner (no grant before the owner record);
+        # no dispatch before the send intent (a re-offered claim of a terminal record
+        # dispatches nothing new); the dispatch start recorded in the owner before every call
+        # into Meta or the peer's section; every Offered record keeps its outbox.
+        'I4_EffectsHaveOwner': ('(stage = "B" /\\ ~(issued \\subseteq BA!InitialIssued(door, initial)))\n'
+                                '    => \\E i \\in Slots : OPhase(i) # "Absent"'),
+        'I4_OwnerBeforeDispatch': ('\\A p \\in Procs : (sp[p].pc \\in {"Lock", "DecideP", "DecideA", "Entry", "Settle", "MetaWait", "PeerWait"}\n'
+                                   '                    /\\ ~(sp[p].kind = "core" /\\ sp[p].d = 0))\n'
+                                   '    => OPhase(sp[p].slot) \\in {"Offered", "CoreObserved"}'),
+        'I4_DispatchRecordedBeforeMeta': ('\\A p \\in Procs : (sp[p].pc \\in {"Lock", "DecideP", "DecideA", "Entry", "MetaWait", "PeerWait"}\n'
+                                          '                    /\\ OPhase(sp[p].slot) = "Offered")\n'
+                                          '    => sp[p].d \\in DOMAIN ODispatchEpochs(sp[p].slot)'),
+        'I4_DurableOutbox': '\\A i \\in Slots : OPhase(i) = "Offered" => jr[i].outbox',
+        # I5: a genuine refusal (closed or expired source, closed admission, denied authority)
+        # never becomes not-now; every refusal is typed.
+        'I5_GenuineRefusalNeverNotNow': ('\\A p \\in Procs : sp[p].cause \\in {"PolicyDenied", "SourceClosed", "AdmissionClosed"}\n'
+                                         '    => sp[p].dec # "NotNow"'),
+        'I5_TypedRefusal': '\\A p \\in Procs : sp[p].out = "Refused" => sp[p].cause \\in RefusalCauses',
+        # I6: a not-now always has its retry owner (never handed to a caller as such); a durable
+        # peer delivery that ended at its deadline is still queued by Core (parked, never lost);
+        # Core's drain binds one peer delivery of the session at a time.
+        'I6_OneRetryOwner': '\\A p \\in Procs : sp[p].out # "NotNow"',
+        'I6_ParkedNeverLost': ('\\A i \\in Slots : (door = "Peer" /\\ jr[i].pend /\\ OPhase(i) = "Offered" /\\ jr[i].outbox)\n'
+                               '    => jr[i].fifo'),
+        'I6_OnePeerBindPerSession': 'door = "Peer" => \\A p, q \\in Procs : (Live(p) /\\ Live(q)) => p = q',
+        # I7: Connect observes Admitted only with Core's admission of the offer's key, and leaves
+        # no record kept (nothing owed) that Core admitted.
+        'I7_CoreReceiptProvenance': '\\A i \\in Slots : ObservedAdmitted(i) => OfferAdmitted(i)',
+        'I7_KeptRecordNotAdmitted': '\\A i \\in Slots : Kept(i) => ~OfferAdmitted(i)',
+        # I9: no native admission after a revocation took effect (the entry fence).
+        'I9_NoAdmissionAfterRevocation': '~admitted_stale',
+        'I10_DeclaredOrder': ('\\A t \\in Threads : NextLock(t) # "" =>\n'
+                              '    \\A h \\in HeldLocks(t) : Rank[h] < Rank[NextLock(t)]'),
+        'I11_NoAdmissionAfterClose': '~entered_after_close',
+        # The closed lifetime: the join ran and every Offered record carries the close's
+        # unresolved record (the current process's lifetime: after a stop and restart, the next
+        # process's).
+        'I11_CloseJoinsDriver': ('LPhase = "Closed" => (/\\ joined /\\ \\A n \\in Preparers : prep[n].st # "Running"\n'
+                                 '                          /\\ \\A p \\in Procs : ~Live(p)\n'
+                                 '                          /\\ \\A i \\in Slots : OPhase(i) = "Offered" => OCloseEpoch(i) > 0)'),
+        'I11_RestartEnumerates': ('\\A i \\in Slots : (alive /\\ epoch = 2 /\\ scanned /\\ OPhase(i) = "Offered" /\\ jr[i].ie = 1\n'
+                                  '                    /\\ ~joined) => jr[i].parked'),
+        # The restart drives every non-terminal record (I11): a send at the call over an Offered
+        # record, in a live process that has not joined for its close, can record its dispatch
+        # start: the close's unresolved record blocks only the closing process's dispatches.
+        'I11_CallRecordsItsDispatch': ('\\A p \\in Procs : (alive /\\ ~joined /\\ sp[p].pc = "Call" /\\ OPhase(sp[p].slot) = "Offered")\n'
+                                       '    => ENABLED ODispatch(sp[p].slot, ODispatchCount(sp[p].slot) + 1)'),
+        'I12_NoOrphanOffer': '(\\E i \\in Slots : OPhase(i) = "Offered") => mode \\in {"production", "fixture"}',
+        'I12_ClaimsProduction': 'claimed => mode = "production"',
+        # I13: no NotAdmitted settlement against Core; a NotAdmitted receipt names the dispatch it
+        # settles and a refusal of that dispatch by Core or the fence of its kind (a
+        # transport drop is no verdict); final-absence evidence only for dispatches that did not
+        # admit.
+        'I13_NoSettlementAgainstCore': '\\A i \\in Slots : ObservedNotAdmitted(i) => ~OfferAdmitted(i)',
+        'I13_ReceiptNamesItsRefusal': ('\\A i \\in Slots : ObservedNotAdmitted(i)\n'
+                                       '    => <<i, OReceiptDispatch(i), OReceiptKind(i)>> \\in refusals'),
+        'I13_FinalAbsenceProven': ('\\A i \\in Slots : OAbsenceThrough(i) > 0\n'
+                                   '    => ~\\E x \\in native : x[1] = OInc(i) /\\ x[2] = Key(i) /\\ x[4] <= OAbsenceThrough(i)'),
+        # A send whose grants exist is never refused for a Duplicate.
+        'NoDuplicateRefusalB': ('\\A p \\in Procs : (sp[p].out = "Refused" /\\ sp[p].cause = "PreparationRefused")\n'
+                                '    => ~(BA!StepArts(door) \\subseteq issued)'),
+        # The model is finite by construction (no state constraint): every owner stays in its steps.
+        'StepBound': ('src_model_step_count <= 8 /\\ offer_model_step_count <= 16 /\\ offer2_model_step_count <= 16\n'
+                      '    /\\ life_model_step_count <= 8 /\\ life2_model_step_count <= 8'),
+    }
+    rows = {
+        # Stage A rows, from the attempt model (its partial-issuance and shared-parent states).
+        **{f'NotRow{name}': 'BA!NotRow' + name for name in [
+            'ClassFirstSendA', 'BatchFirstSendA', 'BoundResendA', 'OrphanDuplicate', 'OrphanDuplicateRetry',
+            'LeafFirstAfterRefusal', 'LeafFirstAfterCrash', 'NativeChildFirstAfterDrop',
+            'NativeChildFirstAfterCrash', 'TargetsFirstAfterDrop', 'ConfiguredGrantFirstAfterDrop',
+            'ClassSelectionFirstShared', 'ClassSelectionFirstAfterRefusal', 'NativeChildFirstShared',
+            'ServiceObservationFirstAfterRefusal', 'ServiceObservationFirstAfterCrash']},
+        # Stage B rows.
+        'NotRowClassFirstSendB': ('~(stage = "B" /\\ door \\in {"ClassInput", "ClassNative"} /\\ initial = "First"\n'
+                                  '    /\\ \\E p \\in Procs : sp[p].out = "Admitted" /\\ sp[p].waited)'),
+        'NotRowBatchFirstSendB': ('~(stage = "B" /\\ door = "BatchSetup" /\\ initial = "First"\n'
+                                  '    /\\ \\E p \\in Procs : sp[p].out = "Admitted" /\\ sp[p].waited)'),
+        'NotRowProductionClaimed': ('~(stage = "B" /\\ mode = "production" /\\ claimed /\\ ObservedAdmitted(1)\n'
+                                    '    /\\ Cardinality(native) = 1)'),
+        'NotRowFixtureUnclaimed': '~(stage = "B" /\\ mode = "fixture" /\\ ObservedAdmitted(1) /\\ ~claimed)',
+        'NotRowCloseRecordsUnresolved': ('~(stage = "B" /\\ life_phase = "Closed" /\\ \\E i \\in Slots : OPhase(i) = "Offered"\n'
+                                         '    /\\ OCloseEpoch(i) > 0)'),
+        # The restart after a stop: the record the stopped process's close recorded unresolved is
+        # re-driven by the next process (its new lifetime open), dispatched there and admitted
+        # once (RED on the owner whose close record blocks every later dispatch).
+        'NotRowStopRestartRedriveAdmitted': ('~(stage = "B" /\\ life_cur = 2 /\\ epoch = 2 /\\ OCloseEpoch(1) = 1\n'
+                                             '    /\\ ObservedAdmitted(1) /\\ OReceiptKind(1) = "Admitted" /\\ OReceiptEpoch(1) = 2\n'
+                                             '    /\\ Cardinality(native) = 1 /\\ \\E p \\in Procs : sp[p].kind = "driver" /\\ sp[p].out = "Admitted")'),
+        # A durable peer claim queued at the stop: Core re-offers it to the next process, which
+        # dispatches the closed record and admits it once.
+        'NotRowStopRestartClaimReoffered': ('~(stage = "B" /\\ door = "Peer" /\\ life_cur = 2 /\\ epoch = 2 /\\ OCloseEpoch(1) = 1\n'
+                                            '    /\\ ObservedAdmitted(1) /\\ OReceiptKind(1) = "Admitted" /\\ OReceiptEpoch(1) = 2\n'
+                                            '    /\\ Cardinality(native) = 1 /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
+        'NotRowLostReplyReadback': ('~(stage = "B" /\\ lost_reply_seen /\\ ObservedAdmitted(1) /\\ offer2_phase = "Absent"\n'
+                                    '    /\\ Cardinality(native) = 1)'),
+        'NotRowRestartRedrive': ('~(stage = "B" /\\ epoch = 2 /\\ crashed_offered /\\ ObservedAdmitted(1)\n'
+                                 '    /\\ Cardinality(native) = 1)'),
+        # A send held, then a same-key replay finds
+        # the kept offer and uses it: one offer, one native input.
+        'NotRowHeldThenReplayed': ('~(stage = "B" /\\ replayed /\\ ObservedAdmitted(1) /\\ offer2_phase = "Absent"\n'
+                                   '    /\\ NativeKeys = {<<"inc1", "k1", 1>>}\n'
+                                   '    /\\ \\E p, q \\in Procs : p # q /\\ sp[p].out = "Held" /\\ sp[q].out = "Admitted")'),
+        # S1 admitted, its answer and receipt lost, the session
+        # replaced; S2 never admits (OriginalAdmissionPending, Held), and the read by S1's
+        # key observes the admission.
+        'NotRowLostReceiptS1S2': ('~(stage = "B" /\\ current_inc = "inc2" /\\ ObservedAdmitted(1)\n'
+                                  '    /\\ NativeKeys = {<<"inc1", "k1", 1>>}\n'
+                                  '    /\\ \\E p \\in Procs : sp[p].out = "Held" /\\ sp[p].cause = "OriginalAdmissionPending")'),
+        # The real peer seam: a delivery past its deadline stays queued,
+        # Core re-offers it, admitted once: one offer.
+        'NotRowPeerPendingReoffered': ('~(stage = "B" /\\ door = "Peer" /\\ ObservedAdmitted(1) /\\ offer2_phase = "Absent"\n'
+                                       '    /\\ Cardinality(native) = 1 /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
+        # Two live sends of one original; the loser of a CAS reads the winner back.
+        'NotRowConcurrentSendsOneOffer': ('~(stage = "B" /\\ cas_lost /\\ ObservedAdmitted(1) /\\ offer2_phase = "Absent"\n'
+                                          '    /\\ Cardinality(native) = 1 /\\ \\A p \\in Procs : sp[p].out = "Admitted")'),
+        'NotRowSecondOfferAfterNotAdmitted': ('~(stage = "B" /\\ ObservedNotAdmitted(1) /\\ ObservedAdmitted(2)\n'
+                                              '    /\\ Cardinality(native) = 1)'),
+        # The fence's typed refusal settles the record with a receipt naming its dispatch.
+        'NotRowEntryRefusedNotAdmitted': ('~(stage = "B" /\\ ~auth_ok /\\ ObservedNotAdmitted(1) /\\ native = {}\n'
+                                          '    /\\ OReceiptKind(1) = "EntryRefused" /\\ OReceiptDispatch(1) = 1 /\\ OReceiptEpoch(1) = 1\n'
+                                          '    /\\ \\E p \\in Procs : sp[p].out = "Refused" /\\ sp[p].cause = "EntryRefused")'),
+        # Core's refusal settles the record with a receipt naming its dispatch and kind.
+        'NotRowReceiptNamesCoreRefusal': ('~(stage = "B" /\\ ObservedNotAdmitted(1) /\\ OReceiptKind(1) = "CoreRefused"\n'
+                                          '    /\\ OReceiptDispatch(1) = 1 /\\ OReceiptEpoch(1) = 1 /\\ native = {})'),
+        # A refusal while another dispatch of the record is open leaves the journal; the
+        # other dispatch admits and settles it, its receipt naming that dispatch.
+        'NotRowRefusalLeftJournal': ('~(stage = "B" /\\ ObservedAdmitted(1) /\\ OReceiptKind(1) = "Admitted"\n'
+                                     '    /\\ <<1, 1, "CoreRefused">> \\in refusals /\\ OReceiptDispatch(1) = 2 /\\ Cardinality(native) = 1)'),
+        # The dispatch start is recorded in the owner, in this process's epoch, before the
+        # call into Meta (Find) or the peer's protected section (a peer delivery).
+        'NotRowDispatchBeforeMeta': ('~(stage = "B" /\\ door # "Peer" /\\ \\E p \\in Procs :\n'
+                                     '    /\\ sp[p].pc = "DecideP" /\\ sp[p].d \\in DOMAIN ODispatchEpochs(1)\n'
+                                     '    /\\ ODispatchEpochs(1)[sp[p].d] = epoch)'),
+        'NotRowDispatchBeforePeerSection': ('~(stage = "B" /\\ door = "Peer" /\\ \\E p \\in Procs :\n'
+                                            '    /\\ sp[p].kind = "caller" /\\ sp[p].pc = "DecideP"\n'
+                                            '    /\\ sp[p].d \\in DOMAIN ODispatchEpochs(1) /\\ ODispatchEpochs(1)[sp[p].d] = epoch)'),
+        # A lost answer is recorded against its dispatch.
+        'NotRowLostAnswerRecorded': ('~(stage = "B" /\\ offer_phase = "Offered" /\\ OUnresolved(1) = {1}\n'
+                                     '    /\\ \\E p \\in Procs : sp[p].out = "Unresolved")'),
+        # A dispatch whose answer is lost without a crash; the read by key observes it.
+        'NotRowLostDispatchObserved': ('~(stage = "B" /\\ epoch = 1 /\\ ObservedAdmitted(1) /\\ Cardinality(native) = 1\n'
+                                       '    /\\ \\E p \\in Procs : sp[p].out = "Unresolved")'),
+        # A lost dispatch that never landed is kept (in-process absence is not final); a
+        # same-key replay admits it once.
+        'NotRowLostBeforeReplayed': ('~(stage = "B" /\\ epoch = 1 /\\ replayed /\\ ObservedAdmitted(1)\n'
+                                     '    /\\ NativeKeys = {<<"inc1", "k1", 1>>} /\\ \\E p \\in Procs : sp[p].out = "Unresolved")'),
+        # The final-absence evidence after a restart, once the restart's re-drive was
+        # dispatched and answered: it covers every dispatch so far.
+        'NotRowFinalAbsenceCoversDispatches': ('~(stage = "B" /\\ epoch = 2 /\\ offer_phase = "Offered" /\\ ~jr[1].redrive\n'
+                                               '    /\\ OAbsenceThrough(1) >= 2 /\\ OAbsenceThrough(1) = ODispatchCount(1))'),
+        # The evidence covers its dispatches only: a later dispatch (a same-key replay) may
+        # still admit; a consumer checks that none followed it.
+        'NotRowFinalAbsenceThenLaterDispatch': ('~(stage = "B" /\\ OAbsenceThrough(1) > 0 /\\ ObservedAdmitted(1)\n'
+                                                '    /\\ OReceiptDispatch(1) > OAbsenceThrough(1))'),
+        # After a restart, a caller's same-key replay dispatches the parked record in the new
+        # process, which discharges the re-drive (no driver task re-drives it).
+        'NotRowReplayDischargesRedrive': ('~(stage = "B" /\\ epoch = 2 /\\ scanned /\\ jr[1].parked /\\ ~jr[1].redrive\n'
+                                          '    /\\ OLastDispatchEpoch(1) = 2 /\\ \\A p \\in Procs : sp[p].kind = "caller")'),
+        'NotRowRebindLimitHeld': '~(stage = "B" /\\ \\E p \\in Procs : sp[p].out = "Held" /\\ sp[p].rb = RebindLimit)',
+        # The source closes and is cancelled while the offer is Offered; Core's outcome
+        # is still observed, or the record is kept for its owner.
+        'NotRowOfferedSourceCancelledObserved': ('~(stage = "B" /\\ src_phase = "Cancelled" /\\ ObservedAdmitted(1)\n'
+                                                 '    /\\ \\E i \\in Slots : jr[i].ie > 0)'),
+        'NotRowSourceClosedDuringWaitKept': ('~(stage = "B" /\\ src_readiness = "ClosedToOffers" /\\ offer_phase = "Offered"\n'
+                                             '    /\\ \\E p \\in Procs : sp[p].out = "Refused" /\\ sp[p].cause = "SourceClosed" /\\ sp[p].waited)'),
+        'NotRowRevokedDuringWaitKept': ('~(stage = "B" /\\ ~auth_ok /\\ offer_phase = "Offered"\n'
+                                        '    /\\ \\E p \\in Procs : sp[p].out = "Refused" /\\ sp[p].cause = "PolicyDenied" /\\ sp[p].waited)'),
+        'NotRowRevokedAfterAdmissionKept': '~(stage = "B" /\\ ~auth_ok /\\ ObservedAdmitted(1) /\\ ~admitted_stale)',
+        'NotRowSessionReplacedHeld': ('~(stage = "B" /\\ current_inc = "inc2" /\\ offer_phase = "Offered" /\\ native = {}\n'
+                                      '    /\\ \\E p \\in Procs : sp[p].out = "Held" /\\ sp[p].cause = "OriginalAdmissionPending")'),
+        # The ended process's preparation (a send dropped or interrupted mid-preparation)
+        # is withdrawn by the restart scan, through its owner (the preparation's epoch).
+        'NotRowOrphanWithdrawnAfterRestart': ('~(stage = "B" /\\ epoch = 2 /\\ scanned /\\ offer_phase = "Withdrawn"\n'
+                                              '    /\\ OPrepEpoch(1) = 1 /\\ jr[1].ie = 0)'),
+        # The binder's rule for a re-offered durable claim whose record is terminal: bound with
+        # the record's own key when it was admitted (Core deduplicates and settles the claim),
+        # with no new entry fence, even after the authority was revoked (the readmitted-fence
+        # mutant fences it again).
+        'NotRowReofferTerminalAdmittedBound': ('~(stage = "B" /\\ door = "Peer" /\\ ObservedAdmitted(1) /\\ OReceiptKind(1) = "Found"\n'
+                                               '    /\\ Cardinality(native) = 1\n'
+                                               '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].d = 0 /\\ sp[p].out = "Admitted")'),
+        'NotRowReofferAdmittedNoFence': ('~(stage = "B" /\\ door = "Peer" /\\ ~auth_ok /\\ ObservedAdmitted(1)\n'
+                                         '    /\\ OReceiptKind(1) = "Found" /\\ Cardinality(native) = 1\n'
+                                         '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].d = 0 /\\ ~sp[p].view\n'
+                                         '                       /\\ sp[p].out = "Admitted")'),
+        # A record withdrawn for no verdict (the restart's withdrawal of an ended process's
+        # preparation, a session replaced during the preparation, a component stop before the
+        # commit) does not end Core's claim: Core re-offers it and the same delivery is prepared
+        # again and admitted once (the withdrawn-always-refused mutant refuses it).
+        **{f'NotRowWithdrawn{name}PreparedAgain': (
+            f'~(stage = "B" /\\ door = "Peer" /\\ offer_phase = "Withdrawn" /\\ OWithdrawalCause(1) = "{cause}"{extra}\n'
+            '    /\\ ObservedAdmitted(2) /\\ Cardinality(native) = 1\n'
+            '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")')
+           for name, cause, extra in [('Restart', 'ProcessEnded', ''), ('Stale', 'PreparationStale', ''),
+                                      ('Stop', 'AdmissionClosed', ' /\\ life_cur = 2')]},
+        # A verdict withdrawal (a denied authority at the commit) ends the delivery refused,
+        # typed, and with it Core's claim.
+        'NotRowPeerVerdictWithdrawalRefused': ('~(stage = "B" /\\ door = "Peer" /\\ offer_phase = "Withdrawn"\n'
+                                               '    /\\ OWithdrawalCause(1) = "PolicyDenied" /\\ ~QueuedClaim\n'
+                                               '    /\\ \\E p \\in Procs : sp[p].out = "Refused" /\\ sp[p].cause = "PolicyDenied")'),
+        # A durable delivery that meets a closed admission before its record exists answers Core
+        # NotReady: Core keeps the claim with no record and re-offers it to the next process after
+        # the stop, where the delivery is prepared and admitted once (the
+        # closed-admission-denied mutant ends the claim).
+        'NotRowLookupClosedClaimKept': ('~(stage = "B" /\\ door = "Peer" /\\ life_cur = 2 /\\ ObservedAdmitted(1)\n'
+                                        '    /\\ OPrepEpoch(1) = 2 /\\ OCloseEpoch(1) = 0 /\\ Cardinality(native) = 1\n'
+                                        '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
+        # Never Denied over ambiguity: a re-offered claim whose record has an unresolved dispatch
+        # meets a revoked authority in the section; it answers NotReady and Core keeps the claim
+        # (the denied-over-ambiguity mutant denies it).
+        'NotRowNoDenialOverAmbiguity': ('~(stage = "B" /\\ door = "Peer" /\\ ~auth_ok /\\ offer_phase = "Offered"\n'
+                                        '    /\\ OUnresolved(1) # {} /\\ jr[1].fifo /\\ jr[1].held /\\ jr[1].read_owed\n'
+                                        '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Pending"\n'
+                                        '                       /\\ sp[p].cause = "PolicyDenied")'),
+        # The held claim's release: after a restart, Core's re-offer records a dispatch of the
+        # new process and meets the same verdict (NotReady, a read owed); the read finds the key
+        # absent and the owner records the final absence over every dispatch, the lost one
+        # included; Core's next re-offer, a dispatch after the evidence, is denied for the verdict
+        # and the claim ends (the denied-over-ambiguity mutant denies before the evidence).
+        'NotRowHeldClaimDeniedAfterRestart': ('~(stage = "B" /\\ door = "Peer" /\\ epoch = 2 /\\ ~auth_ok /\\ native = {}\n'
+                                              '    /\\ offer_phase = "Offered" /\\ OUnresolved(1) # {} /\\ OAbsenceThrough(1) > 0\n'
+                                              '    /\\ ~jr[1].fifo /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].pc = "Done"\n'
+                                              '                                         /\\ sp[p].out = "Refused" /\\ sp[p].cause = "PolicyDenied"\n'
+                                              '                                         /\\ sp[p].d > OAbsenceThrough(1))'),
+        # Core's drain binds the FIFO head first: a second delivery begins only after the
+        # first delivery's queued claim was re-offered (here admitted); it finds the admission.
+        'NotRowPeerHeadFirst': ('~(stage = "B" /\\ door = "Peer" /\\ ObservedAdmitted(1) /\\ Cardinality(native) = 1 /\\ begun = 2\n'
+                                '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted"\n'
+                                '    /\\ \\E q \\in Procs : sp[q].kind = "caller" /\\ sp[q].n = 2 /\\ sp[q].out = "Admitted")'),
+        # A volatile or supervisor delivery (no claim) dropped at its deadline keeps the record
+        # Offered and kept (a transport outcome, never a verdict); the supervisor's retry of the
+        # same input id is a same-key replay that admits it once. Nothing re-drives it after a
+        # restart: the record stays kept for its sender's retry.
+        'NotRowNoClaimDroppedKept': ('~(stage = "B" /\\ door = "Peer" /\\ ~PeerClaims /\\ Kept(1)\n'
+                                     '    /\\ \\E p \\in Procs : sp[p].out = "Dropped")'),
+        'NotRowNoClaimRetryAdmitted': ('~(stage = "B" /\\ door = "Peer" /\\ ~PeerClaims /\\ ObservedAdmitted(1)\n'
+                                       '    /\\ Cardinality(native) = 1 /\\ \\E p \\in Procs : sp[p].out = "Dropped"\n'
+                                       '    /\\ \\E q \\in Procs : sp[q].out = "Admitted")'),
+        # A crash during the preparation leaves the grants owned by a record the restart
+        # scan finds; a later send's preparation finds them, admitted once.
+        'NotRowCrashMidPreparationOwned': ('~(stage = "B" /\\ dead_prep /\\ offer_phase = "Withdrawn" /\\ ObservedAdmitted(2)\n'
+                                           '    /\\ GrantUniqueB)'),
+        # The close waited for a running preparer.
+        'NotRowCloseJoinsPreparer': '~(stage = "B" /\\ life_phase = "Closed" /\\ close_waited_prep)',
+        'NotRowDuplicateRelookup': '~(stage = "B" /\\ dup_arts # {} /\\ ~prep_refused /\\ ObservedAdmitted(1))',
+        # The setup request's racing Duplicate is looked up again, never Denied.
+        'NotRowSetupRequestDuplicateRelookup': ('~(stage = "B" /\\ door = "SetupRequest"\n'
+                                                '    /\\ dup_arts \\cap {"setup_request_child", "setup_request_targets"} # {}\n'
+                                                '    /\\ ~prep_refused /\\ ObservedAdmitted(1))'),
+        'NotRowUnavailableThenAdmitted': ('~(stage = "B" /\\ ObservedAdmitted(1) /\\ OReceiptKind(1) = "Found"\n'
+                                          '    /\\ unavail_reads >= 1)'),
+        **{f'NotRowCommitRefused{cause}': ('~(stage = "B" /\\ offer_phase = "Withdrawn"\n'
+                                          f'    /\\ \\E p \\in Procs : sp[p].out = "Refused" /\\ sp[p].cause = "{cause}")')
+           for cause in ['PolicyDenied', 'SourceClosed', 'AdmissionClosed', 'PreparationStale']},
+        **{f'NotRowBPartialResend{door}': (f'~(stage = "B" /\\ door = "{door}" /\\ drop_partial /\\ ObservedAdmitted(1))')
+           for door in ['ClassInput', 'FindNative', 'BatchSetup', 'ConfiguredSetup', 'SetupRequest']},
+        **held_rows(),
+    }
+    properties = {
+        'I8_MachineOnlyLifecycle':
+            "[][/\\ ((offer_phase' # offer_phase) => (offer_revision' = offer_revision + 1 "
+            "/\\ offer_model_step_count' = offer_model_step_count + 1))\n"
+            "    /\\ ((offer2_phase' # offer2_phase) => (offer2_revision' = offer2_revision + 1 "
+            "/\\ offer2_model_step_count' = offer2_model_step_count + 1))\n"
+            "    /\\ ((life_phase' # life_phase) => (life_revision' = life_revision + 1 "
+            "/\\ life_model_step_count' = life_model_step_count + 1))\n"
+            "    /\\ ((life2_phase' # life2_phase) => (life2_revision' = life2_revision + 1 "
+            "/\\ life2_model_step_count' = life2_model_step_count + 1))\n"
+            "    /\\ ((src_phase' # src_phase) => (src_revision' = src_revision + 1 "
+            "/\\ src_model_step_count' = src_model_step_count + 1))]_vars",
+        # Every owner field changes only in a counted generated step.
+        'I8_OwnerFieldsByTransition':
+            '[][' + '\n    /\\ '.join(
+                f"(<<{', '.join(fields)}>>' # <<{', '.join(fields)}>> => {prefix}_model_step_count' = "
+                f"{prefix}_model_step_count + 1)" for prefix, fields in owner_fields.items()) + ']_vars',
+        # A step that newly answers a not-now for a held source or a pending admission
+        # does so over a ready source, an open lifetime and a current authority.
+        'I5_NotNowOnlyOverOpenSource':
+            "[][\\A p \\in Procs : (sp'[p].dec = \"NotNow\" /\\ sp[p].dec # \"NotNow\"\n"
+            "                       /\\ sp'[p].cause \\in {\"SourceHeld\", \"OriginalAdmissionPending\"})\n"
+            "       => (SourceOpen /\\ LPhase = \"Open\" /\\ sp[p].view)]_vars",
+        # The final-absence evidence is recorded only when no restart re-drive of the key is owed
+        # (the owner checks the dispatches' epochs; I13_FinalAbsenceProven checks what the evidence
+        # covers). A durable claim Core keeps queued may still be re-offered: its later dispatch is
+        # outside the evidence, which covers only the dispatches recorded before it.
+        'I13_FinalAbsenceSound':
+            "[][\\A i \\in Slots : OAbsenceThrough(i)' # OAbsenceThrough(i) => ~jr[i].redrive]_vars",
+        # A decision refuses only for its cause: a closed admission, a closed source, a denied
+        # authority, or a re-offered claim whose record is NotAdmitted or was withdrawn for a
+        # verdict. Contention (a held source, a replaced session) is never refused.
+        'I5_RefusalNeedsItsCause':
+            "[][\\A p \\in Procs : (sp[p].pc \\in {\"DecideP\", \"DecideA\"} /\\ sp'[p].dec = \"Refused\")\n"
+            "       => \\/ sp'[p].cause = \"AdmissionClosed\" /\\ ~Admission\n"
+            "          \\/ sp'[p].cause = \"SourceClosed\" /\\ ~SourceOpen\n"
+            "          \\/ sp'[p].cause = \"PolicyDenied\" /\\ ~sp[p].view\n"
+            "          \\/ sp'[p].cause = \"OfferNotAdmitted\" /\\ sp[p].kind = \"core\" /\\ ObservedNotAdmitted(sp[p].slot)\n"
+            "          \\/ /\\ sp'[p].cause = \"PreparationWithdrawn\" /\\ sp[p].kind = \"core\"\n"
+            "             /\\ OPhase(sp[p].slot) = \"Withdrawn\" /\\ OVerdictWithdrawal(sp[p].slot)]_vars",
+        # Core's drain binds its FIFO head first: no fresh peer delivery begins while a claim is
+        # queued, with or without a record.
+        'I6_PeerHeadFirst':
+            "[][\\A p \\in Procs : (door = \"Peer\" /\\ ~Live(p) /\\ sp'[p].pc = \"Lookup\" /\\ sp'[p].kind = \"caller\")\n"
+            "       => ~QueuedClaim]_vars",
+        # A durable peer delivery ends its claim (Core's Denied) only for a verdict, never over
+        # another dispatch of its record that may have admitted; otherwise Core keeps the claim
+        # (NotReady): a closed admission, a replaced session, a record withdrawn for no verdict.
+        # Core's own refusals (NotAdmitted, the entry fence) and a failed preparation end it too.
+        'I6_ClaimEndsOnlyForVerdict':
+            "[][\\A p \\in Procs : (ClaimedPeer /\\ sp[p].pc # \"Done\" /\\ sp'[p].pc = \"Done\" /\\ sp'[p].out = \"Refused\")\n"
+            "       => \\/ /\\ sp'[p].cause \\in {\"PolicyDenied\", \"SourceClosed\"}\n"
+            "             /\\ (sp[p].slot # 0 => ~Ambiguous(sp[p].slot, sp[p].d))\n"
+            "          \\/ sp'[p].cause \\in {\"OfferNotAdmitted\", \"EntryRefused\", \"PreparationRefused\"}\n"
+            "          \\/ sp'[p].cause = \"PreparationWithdrawn\" /\\ OVerdictWithdrawal(sp[p].slot)]_vars",
+        # The entry fence guards a new admission only: a re-offered claim whose record Core
+        # admitted is answered by Core's dedup and never refused at the entry.
+        'I9_AdmittedReofferNotFenced':
+            "[][\\A p \\in Procs : (sp[p].pc = \"Entry\" /\\ sp[p].kind = \"core\" /\\ ObservedAdmitted(sp[p].slot))\n"
+            "       => sp'[p].ans # \"EntryRefused\"]_vars",
+    }
+    text = '\n\n'.join([
+        '---- MODULE combined_composition ----\nEXTENDS TLC, Naturals, Sequences, FiniteSets',
+        '\\* The combined I1-I13 model. Stage A: the bind attempt model, instanced byte-exact (the\n'
+        '\\* first-send writes and the service setup observation record, their marks, drops,\n'
+        '\\* failures, one interruption, the partial-issuance and shared-parent states, G3). Stage B,\n'
+        '\\* in the accepted order (the stage A/B type map, sections 2 and 3): one source with two\n'
+        '\\* offer slots and a component lifetime (and, after a stop, the next process\'s new one;\n'
+        '\\* generated owners: only their transitions change owner state); two send tasks; the offer\n'
+        '\\* owner prepared first, the same writes issued outside protection and looked up again on\n'
+        '\\* Duplicate, the preparation sealed, the send intent recorded with its outbox under the\n'
+        '\\* publication writer then the store transaction, the dispatch start recorded in the owner,\n'
+        '\\* then Meta entered (the peer door: its section in Core\'s drain, one peer bind per session,\n'
+        '\\* the FIFO head first): its pure decision at (P) and (A), its wait (or Core\'s peer waiter)\n'
+        '\\* with one deadline, and native admission behind the entry fence in the same section; the\n'
+        '\\* answer fed to the owner after Meta returns. Held and the peer deadline end only the\n'
+        '\\* caller\'s wait. The driver reads by key, one crash and restart with its scan, admission\n'
+        '\\* closure with the close\'s join (its unresolved records scoped to the closing process), a\n'
+        '\\* stop after the close and the restart into the next lifetime, the declared composition\n'
+        '\\* mode. Core\'s commit and dedup by qualified key are assumptions. Liveness: LiveSpec, under\n'
+        '\\* the declared fairness and environment assumptions (below).',
+        'CONSTANTS ' + ', '.join(constants) + ',\n    Fault, StageValues, DoorValues, InitialValues, MaxAttempts, '
+                                              'Interrupts, ModeValues,\n    ProcBound, SendBound, UnavailBound, '
+                                              'LostBound, CoreRefuseBound, GateBound, Env, RecordRows, PeerClaims',
+        '\\* RecordRows: the row-only history variables (held_site, cas_lost, replayed, dup_arts, drop_partial,\n'
+        '\\* lost_reply_seen, crashed_offered, close_waited_prep, dead_prep, a_held, a send\'s waited) are\n'
+        '\\* recorded. No action reads them (a send\'s waited only in the cached-authority mutant, which\n'
+        '\\* records), so they change no behavior; the clean bases and the liveness profiles run without\n'
+        '\\* them (their invariants and properties read none), the rows and mutants with them.',
+        'VARIABLES ' + ', '.join(variables),
+        'vars == <<' + ', '.join(variables) + '>>',
+        'AttemptFaults == {' + ', '.join(json.dumps(f) for f in ATTEMPT_FAULTS) + '}',
+        'AFault == IF Fault \\in AttemptFaults THEN Fault ELSE "none"',
+        ba_instance, src_instance, offer_instance, offer2_instance, life_instance, life2_instance,
+        *helpers,
+        'GrantUniqueB == \\A x \\in BA!AllArts : issue_count[x] <= 1',
+        'Init ==\n' + '\n'.join('    /\\ ' + e for e in init),
+        *definitions,
+        'Next ==\n' + '\n'.join('    \\/ ' + a for a in actions),
+        'Spec == Init /\\ [][Next]_vars',
+        *[name + ' ==\n    ' + expr for name, expr in invariants.items()],
+        *[name + ' ==\n    ' + expr for name, expr in rows.items()],
+        *[name + ' ==\n    ' + expr for name, expr in properties.items()],
+        *fairness_definitions(),
+        *[name + ' ==\n    ' + expr for name, expr in LIVENESS.items()],
+        '=============================================================================',
+    ]) + '\n'
+    (output / 'combined_composition.tla').write_text(text)
+    # The owner mutants: the generated offer owner with one guard conjunct replaced inside one
+    # transition, composed by a copy of this module that differs only in its header and the
+    # two offer INSTANCE lines.
+    owner_text = (output / 'offer_owner.tla').read_text()
+    owner_mutants = {}
+    for mutant, (transition, conjunct, replacement) in OWNER_MUTANTS.items():
+        ident = mutant.replace('-', '_')
+        start = owner_text.index('\n' + transition + '(') + 1
+        end = owner_text.index('\n\n', start)
+        block = owner_text[start:end]
+        if block.count(conjunct) != 1:
+            raise ValueError(f'{mutant}: the conjunct must occur once in {transition}')
+        patched = owner_text[:start] + block.replace(conjunct, replacement) + owner_text[end:]
+        patched = patched.replace('---- MODULE offer_owner ----', f'---- MODULE offer_owner_{ident} ----', 1)
+        (output / f'offer_owner_{ident}.tla').write_text(patched)
+        composed = text.replace('---- MODULE combined_composition ----',
+                                f'---- MODULE combined_composition_{ident} ----', 1)
+        for prefix in ('offer', 'offer2'):
+            line = f'{prefix} == INSTANCE offer_owner WITH'
+            if composed.count(line) != 1:
+                raise ValueError(f'{mutant}: expected one {line!r}')
+            composed = composed.replace(line, f'{prefix} == INSTANCE offer_owner_{ident} WITH', 1)
+        (output / f'combined_composition_{ident}.tla').write_text(composed)
+        owner_mutants[mutant] = {'transition': transition, 'conjunct': conjunct, 'replacement': replacement,
+                                 'owner_module': f'offer_owner_{ident}', 'module': f'combined_composition_{ident}'}
+    info = {'owners': {'source': src_prov, 'offer': offer_prov, 'offer2': offer2_prov, 'lifetime': life_prov,
+                       'lifetime2': life2_prov},
+            'attempt_model': {'name': attempt_source.name, 'sha256': sha(attempt)},
+            'rank_table': table, 'owner_mutants': owner_mutants}
+    return actions, list(invariants), rows, properties, info
+
+
+# Declared liveness bounds. Weak fairness for enabled driver and effect steps: the effect
+# runner (lookup, owner, preparers, seal, commit, read-back, dispatch, recording the answer),
+# Meta's protected section (lock, decision, entry), the peer binder's section in Core's drain,
+# and Core (admission, reads, the peer FIFO re-offer, a queued claim's with or without its
+# record), the driver (read, observation, re-drive), restart and scan, the next process's new
+# lifetime after a stop (staged, opened), the other store write, the close's join and its
+# records; Core
+# and storage are unavailable for at most UnavailBound reads. Meta's identity lock (B_Lock,
+# Meta's doors only) is a tokio FIFO mutex: strong fairness per task. The peer door takes no
+# Meta lock: Core's drain binds one delivery at a time (weak fairness suffices). The declared
+# environment assumption: a wait ends. Meta's waiter (Core's for a peer) wakes when its
+# condition clears, the deadline passes while the condition persists, and the expiry answers
+# Held, Pending or the transport's drop. Each liveness mutant drops one fairness or the bound.
+DRIVER_FAIRNESS = ['B_Lookup', 'B_Create', 'B_PrepLookup', 'B_PrepIssue', 'B_PrepDone', 'B_Seal', 'B_CommitPub',
+                   'B_CommitStore', 'B_CommitRefuse', 'B_ReadBack', 'B_Call', 'B_FixtureCall', 'B_Lock',
+                   'B_PeerSection', 'B_DecideP', 'B_DecideA', 'B_Entry', 'B_Settle', 'B_ReadCore', 'B_ObserveRead',
+                   'B_Redrive', 'B_CoreReoffer', 'B_CoreReofferFresh', 'B_Restart', 'B_ScanWithdraw', 'B_Scan',
+                   'B_StoreEnd', 'B_JoinDriver', 'B_CloseRecord', 'B_Life2Stage', 'B_Life2Open']
+WAIT_FAIRNESS = ['B_MetaRebind', 'B_PeerRebind', 'B_Deadline', 'B_MetaExpire', 'B_PeerExpire']
+STRONG_FAIRNESS = {'B_Lock'}
+ACTION_PARAMS = {}
+UNFAIR = {
+    'LiveSpec': [],
+    'LiveSpecNoDispatch': ['B_Call'],
+    'LiveSpecNoRead': ['B_ReadCore'],
+    'LiveSpecNoRestart': ['B_Restart'],
+    'LiveSpecNoPreparer': ['B_PrepIssue'],
+    'LiveSpecNoOrphanWithdrawal': ['B_ScanWithdraw'],
+    'LiveSpecNoDeadline': ['B_Deadline'],
+    'LiveSpecNoReoffer': ['B_CoreReoffer', 'B_CoreReofferFresh'],
+    # The driver and effect steps alone, without the declared wait assumption.
+    'LiveSpecDriverOnly': list(WAIT_FAIRNESS),
+}
+LIVENESS = {
+    # Every Offered record reaches Core's observed outcome, or is kept with its intent and
+    # nothing owed by the driver (its owner a caller's same-key replay, Core's re-offer of a
+    # queued claim (LV7), a sender's retry of a delivery with no claim, the restart or the
+    # close), or the close records it durably unresolved through its owner, nothing in this
+    # process driving it any more (I6, I11); after a stop, the next process drives it again.
+    'LV1_OfferDisposition': ('\\A i \\in Slots : OPhase(i) = "Offered"\n'
+                             '    ~> (OPhase(i) # "Offered" \\/ Kept(i) \\/ (joined /\\ OCloseEpoch(i) > 0))'),
+    # Every native admission of an Offered record is observed, or recorded at the close.
+    'LV1_AdmissionObserved': ('\\A i \\in Slots : (OPhase(i) = "Offered" /\\ OfferAdmitted(i))\n'
+                              '    ~> (OPhase(i) # "Offered" \\/ (joined /\\ OCloseEpoch(i) > 0))'),
+    # A wait whose condition cleared before its deadline binds again, unless the condition is
+    # held again or the process stops first (the one retry owner retries).
+    'LV2_FreedWaitRebinds': ('\\A p \\in Procs : (Waiting(p) /\\ Cleared(p) /\\ ~sp[p].dl)\n'
+                             '    ~> (sp[p].pc = "Lock" \\/ ~Cleared(p) \\/ ~alive)'),
+    # A restart is followed by its scan (I11).
+    'LV3_RestartRecovers': '~alive ~> (alive /\\ scanned)',
+    # Every preparer, a dropped send's included, ends.
+    'LV4_PreparersEnd': ('(\\E n \\in Preparers : prep[n].st = "Running") ~> (\\A n \\in Preparers : prep[n].st # "Running")'),
+    # A preparation of an ended process is withdrawn (its epoch is the owner's).
+    'LV5_OrphanPreparationWithdrawn': ('\\A i \\in Slots : (OPhase(i) = "Prepared" /\\ OPrepEpoch(i) < epoch)\n'
+                                       '    ~> OPhase(i) # "Prepared"'),
+    # Every send task ends: admitted, refused, held, pending, unresolved or dropped.
+    'LV6_SendEnds': '\\A p \\in Procs : Live(p) ~> ~Live(p)',
+    # Core re-offers a queued peer claim, with or without its record, while admission is open
+    # (the peer discharge of a kept record), unless the claim is held: a verdict met while
+    # another dispatch of the record may have admitted holds it until a read settles the
+    # record or records its final absence (in a later process: in-process absence is not final).
+    'LV7_PeerClaimReoffered': ('(\\A i \\in Slots : jr[i].fifo ~> (~jr[i].fifo \\/ joined \\/ LPhase # "Open" \\/ jr[i].held))\n'
+                               '    /\\ (orphan_claim ~> (~orphan_claim \\/ joined \\/ LPhase # "Open"))'),
+}
+DRIVER_ONLY_HOLDS = ['LV1_AdmissionObserved', 'LV3_RestartRecovers', 'LV4_PreparersEnd',
+                     'LV5_OrphanPreparationWithdrawn', 'LV7_PeerClaimReoffered']
+
+
+def fairness_term(name):
+    # Fairness per send task, preparer and slot: a task's step, not just some task's step.
+    # Meta's identity lock is a tokio FIFO mutex: strong fairness per task.
+    kind = 'SF_vars' if name in STRONG_FAIRNESS else 'WF_vars'
+    params = ACTION_PARAMS[name]
+    if not params:
+        return f'{kind}({name})'
+    if [v for v, _ in params] == ['i', 'p']:
+        return f'\\A i \\in Slots : {kind}(\\E p \\in Procs : {name}Of(i, p))'
+    (var, dom), = params
+    return f'\\A {var} \\in {dom} : {kind}({name}Of({var}))'
+
+
+def fairness_definitions():
+    out = ['\\* Declared liveness bounds: fairness for enabled driver and effect steps, per send task,\n'
+           '\\* preparer and slot (the effect runner, Meta\'s protected section with its lock a tokio\n'
+           '\\* FIFO mutex (strong fairness, Meta\'s doors), the peer binder\'s section in Core\'s drain (one\n'
+           '\\* bind at a time), Core\'s admission, reads and FIFO re-offer, the driver, restart and scan,\n'
+           '\\* the other store write, the close\'s join and records), with Core and storage unavailable\n'
+           '\\* for at most UnavailBound reads; and, as a declared environment assumption, that a\n'
+           '\\* wait ends: the waiter is taken to observe a cleared condition before its deadline, the\n'
+           '\\* deadline passes while the condition persists, the expiry answers. Production bounds the\n'
+           '\\* wait by the door\'s budget clamped to Core\'s 2 s owner-change bound and at most 3 free\n'
+           '\\* rebinds (Meta), or the peer delivery\'s one deadline (Core\'s waiter). LiveSpecDriverOnly\n'
+           '\\* drops the assumption.']
+    for name, dropped in UNFAIR.items():
+        steps = [fairness_term(a) for a in DRIVER_FAIRNESS + WAIT_FAIRNESS if a not in dropped]
+        out.append(f'{name} ==\n    /\\ Spec\n' + ''.join(f'    /\\ {c}\n' for c in steps).rstrip('\n'))
+    return out
+
+
+DEFAULTS = {'stage': ['B'], 'door': ['Find'], 'initial': ['First'], 'attempts': 1, 'interrupts': [],
+            'modes': ['production'], 'procs': 1, 'sends': 1, 'env': [], 'unavail': 1, 'lost': 1, 'corerefuse': 1,
+            'gate': 2, 'spec': 'Spec', 'live': [], 'record': True, 'claims': True, 'module': 'combined_composition'}
+
+
+def profile(kind, fault='none', expected=None, **values):
+    unknown = set(values) - set(DEFAULTS)
+    if unknown:
+        raise ValueError(f'unknown profile fields {sorted(unknown)}')
+    spec = {'kind': kind, 'fault': fault, 'expected': expected, **DEFAULTS, **values}
+    if kind in ('base', 'live-base', 'live-mutant'):
+        spec['record'] = False
+    if spec['stage'] == ['A']:
+        spec.update(modes=['production'], procs=1, sends=1, env=[])
+    if any(e not in ENV_TOKENS for e in spec['env']):
+        raise ValueError(f'unknown environment in {spec["env"]}')
+    if fault in OWNER_MUTANTS:
+        spec['module'] = 'combined_composition_' + fault.replace('-', '_')
+    return spec
+
+
+def config_text(spec, checked, properties):
+    def domain(values):
+        return '{' + ','.join(json.dumps(v) for v in values) + '}'
+    return (f'SPECIFICATION {spec["spec"]}\nCONSTANTS\n'
+            '  BooleanValues = {TRUE,FALSE}\n  NatValues = {0,1,2}\n  StringValues = {"","alpha"}\n'
+            '  SetOfU64Values = {{},{1}}\n'
+            '  RustU64Max = 16\n'
+            '  ToolkitSourceKindValues = {"Ordinary","Helper"}\n'
+            '  ToolkitSourceReadinessValues = {"Preparing","Ready","ClosedToOffers"}\n'
+            '  ToolkitCoreObservationValues = {"Unresolved","Admitted","NotAdmitted","Absent","Unavailable"}\n'
+            '  ToolkitDispatchAnswerValues = {"NotSubmitted","Admitted","CoreRefused","EntryRefused","Unresolved"}\n'
+            '  ToolkitReceiptKindValues = {"Unsettled","Admitted","Found","CoreRefused","EntryRefused"}\n'
+            '  ToolkitWithdrawalCauseValues = {"NotWithdrawn","PolicyDenied","SourceClosed","AdmissionClosed",'
+            '"PreparationStale","ProcessEnded"}\n'
+            f'  Fault = "{spec["fault"]}"\n'
+            f'  StageValues = {domain(spec["stage"])}\n'
+            f'  DoorValues = {domain(spec["door"])}\n'
+            f'  InitialValues = {domain(spec["initial"])}\n'
+            f'  MaxAttempts = {spec["attempts"]}\n'
+            f'  Interrupts = {domain(spec["interrupts"])}\n'
+            f'  ModeValues = {domain(spec["modes"])}\n'
+            f'  ProcBound = {spec["procs"]}\n'
+            f'  SendBound = {spec["sends"]}\n'
+            f'  UnavailBound = {spec["unavail"]}\n'
+            f'  LostBound = {spec["lost"]}\n'
+            f'  CoreRefuseBound = {spec["corerefuse"]}\n'
+            f'  GateBound = {spec["gate"]}\n'
+            f'  Env = {domain(spec["env"])}\n'
+            f'  RecordRows = {"TRUE" if spec["record"] else "FALSE"}\n'
+            f'  PeerClaims = {"TRUE" if spec["claims"] else "FALSE"}\n'
+            'INVARIANTS\n' + ''.join(f'  {inv}\n' for inv in checked)
+            + ('PROPERTIES\n' + ''.join(f'  {p}\n' for p in properties) if properties else ''))
+
+
+SAFETY_PROPERTIES = ['I8_MachineOnlyLifecycle', 'I8_OwnerFieldsByTransition', 'I5_NotNowOnlyOverOpenSource',
+                     'I13_FinalAbsenceSound', 'I5_RefusalNeedsItsCause', 'I6_PeerHeadFirst',
+                     'I6_ClaimEndsOnlyForVerdict', 'I9_AdmittedReofferNotFenced']
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise ValueError(__doc__)
+    root, output = Path(sys.argv[1]), Path(sys.argv[2])
+    output.mkdir(exist_ok=False)
+    actions, safety, rows, properties, info = build_model(root, output)
+    exported = {}
+    for name, spec in PROFILES.items():
+        kind, expected = spec['kind'], spec['expected']
+        if kind == 'row' and expected not in rows:
+            raise ValueError('unknown row ' + expected)
+        if kind == 'mutant' and expected not in safety and expected not in properties:
+            raise ValueError('unknown invariant ' + expected)
+        if kind == 'live-mutant' and expected not in LIVENESS:
+            raise ValueError('unknown liveness property ' + expected)
+        if kind == 'row':
+            text = config_text(spec, [expected], [])
+        elif kind == 'live-base':
+            text = config_text(spec, safety, SAFETY_PROPERTIES + (spec['live'] or list(LIVENESS)))
+        elif kind == 'live-mutant':
+            text = config_text(spec, safety, [expected])
+        elif spec['fault'] in FORGE_FAULTS:
+            # An I8 mutant writes one owner field outside a transition: TypeOK and the
+            # field-level property only (the forged value may break other invariants first).
+            text = config_text(spec, ['TypeOK'], ['I8_OwnerFieldsByTransition'])
+        else:
+            text = config_text(spec, safety, SAFETY_PROPERTIES)
+        (output / (name + '.cfg')).write_text(text)
+        exported[name] = spec
+    missing_rows = set(rows) - {spec['expected'] for spec in PROFILES.values() if spec['kind'] == 'row'}
+    if missing_rows:
+        raise ValueError(f'rows without a profile: {sorted(missing_rows)}')
+    missing_forges = FORGE_FAULTS - {s['fault'] for s in PROFILES.values()}
+    missing_owner = set(OWNER_MUTANTS) - {s['fault'] for s in PROFILES.values()}
+    if missing_forges or missing_owner:
+        raise ValueError(f'mutants without a profile: {sorted(missing_forges | missing_owner)}')
+    manifest = {
+        'scope': 'combined I1-I13: stage A bind attempt (the first-send write inventory and the service setup '
+                 'observation record, marks, partial-issuance and shared-parent states) and stage B in the accepted '
+                 'order (owner first, preparation outside protection with re-lookup, seal, send intent with its '
+                 'outbox under the publication writer then the store transaction, the dispatch start recorded in '
+                 'the owner, then Meta: pure decision, wait or Core\'s peer waiter, native admission behind the '
+                 'entry fence in the same section, the answer fed to the owner after Meta returns; every fact that '
+                 'decides an owner transition is owner state; Held and the peer deadline keep the offer; the peer '
+                 'door as Core\'s drain runs it, durable and claimless deliveries; two offer slots, two send tasks, '
+                 'Core\'s five results, the driver by key, one crash and restart, admission closure with the close\'s '
+                 'record scoped to the closing process, a stop and the restart into the next lifetime, declared mode)',
+        'full_b1_acceptance': False,
+        **info,
+        'actions': actions,
+        'fault_only_actions': FAULT_ONLY_ACTIONS,
+        'safety': safety,
+        'safety_properties': SAFETY_PROPERTIES,
+        'rows': list(rows),
+        'liveness': list(LIVENESS),
+        'driver_only_holds': DRIVER_ONLY_HOLDS,
+        'fairness': {'driver': DRIVER_FAIRNESS, 'wait': WAIT_FAIRNESS, 'strong': sorted(STRONG_FAIRNESS),
+                     'per_task': True, 'variants': UNFAIR},
+        'profiles': exported,
+        'generator_sha256': sha(Path(__file__).read_bytes()),
+        'artifact_hashes': {f.name: sha(f.read_bytes()) for f in sorted(output.iterdir()) if f.is_file()},
+    }
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+def m(fault, expected, **values):
+    return profile('mutant', fault, expected, **values)
+
+
+def r(expected, **values):
+    return profile('row', 'none', expected, **values)
+
+
+def c(fault, **values):
+    return profile('control', fault, None, **values)
+
+
+def lb(spec_name, live=None, **values):
+    return profile('live-base', 'none', None, spec=spec_name, live=live or [], **values)
+
+
+def lm(fault, expected, spec_name, **values):
+    return profile('live-mutant', fault, expected, spec=spec_name, **values)
+
+
+A = {'stage': ['A']}
+FULL_ENV_B = {'procs': 2, 'sends': 2, 'env': ALL_ENV}
+INVENTORY_DOORS = ['FindNative', 'ClassInput', 'ClassNative', 'BatchSetup', 'ConfiguredSetup', 'SetupRequest']
+# The liveness profiles: two send tasks and two caller sends, each over the environment one
+# family of obligations meets (the waits and their conditions with a restart; lost answers and
+# reads, a restart and the close; refusals, Core's refusal and drops; the helper door; the peer
+# FIFO), production mode (the fixture's stand-in has the same fairness), Core and storage
+# unavailable for at most one read. TLC's liveness search is far slower than its safety
+# search, so the environment is split by family rather than joined in one profile.
+LIVE2 = {'procs': 2, 'sends': 2}
+ONE = {'procs': 1, 'sends': 1}
+
+PROFILES = {
+    # ---- Clean bases (their union is the model's full scope). Stage B treats Find, Launch and
+    # Console alike (the same preparation inventory and decision path), so the full stage B
+    # environment runs on Find, the helper door and the peer door; the fixture's stand-in, the
+    # entry doors and the preparation inventory doors (with every initial state) run with the
+    # environment that reaches what they change.
+    'none-a': profile('base', stage=['A'], door=ALL_DOORS, initial=ALL_INITIAL, attempts=3,
+                      interrupts=['fail', 'crash']),
+    'none-b-peer': profile('base', door=['Peer'], **FULL_ENV_B),
+    # The peer door's volatile and supervisor deliveries: no Core claim.
+    'none-b-peer-noclaim': profile('base', door=['Peer'], claims=False, **FULL_ENV_B),
+    'none-b-fixture': profile('base', door=['Find'], modes=['fixture'], procs=2, sends=2,
+                              env=['hold', 'lost', 'crash', 'close']),
+    'none-b-entry-doors': profile('base', door=['Launch', 'Console'], initial=OWN_INITIAL, procs=2, sends=2,
+                                  env=['hold', 'drop', 'crash']),
+    'none-b-inventory': profile('base', door=INVENTORY_DOORS, initial=OWN_INITIAL, procs=2, sends=2,
+                                env=['drop', 'crash', 'close']),
+    'none-b-shared': profile('base', door=['FindNative', 'ClassInput', 'ClassNative'], initial=['Shared'], procs=2,
+                             sends=2, env=['drop', 'crash', 'close']),
+    # The stop: the process ends after its close and the next process, in a new component
+    # lifetime, drives the records the close recorded (its restart re-drive, Core's re-offer of a
+    # durable claim, a caller's same-key replay).
+    'none-b-stop': profile('base', door=['Find', 'Peer'], procs=2, sends=2,
+                           env=['hold', 'revoke', 'close', 'crash', 'drop', 'lost', 'corerefuse', 'stop']),
+    'none-b-stop-noclaim': profile('base', door=['Peer'], claims=False, procs=2, sends=2,
+                                   env=['hold', 'close', 'crash', 'lost', 'corerefuse', 'stop']),
+    # ---- Liveness (the Helper door included; the peer door as Core's drain runs it,
+    # one bind per session at a time, with and without Core's claim). ----
+    'live-find-waits': lb('LiveSpec', door=['Find'], env=['hold', 'session', 'crash'], **LIVE2),
+    'live-find-driver': lb('LiveSpec', door=['Find'], env=['lost', 'crash', 'close'], **LIVE2),
+    'live-find-refusals': lb('LiveSpec', door=['Find'], env=['revoke', 'srcclose', 'corerefuse', 'drop'], **LIVE2),
+    'live-helper': lb('LiveSpec', door=['Helper'], env=['hold', 'lost', 'crash'], **LIVE2),
+    'live-peer': lb('LiveSpec', door=['Peer'], env=['hold', 'crash', 'close'], **LIVE2),
+    'live-peer-lost': lb('LiveSpec', door=['Peer'], env=['hold', 'lost', 'crash'], **LIVE2),
+    'live-peer-noclaim': lb('LiveSpec', door=['Peer'], claims=False, env=['hold', 'crash', 'close'], **LIVE2),
+    # Across a stop and the restart into the next lifetime (LV1 for the records the close recorded).
+    'live-find-stop': lb('LiveSpec', door=['Find'], env=['hold', 'lost', 'close', 'stop'], **LIVE2),
+    'live-peer-stop': lb('LiveSpec', door=['Peer'], env=['hold', 'lost', 'close', 'stop'], **LIVE2),
+    'live-driver-only': lb('LiveSpecDriverOnly', live=DRIVER_ONLY_HOLDS, door=['Find'], env=['hold', 'lost', 'crash'],
+                           **LIVE2),
+    'live-no-dispatch-fairness': lm('none', 'LV1_OfferDisposition', 'LiveSpecNoDispatch', **ONE),
+    'live-core-unavailable-forever': lm('core-unavailable-forever', 'LV1_AdmissionObserved', 'LiveSpec',
+                                        env=['lost'], **ONE),
+    'live-no-read-fairness': lm('none', 'LV1_AdmissionObserved', 'LiveSpecNoRead', env=['lost'], **ONE),
+    'live-never-rebind': lm('never-rebind', 'LV2_FreedWaitRebinds', 'LiveSpec', env=['hold'], **ONE),
+    'live-no-restart-fairness': lm('none', 'LV3_RestartRecovers', 'LiveSpecNoRestart', env=['crash'], **ONE),
+    'live-no-preparer-fairness': lm('none', 'LV4_PreparersEnd', 'LiveSpecNoPreparer', **ONE),
+    'live-no-orphan-withdrawal': lm('none', 'LV5_OrphanPreparationWithdrawn', 'LiveSpecNoOrphanWithdrawal',
+                                    env=['crash'], **ONE),
+    'live-no-deadline': lm('none', 'LV6_SendEnds', 'LiveSpecNoDeadline', env=['hold'], **ONE),
+    'live-no-reoffer-fairness': lm('none', 'LV7_PeerClaimReoffered', 'LiveSpecNoReoffer', door=['Peer'],
+                                   env=['hold'], **ONE),
+    'live-driver-only-disposition': lm('none', 'LV1_OfferDisposition', 'LiveSpecDriverOnly', env=['hold'], **ONE),
+    'live-driver-only-rebind': lm('none', 'LV2_FreedWaitRebinds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
+    'live-driver-only-send-ends': lm('none', 'LV6_SendEnds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
+    # ---- Stage B mutants, each against what kills it. ----
+    'block-in-protected': m('block-in-protected', 'I1_ProtectedStepsNeverBlock', env=['hold']),
+    'stale-snapshot': m('stale-snapshot', 'I2_FreshSnapshotAtCommit', env=['srcclose']),
+    'cached-incarnation': m('cached-incarnation', 'I2_FreshSnapshotAtCommit', env=['session']),
+    'fresh-key-replay': m('fresh-key-replay', 'I3_OneNativeAdmission', env=['crash']),
+    'dispatch-current-session': m('dispatch-current-session', 'I3_OneNativeAdmission', env=['session']),
+    'replay-reprepares': m('replay-reprepares', 'I3_OneOfferPerSource', sends=2, env=['hold']),
+    'lost-reply-reprepare': m('lost-reply-reprepare', 'I3_OneOfferPerSource'),
+    'effects-before-owner': m('effects-before-owner', 'I4_EffectsHaveOwner'),
+    'send-before-owner': m('send-before-owner', 'I4_OwnerBeforeDispatch'),
+    'commit-without-outbox': m('commit-without-outbox', 'I4_DurableOutbox'),
+    'discard-clears-obligation': m('discard-clears-obligation', 'I4_DurableOutbox', door=['Peer'], env=['hold']),
+    'refusal-as-notnow': m('refusal-as-notnow', 'I5_GenuineRefusalNeverNotNow', env=['revoke']),
+    'closed-as-notnow': m('closed-as-notnow', 'I5_GenuineRefusalNeverNotNow', env=['srcclose']),
+    'held-before-closed': m('held-before-closed', 'I5_NotNowOnlyOverOpenSource', env=['hold', 'srcclose']),
+    'untyped-commit-refusal': m('untyped-commit-refusal', 'I5_TypedRefusal', env=['revoke']),
+    'drop-retry-owner': m('drop-retry-owner', 'I6_OneRetryOwner', env=['hold']),
+    'discard-parked': m('discard-parked', 'I6_ParkedNeverLost', door=['Peer'], env=['hold']),
+    'forge-admission': m('forge-admission', 'I7_CoreReceiptProvenance', env=['lost']),
+    'forget-lost-reply': m('forget-lost-reply', 'I7_KeptRecordNotAdmitted', env=['lost']),
+    'stale-read-clears': m('stale-read-clears', 'I7_KeptRecordNotAdmitted', env=['crash', 'lost']),
+    'drop-mutates-phase': m('drop-mutates-phase', 'I8_MachineOnlyLifecycle', env=['drop']),
+    'drop-clears-seal': m('drop-clears-seal', 'I8_OwnerFieldsByTransition', env=['drop']),
+    'cached-authority': m('cached-authority', 'I9_NoAdmissionAfterRevocation', env=['hold', 'revoke']),
+    'entry-without-fence': m('entry-without-fence', 'I9_NoAdmissionAfterRevocation', env=['revoke']),
+    'publication-inside-store': m('publication-inside-store', 'I10_DeclaredOrder'),
+    'skip-restart-scan': m('skip-restart-scan', 'I11_RestartEnumerates', env=['crash']),
+    'scan-first-record-only': m('scan-first-record-only', 'I11_RestartEnumerates', sends=2,
+                                env=['crash', 'corerefuse']),
+    'admit-after-close': m('admit-after-close', 'I11_NoAdmissionAfterClose', env=['close']),
+    'close-without-join': m('close-without-join', 'I11_CloseJoinsDriver', env=['close']),
+    'close-forgets-unresolved': m('close-forgets-unresolved', 'I11_CloseJoinsDriver', env=['hold', 'close']),
+    'close-skips-preparers': m('close-skips-preparers', 'I11_CloseJoinsDriver', env=['drop', 'close']),
+    'omit-driver-undeclared': m('none', 'I12_NoOrphanOffer', modes=['undeclared']),
+    'fixture-claims': m('fixture-claims', 'I12_ClaimsProduction', modes=['fixture']),
+    # An Unavailable read published as Absent discharges the read owed after a lost answer:
+    # the record is kept with nothing owed over Core's admission (the owner records no final
+    # absence over this process's own open dispatch).
+    'unavailable-as-absent': m('unavailable-as-absent', 'I7_KeptRecordNotAdmitted', env=['lost']),
+    # The driver feeds an Absent read as Core's refusal of the record's last open dispatch.
+    'absent-terminates': m('absent-terminates', 'I13_ReceiptNamesItsRefusal', env=['crash']),
+    # A lost answer fed as not submitted: it leaves the journal, and a later refusal settles
+    # the record although Core admitted the lost dispatch.
+    'lost-as-not-submitted': m('lost-as-not-submitted', 'I13_NoSettlementAgainstCore', sends=2,
+                               env=['lost', 'revoke']),
+    # The restart answers the ended process's open dispatches as not submitted.
+    'crash-clears-ambiguity': m('crash-clears-ambiguity', 'I13_NoSettlementAgainstCore', env=['crash', 'revoke']),
+    # The fence's refusal fed as Core's; a transport drop fed as Core's refusal.
+    'receipt-wrong-kind': m('receipt-wrong-kind', 'I13_ReceiptNamesItsRefusal', env=['revoke']),
+    'drop-as-verdict': m('drop-as-verdict', 'I13_ReceiptNamesItsRefusal', door=['Peer'], claims=False, env=['hold']),
+    # Meta called without the dispatch start recorded in the owner.
+    'call-without-dispatch-record': m('call-without-dispatch-record', 'I4_DispatchRecordedBeforeMeta'),
+    # The peer door without Core's drain (two peer binds of the session at once).
+    'peer-binds-concurrently': m('peer-binds-concurrently', 'I6_OnePeerBindPerSession', door=['Peer'], procs=2,
+                                 sends=2),
+    # The drain binds a fresh peer delivery while a claim is queued (its FIFO head skipped).
+    'peer-skips-queued-claim': m('peer-skips-queued-claim', 'I6_PeerHeadFirst', door=['Peer'], sends=2,
+                                 env=['hold']),
+    # Contention answered refused: a held source, a replaced session.
+    'held-refused': m('held-refused', 'I5_RefusalNeedsItsCause', env=['hold']),
+    'stale-refused': m('stale-refused', 'I5_RefusalNeedsItsCause', env=['session']),
+    # Core's re-offer of a record withdrawn for no verdict (here the restart's withdrawal of an
+    # ended process's preparation) refused instead of prepared again.
+    'withdrawn-always-refused': m('withdrawn-always-refused', 'I5_RefusalNeedsItsCause', door=['Peer'],
+                                  env=['crash']),
+    # Core's claim ended for no verdict: a closed admission, a verdict over an ambiguous dispatch.
+    'closed-admission-denied': m('closed-admission-denied', 'I6_ClaimEndsOnlyForVerdict', door=['Peer'],
+                                 env=['close']),
+    'denied-over-ambiguity': m('denied-over-ambiguity', 'I6_ClaimEndsOnlyForVerdict', door=['Peer'],
+                               env=['lost', 'revoke']),
+    # The re-offer of an admitted record fenced again at the entry, after the source closed.
+    'readmitted-fence': m('readmitted-fence', 'I9_AdmittedReofferNotFenced', door=['Peer'], env=['lost', 'srcclose']),
+    # Owner mutants: the generated owner with one guard conjunct replaced.
+    'notadmitted-while-inflight': m('notadmitted-while-inflight', 'I13_NoSettlementAgainstCore', procs=2, sends=2,
+                                    env=['corerefuse']),
+    'absence-without-redispatch': m('absence-without-redispatch', 'I13_FinalAbsenceSound', env=['crash']),
+    'absence-in-process': m('absence-in-process', 'I13_FinalAbsenceProven', sends=2, env=['lost']),
+    # The close's record blocks every later dispatch start (owner mutant): after a stop and
+    # restart, the re-drive cannot record its dispatch.
+    'close-blocks-later-process': m('close-blocks-later-process', 'I11_CallRecordsItsDispatch',
+                                    env=['hold', 'close', 'stop']),
+    # The I8 mutants, one per owner field that decides a transition.
+    **{forge_fault(field): m(forge_fault(field), 'I8_OwnerFieldsByTransition') for field in FORGE_FIELDS},
+    'no-relookup-b': m('no-relookup-b', 'NoDuplicateRefusalB', procs=2, sends=2),
+    # ---- Stage A: the attempt model's mutants, inside the combined model. ----
+    'a-drop-controller-mark': m('drop-controller-mark', 'G3_WitnessQuiet', **A),
+    'a-silent-blocking-writer': m('silent-blocking-writer', 'G3_NoSilentUnmarkedWrite', **A),
+    'a-drop-callback-mark': m('drop-callback-mark', 'G3_WitnessQuiet', door=['ClassInput'], **A),
+    'a-drop-service-setup-mark': m('drop-service-setup-mark', 'G3_WitnessQuiet', door=['BatchSetup'], **A),
+    'a-drop-first-binding-mark': m('drop-first-binding-mark', 'G3_WitnessQuiet', initial=['Partial'], **A),
+    'a-drop-first-binding-mark-after-drop': m('drop-first-binding-mark', 'G3_WitnessQuiet', attempts=2, **A),
+    'a-nested-fresh-attempt': m('nested-fresh-attempt', 'MarkReflectsWrites', door=['Console'], initial=['Bound'],
+                                **A),
+    'a-peer-entry-unmarked': m('peer-entry-unmarked', 'MarkReflectsWrites', door=['Peer'], attempts=2, **A),
+    'a-spawned-writer': m('spawned-writer', 'G3_NoSilentUnmarkedWrite', initial=['Bound'], **A),
+    'a-early-decision': m('early-decision', 'DecisionPlacement', **A),
+    'a-late-not-now': m('late-not-now', 'I4_NoNotNowAfterEffect', **A),
+    'a-duplicate-issue': m('duplicate-issue', 'GrantUnique', attempts=2, **A),
+    'a-drop-configured-setup-mark': m('drop-configured-setup-mark', 'G3_WitnessQuiet', door=['ConfiguredSetup'], **A),
+    'a-drop-setup-request-grant-mark': m('drop-setup-request-grant-mark', 'G3_WitnessQuiet', door=['SetupRequest'],
+                                         **A),
+    'a-drop-native-root-mark': m('drop-native-root-mark', 'G3_WitnessQuiet', door=['FindNative'], **A),
+    'a-drop-peer-operation-and-entry-note': m('drop-peer-operation-and-entry-note', 'G3_WitnessQuiet', door=['Peer'],
+                                              **A),
+    'a-drop-configured-setup-grant-mark': m('drop-configured-setup-grant-mark', 'G3_WitnessQuiet',
+                                            door=['ConfiguredSetup'], attempts=2, **A),
+    'a-drop-setup-target-mark-configured': m('drop-setup-target-mark', 'G3_WitnessQuiet', door=['ConfiguredSetup'],
+                                             attempts=2, **A),
+    'a-drop-setup-target-mark-request': m('drop-setup-target-mark', 'G3_WitnessQuiet', door=['SetupRequest'],
+                                          attempts=2, **A),
+    'a-drop-native-child-mark': m('drop-native-child-mark', 'G3_WitnessQuiet', door=['FindNative'], attempts=2,
+                                  interrupts=['fail'], **A),
+    'a-drop-native-child-mark-after-crash': m('drop-native-child-mark', 'G3_WitnessQuiet', door=['FindNative'],
+                                              attempts=2, interrupts=['crash'], **A),
+    'a-drop-callback-leaf-mark': m('drop-callback-leaf-mark', 'G3_WitnessQuiet', door=['ClassInput'], attempts=2,
+                                   interrupts=['fail'], **A),
+    'a-drop-callback-leaf-mark-after-crash': m('drop-callback-leaf-mark', 'G3_WitnessQuiet', door=['ClassInput'],
+                                               attempts=2, interrupts=['crash'], **A),
+    'a-drop-class-input-mark': m('drop-class-input-mark', 'G3_WitnessQuiet', door=['ClassInput'], initial=['Shared'],
+                                 **A),
+    'a-drop-class-input-mark-after-refusal': m('drop-class-input-mark', 'G3_WitnessQuiet', door=['ClassInput'],
+                                               attempts=2, interrupts=['fail'], **A),
+    'a-drop-native-child-mark-shared': m('drop-native-child-mark', 'G3_WitnessQuiet', door=['FindNative'],
+                                         initial=['Shared'], **A),
+    'a-drop-service-observation-mark': m('drop-service-observation-mark', 'G3_WitnessQuiet', door=['BatchSetup'],
+                                         attempts=2, interrupts=['fail'], **A),
+    'a-drop-service-observation-mark-after-crash': m('drop-service-observation-mark', 'G3_WitnessQuiet',
+                                                     door=['BatchSetup'], attempts=2, interrupts=['crash'], **A),
+    'a-notnow-after-failed-write': m('notnow-after-failed-write', 'G4_BackstopQuiet', door=['ClassInput'],
+                                     initial=['Shared'], interrupts=['fail'], **A),
+    'a-refused-waits': m('refused-waits', 'MetaNeverWaitsAfterEffect', door=['ClassInput'], interrupts=['fail'], **A),
+    # Controls: mark drops an earlier mark masks, as in the attempt model.
+    'a-masked-callback-leaf-no-interrupt': c('drop-callback-leaf-mark', door=['ClassInput'], initial=ALL_INITIAL,
+                                             attempts=3, **A),
+    'a-masked-native-child-no-interrupt': c('drop-native-child-mark', door=['FindNative'], initial=OWN_INITIAL,
+                                            attempts=3, **A),
+    'a-masked-peer-operation-drop': c('drop-peer-operation-mark', door=['Peer'], initial=OWN_INITIAL, attempts=3,
+                                      interrupts=['fail', 'crash'], **A),
+    'a-masked-class-input-own-grants': c('drop-class-input-mark', door=['ClassInput', 'ClassNative'],
+                                         initial=OWN_INITIAL, attempts=3, **A),
+    'a-masked-service-observation-no-interrupt': c('drop-service-observation-mark', door=['BatchSetup'],
+                                                   initial=ALL_INITIAL, attempts=3, **A),
+    # Rows, stage A (from the attempt model).
+    'row-class-first-send-a': r('NotRowClassFirstSendA', door=['ClassInput'], **A),
+    'row-batch-first-send-a': r('NotRowBatchFirstSendA', door=['BatchSetup'], **A),
+    'row-bound-resend-a': r('NotRowBoundResendA', initial=['Bound'], attempts=2, **A),
+    'row-orphan-duplicate': r('NotRowOrphanDuplicate', attempts=2, **A),
+    'row-orphan-duplicate-retry': r('NotRowOrphanDuplicateRetry', attempts=3, **A),
+    'row-leaf-first-after-refusal': r('NotRowLeafFirstAfterRefusal', door=['ClassInput'], attempts=2,
+                                      interrupts=['fail'], **A),
+    'row-leaf-first-after-crash': r('NotRowLeafFirstAfterCrash', door=['ClassInput'], attempts=2,
+                                    interrupts=['crash'], **A),
+    'row-native-child-first-after-drop': r('NotRowNativeChildFirstAfterDrop', door=['FindNative'], attempts=2,
+                                           interrupts=['fail'], **A),
+    'row-native-child-first-after-crash': r('NotRowNativeChildFirstAfterCrash', door=['FindNative'], attempts=2,
+                                            interrupts=['crash'], **A),
+    'row-configured-targets-first-after-drop': r('NotRowTargetsFirstAfterDrop', door=['ConfiguredSetup'], attempts=2,
+                                                 **A),
+    'row-request-targets-first-after-drop': r('NotRowTargetsFirstAfterDrop', door=['SetupRequest'], attempts=2, **A),
+    'row-configured-grant-first-after-drop': r('NotRowConfiguredGrantFirstAfterDrop', door=['ConfiguredSetup'],
+                                               attempts=2, **A),
+    'row-class-selection-first-shared': r('NotRowClassSelectionFirstShared', door=['ClassInput', 'ClassNative'],
+                                          initial=['Shared'], **A),
+    'row-class-selection-first-after-refusal': r('NotRowClassSelectionFirstAfterRefusal', door=['ClassInput'],
+                                                 attempts=2, interrupts=['fail'], **A),
+    'row-native-child-first-shared': r('NotRowNativeChildFirstShared', door=['FindNative'], initial=['Shared'], **A),
+    'row-service-observation-first-after-refusal': r('NotRowServiceObservationFirstAfterRefusal',
+                                                     door=['BatchSetup'], attempts=2, interrupts=['fail'], **A),
+    'row-service-observation-first-after-crash': r('NotRowServiceObservationFirstAfterCrash', door=['BatchSetup'],
+                                                   attempts=2, interrupts=['crash'], **A),
+    # Rows, stage B.
+    'row-class-first-send-b': r('NotRowClassFirstSendB', door=['ClassInput'], env=['hold']),
+    'row-batch-first-send-b': r('NotRowBatchFirstSendB', door=['BatchSetup'], env=['hold']),
+    'row-production-claimed': r('NotRowProductionClaimed'),
+    'row-fixture-unclaimed': r('NotRowFixtureUnclaimed', modes=['fixture']),
+    'row-close-records-unresolved': r('NotRowCloseRecordsUnresolved', env=['hold', 'close']),
+    'row-stop-restart-redrive-admitted': r('NotRowStopRestartRedriveAdmitted', env=['hold', 'close', 'stop']),
+    'row-stop-restart-claim-reoffered': r('NotRowStopRestartClaimReoffered', door=['Peer'],
+                                          env=['hold', 'close', 'stop']),
+    'row-lost-reply-readback': r('NotRowLostReplyReadback'),
+    'row-restart-redrive': r('NotRowRestartRedrive', env=['crash']),
+    'row-held-then-replayed': r('NotRowHeldThenReplayed', procs=2, sends=2, env=['hold']),
+    'row-lost-receipt-s1-s2': r('NotRowLostReceiptS1S2', procs=2, sends=2, env=['session', 'lost']),
+    'row-peer-pending-reoffered': r('NotRowPeerPendingReoffered', door=['Peer'], env=['hold']),
+    'row-concurrent-sends-one-offer': r('NotRowConcurrentSendsOneOffer', procs=2, sends=2),
+    'row-second-offer-after-notadmitted': r('NotRowSecondOfferAfterNotAdmitted', sends=2, env=['corerefuse']),
+    'row-entry-refused-notadmitted': r('NotRowEntryRefusedNotAdmitted', env=['revoke']),
+    'row-receipt-names-core-refusal': r('NotRowReceiptNamesCoreRefusal', env=['corerefuse']),
+    'row-refusal-left-journal': r('NotRowRefusalLeftJournal', procs=2, sends=2, env=['corerefuse']),
+    'row-dispatch-before-meta': r('NotRowDispatchBeforeMeta'),
+    'row-dispatch-before-peer-section': r('NotRowDispatchBeforePeerSection', door=['Peer']),
+    'row-lost-answer-recorded': r('NotRowLostAnswerRecorded', env=['lost']),
+    'row-lost-dispatch-observed': r('NotRowLostDispatchObserved', env=['lost']),
+    'row-lost-before-replayed': r('NotRowLostBeforeReplayed', procs=2, sends=2, env=['lost']),
+    'row-final-absence-covers-dispatches': r('NotRowFinalAbsenceCoversDispatches', env=['crash', 'hold']),
+    'row-final-absence-then-later-dispatch': r('NotRowFinalAbsenceThenLaterDispatch', sends=2, env=['crash', 'hold']),
+    'row-replay-discharges-redrive': r('NotRowReplayDischargesRedrive', sends=2, env=['crash']),
+    'row-reoffer-terminal-admitted-bound': r('NotRowReofferTerminalAdmittedBound', door=['Peer'], env=['lost']),
+    'row-reoffer-admitted-no-fence': r('NotRowReofferAdmittedNoFence', door=['Peer'], env=['lost', 'revoke']),
+    'row-withdrawn-restart-prepared-again': r('NotRowWithdrawnRestartPreparedAgain', door=['Peer'], env=['crash']),
+    'row-withdrawn-stale-prepared-again': r('NotRowWithdrawnStalePreparedAgain', door=['Peer'], env=['session']),
+    'row-withdrawn-stop-prepared-again': r('NotRowWithdrawnStopPreparedAgain', door=['Peer'], env=['close', 'stop']),
+    'row-peer-verdict-withdrawal-refused': r('NotRowPeerVerdictWithdrawalRefused', door=['Peer'], env=['revoke']),
+    'row-lookup-closed-claim-kept': r('NotRowLookupClosedClaimKept', door=['Peer'], env=['close', 'stop']),
+    'row-no-denial-over-ambiguity': r('NotRowNoDenialOverAmbiguity', door=['Peer'], env=['lost', 'revoke']),
+    'row-held-claim-denied-after-restart': r('NotRowHeldClaimDeniedAfterRestart', door=['Peer'],
+                                             env=['lost', 'revoke', 'crash']),
+    'row-peer-head-first': r('NotRowPeerHeadFirst', door=['Peer'], procs=2, sends=2, env=['hold']),
+    'row-noclaim-dropped-kept': r('NotRowNoClaimDroppedKept', door=['Peer'], claims=False, env=['hold']),
+    'row-noclaim-retry-admitted': r('NotRowNoClaimRetryAdmitted', door=['Peer'], claims=False, procs=2, sends=2,
+                                    env=['hold']),
+    'row-rebind-limit-held': r('NotRowRebindLimitHeld', env=['hold'], gate=7),
+    'row-offered-source-cancelled-observed': r('NotRowOfferedSourceCancelledObserved', env=['srcclose']),
+    'row-source-closed-during-wait-kept': r('NotRowSourceClosedDuringWaitKept', env=['hold', 'srcclose']),
+    'row-revoked-during-wait-kept': r('NotRowRevokedDuringWaitKept', env=['hold', 'revoke']),
+    'row-revoked-after-admission-kept': r('NotRowRevokedAfterAdmissionKept', env=['revoke']),
+    'row-session-replaced-held': r('NotRowSessionReplacedHeld', env=['session']),
+    'row-orphan-withdrawn-after-restart': r('NotRowOrphanWithdrawnAfterRestart', env=['drop', 'crash']),
+    'row-crash-mid-preparation-owned': r('NotRowCrashMidPreparationOwned', sends=2, env=['crash']),
+    'row-close-joins-preparer': r('NotRowCloseJoinsPreparer', env=['drop', 'close']),
+    'row-b-duplicate-relookup': r('NotRowDuplicateRelookup', procs=2, sends=2),
+    'row-b-setup-request-duplicate-relookup': r('NotRowSetupRequestDuplicateRelookup', door=['SetupRequest'], procs=2,
+                                                sends=2),
+    'row-unavailable-then-admitted': r('NotRowUnavailableThenAdmitted', env=['lost'], unavail=2),
+    'row-commit-refused-policy-denied': r('NotRowCommitRefusedPolicyDenied', env=['revoke']),
+    'row-commit-refused-source-closed': r('NotRowCommitRefusedSourceClosed', env=['srcclose']),
+    'row-commit-refused-admission-closed': r('NotRowCommitRefusedAdmissionClosed', env=['close']),
+    'row-commit-refused-preparation-stale': r('NotRowCommitRefusedPreparationStale', env=['session']),
+    **{f'row-b-partial-resend-{door.lower()}': r(f'NotRowBPartialResend{door}', door=[door], procs=2, sends=2,
+                                                  env=['drop'])
+       for door in ['ClassInput', 'FindNative', 'BatchSetup', 'ConfiguredSetup', 'SetupRequest']},
+    # The held rows of the protected slice: stages A and B, Find and Launch, (P) and
+    # (A), first send, one-write (Partial) and bound originals.
+    **{f'row-held-{stage.lower()}-{door.lower()}-{site.lower()}-{initial.lower()}':
+       r(f'NotRowHeld_{stage}_{door}_{site}_{initial}', stage=[stage], door=[door], initial=[initial],
+         env=['hold'] if stage == 'B' else [])
+       for stage in BOTH for door in HELD_DOORS for site in ['P', 'A'] for initial in OWN_INITIAL},
+    # The two largest clean bases last (the verifier runs the clean profiles in this order): the
+    # full stage B environment on Find and on the helper door.
+    'none-b-find': profile('base', door=['Find'], **FULL_ENV_B),
+    'none-b-helper': profile('base', door=['Helper'], **FULL_ENV_B),
+}
+
+
+if __name__ == '__main__':
+    main()

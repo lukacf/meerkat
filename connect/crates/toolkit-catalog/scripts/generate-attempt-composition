@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Export the bind-attempt ownership model with its attributed profiles.
+
+Usage: generate-attempt-composition NEW_DIRECTORY
+Copies models/bind_attempt.tla byte-exact and writes one TLC config per profile:
+the clean base, one mutant per ownership edge (each attributed to the invariant
+its counterexample must violate), controls whose fault an earlier mark masks,
+and reachability rows (a negated row end state that must be violated). This is
+a contract model of Stage A's protected_section attempt, not its code.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+SAFETY = ['TypeOK', 'G3_WitnessQuiet', 'G3_NoSilentUnmarkedWrite', 'MarkReflectsWrites',
+          'I4_NoNotNowAfterEffect', 'MetaNeverWaitsAfterEffect', 'G4_BackstopQuiet',
+          'DecisionPlacement', 'GrantUnique', 'I1_NoWaitInProtectedB']
+ALL_DOORS = ['Find', 'Launch', 'FindNative', 'ClassInput', 'ClassNative', 'BatchSetup', 'ConfiguredSetup',
+             'SetupRequest', 'Console', 'Peer', 'Helper']
+R24_DOORS = ['FindNative', 'ConfiguredSetup', 'SetupRequest', 'Peer']
+ALL_INITIAL = ['First', 'Partial', 'Bound', 'Shared']
+OWN_INITIAL = ['First', 'Partial', 'Bound']
+ALL_INTERRUPTS = ['fail', 'crash']
+
+
+def row(name, doors, initial, attempts, interrupts, stages=('A',)):
+    return ('row', 'none', name, list(stages), doors, initial, attempts, interrupts, [name])
+
+
+# name: (kind, fault, expected invariant, stages, doors, initial bindings, attempts,
+#        interrupts (a failed later write, one process interruption), invariants)
+PROFILES = {
+    'none': ('base', 'none', None, ['A', 'B'], ALL_DOORS, ALL_INITIAL, 3, ALL_INTERRUPTS, SAFETY),
+    # Mutants: one ownership edge broken each.
+    'drop-controller-mark': ('mutant', 'drop-controller-mark', 'G3_WitnessQuiet',
+                             ['A'], ['Find'], ['First'], 1, [], SAFETY),
+    'silent-blocking-writer': ('mutant', 'silent-blocking-writer', 'G3_NoSilentUnmarkedWrite',
+                               ['A'], ['Find'], ['First'], 1, [], SAFETY),
+    'drop-callback-mark': ('mutant', 'drop-callback-mark', 'G3_WitnessQuiet',
+                           ['A'], ['ClassInput'], ['First'], 1, [], SAFETY),
+    'drop-service-setup-mark': ('mutant', 'drop-service-setup-mark', 'G3_WitnessQuiet',
+                                ['A'], ['BatchSetup'], ['First'], 1, [], SAFETY),
+    'drop-first-binding-mark': ('mutant', 'drop-first-binding-mark', 'G3_WitnessQuiet',
+                                ['A'], ['Find'], ['Partial'], 1, [], SAFETY),
+    'drop-first-binding-mark-after-drop': ('mutant', 'drop-first-binding-mark', 'G3_WitnessQuiet',
+                                           ['A'], ['Find'], ['First'], 2, [], SAFETY),
+    'nested-fresh-attempt': ('mutant', 'nested-fresh-attempt', 'MarkReflectsWrites',
+                             ['A'], ['Console'], ['Bound'], 1, [], SAFETY),
+    'peer-entry-unmarked': ('mutant', 'peer-entry-unmarked', 'MarkReflectsWrites',
+                            ['A'], ['Peer'], ['First'], 2, [], SAFETY),
+    'spawned-writer': ('mutant', 'spawned-writer', 'G3_NoSilentUnmarkedWrite',
+                       ['A'], ['Find'], ['Bound'], 1, [], SAFETY),
+    'early-decision': ('mutant', 'early-decision', 'DecisionPlacement',
+                       ['A'], ['Find'], ['First'], 1, [], SAFETY),
+    'late-not-now': ('mutant', 'late-not-now', 'I4_NoNotNowAfterEffect',
+                     ['A'], ['Find'], ['First'], 1, [], SAFETY),
+    'duplicate-issue': ('mutant', 'duplicate-issue', 'GrantUnique',
+                        ['A'], ['Find'], ['First'], 2, [], SAFETY),
+    'wait-in-protected-b': ('mutant', 'wait-in-protected-B', 'I1_NoWaitInProtectedB',
+                            ['B'], ['ClassInput', 'BatchSetup'], ['First'], 1, [], SAFETY),
+    # The writes that are the first write of a first send.
+    'drop-configured-setup-mark': ('mutant', 'drop-configured-setup-mark', 'G3_WitnessQuiet',
+                                   ['A'], ['ConfiguredSetup'], ['First'], 1, [], SAFETY),
+    'drop-setup-request-grant-mark': ('mutant', 'drop-setup-request-grant-mark', 'G3_WitnessQuiet',
+                                      ['A'], ['SetupRequest'], ['First'], 1, [], SAFETY),
+    'drop-native-root-mark': ('mutant', 'drop-native-root-mark', 'G3_WitnessQuiet',
+                              ['A'], ['FindNative'], ['First'], 1, [], SAFETY),
+    # The peer operation children with PI's entry note dropped too (the leg's first offer).
+    'drop-peer-operation-and-entry-note': ('mutant', 'drop-peer-operation-and-entry-note', 'G3_WitnessQuiet',
+                                           ['A'], ['Peer'], ['First'], 1, [], SAFETY),
+    # The writes that are first only in a partial-issuance state left by an earlier attempt.
+    'drop-configured-setup-grant-mark': ('mutant', 'drop-configured-setup-grant-mark', 'G3_WitnessQuiet',
+                                         ['A'], ['ConfiguredSetup'], ['First'], 2, [], SAFETY),
+    'drop-setup-target-mark-configured': ('mutant', 'drop-setup-target-mark', 'G3_WitnessQuiet',
+                                          ['A'], ['ConfiguredSetup'], ['First'], 2, [], SAFETY),
+    'drop-setup-target-mark-request': ('mutant', 'drop-setup-target-mark', 'G3_WitnessQuiet',
+                                       ['A'], ['SetupRequest'], ['First'], 2, [], SAFETY),
+    'drop-native-child-mark': ('mutant', 'drop-native-child-mark', 'G3_WitnessQuiet',
+                               ['A'], ['FindNative'], ['First'], 2, ['fail'], SAFETY),
+    'drop-native-child-mark-after-crash': ('mutant', 'drop-native-child-mark', 'G3_WitnessQuiet',
+                                           ['A'], ['FindNative'], ['First'], 2, ['crash'], SAFETY),
+    'drop-callback-leaf-mark': ('mutant', 'drop-callback-leaf-mark', 'G3_WitnessQuiet',
+                                ['A'], ['ClassInput'], ['First'], 2, ['fail'], SAFETY),
+    'drop-callback-leaf-mark-after-crash': ('mutant', 'drop-callback-leaf-mark', 'G3_WitnessQuiet',
+                                            ['A'], ['ClassInput'], ['First'], 2, ['crash'], SAFETY),
+    # The class input selection record, first under another original's callback grants
+    # or after the check before it refused; a native child first under a shared root.
+    'drop-class-input-mark': ('mutant', 'drop-class-input-mark', 'G3_WitnessQuiet',
+                              ['A'], ['ClassInput'], ['Shared'], 1, [], SAFETY),
+    'drop-class-input-mark-after-refusal': ('mutant', 'drop-class-input-mark', 'G3_WitnessQuiet',
+                                            ['A'], ['ClassInput'], ['First'], 2, ['fail'], SAFETY),
+    'drop-class-input-mark-class-native': ('mutant', 'drop-class-input-mark', 'G3_WitnessQuiet',
+                                           ['A'], ['ClassNative'], ['Shared'], 1, [], SAFETY),
+    'drop-native-child-mark-shared': ('mutant', 'drop-native-child-mark', 'G3_WitnessQuiet',
+                                      ['A'], ['FindNative'], ['Shared'], 1, [], SAFETY),
+    # The service setup child's observation record (service.rs:379, in no erratum): first after
+    # an attempt that issued the child and ended before the record.
+    'drop-service-observation-mark': ('mutant', 'drop-service-observation-mark', 'G3_WitnessQuiet',
+                                      ['A'], ['BatchSetup'], ['First'], 2, ['fail'], SAFETY),
+    'drop-service-observation-mark-after-crash': ('mutant', 'drop-service-observation-mark', 'G3_WitnessQuiet',
+                                                  ['A'], ['BatchSetup'], ['First'], 2, ['crash'], SAFETY),
+    # Meta's backstop and wait: a binder's not-now after a failed write whose mark is
+    # set reaches the backstop; Meta waiting on a refusal waits after an effect.
+    'notnow-after-failed-write': ('mutant', 'notnow-after-failed-write', 'G4_BackstopQuiet',
+                                  ['A'], ['ClassInput'], ['Shared'], 1, ['fail'], SAFETY),
+    'refused-waits': ('mutant', 'refused-waits', 'MetaNeverWaitsAfterEffect',
+                      ['A'], ['ClassInput'], ['First'], 1, ['fail'], SAFETY),
+    # Controls: the same faults where an earlier mark of the attempt masks them.
+    'masked-first-binding-drop': ('control', 'drop-first-binding-mark', None,
+                                  ['A'], ['Find', 'Launch'], ['First'], 1, [], SAFETY),
+    'masked-controller-drop-class': ('control', 'drop-controller-mark', None,
+                                     ['A'], ['ClassInput', 'BatchSetup'], ['First'], 1, [], SAFETY),
+    'masked-controller-drop-r24': ('control', 'drop-controller-mark', None,
+                                   ['A'], R24_DOORS, ['First'], 1, [], SAFETY),
+    # PI's entry note is vacuous on a first delivery: the peer operation grant's mark marks the bind.
+    'masked-peer-note-first-delivery': ('control', 'peer-entry-unmarked', None,
+                                        ['A'], ['Peer'], ['First'], 1, [], SAFETY),
+    # The entry note marks every peer bind before its operation children.
+    'masked-peer-operation-drop': ('control', 'drop-peer-operation-mark', None,
+                                   ['A'], ['Peer'], ALL_INITIAL, 3, ALL_INTERRUPTS, SAFETY),
+    'masked-configured-setup-grant-first-send': ('control', 'drop-configured-setup-grant-mark', None,
+                                                 ['A'], ['ConfiguredSetup'], ['First'], 1, [], SAFETY),
+    'masked-setup-target-first-send': ('control', 'drop-setup-target-mark', None,
+                                       ['A'], ['ConfiguredSetup', 'SetupRequest'], ['First'], 1, [], SAFETY),
+    # Without a failed write or an interruption no attempt ends between the root and its
+    # leaves (one synchronous closure) or between the native root and child (the source
+    # writer serializes a dropped bind's writer and the resend's); under a shared root the
+    # child is first with no interruption (drop-native-child-mark-shared).
+    'masked-callback-leaf-no-interrupt': ('control', 'drop-callback-leaf-mark', None,
+                                          ['A'], ['ClassInput'], ALL_INITIAL, 3, [], SAFETY),
+    'masked-native-child-no-interrupt': ('control', 'drop-native-child-mark', None,
+                                         ['A'], ['FindNative'], OWN_INITIAL, 3, [], SAFETY),
+    # No await separates the callback grants from the selection record, or a service setup
+    # child's grant from its observation record: without a refusal, an interruption or
+    # another original's grants, an earlier mark of the attempt masks either.
+    'masked-class-input-own-grants': ('control', 'drop-class-input-mark', None,
+                                      ['A'], ['ClassInput', 'ClassNative'], OWN_INITIAL, 3, [], SAFETY),
+    'masked-service-observation-no-interrupt': ('control', 'drop-service-observation-mark', None,
+                                                ['A'], ['BatchSetup'], ALL_INITIAL, 3, [], SAFETY),
+    # Rows: each negated row end state must be violated (the row is reachable).
+    'row-class-first-send-a': row('NotRowClassFirstSendA', ['ClassInput'], ['First'], 1, []),
+    'row-batch-first-send-a': row('NotRowBatchFirstSendA', ['BatchSetup'], ['First'], 1, []),
+    'row-class-first-send-b': row('NotRowClassFirstSendB', ['ClassInput'], ['First'], 2, [], stages=('B',)),
+    'row-batch-first-send-b': row('NotRowBatchFirstSendB', ['BatchSetup'], ['First'], 2, [], stages=('B',)),
+    'row-bound-resend-a': row('NotRowBoundResendA', ['Find'], ['Bound'], 2, []),
+    'row-orphan-duplicate': row('NotRowOrphanDuplicate', ['Find'], ['First'], 2, []),
+    'row-orphan-duplicate-retry': row('NotRowOrphanDuplicateRetry', ['Find'], ['First'], 3, []),
+    'row-orphan-duplicate-peer-retry': row('NotRowOrphanDuplicateRetry', ['Peer'], ['First'], 3, []),
+    'row-leaf-first-after-refusal': row('NotRowLeafFirstAfterRefusal', ['ClassInput'], ['First'], 2, ['fail']),
+    'row-leaf-first-after-crash': row('NotRowLeafFirstAfterCrash', ['ClassInput'], ['First'], 2, ['crash']),
+    'row-native-child-first-after-drop': row('NotRowNativeChildFirstAfterDrop', ['FindNative'], ['First'], 2,
+                                             ['fail']),
+    'row-native-child-first-after-crash': row('NotRowNativeChildFirstAfterCrash', ['FindNative'], ['First'], 2,
+                                              ['crash']),
+    'row-configured-targets-first-after-drop': row('NotRowTargetsFirstAfterDrop', ['ConfiguredSetup'], ['First'],
+                                                   2, []),
+    'row-request-targets-first-after-drop': row('NotRowTargetsFirstAfterDrop', ['SetupRequest'], ['First'], 2, []),
+    'row-configured-grant-first-after-drop': row('NotRowConfiguredGrantFirstAfterDrop', ['ConfiguredSetup'],
+                                                 ['First'], 2, []),
+    'row-class-selection-first-shared': row('NotRowClassSelectionFirstShared', ['ClassInput', 'ClassNative'],
+                                            ['Shared'], 1, []),
+    'row-class-selection-first-after-refusal': row('NotRowClassSelectionFirstAfterRefusal', ['ClassInput'],
+                                                   ['First'], 2, ['fail']),
+    'row-native-child-first-shared': row('NotRowNativeChildFirstShared', ['FindNative'], ['Shared'], 1, []),
+    'row-service-observation-first-after-refusal': row('NotRowServiceObservationFirstAfterRefusal',
+                                                       ['BatchSetup'], ['First'], 2, ['fail']),
+    'row-service-observation-first-after-crash': row('NotRowServiceObservationFirstAfterCrash', ['BatchSetup'],
+                                                     ['First'], 2, ['crash']),
+}
+# Present in Next but enabled only by a fault; the clean base never takes them.
+FAULT_ONLY_ACTIONS = ['SpawnedWrite']
+
+
+def domain(values):
+    return '{' + ','.join(json.dumps(value) for value in values) + '}'
+
+
+def main():
+    if len(sys.argv) != 2:
+        raise ValueError(__doc__)
+    output = Path(sys.argv[1])
+    output.mkdir(exist_ok=False)
+    source = Path(__file__).resolve().parents[1] / 'models' / 'bind_attempt.tla'
+    model = source.read_bytes()
+    (output / source.name).write_bytes(model)
+    text = model.decode()
+    body = text.split('\nNext ==\n', 1)[1].split('\n\n', 1)[0]
+    actions = []
+    for line in body.splitlines():
+        name = line.strip().removeprefix('\\/ ').strip()
+        if name.startswith('\\E '):
+            name = name.split(':', 1)[1].strip()
+        name = name.split('(', 1)[0]
+        if not name.isidentifier() or name in actions:
+            raise ValueError(f'unexpected Next disjunct: {line!r}')
+        actions.append(name)
+    exported = {}
+    for name, (kind, fault, expected, stages, doors, initial, attempts, interrupts,
+               invariants) in PROFILES.items():
+        config = ('SPECIFICATION Spec\nCONSTANTS\n'
+                  f'  Fault = "{fault}"\n'
+                  f'  StageValues = {domain(stages)}\n'
+                  f'  DoorValues = {domain(doors)}\n'
+                  f'  InitialValues = {domain(initial)}\n'
+                  f'  MaxAttempts = {attempts}\n'
+                  f'  Interrupts = {domain(interrupts)}\n'
+                  'INVARIANTS\n' + ''.join(f'  {inv}\n' for inv in invariants))
+        (output / (name + '.cfg')).write_text(config)
+        exported[name] = {'kind': kind, 'fault': fault, 'expected_invariant': expected,
+                          'stage': stages, 'door': doors, 'initial': initial,
+                          'max_attempts': attempts, 'interrupts': interrupts, 'invariants': invariants}
+    manifest = {
+        'scope': 'one original, bounded bind attempts, Stage A and B; attempt effect-mark ownership '
+                 'across nested sections, a pre-section door write, inline writers and blocking '
+                 'writers (the first-send write inventory and the service setup observation '
+                 'record) under drops, failed later writes and checks, one process interruption, and '
+                 'parents another original issued, with the partial-issuance states they leave; '
+                 'decision point, Meta backstop, G3 witness',
+        'full_b1_acceptance': False,
+        'model': source.name,
+        'model_sha256': hashlib.sha256(model).hexdigest(),
+        'actions': actions,
+        'fault_only_actions': FAULT_ONLY_ACTIONS,
+        'profiles': exported,
+        'generator_sha256': sha(Path(__file__)),
+        'artifact_hashes': {f.name: sha(f) for f in sorted(output.iterdir()) if f.is_file()},
+    }
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

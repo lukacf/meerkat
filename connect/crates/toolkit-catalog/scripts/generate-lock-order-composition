@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Export the lock-order (I10) model with its attributed profiles.
+
+Usage: generate-lock-order-composition GENERATED_ORIGINALS NEW_DIRECTORY
+Reads the one rank table from the canonical export (lock_order/ranks.json,
+written by the generate_originals example from lock_order.rs) and refuses a
+model whose Rank record differs from it. Copies models/lock_order.tla
+byte-exact and writes one TLC config per profile: the current code's shapes
+(mode A) against stage B's declared order, the stage B design (clean), and one
+mutant per restored A edge, each attributed to the invariant it violates or to
+a deadlock that generic deadlock checking reports.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import sys
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def model_ranks(text):
+    body = text.split('Rank == [', 1)[1].split(']', 1)[0]
+    fields = []
+    for line in body.splitlines():
+        for field in line.split('\\*', 1)[0].split(','):
+            if '|->' in field:
+                lock, rank = field.split('|->')
+                fields.append((lock.strip(), int(rank)))
+    return fields
+
+
+ALL = ['OwnersConsistent', 'I10_DeclaredOrder', 'I1_NoBlockingInSection']
+EXCLUSION = ['OwnersConsistent']
+
+# name: (kind, mode, fault, expected, invariants); expected is an invariant name,
+# 'deadlock', or None for a clean pass.
+PROFILES = {
+    # Mode A: the current shapes break the declared order and wait inside sections,
+    # yet have no cycle at this granularity.
+    'a-order': ('baseline', 'A', 'none', 'I10_DeclaredOrder', ['OwnersConsistent', 'I10_DeclaredOrder']),
+    'a-sections': ('baseline', 'A', 'none', 'I1_NoBlockingInSection',
+                   ['OwnersConsistent', 'I1_NoBlockingInSection']),
+    'a-deadlock-free': ('baseline', 'A', 'none', None, EXCLUSION),
+    # Mode B: the clean design.
+    'b-none': ('base', 'B', 'none', None, ALL),
+    # Mutants: one A edge restored in B each.
+    'b-publication-inside-store': ('mutant', 'B', 'publication-inside-store', 'I10_DeclaredOrder', ALL),
+    'b-publication-inside-store-deadlock': ('mutant', 'B', 'publication-inside-store', 'deadlock', EXCLUSION),
+    'b-control-before-publication': ('mutant', 'B', 'control-before-publication', 'I10_DeclaredOrder', ALL),
+    'b-control-before-publication-deadlock': ('mutant', 'B', 'control-before-publication', 'deadlock',
+                                              EXCLUSION),
+    'b-bind-takes-lock': ('mutant', 'B', 'bind-takes-lock', 'I1_NoBlockingInSection', ALL),
+    'b-blocking-native-read': ('mutant', 'B', 'blocking-native-read', 'I1_NoBlockingInSection', ALL),
+    'b-historical-waits': ('mutant', 'B', 'historical-waits', 'I1_NoBlockingInSection', ALL),
+    # The source writer before the class callback exclusion (the code's documented order):
+    # a preparation that follows the earlier table breaks the order and closes a cycle with
+    # the native operation preparation; the code's shapes break the earlier table.
+    'b-exclusion-before-writer': ('mutant', 'B', 'exclusion-before-writer', 'I10_DeclaredOrder', ALL),
+    'b-exclusion-before-writer-deadlock': ('mutant', 'B', 'exclusion-before-writer', 'deadlock', EXCLUSION),
+    'b-old-table-order': ('mutant', 'B', 'old-table-order', 'I10_DeclaredOrder', ALL),
+}
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise ValueError(__doc__)
+    root, output = Path(sys.argv[1]), Path(sys.argv[2])
+    table = json.loads((root / 'lock_order' / 'ranks.json').read_text())
+    source = Path(__file__).resolve().parents[1] / 'models' / 'lock_order.tla'
+    model = source.read_bytes()
+    if model_ranks(model.decode()) != [(entry['lock'], entry['rank']) for entry in table]:
+        raise ValueError('the lock-order model drifted from the rank table')
+    output.mkdir(exist_ok=False)
+    (output / source.name).write_bytes(model)
+    shutil.copyfile(root / 'lock_order' / 'ranks.json', output / 'ranks.json')
+    exported = {}
+    for name, (kind, mode, fault, expected, invariants) in PROFILES.items():
+        config = ('SPECIFICATION Spec\nCONSTANTS\n'
+                  f'  Fault = "{fault}"\n  Mode = "{mode}"\n'
+                  'INVARIANTS\n' + ''.join(f'  {inv}\n' for inv in invariants))
+        (output / (name + '.cfg')).write_text(config)
+        exported[name] = {'kind': kind, 'mode': mode, 'fault': fault,
+                          'expected': expected, 'invariants': invariants}
+    manifest = {
+        'scope': 'declared stage B lock order over the source owner synchronization; current A shapes, '
+                 'stage B shapes and one restored A edge per mutant; blocking versus try acquisitions; '
+                 'protected sections where nothing may block',
+        'full_b1_acceptance': False,
+        'model': source.name,
+        'model_sha256': hashlib.sha256(model).hexdigest(),
+        'actions': ['Block', 'Try', 'Release', 'Finished'],
+        'profiles': exported,
+        'generator_sha256': sha(Path(__file__)),
+        'artifact_hashes': {f.name: sha(f) for f in sorted(output.iterdir()) if f.is_file()},
+    }
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

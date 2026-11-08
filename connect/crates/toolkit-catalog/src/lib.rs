@@ -8,8 +8,58 @@
 
 pub mod coverage;
 pub mod dsl;
+pub mod lock_order;
+mod original_models;
 mod wire;
 pub use dsl::acquisition::*;
+pub use dsl::original_offer::*;
+pub use dsl::original_types::*;
+pub use dsl::source_record::*;
+pub use original_models::{
+    OriginalModelArtifacts, OriginalRecoveryArtifacts, OriginalRecoveryProfile,
+    component_lifetime_model_artifacts, original_offer_model_artifacts,
+    original_offer_recovery_artifacts, source_record_model_artifacts,
+};
+
+/// Extract the source owner and its bounded vocabulary from the catalog.
+pub fn source_record_schema() -> meerkat_machine_schema::MachineSchema {
+    let mut schema = ToolkitSourceRecordMachineState::schema();
+    schema.named_types.extend([
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitSourceKind",
+            ToolkitSourceKind::MODEL_VARIANTS,
+        ),
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitSourceReadiness",
+            ToolkitSourceReadiness::MODEL_VARIANTS,
+        ),
+    ]);
+    schema
+}
+
+/// Receipt provenance remains a bridge obligation; this schema owns no native verdict.
+pub fn original_offer_schema() -> meerkat_machine_schema::MachineSchema {
+    let mut schema = ToolkitOriginalOfferMachineState::schema();
+    schema.named_types.extend([
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitCoreObservation",
+            ToolkitCoreObservation::MODEL_VARIANTS,
+        ),
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitDispatchAnswer",
+            ToolkitDispatchAnswer::MODEL_VARIANTS,
+        ),
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitReceiptKind",
+            ToolkitReceiptKind::MODEL_VARIANTS,
+        ),
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitWithdrawalCause",
+            ToolkitWithdrawalCause::MODEL_VARIANTS,
+        ),
+    ]);
+    schema
+}
 
 /// The compiled schema is extracted from the same canonical macro invocation
 /// that produces the authority consumed by the production bridge.

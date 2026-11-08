@@ -323,7 +323,10 @@ instead of failing the realm:
   read. Its chunks
   are never swept as ownerless. `SpiRealm::quarantined_scopes` lists every
   quarantined scope, and a mob storage whose scope is quarantined is listed
-  as quarantined (`SpiStoredMob::quarantined`).
+  as quarantined (`SpiStoredMob::quarantined`), never left out: a storage
+  whose key its scope names hash and that no other listed scope names is
+  listed under the quarantined scope's name, which opens to the
+  quarantine's refusal.
 - **At a re-acquire.** The scope stays conflicted in your store until it is
   repaired, so a writer that stopped and acquires again lists it again. The
   listing must report each recorded conflict unchanged: at the same version

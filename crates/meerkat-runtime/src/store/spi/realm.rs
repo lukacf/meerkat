@@ -1399,6 +1399,32 @@ impl SpiRealm {
             .collect()
     }
 
+    /// The quarantine of the scope `id`, when the store reports a conflict
+    /// for it: named by `id`, with its conflicted incarnations (the same
+    /// store names [`Self::quarantined_scopes`] lists, which names a scope
+    /// whose store name hashes its key by that name until a call names it)
+    /// and the cause its refusals carry. Reads the writer fence only, and
+    /// names nothing: an adapter that knows a key matches it to a
+    /// quarantine the realm lists by a hash.
+    #[must_use]
+    pub fn quarantine_of(&self, id: &ScopeId) -> Option<QuarantinedScope> {
+        let key = codec::scope_key(id.family.tag, &id.key);
+        let fence = lock(&self.writer_fence);
+        if !fence.machine.state().quarantined_keys.contains(&key) {
+            return None;
+        }
+        let names = fence
+            .quarantined
+            .get(&key)
+            .map(|names| names.iter().cloned().collect())
+            .unwrap_or_default();
+        Some(QuarantinedScope {
+            scope: id.to_string(),
+            names,
+            cause: fence.quarantine_cause(&key, None),
+        })
+    }
+
     /// The quarantined scopes of `families` (of any family with `None`), in
     /// key order, each with the id a call names it by when the realm knows
     /// it: its store name keeps its key verbatim, or a call named it.

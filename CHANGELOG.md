@@ -755,7 +755,8 @@ them.
   across scopes while one of a family it reads is quarantined (naming the
   poisoned ones too); both reach a runtime store's caller as
   `RuntimeStoreError::ScopeRefused`. With them `SpiRealm::scope_refused`
-  (poisoned or quarantined), `ScopeState::quarantine` and
+  (poisoned or quarantined), `SpiRealm::quarantine_of` (the quarantine of
+  one scope, named by the id the caller gives), `ScopeState::quarantine` and
   `ScopeState::refusal`.
 
 - `meerkat-runtime`: `RuntimeStore::unnamed_refused_runtimes`, the runtime
@@ -953,7 +954,10 @@ them.
   unavailable, naming it, and the subject's list reports it among the rows
   it cannot read. Its
   chunks are never swept, and a mob storage lists a mob whose scope is
-  quarantined as quarantined. A re-acquire's listing must report each
+  quarantined as quarantined, never leaving it out (one whose key its scope
+  names hash and that no other listed scope names is listed under the
+  quarantined scope's name, which opens to the quarantine's refusal). A
+  re-acquire's listing must report each
   recorded conflict unchanged (its version, and its commit ids where both
   sides name them, in any order); a conflict on another scope, or a
   recorded one at another version, with other ids, listed among the heads

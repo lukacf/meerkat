@@ -25,6 +25,7 @@ use meerkat_core::image_generation::{
     PromptText, SessionModelRoutingStatus, ToolCallId,
 };
 use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeExecutionKind};
+use meerkat_core::model_profile::catalog::ImageGenerationModelRoute;
 use meerkat_core::service::{InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::{
     AgentToolDispatcher, AssistantBlock, BlobStore, BlockAssistantMessage, ContentBlock, ImageData,
@@ -75,6 +76,17 @@ fn gemini_api_key() -> Option<String> {
 /// Get the model to use for regression tests (cheaper model by default).
 fn smoke_model() -> String {
     std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+}
+
+/// The catalog's OpenAI image-generation default, unless
+/// `RKAT_OPENAI_IMAGE_MODEL` names another model.
+fn openai_image_model() -> String {
+    std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| {
+        meerkat_models::default_image_generation_model(meerkat_core::Provider::OpenAI)
+            .expect("the catalog has an OpenAI image-generation default")
+            .model_id
+            .to_string()
+    })
 }
 
 fn live_image_request(provider: &str, model: &str) -> GenerateImageRequest {
@@ -129,35 +141,42 @@ mod image_generation_substrate {
             };
             let (provider_model, execution_plan) = match provider.0.as_str() {
                 "openai" => {
-                    let images_api =
-                        model.as_str().starts_with("gpt-image") && model.as_str() != "gpt-image-2";
-                    let (provider_model, backend, provider_plan) = if images_api {
-                        (
+                    // The catalog owns the route, as in the factory planner.
+                    let profile = meerkat_models::image_generation_model(
+                        meerkat_core::Provider::OpenAI,
+                        model.as_str(),
+                    )
+                    .ok_or(ImageOperationDenialReason::UnsupportedTarget)?;
+                    let output = json!({
+                        "size": "square1024",
+                        "quality": "low",
+                        "output_format": "png"
+                    });
+                    let (provider_model, backend, provider_plan) = match profile.route {
+                        ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+                            provider_call_model_id,
+                            tool_model_id,
+                        } => (
+                            ModelId::new(provider_call_model_id.unwrap_or(profile.model_id)),
+                            ImageGenerationBackendKind::HostedTool,
+                            json!({
+                                "tool_name": "image_generation",
+                                "model": tool_model_id,
+                                "output": output
+                            }),
+                        ),
+                        ImageGenerationModelRoute::OpenAiImagesApi { request_shape } => (
                             model.clone(),
                             ImageGenerationBackendKind::ProviderApi,
                             json!({
                                 "endpoint": "generations",
-                                "output": {
-                                    "size": "square1024",
-                                    "quality": "low",
-                                    "output_format": "png"
-                                }
+                                "request_shape": request_shape,
+                                "output": output
                             }),
-                        )
-                    } else {
-                        (
-                            ModelId::new("gpt-5.4"),
-                            ImageGenerationBackendKind::HostedTool,
-                            json!({
-                                "tool_name": "image_generation",
-                                "model": "gpt-image-2",
-                                "output": {
-                                    "size": "square1024",
-                                    "quality": "low",
-                                    "output_format": "png"
-                                }
-                            }),
-                        )
+                        ),
+                        ImageGenerationModelRoute::GeminiNativeModel { .. } => {
+                            return Err(ImageOperationDenialReason::UnsupportedTarget);
+                        }
                     };
                     (
                         provider_model,
@@ -205,13 +224,8 @@ mod image_generation_substrate {
         }
 
         fn infer_provider_for_model(&self, model: &str) -> Option<ProviderId> {
-            if model.starts_with("gpt-image") || model.starts_with("dall-e") {
-                Some(ProviderId::new("openai"))
-            } else if model.starts_with("gemini-") {
-                Some(ProviderId::new("gemini"))
-            } else {
-                None
-            }
+            meerkat_models::image_generation_provider_for_model(model)
+                .map(|provider| ProviderId::new(provider.as_str()))
         }
     }
 
@@ -378,8 +392,7 @@ mod image_generation_substrate {
             eprintln!("Skipping OpenAI substrate image smoke: missing OPENAI_API_KEY");
             return;
         };
-        let model =
-            std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-2".into());
+        let model = openai_image_model();
         run_live_generate_image_substrate(
             "openai",
             &model,
@@ -499,8 +512,7 @@ mod image_generation_substrate {
             eprintln!("Skipping OpenAI factory/session image smoke: missing OPENAI_API_KEY");
             return;
         };
-        let model =
-            std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-2".into());
+        let model = openai_image_model();
         let temp_dir = TempDir::new().unwrap();
         let runtime = Arc::new(MeerkatMachine::ephemeral());
         let blob_store = Arc::new(MemoryBlobStore::default());

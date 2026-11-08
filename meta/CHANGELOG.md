@@ -406,6 +406,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`local-accounts`). The operator signs in as before, with an empty account
   name, and now signs in as a person.
 
+- The incident command center example generates images with
+  `gpt-image-2.6-sunburst`, Core 0.9.11's OpenAI image default, unless
+  `RKAT_INCIDENT_IMAGE_MODEL` names another model (was `gpt-image-2`).
+
 ### Fixed
 
 - Release notes: Forge 0.3.1 ships for Linux x86_64; macOS arm64 follows in

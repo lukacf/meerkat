@@ -778,15 +778,15 @@ pub const HELD_COMPLETION_OWED_DIR: &str = "held-completion-owed";
 /// identity itself, so an identity of any length makes a short file name.
 ///
 /// The marks are the mirror written for a rollback to 0.9.10, whose
-/// identity runtime reads them back after a restart (O3, until 0.9.12): a
-/// held pass marks every roster identity before it creates any member, so
-/// a process that stops while a member is held keeps the mark, and it
-/// removes the mark of each member it publishes. This identity runtime
-/// never reads them: held creation follows the host's hold in each process
-/// and Core's verdict. Two offline diagnostics read them until the mirror
-/// expires: the gateway's identity census and the offline
-/// `identity-reset`. Every writer assumes the caller holds the state
-/// directory exclusively (the realm lock).
+/// identity runtime reads them back after a restart, kept only while that
+/// rollback is supported (until 0.9.12): a held pass marks every roster
+/// identity before it creates any member, so a process that stops while a
+/// member is held keeps the mark, and it removes the mark of each member it
+/// publishes. This identity runtime never reads them: held creation follows
+/// the host's hold in each process and Core's verdict. Two offline
+/// diagnostics read them until the mirror expires: the gateway's identity
+/// census and the offline `identity-reset`. Every writer assumes the caller
+/// holds the state directory exclusively (the realm lock).
 #[derive(Debug, Clone)]
 pub(crate) struct HeldCompletionMarks {
     dir: PathBuf,

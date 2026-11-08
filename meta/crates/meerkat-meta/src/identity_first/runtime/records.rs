@@ -12,9 +12,9 @@
 //! - the rotation intent: a fresh life (`reset`, `delete_identity`) Meta
 //!   asked Core to start, a mirror written for a rollback to 0.9.10, whose
 //!   roster pass drives the rotation it names to its end, or settles it when
-//!   Core already did (O3, until 0.9.12). It is written after Core's answer
-//!   and never read: Core finishes a rotation a crash interrupted from its
-//!   own record.
+//!   Core already did, kept only while that rollback is supported (until
+//!   0.9.12). It is written after Core's answer and never read: Core
+//!   finishes a rotation a crash interrupted from its own record.
 //!
 //! Without a durable store both are kept for this process only.
 

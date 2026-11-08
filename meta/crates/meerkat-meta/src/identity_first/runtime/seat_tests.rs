@@ -3941,11 +3941,12 @@ fn crate_production_sources() -> Vec<(String, String)> {
 
 /// Source guard: nothing in the crate reads the rotation records. They are
 /// a mirror written for a rollback to 0.9.10, whose roster pass drives the
-/// rotation a record names to its end (O3, until 0.9.12): a verb writes its
-/// record after Core's answer and reads none, and nothing else reads them
-/// online. Every production source is read ([`crate_production_sources`]),
-/// a file added later included: a store that implements the read defines it
-/// and calls it nowhere.
+/// rotation a record names to its end, kept only while that rollback is
+/// supported (until 0.9.12): a verb writes its record after Core's answer
+/// and reads none, and nothing else reads them online. Every production
+/// source is read ([`crate_production_sources`]), a file added later
+/// included: a store that implements the read defines it and calls it
+/// nowhere.
 ///
 /// RED before the verbs stopped reading the records: the reset and delete
 /// verbs read them to put an earlier call's record back after a refusal. A
@@ -4104,13 +4105,14 @@ async fn held_creation_follows_the_host_s_hold_across_a_restart_in_every_composi
 
 /// Source guard: nothing online reads the held-completion marks. They are
 /// the mirror written for a rollback to 0.9.10, whose runtime reads them back
-/// after a restart (O3, until 0.9.12); held creation follows the host's hold
-/// in this process and Core's verdict. Two offline diagnostics read them
-/// until the mirror expires, each in one function: the gateway's identity
-/// census (`held_completion_owed`) and the offline `identity-reset`, which
-/// refuses on a mark and never acts on it. Every production source is read
-/// ([`crate_production_sources`]), a file added later included: the marks'
-/// own module defines the readers and calls them nowhere.
+/// after a restart, kept only while that rollback is supported (until
+/// 0.9.12); held creation follows the host's hold in this process and Core's
+/// verdict. Two offline diagnostics read them until the mirror expires, each
+/// in one function: the gateway's identity census (`held_completion_owed`)
+/// and the offline `identity-reset`, which refuses on a mark and never acts
+/// on it. Every production source is read ([`crate_production_sources`]), a
+/// file added later included: the marks' own module defines the readers and
+/// calls them nowhere.
 ///
 /// RED before the marks stopped being read: the identity runtime read them
 /// before a declaration, a held create and a fresh life. A reader planted in

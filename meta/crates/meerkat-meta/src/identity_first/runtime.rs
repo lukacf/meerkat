@@ -3594,8 +3594,9 @@ pub struct IdentityRuntime {
     /// or a held add.
     host_held: StdMutex<BTreeSet<AgentIdentity>>,
     /// Where this runtime writes the held-completion marks: the mirror for
-    /// a rollback to 0.9.10, whose runtime reads them back after a restart
-    /// (O3, until 0.9.12). Nothing here reads them.
+    /// a rollback to 0.9.10, whose runtime reads them back after a restart,
+    /// kept only while that rollback is supported (until 0.9.12). Nothing
+    /// here reads them.
     held_completion_marks: StdMutex<Option<super::held_bootstrap::HeldCompletionMarksAt>>,
     /// The first-boot manifest: the rows of it this process has not
     /// carried out yet. Process-local: each row is read against Core's
@@ -13088,8 +13089,10 @@ impl IdentityRuntime {
     /// named then: a member Core holds under its name is not the
     /// identity's), Dormant otherwise. The Core facts come from one read of
     /// Core's member history, a store read that never waits on the mob
-    /// actor, and one read of Core's member list; a history read fault is
-    /// typed history unavailable, never a guess.
+    /// actor, one read of Core's member list, and one read of whether Core
+    /// holds the identity's member for unpublished customizer tools. A
+    /// failed read of any of them, the held member's included, fails the
+    /// call typed (`IdentityHistoryUnavailable`), never a guess.
     pub async fn status(
         &self,
         identity: &AgentIdentity,
@@ -13261,8 +13264,10 @@ impl IdentityRuntime {
     }
 
     /// Return statuses for every registered identity without waking any.
-    /// One read of Core's member history serves every identity; when that
-    /// read fails the call fails typed (`MemberHistoryUnavailable`): no
+    /// One read of Core's member history, one of its member list and one of
+    /// the members Core holds for unpublished customizer tools serve every
+    /// identity; when any of them fails, the read of the held members
+    /// included, the call fails typed (`MemberHistoryUnavailable`): no
     /// status is guessed and no empty list stands in for "none".
     pub async fn statuses(&self) -> Result<Vec<IdentityStatus>, IdentityRuntimeError> {
         let identities = self
@@ -14415,12 +14420,13 @@ impl IdentityRuntime {
     /// Returns the fresh session.
     ///
     /// The rotation record is a mirror written for a rollback to 0.9.10,
-    /// whose roster pass drives the rotation a record names to its end (O3,
-    /// until 0.9.12). It is written after Core's answer and never read: a
-    /// rotation Core carried out removes the identity's record, one that
-    /// may have started writes it (its verb and the generation it rotates
-    /// from), as 0.9.10 leaves its record at rest, and one Core refused
-    /// before any of it started leaves the records as they were.
+    /// whose roster pass drives the rotation a record names to its end,
+    /// kept only while that rollback is supported (until 0.9.12). It is
+    /// written after Core's answer and never read: a rotation Core carried
+    /// out removes the identity's record, one that may have started writes
+    /// it (its verb and the generation it rotates from), as 0.9.10 leaves
+    /// its record at rest, and one Core refused before any of it started
+    /// leaves the records as they were.
     ///
     /// What the retirement of the live incarnation owes (`life`'s side
     /// effects, run by the lifecycle projection once Core journaled it) is
@@ -14806,9 +14812,11 @@ impl IdentityRuntime {
     // Roster inspection - REQ-32
     // -----------------------------------------------------------------------
 
-    /// Return every registered identity with its spec and status (one read
-    /// of Core's member history serves them all; a failed read fails typed,
-    /// as [`Self::statuses`]).
+    /// Return every registered identity with its spec and status. As
+    /// [`Self::statuses`], one read each of Core's member history, its member
+    /// list and the members it holds for unpublished customizer tools serves
+    /// them all, and a failed read of any of them, the held members
+    /// included, fails the call typed (`MemberHistoryUnavailable`).
     pub async fn roster_inspect(
         &self,
     ) -> Result<BTreeMap<AgentIdentity, (DurableAgentSpec, IdentityStatus)>, IdentityRuntimeError>

@@ -1448,10 +1448,11 @@ run_machine_verify() {
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these
-# audits, so size a new audit by a hosted run. The job times out at 20
-# minutes; each shard is sized to stay within about 720 s hosted, 60
-# percent of that. audits-n, one audit part, reaches 745-776 s and gets
-# shorter only when its part splits. A new audit
+# audits, so size a new audit by a hosted run. The job times out at 30
+# minutes, since one audit that no shard can split (the durable decision
+# audit, alone in audits-j) runs near 20 hosted; each shard is still sized
+# to stay within about 720 s hosted. audits-n, one audit part, reaches
+# 745-776 s and gets shorter only when its part splits. A new audit
 # joins the lightest shard, or a new shard when it would take that shard
 # past about 720 s hosted. Shard of the two audits the
 # `all` lane runs concurrently with machine-verify below:

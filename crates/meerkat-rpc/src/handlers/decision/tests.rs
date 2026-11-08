@@ -1518,6 +1518,53 @@ mod operator_connections {
         );
     }
 
+    /// Probe: an operator connection whose subscription fell behind still
+    /// presents every decision its operator acts for that opened while it
+    /// was open. More decisions open than the subscription holds before
+    /// the connection reads any of them; nothing tells the client to list.
+    #[tokio::test]
+    async fn probe_a_connection_that_falls_behind_presents_every_opening() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let Connection { operator, written } = Connection::open("stdio:operator:behind");
+        let operator = Arc::new(operator);
+        let openings = decisions.subscribe_openings();
+        let total = 300;
+        for index in 0..total {
+            decisions
+                .hold(
+                    hold_request("release", &format!("build-{index}"), "operator"),
+                    false,
+                )
+                .expect("hold");
+        }
+        let presenting =
+            tokio::spawn(Arc::clone(&operator).present_openings(openings, Arc::clone(&runtime)));
+        // Wait until the connection has presented nothing new for 2 s.
+        let mut shown = 0;
+        let mut quiet = 0;
+        for _ in 0..600 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let now = written.lock().expect("notices").len();
+            if now == shown {
+                quiet += 1;
+                if quiet >= 20 {
+                    break;
+                }
+            } else {
+                shown = now;
+                quiet = 0;
+            }
+        }
+        presenting.abort();
+        let _ = presenting.await;
+        assert_eq!(
+            shown, total,
+            "every decision the operator acts for that opened while the connection was open is presented"
+        );
+    }
+
     /// A notice the pipe does not take records nothing. The server loop
     /// answers a notice only once its line is written, and a failed write
     /// drops the answer: the listing still answers, the decision stays

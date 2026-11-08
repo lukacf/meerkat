@@ -158,7 +158,10 @@
 #   is refused as an identity member, whatever session it names, whenever
 #   no refusal of a member that is not there, not live, not current or
 #   retiring answers it (AuditDoorsEntryExactlyOne). Internal work to an
-#   entry, the host's own door, is admitted as to any member.
+#   entry, the host's own door, is admitted as to any member, and the stale
+#   session refusal still answers what its guard spares: a worker's external
+#   work and an entry's internal work that name a moved session (two
+#   witnesses).
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -179,9 +182,10 @@
 # the named violation: defects of the created entries' invariants and
 # properties and of the new guards a reachable state needs. The list names
 # what each defect breaks; not every invariant or property has a mutant of
-# its own. The created_custody_local_kept, recovered_removal_unmarked and
-# accepted_ladder_refused mutants instead require a witness unreachable
-# (their runs end without an error). An anchor this script expects but
+# its own. The created_custody_local_kept, recovered_removal_unmarked,
+# accepted_ladder_refused, stale_session_spares_no_external and
+# stale_session_spares_no_entry mutants instead require a witness
+# unreachable (their runs end without an error). An anchor this script expects but
 # cannot find fails the run. Each TLC run is held to the canonical lane's
 # per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
 set -euo pipefail
@@ -1082,7 +1086,9 @@ for witness in \
   "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds" \
   "doors:Action property:DoorsExternalWorkerAdmitted" "doors:Action property:DoorsInternalEntryAdmitted" \
   "doors:Action property:DoorsExternalEntryRefused" "doors:Action property:DoorsExternalCreatedRefused" \
-  "doors:Action property:DoorsExternalEntryMovedSessionRefused"; do
+  "doors:Action property:DoorsExternalEntryMovedSessionRefused" \
+  "doors:Action property:DoorsExternalWorkerMovedSessionRefused" \
+  "doors:Action property:DoorsInternalEntryMovedSessionRefused"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -1768,6 +1774,20 @@ PY
   # guard read as TRUE), beside the unreadable name's refusal.
   mutate doors stale_session_answers_unreadable "Invariant AuditDoorsAtMostOne" <<'PY'
 replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", "((agent_identity \\in identity_entry_unreadable) = FALSE)", "TRUE")
+PY
+
+  # The stale session refusal answers no external work (its guard reads the
+  # origin alone): a worker's external work that names a moved session is
+  # then answered by no arm.
+  mutate_unreached doors stale_session_spares_no_external DoorsExternalWorkerMovedSessionRefused <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", "ELSE (((agent_identity \\in DOMAIN identity_entry_origins) = FALSE) /\\ ((agent_identity \\in identity_entry_unreadable) = FALSE))", "ELSE FALSE")
+PY
+
+  # The stale session refusal answers no work to an entry (its guard reads
+  # the entry for every origin): the host's internal work that names a moved
+  # session is then answered by no arm.
+  mutate_unreached doors stale_session_spares_no_entry DoorsInternalEntryMovedSessionRefused <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", '(IF (origin # "External") THEN TRUE ELSE', '(IF FALSE THEN TRUE ELSE')
 PY
 fi
 echo "created identity audit passed"

@@ -1743,7 +1743,9 @@ NotAuditWitnessRecoveredArchiveEnds == [][~AuditWitnessRecoveredArchiveEnds]_var
 \* internal work, and an external sender is refused as an identity member
 \* (ResolveSubmitWorkRejectionIdentityMember and its unreadable-name twin),
 \* whatever session the work names: a stale-session answer would invite a
-\* retry that can only be refused again.
+\* retry that can only be refused again. The stale session refusal still
+\* answers the work its guard spares: a worker's external work and an
+\* entry's internal work, its host's, that name a moved session.
 \* Member 1 recovered externally addressable and bound to its session, its
 \* Declared entry row replayed or not; member 2 recovered externally
 \* addressable or not, bound to its session or not, its peer registered or
@@ -1886,6 +1888,18 @@ AuditWitnessDoorsExternalCreatedRefused ==
 AuditWitnessDoorsExternalEntryMovedSessionRefused ==
     /\ Origin(Id1) = Some("Declared")
     /\ ResolveSubmitWorkRejectionIdentityMember(Id1, Rid1, 1, Some(Sess2), "External")
+\* What the stale session refusal's guard spares. External work to an
+\* externally addressable worker that names another session than the
+\* worker's binding is refused as a stale session.
+AuditWitnessDoorsExternalWorkerMovedSessionRefused ==
+    /\ ~DoorsEntry(Id2)
+    /\ Rid2 \in externally_addressable_runtime_ids
+    /\ ResolveSubmitWorkRejectionStaleSessionBinding(Id2, Rid2, 2, Some(Sess1), "External")
+\* Internal work to a Declared entry (its host's own door) that names another
+\* session than the entry's binding is refused as a stale session.
+AuditWitnessDoorsInternalEntryMovedSessionRefused ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ ResolveSubmitWorkRejectionStaleSessionBinding(Id1, Rid1, 1, Some(Sess2), "Internal")
 
 NotAuditWitnessDoorsExternalWorkerAdmitted == [][~AuditWitnessDoorsExternalWorkerAdmitted]_vars
 NotAuditWitnessDoorsInternalEntryAdmitted == [][~AuditWitnessDoorsInternalEntryAdmitted]_vars
@@ -1893,4 +1907,8 @@ NotAuditWitnessDoorsExternalEntryRefused == [][~AuditWitnessDoorsExternalEntryRe
 NotAuditWitnessDoorsExternalCreatedRefused == [][~AuditWitnessDoorsExternalCreatedRefused]_vars
 NotAuditWitnessDoorsExternalEntryMovedSessionRefused ==
     [][~AuditWitnessDoorsExternalEntryMovedSessionRefused]_vars
+NotAuditWitnessDoorsExternalWorkerMovedSessionRefused ==
+    [][~AuditWitnessDoorsExternalWorkerMovedSessionRefused]_vars
+NotAuditWitnessDoorsInternalEntryMovedSessionRefused ==
+    [][~AuditWitnessDoorsInternalEntryMovedSessionRefused]_vars
 ====

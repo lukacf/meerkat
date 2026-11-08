@@ -1388,7 +1388,10 @@ async fn another_lifecycle_operation_completes_while_a_governed_bind_is_not_read
 /// A governed send whose bind cannot answer yet while the member's session
 /// is replaced (a reset rotates the member onto a fresh session) is never
 /// admitted onto the old session: its next bind is handed the new session,
-/// which admits it, once, and the replaced session holds none of the input.
+/// which admits it, once. (This fixture's reset destroys the replaced
+/// session, so a read there cannot show whether it holds the input; the
+/// sessions the binds were handed and the one admission onto the new
+/// session carry the row.)
 ///
 /// RED on the base: the reset parks behind the bind, which then admits the
 /// input onto the old session.
@@ -1455,22 +1458,6 @@ async fn a_session_replaced_while_a_governed_bind_is_not_ready_never_takes_the_i
         binder.admitted(),
         vec![outcome.admission.clone()],
         "admitted once"
-    );
-    // The replaced session holds none of the input: read by the admitted
-    // input's id (on this ephemeral runtime the reset destroyed it, which
-    // its read answers typed).
-    let observed = fixture
-        .machine
-        .input_terminal_receipt_observation(
-            &fixture.session_id,
-            meerkat_runtime::terminal_status::InteractionSelector::InputId(
-                outcome.admission.input_id.clone(),
-            ),
-        )
-        .await;
-    assert!(
-        !matches!(observed, Ok(Some(_))),
-        "the replaced session holds none of the input: {observed:?}"
     );
 }
 

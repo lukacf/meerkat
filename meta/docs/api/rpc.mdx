@@ -2434,7 +2434,8 @@ first delivery builds it with the grant.
 `{grant_id, reason?}` answers `{grant, changed}`. A revoke is idempotent:
 revoking a grant that already ended answers it as it stands with `changed`
 `false`. Only an identity grant of this gateway's mob is revoked; any other id
-is `not_found`.
+is `not_found`, answered as an unknown id is. The `revoked` audit row names the
+Console's signed-in principal as its `actor` (none for the stdio host).
 
 ### `meta/tool_grants/list`
 
@@ -2456,9 +2457,12 @@ last sequence as `next_sequence`.
 
 On the Console, `agent.tool_grants.manage` on the identity gates grant and
 revoke (a revoke on the identity its grant names), and `agent.view` gates list
-and audit. A read-only Console refuses grant and revoke (`-32010`), and so does
-a candidate launch (`-32047` `candidate_launch`). The stdio gateway serves its
-host as the operator.
+and audit. A revoke tells a caller that may not view the grant's identity
+nothing: it answers `not_found` with the message an unknown grant id gets. A
+caller that may view the identity but not manage its grants is refused
+`-32030` naming it. A read-only Console refuses grant and revoke (`-32010`),
+and so does a candidate launch (`-32047` `candidate_launch`). The stdio gateway
+serves its host as the operator.
 
 ### Refusals
 
@@ -2473,7 +2477,7 @@ Every refusal of a request is `-32602` with
 | `invalid_window` | Not exactly one of `duration_ms` and `expires_at_ms`, or a window that is past, empty or longer than the maximum lifetime |
 | `empty_target` | A target that names no tool |
 | `invalid_decision_ref` | A `decision_ref` that is empty, longer than 1024 bytes or holds a control character |
-| `not_found` | An unknown or unparseable grant id, or a grant of another mob, with its `grant_id` |
+| `not_found` | An unknown or unparseable grant id, a grant of another mob, or on the Console a grant of an identity the caller may not view, with its `grant_id` |
 | `invalid_page_limit` | An audit page `limit` of 0 |
 
 The refusal kinds are a closed vocabulary; the SDKs' list also holds

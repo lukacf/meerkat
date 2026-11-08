@@ -434,8 +434,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `tool_grant_request_refused` refusal; an identity created at runtime
   (store-owned) is `subject_unknown`. On the Console, grant and revoke need
   `agent.tool_grants.manage` on the identity and record the signed-in
-  principal as the grant's caller, list and audit need `agent.view`, and a
-  read-only Console refuses the writes; a candidate launch refuses them too
+  principal (the grant's caller, the revoke's actor), list and audit need
+  `agent.view`, a revoke answers a caller that may not view the grant's
+  identity `not_found` as it answers an unknown grant id, and a read-only
+  Console refuses the writes; a candidate launch refuses them too
   (`candidate_launch`).
 - `runtime_options.tool_grants = {max_lifetime_ms}` on the stdio gateway,
   and the top-level `tool_grants` init param on `meta_gateway`: the longest

@@ -438,6 +438,13 @@ async fn revoke(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value,
     };
     let grant_id =
         ToolGrantId::parse(&params.grant_id).map_err(|error| not_found(error.to_string()))?;
+    // A grant the caller may not know of answers as Core answers an unknown
+    // id, so the answer tells nothing of it.
+    let unknown = || {
+        service_error(ToolGrantServiceError::NotFound {
+            grant_id: grant_id.to_string(),
+        })
+    };
     let owner = grant_owner(surface)?;
     let stored = owner.tool_grant(&grant_id).await.map_err(service_error)?;
     let handle = surface.mob.handle();
@@ -445,20 +452,18 @@ async fn revoke(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value,
         ToolGrantSubject::Identity {
             mob_id, identity, ..
         } if mob_id == handle.mob_id().as_str() => public_identity(identity),
-        _ => {
-            return Err(not_found(format!(
-                "tool grant '{}' is no identity grant of this gateway's mob",
-                params.grant_id
-            )));
-        }
+        _ => return Err(unknown()),
     };
-    if let Some(view) = surface.access.filter(|view| view.enforced())
-        && !view.allows_agent(ACTION_AGENT_TOOL_GRANTS_MANAGE, &identity)
-    {
-        return Err(crate::http_console::member_access_denied(
-            ACTION_AGENT_TOOL_GRANTS_MANAGE,
-            Some(identity),
-        ));
+    if let Some(view) = surface.access.filter(|view| view.enforced()) {
+        if !view.can_view_agent(&identity) {
+            return Err(unknown());
+        }
+        if !view.allows_agent(ACTION_AGENT_TOOL_GRANTS_MANAGE, &identity) {
+            return Err(crate::http_console::member_access_denied(
+                ACTION_AGENT_TOOL_GRANTS_MANAGE,
+                Some(identity),
+            ));
+        }
     }
     let revoked = owner
         .revoke_tool_grant(

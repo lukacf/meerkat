@@ -1041,6 +1041,12 @@ test("an invalid access save names the owner's reason in the Console's words, wi
     ["approver_without_holders", "An approver needs a person, service or group to hold it", "approver lead: at least one subject or group must hold it", true],
     ["unknown_approver_group", "An approver names a group that does not exist", 'approver lead: unknown group "ghosts"', true],
     ["unknown_rule", "The rule to delete does not exist", "unknown access rule id: ops", true],
+    ["invalid_ingress_name", "An approver names an ingress that is not an ingress name", `approver "lead": "Chat!" is not an ingress name (1 to 64 of a-z, 0-9, '.', '_' and '-')`, true],
+    ["operator_ingress_with_subject", "An approver lists the operator with a subject", 'approver "lead": the operator ingress names no subject (one operator per gateway)', true],
+    ["invalid_ingress_subject", "An approver's ingress identity needs a subject without surrounding spaces", 'approver "lead": ingress "chat" needs a subject that is not empty and has no leading or trailing whitespace', true],
+    ["approver_person_without_identity", "An approver's person entry names no identity", 'approver "lead": a people entry names no identity', true],
+    ["unknown_ingress", "An approver names an ingress this runtime does not declare", 'approver "lead": unknown ingress "sms" (declare it in runtime_options.decisions)', true],
+    ["duplicate_person_identity", "An approver lists one identity in two person entries", 'approver "lead": ingress "chat" subject "U123" is listed in two people entries (each entry is one person)', true],
     ["invalid_toml", "The access configuration file cannot hold this configuration", "access configuration could not be written as TOML", false],
   ];
   const futureDetail = "access rule ops: a check this Console does not know";

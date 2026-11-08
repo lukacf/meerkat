@@ -14006,6 +14006,20 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    // Forwarded: this wrapper reports the persistent-session contract, so the
+    // trait default would refuse the settle; the wrapped in-memory service
+    // has no compaction outbox and owes nothing.
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat::OwedCompactionSettlement, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_owed_compaction_projections(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -17456,6 +17470,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 )),
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
+                requester: None,
             },
             event_type: dispatch.event_type,
             payload: dispatch.payload,
@@ -17987,6 +18002,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<meerkat_mob::ColdStartTailSettlement, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat::OwedCompactionSettlement, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_owed_compaction_projections(
             &self.inner,
             session_id,
         )
@@ -40230,5 +40256,48 @@ mod cli_mcp_host_auth_resolver_tests {
                 .is_some_and(|bound| bound.same_profile(&profile)),
             "the CLI resolver must report the authority's bound egress profile"
         );
+    }
+}
+
+/// Both CLI `MobSessionService` wrappers forward the cold settle of a member
+/// session's owed compaction projections to the service they wrap. The
+/// trait default refuses it for a service that keeps durable sessions, so a
+/// wrapper without the forward compiles and leaves a dormant member's owed
+/// compaction unsettled when its mob rotates it.
+#[cfg(test)]
+mod owed_compaction_forward_guard {
+    /// The `MobSessionService` impl block of `wrapper` in `source`, up to
+    /// its closing brace, whatever form its header takes (the trait's path
+    /// with or without a leading `::`, or an imported name). Only the source
+    /// before this module is read, so the guard's own text never stands for
+    /// a wrapper's.
+    fn wrapper_impl<'a>(source: &'a str, wrapper: &str) -> Option<&'a str> {
+        let source = &source[..source
+            .find("mod owed_compaction_forward_guard")
+            .unwrap_or(source.len())];
+        let at = source.find(&format!("MobSessionService for {wrapper} {{"))?;
+        let line = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if !source[line..at].trim_start().starts_with("impl") {
+            return None;
+        }
+        let body = &source[at..];
+        Some(&body[..body.find("\n}\n")?])
+    }
+
+    #[test]
+    fn both_cli_wrappers_forward_the_owed_compaction_settle() {
+        let source = include_str!("main.rs");
+        for wrapper in ["RunMobSessionService", "MobCliSessionService"] {
+            let block = wrapper_impl(source, wrapper);
+            assert!(
+                block.is_some(),
+                "the MobSessionService impl for {wrapper} is in the CLI's source"
+            );
+            assert!(
+                block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
+                "the MobSessionService impl for {wrapper} forwards the owed compaction settle to \
+                 the service it wraps"
+            );
+        }
     }
 }

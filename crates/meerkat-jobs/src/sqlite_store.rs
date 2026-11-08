@@ -66,6 +66,10 @@ struct PersistedJobSpec {
     submission_key: JobSubmissionKey,
     #[serde(default)]
     terminal_application: crate::JobTerminalApplication,
+    /// The submitting run's requester. Absent for a run without one and in
+    /// a job written before the field existed; an older reader drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requester: Option<meerkat_core::TurnRequester>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1173,6 +1177,7 @@ impl From<&JobSpec> for PersistedJobSpec {
                 .collect(),
             submission_key: spec.submission_key.clone(),
             terminal_application: spec.terminal_application,
+            requester: spec.requester.clone(),
         }
     }
 }
@@ -1197,6 +1202,7 @@ impl From<PersistedJobSpec> for JobSpec {
                 .collect(),
             submission_key: spec.submission_key,
             terminal_application: spec.terminal_application,
+            requester: spec.requester,
         }
     }
 }

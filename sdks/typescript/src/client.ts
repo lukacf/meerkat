@@ -535,6 +535,7 @@ import type {
   TurnOptions,
   TurnToolOverlay,
   ToolCallDedupeKey,
+  ToolCallRequester,
   Usage,
   ReadyWorkFilter,
   WorkGraphEventFilter,
@@ -684,6 +685,26 @@ const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
 ]);
 function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailureCause {
   return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
+}
+
+/** The principal kinds the runtime's requester grammar names. */
+const REQUESTER_PRINCIPAL_KINDS = new Set<string>([
+  "human",
+  "personal_agent",
+  "shared_agent",
+  "runtime_host",
+  "service_account",
+]);
+/** A control character, as the runtime's identity check reads one. */
+const REQUESTER_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+/**
+ * Whether `value` is an id the runtime accepts for a qualified principal or a
+ * trust domain: a string that is not blank and holds no control character.
+ */
+function isRequesterIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.trim() !== "" && !REQUESTER_CONTROL_CHARACTER.test(value)
+  );
 }
 
 interface ResolvedBinary {
@@ -1109,6 +1130,7 @@ export class MeerkatClient {
       handler: (
         args: Record<string, unknown>,
         dedupeKey?: ToolCallDedupeKey,
+        requester?: ToolCallRequester,
       ) => Promise<string | ContentBlock[]>;
     }
   >();
@@ -1141,6 +1163,11 @@ export class MeerkatClient {
    * {@link ToolCallDedupeKey}, present when an agent-loop round dispatched
    * the call. A resumed run that dispatches the same call again passes the
    * same key.
+   *
+   * Its optional third argument is the {@link ToolCallRequester} of the run
+   * the call serves, when the run has one. The runtime sets it from the run's
+   * admitted inputs, never from the arguments, so a tool that acts in one
+   * person's name can refuse every other requester.
    */
   registerTool(
     name: string,
@@ -1149,6 +1176,7 @@ export class MeerkatClient {
     handler: (
       args: Record<string, unknown>,
       dedupeKey?: ToolCallDedupeKey,
+      requester?: ToolCallRequester,
     ) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
@@ -5262,6 +5290,67 @@ export class MeerkatClient {
   }
 
   /**
+   * The `requester` of a `tool/execute` request: the original requester of
+   * the run the call serves, read as the runtime's grammar reads it. An
+   * absent or malformed value is `undefined`, no requester, which a
+   * person-scoped tool refuses. Malformed is anything the runtime refuses: a
+   * principal kind outside `human`, `personal_agent`, `shared_agent`,
+   * `runtime_host` and `service_account`; a qualification that is null, has
+   * an unknown kind, or carries a field its kind does not have; a blank trust
+   * domain or one with a control character; and a blank qualified id or one
+   * with a control character.
+   */
+  static parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return undefined;
+    }
+    const { principal, carried } = raw as Record<string, unknown>;
+    if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
+      return undefined;
+    }
+    const wirePrincipal = principal as Record<string, unknown>;
+    const { kind, id } = wirePrincipal;
+    if (
+      typeof kind !== "string" ||
+      !REQUESTER_PRINCIPAL_KINDS.has(kind) ||
+      typeof id !== "string" ||
+      id.trim() === ""
+    ) {
+      return undefined;
+    }
+    let trustDomainId: string | undefined;
+    if (Object.prototype.hasOwnProperty.call(wirePrincipal, "qualification")) {
+      const qualification = wirePrincipal.qualification;
+      if (qualification === null || typeof qualification !== "object" || Array.isArray(qualification)) {
+        return undefined;
+      }
+      const fields = qualification as Record<string, unknown>;
+      const keys = Object.keys(fields).sort().join(",");
+      if (fields.kind === "qualified") {
+        const domain = fields.trust_domain_id;
+        if (
+          keys !== "kind,trust_domain_id" ||
+          !isRequesterIdentity(domain) ||
+          !isRequesterIdentity(id)
+        ) {
+          return undefined;
+        }
+        trustDomainId = domain;
+      } else if (fields.kind !== "unqualified" || keys !== "kind") {
+        return undefined;
+      }
+    }
+    if (carried !== undefined && typeof carried !== "boolean") {
+      return undefined;
+    }
+    return {
+      principal:
+        trustDomainId === undefined ? { kind, id } : { kind, id, trust_domain_id: trustDomainId },
+      carried: carried === true,
+    };
+  }
+
+  /**
    * Type-narrow an inbound live-adapter observation against
    * {@link WireLiveAdapterObservation}.
    *
@@ -9161,8 +9250,11 @@ export class MeerkatClient {
       if (handler) {
         const args = (params.arguments ?? {}) as Record<string, unknown>;
         const dedupeKey = MeerkatClient.parseToolCallDedupeKey(params.dedupe_key);
+        // The runtime names the run's requester here, never in the
+        // arguments; absent or malformed is no requester.
+        const requester = MeerkatClient.parseToolCallRequester(params.requester);
         handler
-          .handler(args, dedupeKey)
+          .handler(args, dedupeKey, requester)
           .then((content) => {
             this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })

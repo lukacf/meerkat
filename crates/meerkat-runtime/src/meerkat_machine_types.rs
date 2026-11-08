@@ -1389,6 +1389,16 @@ meerkat_machine_runtime_internal_inputs!(
         HoldResumedRunForAdmission,
         ReleaseResumedRunAdmission,
     ],
+    // A channel's close sweep closes its delegation intake, so a delegation
+    // the lifecycle seam carries past the close is refused admission.
+    LiveExecutionLifecycle => [
+        CloseLiveDelegationIntake,
+    ],
+    // A recovered ungoverned row's requester batch key, rehydrated as
+    // BindInputAuthority rehydrates a governed row's binding.
+    InputQueueLifecycle => [
+        BindInputRequesterBatchKey,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

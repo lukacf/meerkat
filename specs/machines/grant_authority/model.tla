@@ -76,6 +76,10 @@ Init ==
     /\ consumed = 0
     /\ carried_decisions = {}
 
+TerminalStutter ==
+    /\ phase = "Released"
+    /\ UNCHANGED vars
+
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
 UnchangedFrame_0f02c09694d21da7 == UNCHANGED << root, namespace, generation, incarnation, revoked, spent, consumed, carried_decisions >>
@@ -200,6 +204,34 @@ ConsumeUseRefusedApproverRevoked(arg_namespace, arg_generation, arg_incarnation,
     /\ UnchangedFrame_6bb9de584729bfd0
 
 
+ReleaseCustody ==
+    /\ phase = "Active"
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6bb9de584729bfd0
+
+
+RecordUncertainAppend ==
+    /\ phase = "Active"
+    /\ phase' = "Uncertain"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6bb9de584729bfd0
+
+
+ReleaseUncertainCustody ==
+    /\ phase = "Uncertain"
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6bb9de584729bfd0
+
+
+ReleaseCustodyAgain ==
+    /\ phase = "Released"
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6bb9de584729bfd0
+
+
 Next ==
     \/ (phase = "Unconfigured") /\ \E arg_root \in GrantPrincipalValues : \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : Configure(arg_root, arg_namespace, arg_generation, arg_incarnation)
     \/ (phase = "Active") /\ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues : IssueRoot(actor, record)
@@ -209,6 +241,11 @@ Next ==
     \/ (phase = "Active") /\ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E requester \in OptionGrantPrincipalValues : \E work \in OptionOriginalWorkRefValues : \E operation \in OptionGrantOperationBindingValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, requester, work, operation, leaf, chain, now_ms)
     \/ (phase = "Active") /\ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E requester \in OptionGrantPrincipalValues : \E work \in OptionOriginalWorkRefValues : \E operation \in OptionGrantOperationBindingValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ConsumeUse(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, requester, work, operation, leaf, chain, now_ms, TRUE)
     \/ (phase = "Active") /\ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 : \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues : \E represented_subject \in OptionGrantPrincipalValues : \E requester \in OptionGrantPrincipalValues : \E work \in OptionOriginalWorkRefValues : \E operation \in OptionGrantOperationBindingValues : \E leaf \in GrantRecordValues : \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 : ConsumeUseRefusedApproverRevoked(arg_namespace, arg_generation, arg_incarnation, executor, represented_subject, requester, work, operation, leaf, chain, now_ms, FALSE)
+    \/ ReleaseCustody
+    \/ RecordUncertainAppend
+    \/ ReleaseUncertainCustody
+    \/ ReleaseCustodyAgain
+    \/ TerminalStutter
 
 configured_identity_is_present == (IF (phase = "Unconfigured") THEN TRUE ELSE ((root # None) /\ (namespace # None) /\ (generation > 0) /\ (incarnation # None)))
 unconfigured_state_is_empty == (IF (phase # "Unconfigured") THEN TRUE ELSE ((root = None) /\ (namespace = None) /\ (generation = 0) /\ (incarnation = None) /\ (revision = 0) /\ (Cardinality(DOMAIN records) = 0) /\ (Cardinality(revoked) = 0) /\ (Cardinality(DOMAIN spent) = 0) /\ (consumed = 0) /\ (Cardinality(carried_decisions) = 0)))

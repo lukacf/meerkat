@@ -136,6 +136,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   as any declared identity is. 0.9.10 kept the add's owed state across a
   restart, read back from its durable mark.
 
+- The console send routes refuse the `origin_kind` values reserved for
+  Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
+  `system`): `POST /console/send` answers `400` `reserved_origin_kind`, and
+  `meta/console/send` (JSON and multipart RPC) answers invalid params
+  (`-32602`). Nothing is recorded for a refused send. `operator` and
+  `operator_probe` are accepted as before.
+
+- Rust: `BridgeDelivery` gains the public fields `requester` and
+  `sender_label`, so code that builds it literally sets them (`None` keeps
+  the previous behaviour).
+
+- Rust: `MemoryAuthor::Operator` is a struct variant with an optional
+  `principal`: `MemoryAuthor::Operator { principal: None }` is the former
+  value, and a match on it adds `{ .. }`. Its JSON form is unchanged when
+  no principal is named. `ConsoleSessionFence` gains `revoked_by`.
+
+- Durable decisions bring three access actions, `decisions.view`,
+  `decisions.decide` and `decisions.admin`, and an access rule whose actions
+  hold `*` or `decisions.*` grants them. Review such rules when access control
+  is enforced: `decisions.admin` reads every durable decision whole on the
+  Console and withdraws one.
+- `AccessApprover` has two new public fields, `ingress_subjects` and
+  `people`, so a struct literal of it needs them (or
+  `..Default::default()`). The TOML and JSON forms are unchanged when they
+  are empty.
+- `AccessConfigError` has six new variants, `InvalidIngressName`,
+  `OperatorIngressWithSubject`, `InvalidIngressSubject`,
+  `ApproverPersonWithoutIdentity`, `UnknownIngress` and
+  `DuplicatePersonIdentity`; an exhaustive match over it needs arms for them.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -308,6 +338,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A host that added a member held and wants it held again after a restart
   holds it through its held bootstrap or a re-add (see Breaking).
 
+- A detached callback job the gateway submits stores its requester as one
+  more optional field. A gateway rolled back to 0.9.10 while such a job runs
+  removes the field for good on the job's next write: after upgrading again,
+  the job's attempts name no requester (a person-scoped tool refuses them),
+  and a replay of the submitting call is refused as a submission conflict.
+  A host store's own `job_store` (`HostStoreMetaStores::job_store`) persists
+  the requester, compares it when it deduplicates a submission and keeps it
+  through compare-and-swap, as Core's notes describe.
+
+- An access configuration that names the new `audit.view` action is refused
+  by earlier releases (unknown action): keep it out of a configuration an
+  earlier gateway may still load.
+
+- An access configuration that names `decisions.view`, `decisions.decide`,
+  `decisions.admin` or `decisions.*` does not load in an earlier Meta, and
+  neither does an approver id whose only holders are `ingress_subjects` or
+  `people` entries (an earlier Meta ignores both fields and refuses an
+  approver without holders): it refuses to start with that configuration.
+  Before rolling back, remove those actions from the rules and give each
+  such approver id its `subjects` or `groups`, or restore the configuration
+  saved before the upgrade. An earlier `rpc_gateway` also refuses to start
+  with `runtime_options.decisions`, with an error that names the field
+  (`unsupported runtime_options fields: decisions`): leave it out of the
+  launch before rolling back.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -408,6 +463,185 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   bridge without run-start holds holds none (the one-member read answers
   from the list read), and one without build preparation records no
   cause.
+
+- Console messages record their sender: each `user_input` frame a console
+  send makes names its `sender` (`kind`, `assurance`, `display_name` and
+  `caller_scope`, as `meta/console/whoami` reports the caller), set from the
+  caller the Console authenticated. A scheduled fire names the schedule's
+  sender. The senders survive a restart. Rust: the frame's sender is
+  `ConsoleSender`, its kind `ConsoleActorKind`.
+
+- On a console that requires sign-in, a person's console send, and a
+  schedule's fire for a person, carries the person's qualified principal
+  (the verified `sub` in its issuer's trust domain) to the agent's run as
+  its original requester, which Meerkat stores with the admitted input and
+  hands to tool dispatch. The stored frame keeps it, and a send replayed
+  after a restart carries the requester and the label its frame recorded.
+  No view returns it: Meta leaves it out of every transcript identity it
+  shows too, on the frames of the session history and of the run's events,
+  on `/agents/{id}/events`, the mob-wide stream, `meta/events/subscribe` and
+  the event log (`console_agent_event_payload` drops it). A schedule's fire
+  names its sender as that sender's live sends are named at the fire: a
+  person whose issuer's tokens are classified as shared accounts by then
+  (`shared_account_tokens`) is named as a token principal, and the fire
+  names no requester. A service's, a token principal's and an anonymous
+  caller's sends carry none, no ungoverned send on an Open console does (a
+  governed send carries its host-bound association's requester, which may
+  be a person who volunteered a verified token), and neither does a send to
+  an external member.
+
+- On a console that requires sign-in, the agent's model reads each person's
+  message with a sender label, "Message from" and the person's display name,
+  on an injected-context row of its own right before the message, a steer
+  included. A service's, a token principal's and an anonymous caller's
+  messages, a schedule's fire, every message on an Open console and a send
+  to an external member carry none.
+
+- `SessionBridge::wait_member_lifecycle_settled`, Core's
+  `MobHandle::wait_member_lifecycle_settled`: it waits, at most a timeout,
+  until Core holds no lifecycle operation of an identity's member in flight,
+  and answers `meerkat_mob::MemberLifecycleSettlement`. The doors wait on it
+  (see Changed). Its default answers `BridgeError::Unsupported`, so a door
+  through a bridge without it answers Core's deferral at once; a host's own
+  wrapper of a session bridge forwards it.
+
+- Rust: `SessionBridge::settle_owed_compaction_projections` (provided,
+  unsupported by default) settles the compaction projections an identity's
+  current session still owes, through Core's
+  `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
+  and the exported bridge implement it.
+
+- `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
+  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
+  step owed the session it ended failed. Its record has its own key, apart
+  from the retirement's distillation, and goes once the fallback read of
+  the session's memory harvested them. Earlier releases neither write nor
+  read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
+  (provided, removes nothing by default) removes such a record; the SQLite,
+  in-memory and host store placements implement it.
+
+- A console side chat records who opened it: `meta/fork_member` writes the
+  caller's console principal (the one `meta/console/whoami` reports) into
+  the side chat's `side_chat_creator` label and answers it as `creator`
+  (`null` for an anonymous caller of an open console). The label counts
+  only on a side chat Meerkat's roster verifies; a `side_chat_creator`
+  label set any other way, or copied from the forked agent, is dropped on
+  every surface. It records the creator and grants nothing, and the
+  console shows it only to the creator and to the admins of an enforced
+  access policy.
+
+- A console audit log: each console change on `POST /console/rpc` and
+  `/console/rpc/multipart`, every MCP app tool call and each Flow Editor
+  change (a draft store write, a deploy with `execute`, a validation with
+  `rkat_validate`), a refusal included, writes a row naming the actor
+  (kind, principal, a person's verified issuer and subject, assurance and a
+  digest of the login, never the token), the method, its target
+  identifiers, the outcome and the owner's receipt; sends, voice and live
+  media are left out, and a request the console cannot authenticate writes
+  none. A row is bounded (at most 16 identifiers each way beyond the
+  change's known ones, which it keeps first, and 4 KiB in all) and says
+  when it left anything out (`truncated`), and the change and its row run
+  on the server, so a caller that goes away cuts neither short. A tool call
+  answered with an error after it reached the member's app is `failed`,
+  not `refused`. The log is kept in the realm's metadata store (a console
+  without a local runtime keeps none), in two record sets each bounded by
+  count and age, the changes and the MCP app tool calls, so tool calls
+  never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
+  and `console_tool_call_audit_limits`), and read with
+  `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
+  `audit.view` access action. Its reads, and `meta/gating/audit`, report
+  `retention`: `durable` where the records survive a restart, `process`
+  where the gateway keeps them in memory.
+- Rust: `PersistentMetadataStore` gains provided realm-document methods
+  (`realm_document_retention`, `realm_document`, `set_realm_document`,
+  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
+  no realm documents unless it implements them, so it has no console audit
+  log and keeps gating in memory. `UnifiedRuntime::gating_retention` and
+  `MetaRuntimeHandle::gating_retention` say how long the runtime keeps its
+  gating state.
+- Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
+  `supersede_by`, which write on behalf of a named author (the default
+  ignores the author and writes as `remember`, `forget` and `supersede`
+  do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
+  who revoked.
+
+- Durable decisions on Meta: `meta/decisions/list`, `get`, `rendering`,
+  `present`, `withdraw` and `decide` over the decisions Meerkat holds in a
+  runtime's `approval_decisions.sqlite3`, beside its persistent state. A
+  runtime without a persistent state directory keeps none and answers
+  `no_decision_store`; a candidate launch reads them and refuses every write.
+  On the stdio gateway:
+  - a `meta/decisions/list` first writes one `meta/decisions/notice` for each
+    open decision of the page the connection has not noticed: `held`, showing
+    nothing of the decision, or `presented` with its whole rendering to the
+    stdio operator of an approver id that lists it, a presentation the
+    gateway records once the notice is on the pipe;
+  - a decide without an attestation is the stdio operator's (the
+    operating-system user that started the gateway, device trusted), eligible
+    only for a decision the connection presented to it and while the approver
+    map lists it;
+  - a decide with an `attestation` is the decision of the person a declared
+    ingress authenticated (`runtime_options.decisions`, with each ingress's
+    clock skew, at most one hour: a larger one is refused at launch). Each
+    attested event decides one decision, recorded in the runtime's metadata
+    store before the decide; an undeclared ingress, a reused event or a time
+    beyond the skew is refused `-32602`.
+  The approver map lists the people an ingress attests
+  (`ingress_subjects`), the stdio operator (`{ ingress = "operator" }`) and,
+  in `people`, one person per entry within a binding: the stdio operator and
+  the declared-ingress identities an entry links are one person, whose own
+  requests none of those identities may approve, also when the map links
+  them while a decide is in flight. An identity in two entries of one binding
+  is refused (`duplicate_person_identity`). An entry's Console `subjects`
+  now hold the approver id for the Console's decision reads and the gating
+  decide. The map is read again when a decision commits. A map that names an
+  undeclared ingress is refused at load and on a Console edit
+  (`unknown_ingress`).
+- The Console's refusal of an invalid access configuration
+  (`invalid_access_config`) has six new `reason` values for the approver
+  map's ingress identities: `invalid_ingress_name`,
+  `operator_ingress_with_subject`, `invalid_ingress_subject`,
+  `approver_person_without_identity`, `unknown_ingress` and
+  `duplicate_person_identity`. The reasons are
+  an open list: the Console names each in its own words and shows the
+  owner's `detail` for a reason it does not know, and the SDKs pass the
+  refusal's `data` through unchanged.
+- The Console lists the open durable decisions on the Approvals panel's
+  Pending tab, read only, a page at a time with Load more: a holder of the
+  approver id (or, while access control is enforced, a caller with
+  `decisions.admin`) sees the whole rendering and where it was presented,
+  the requester of most kinds sees only the status, and anyone else sees
+  nothing. A list pages over what the caller may see: a caller that does not
+  administer decisions learns of no other decision, and its cursor names
+  only rows it was given. `meta/decisions/list`, `get` and `rendering` on
+  `POST /console/rpc` need `decisions.view` while access control is
+  enforced; a caller that may see only a decision's status is refused its
+  rendering with `-32030` and `data.kind = "content_not_visible"`.
+  `meta/decisions/withdraw` needs `decisions.admin` while access control is
+  enforced, and with access control off, or without an access controller,
+  the Console serves no withdraw (`-32601`). The Console decides no durable
+  decision.
+- The SDKs call the decision methods (Python `MobHandle.decisions_list`,
+  `decisions_get`, `decisions_rendering`, `decisions_present`,
+  `decisions_withdraw` and `decisions_decide` with a `DecisionAttestation`;
+  TypeScript `decisionsList` and its siblings), receive notices
+  (`MetaRuntime.on_decision_notice` / `onDecisionNotice`) and declare the
+  ingresses (`.decision_ingresses(...)` / `.decisionIngresses(...)`). A
+  decide called from inside a tool callback raises
+  `DecideInsideToolCallbackError` and sends nothing.
+- `PersistentMetadataStore::bind_decision_event`, a provided method that
+  records which decision an attested event decided. The SQLite store
+  implements it; the in-memory store keeps the refusing default, so a
+  persistent runtime built with in-memory metadata refuses attested decides.
+- For Rust hosts, `meerkat_meta::durable_decisions`: `RuntimeDecisions`,
+  `StdioDecisionConnection`, `DecisionNoticeSink`,
+  `DecisionIngressDeclarations`, `DecisionIngressDeclaration`,
+  `DecisionIngressError` and `check_approver_ingresses`, with the
+  decision wire types (`MetaDecisionNoticeEvent` decodes an event it does
+  not know as `Unknown`); `UnifiedRuntime::durable_decisions`,
+  `decision_owner`, `set_durable_decisions` and
+  `decision_approver_currentness`; `UnifiedRuntimeBuilder::decision_ingresses`;
+  and the approver map's `AccessIngressSubject` and `AccessApproverPerson`.
 
 ### Changed
 
@@ -515,11 +749,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keeps, restamps or moves each listed identity (MobMachine decides each
   verdict), and unlists each identity it holds declared that the roster no
   longer lists and retires its member, after which the identity leaves
-  Meta's registry. A send, a dispatch or a materialization of an identity
-  Core holds no member for, or one whose first-boot row, held role move or
-  host preparation is still owed, declares that identity alone before it
-  acts. A respawn of a built member is such a declaration: Core seats the
-  member again, Dormant, on the session it kept archived, building nothing,
+  Meta's registry. A send or a dispatch of an identity Core holds no member
+  for, or one whose first-boot row, held role move or host preparation is
+  still owed, and every materialization (a warm included), declares that
+  identity alone before it acts. Such a declaration that Core leaves to its
+  next apply, because a lifecycle operation of the identity's member is in
+  flight (the kickoff wake of the fresh life a reset seated, a delivery's
+  wake, its retirement), waits for that operation to end, up to 15 s, on
+  Core's machine state, and is declared again, so a warm right after a reset
+  answers the woken member. One still in flight then is refused retryable
+  (`-32052`, `identity_wake_retryable`). A roster pass leaves such an
+  identity to its next apply. A respawn of a built member is such a
+  declaration: Core seats the member again, Dormant, on the session it kept
+  archived, building nothing,
   and the wake that follows builds it once, so the host's `customize_build`
   runs twice (the seat's composed build, then the build's own), as for a
   lazily seated identity, where the seat step revived the member live with
@@ -591,6 +833,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   mob Meta hosts, still fails the build, typed (the boot cannot open its
   mobs), so Meta does not start and readiness never runs: repair the scope,
   then restart.
+
+- The stock console names each message's sender from the frame's recorded
+  sender: "You asked" for the caller's own messages in every tab (the
+  sender's `caller_scope` equals the one `meta/console/whoami` reports),
+  and the sender's display name for anyone else's. A frame from an older
+  gateway, which names no sender, keeps the earlier words. Every anonymous
+  caller of an Open console shares one caller scope, so an anonymous
+  message reads "You asked" only in the tab that sent it.
+
+- The SDK host's tool callbacks carry the original requester of the run
+  they serve, typed, so a host can refuse a person-scoped tool (one
+  person's mail, documents or accounts) for anyone but its owner:
+  `callback/call_tool` names it as `requester` (the principal, and
+  `carried` when the run's work reached its agent through another actor),
+  and a detached callback job's `callback/job/start` names the requester of
+  the run that submitted it, recorded with the job. A run without a
+  requester names none. Only the runtime sets it; a `requester` inside a
+  call's arguments is just an argument. The Python and TypeScript SDKs pass
+  it to a tool handler (`ToolCallRequester`, with `RequesterPrincipal`): in
+  Python to a handler that declares a `requester` parameter, in TypeScript
+  as the handler's optional second argument (`parseToolCallRequester` reads
+  one). A detached job's runner reads it as `DetachedJobContext.requester`.
+  A malformed requester reads as none, so a person-scoped tool fails
+  closed.
+
+- An MCP App's action from the console runs for its caller: on a console
+  that requires sign-in, a person's action carries that person as its
+  original requester; on an open console, and for a service or a token
+  principal, it carries none. It never borrows the requester of the model
+  run whose result the app shows.
+
+- The stock gateways keep the gating owner's state (pending approvals and
+  the gating audit) in the realm's metadata store across restarts.
+  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
+  embedded runtime; a host that persists `gating_state_snapshot` itself
+  leaves it off.
+- Memory written from the console names the person who wrote it: its
+  author, `application` before, is now the operator with the caller's
+  principal (an operator naming no one for an anonymous caller of an open
+  console). A quarantine review made in the console names its reviewer on
+  the record it releases.
+- A console session revocation records who revoked (`revoked_by` in the
+  fence record and the answer), and an access edit its author, time and
+  revision (`last_edit` on `meta/access/get`).
 
 ### Fixed
 
@@ -756,6 +1042,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   composition that is not authoritative) answers `AdmissionFailed`
   instead of `IdentityWakeRetryable`.
 
+- A delete, reset, role move or unlisting of an identity whose member was
+  stopped after it compacted inside a run, and has not woken since, now
+  harvests that compaction's discarded history into agent memory. The stop
+  had committed the run with the compaction's memory projection still owed,
+  a lazy start does not wake the member for it, and the distiller harvests
+  discards only when a live member finalizes them, so the identity's next
+  life lost them. The step now settles the projection in Core before it
+  asks Core to end the session, and the distiller reads the settled
+  discards before it distills the transcript (and, for a delete, before the
+  session's memory scope is dropped). When the settle answers no discards
+  (an earlier finalization published them), the distiller reads the
+  compaction's discards from the session's memory instead. When the
+  settle fails or is busy, it reads them there once Core ended the
+  session, which publishes them only for a reset, a role move or a delete
+  (Core's rotation settles the session it leaves) and only when that
+  settle succeeds; the roster's unlisting leaves them owed in Core, as
+  before, for the session's next settle or wake. A harvest that times out,
+  is denied by the realm's budget or fails is recorded as a failed
+  compaction harvest (`lifecycle_effect_failed`, effect
+  `compaction_harvest`) and attempted again through that read, bounded
+  like the other side effects; the record goes once that read harvested
+  the discards. A step Core refuses before any of it reaches Core harvests
+  the discards it settled, or those the session's memory already holds, as
+  the session's live compaction's would be.
+
+- The Approvals panel's Audit tab shows who decided and with what
+  assurance ("Decided by alice@example.test (as Release manager) - person
+  authenticated") when the record names the verified decider, not only
+  the approver label, and says when the gateway keeps its records in
+  memory, where decisions from before a gateway restart may be missing.
+
 ### Known limitations
 
 - Forge: an application on the legacy ordinary route keeps one shared
@@ -781,6 +1098,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sign-out, or a new sign-in in the same browser), the review stays open
   but nobody can read or answer it, and a new one starts only after the
   application restarts.
+
+- A rotation a host starts directly on the mob (`MobHandle::rotate_member`),
+  with no Meta verb behind it, finalizes a dormant member's owed compaction
+  projection, but its discards are not distilled into agent memory; use a
+  delete, reset, role move or the roster's unlisting to have them
+  distilled.
+
+- The compaction harvest a step owes the session it ends (the settled
+  batch, or the fallback read of the session's memory) is kept in process
+  until the retirement's side effects run: a restart in between leaves the
+  records searchable in the old session's memory but never distilled.
 
 ## [0.9.10] - 2026-11-04
 

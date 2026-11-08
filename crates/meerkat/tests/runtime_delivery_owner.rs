@@ -1331,6 +1331,7 @@ fn queued_prompt() -> meerkat_runtime::input::Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: "queued until cancelled".into(),
         typed_turn_appends: Vec::new(),

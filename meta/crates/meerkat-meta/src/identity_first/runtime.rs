@@ -22,8 +22,8 @@ use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::agent_memory::{
-    AgentMemoryError, AgentMemoryForgetResult, AgentMemoryRecallRequest, AgentMemoryRecord,
-    AgentMemoryRuntimeInjector, NewAgentMemory,
+    AgentMemoryError, AgentMemoryForgetResult, AgentMemoryProvider, AgentMemoryRecallRequest,
+    AgentMemoryRecord, AgentMemoryRuntimeInjector, NewAgentMemory,
 };
 use super::bridge::{
     BridgeAdmissionError, BridgeError, BridgeTurnError, DeclaredIdentityAnswer,
@@ -56,7 +56,8 @@ use super::types::{
 };
 use crate::actor_loop_health::{ActorLoopHealth, ActorLoopHealthKind, ActorLoopHealthReport};
 use crate::memory::records::{
-    ManifestTier, MemoryId, MemoryKind, MemoryScope, NewMemoryRecord, RecordMeta, UsageEvent,
+    ManifestTier, MemoryAuthor, MemoryId, MemoryKind, MemoryScope, NewMemoryRecord, RecordMeta,
+    UsageEvent,
 };
 
 mod build_preparation;
@@ -445,6 +446,12 @@ struct ConsoleHumanSend<'a> {
     /// Selected skills for this exact console turn; carried only on the
     /// local host-human lane.
     skill_references: &'a [meerkat_core::skills::SkillKey],
+    /// The sender's person principal, carried to the agent's run as its
+    /// original requester (only on the local host-human lane).
+    requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// The sender label the agent's model reads right before the message
+    /// (only on the local host-human lane).
+    sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
 enum DeliveryPreparation {
@@ -5680,25 +5687,47 @@ impl IdentityRuntime {
             .is_some_and(|injector| injector.provider().supports_manifest())
     }
 
-    pub async fn remember_agent_memory(
+    /// The configured memory provider, for a write to `identity`'s memory:
+    /// the identity must be registered.
+    async fn agent_memory_for_write(
         &self,
-        realm: &str,
         identity: &AgentIdentity,
-        memory: NewAgentMemory,
-    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+    ) -> Result<Arc<dyn AgentMemoryProvider>, AgentMemoryError> {
         self.status(identity)
             .await
             .map_err(|err| AgentMemoryError::InvalidConfig(err.to_string()))?;
-        let provider = self
-            .agent_memory
+        self.agent_memory
             .read()
             .await
             .as_ref()
             .map(AgentMemoryRuntimeInjector::provider)
             .ok_or_else(|| {
                 AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
-            })?;
-        provider.remember(realm, identity, memory).await
+            })
+    }
+
+    pub async fn remember_agent_memory(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.remember_agent_memory_by(realm, identity, memory, MemoryAuthor::Application)
+            .await
+    }
+
+    /// [`Self::remember_agent_memory`], recorded as written by `author`.
+    pub(crate) async fn remember_agent_memory_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+        author: MemoryAuthor,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.agent_memory_for_write(identity)
+            .await?
+            .remember_by(realm, identity, memory, author)
+            .await
     }
 
     pub async fn forget_agent_memory(
@@ -5707,19 +5736,22 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         memory_id: &str,
     ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
-        self.status(identity)
+        self.forget_agent_memory_by(realm, identity, memory_id, MemoryAuthor::Application)
             .await
-            .map_err(|err| AgentMemoryError::InvalidConfig(err.to_string()))?;
-        let provider = self
-            .agent_memory
-            .read()
+    }
+
+    /// [`Self::forget_agent_memory`], recorded as done by `author`.
+    pub(crate) async fn forget_agent_memory_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        author: MemoryAuthor,
+    ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+        self.agent_memory_for_write(identity)
+            .await?
+            .forget_by(realm, identity, memory_id, author)
             .await
-            .as_ref()
-            .map(AgentMemoryRuntimeInjector::provider)
-            .ok_or_else(|| {
-                AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
-            })?;
-        provider.forget(realm, identity, memory_id).await
     }
 
     /// Supersede `memory_id` within its lineage (the D4 fix): the new
@@ -5732,18 +5764,26 @@ impl IdentityRuntime {
         memory_id: &str,
         memory: NewAgentMemory,
     ) -> Result<MemoryId, AgentMemoryError> {
-        self.status(identity)
-            .await
-            .map_err(|err| AgentMemoryError::InvalidConfig(err.to_string()))?;
-        let provider = self
-            .agent_memory
-            .read()
-            .await
-            .as_ref()
-            .map(AgentMemoryRuntimeInjector::provider)
-            .ok_or_else(|| {
-                AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
-            })?;
+        self.update_agent_memory_by(
+            realm,
+            identity,
+            memory_id,
+            memory,
+            MemoryAuthor::Application,
+        )
+        .await
+    }
+
+    /// [`Self::update_agent_memory`], recorded as written by `author`.
+    pub(crate) async fn update_agent_memory_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        memory: NewAgentMemory,
+        author: MemoryAuthor,
+    ) -> Result<MemoryId, AgentMemoryError> {
+        let provider = self.agent_memory_for_write(identity).await?;
         let scope = MemoryScope::Identity {
             realm: realm.to_string(),
             identity: identity.as_str().to_string(),
@@ -5757,7 +5797,9 @@ impl IdentityRuntime {
             evidence: Vec::new(),
             verification: None,
         };
-        provider.supersede(&scope, memory_id, record).await
+        provider
+            .supersede_by(&scope, memory_id, record, author)
+            .await
     }
 
     /// Tiered metadata manifest for the identity's own scope (§8.3).
@@ -9239,7 +9281,10 @@ impl IdentityRuntime {
         // Make the identity a member of Core's mob first: its declaration in
         // Core's mob, whose verdict seats it (on its archived session, or its
         // pending first-boot row's), keeps it, or moves it, and is typed when
-        // it leaves no member to wake. The wake below makes the member live.
+        // it leaves no member to wake. Core decides it once a lifecycle
+        // operation of the member in flight (the kickoff wake of the fresh
+        // life a reset seated, a delivery's wake) ended: the door waits for
+        // it. The wake below makes the member live.
         let seat = self
             .declare_identity_locked(&spec, overrides.customizer)
             .await?;
@@ -11203,6 +11248,7 @@ impl IdentityRuntime {
         handling_mode: HandlingMode,
         skill_references: &[meerkat_core::skills::SkillKey],
         accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+        attribution: &crate::console_aggregator::ConsoleHumanAttribution,
         governed: Option<Arc<dyn super::bridge::GovernedInputBinder>>,
     ) -> Result<FencingToken, IdentityRuntimeError> {
         if let Some(binder) = governed {
@@ -11214,6 +11260,7 @@ impl IdentityRuntime {
                     handling_mode,
                     skill_references,
                     accepted,
+                    attribution.sender_label.as_ref(),
                     binder,
                 )
                 .await;
@@ -11234,6 +11281,7 @@ impl IdentityRuntime {
         let skill_references = skill_references.to_vec();
         let interaction_id = accepted.interaction_id.clone();
         let expected_session = accepted.session_id.clone();
+        let attribution = attribution.clone();
         self.run_tracked_foreground(async move {
             runtime
                 .send_core(
@@ -11249,6 +11297,8 @@ impl IdentityRuntime {
                             delivery_identity: &delivery_identity,
                             expected_session: expected_session.as_deref(),
                             skill_references: &skill_references,
+                            requester: attribution.requester.as_ref(),
+                            sender_label: attribution.sender_label.as_ref(),
                         }),
                         expected_spec_digest: None,
                         sender: None,
@@ -11274,6 +11324,7 @@ impl IdentityRuntime {
         handling_mode: HandlingMode,
         skill_references: &[meerkat_core::skills::SkillKey],
         accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+        sender_label: Option<&meerkat_mob::SenderLabel>,
         binder: Arc<dyn super::bridge::GovernedInputBinder>,
     ) -> Result<FencingToken, IdentityRuntimeError> {
         if !skill_references.is_empty() {
@@ -11292,6 +11343,12 @@ impl IdentityRuntime {
                 },
             ),
         );
+        // The sender label is the message's own injected-context row, right
+        // before it, as on the ungoverned lanes.
+        if let Some(label) = sender_label {
+            prompt.injected_context =
+                vec![meerkat_core::ContentInput::Text(label.as_str().to_string())];
+        }
         prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(format!(
             "console:{}:{}",
             accepted.interaction_id, accepted.input_frame_id
@@ -11673,6 +11730,12 @@ impl IdentityRuntime {
                                 .as_ref()
                                 .map(|human| human.skill_references.to_vec())
                                 .unwrap_or_default();
+                            delivery.requester = console_human
+                                .as_ref()
+                                .and_then(|human| human.requester.cloned());
+                            delivery.sender_label = console_human
+                                .as_ref()
+                                .and_then(|human| human.sender_label.cloned());
                             bridge
                                 .deliver_host_human_input(rid, session, delivery)
                                 .await
@@ -13532,6 +13595,13 @@ impl IdentityRuntime {
             )
             .await?
         };
+        // The roster's unlisting ends the incarnation's session: a
+        // compaction projection it still owes is settled before Core is
+        // asked, and its batch waits for the retirement's side effects.
+        if intent == LifecycleRetireIntent::Retire {
+            self.settle_owed_compaction_for_retirement(identity, prepared.as_ref())
+                .await;
+        }
         // A failed retire keeps what it recorded: the retirement may have
         // started, and Core finishes it; one that did not is asked again by
         // the next roster pass, which records the same.
@@ -14324,8 +14394,14 @@ impl IdentityRuntime {
         let previous = last
             .clone()
             .filter(|binding| binding_spawned_for_identity(binding, identity));
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Reset, last)
-            .await?;
+        self.start_fresh_life_locked(
+            identity,
+            &mut foreground_shutdown,
+            FreshLife::Reset,
+            last,
+            &mut None,
+        )
+        .await?;
 
         // The fresh life is committed in Core from here. The bookkeeping that
         // needs only the old binding runs first, so a failed read of the
@@ -14440,12 +14516,19 @@ impl IdentityRuntime {
     /// between (another lifecycle operation of the member ended) refuses the
     /// step, retryable (`IdentityWakeRetryable`), with nothing recorded and
     /// nothing asked of Core.
+    ///
+    /// `owed_compaction` is the compaction harvest a delete still owes the
+    /// session it ends (its own harvest failed, or Core's settle failed): it
+    /// is handed to the retirement once that is prepared, as a reset's
+    /// settle hands its own, and stays with the caller when the step is
+    /// refused before then.
     async fn start_fresh_life_locked(
         &self,
         identity: &AgentIdentity,
         foreground_shutdown: &mut watch::Receiver<bool>,
         life: FreshLife,
         last: Option<meerkat_mob::MemberBinding>,
+        owed_compaction: &mut Option<lifecycle_projection::OwedCompaction>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
         let bridge = Arc::clone(self.core_bridge(identity)?);
@@ -14523,6 +14606,17 @@ impl IdentityRuntime {
         // once the lifecycle projection reaches its seat.
         if customizer.is_some() {
             self.note_lifecycle_build(identity, self.session_created_context(&spec, &draft));
+        }
+        // A reset ends the live incarnation's session for good: a compaction
+        // projection it still owes is settled before Core is asked, and its
+        // batch waits for the retirement's side effects. A delete settled
+        // its own in its distillation, before this step, and hands the
+        // retirement what it still owes now that the retirement is prepared.
+        if life == FreshLife::Reset {
+            self.settle_owed_compaction_for_retirement(identity, retiring.as_ref())
+                .await;
+        } else if let Some(owed) = owed_compaction.take() {
+            self.owe_compaction(identity, retiring.as_ref(), owed);
         }
         let session_id = match bridge.rotate_member(identity, &spec, &draft).await {
             Ok(session_id) => session_id,
@@ -14769,9 +14863,45 @@ impl IdentityRuntime {
         // the outgoing session before its fresh life starts. Bounded; the
         // delete proceeds at the pre-rotation timeout.
         let injector = self.agent_memory.read().await.clone();
+        // What the delete still owes the session it ends of a compaction:
+        // handed to the retirement once the step prepared it.
+        let mut owed_compaction = None;
         if let (Some(injector), Some(session_key)) =
             (injector.as_ref(), previous_session_key.as_ref())
         {
+            // A compaction projection the outgoing session still owes is
+            // settled first, and its discards harvested before the
+            // transcript is distilled: no wake will finalize it, and the
+            // delete drops the session's scope once Core ended it. A
+            // harvest that fails here (the batch is published in the
+            // session's memory then), and a batch Core publishes only as its
+            // rotation ends the session (the settle failed), are owed to the
+            // retirement's side effects, which harvest the session's memory
+            // before the scope drop; if the delete is refused before
+            // anything of it reaches Core, a published batch is harvested as
+            // the session's live compaction's would be.
+            if previous.is_live() {
+                use self::lifecycle_projection::{OwedCompaction, OwedSettle};
+                let owed = match self.settle_owed_compaction(identity).await {
+                    OwedSettle::Nothing => None,
+                    OwedSettle::Batch {
+                        session_key,
+                        discards,
+                    } => injector
+                        .harvest_compaction_within_bound(identity, &session_key, Some(discards))
+                        .await
+                        .err()
+                        .map(|error| (Some(error), Some(session_key))),
+                    OwedSettle::Published { session_key } => injector
+                        .harvest_compaction_within_bound(identity, &session_key, None)
+                        .await
+                        .err()
+                        .map(|error| (Some(error), Some(session_key))),
+                    OwedSettle::Unsettled => Some((None, None)),
+                };
+                owed_compaction =
+                    owed.map(|(failed, published)| OwedCompaction::Fallback { failed, published });
+            }
             injector
                 .distill_before_rotation(
                     identity,
@@ -14784,8 +14914,30 @@ impl IdentityRuntime {
         let mut foreground_shutdown = self.foreground_cancel.subscribe();
         // The rotation's record reads the binding the delete read, live or
         // retired.
-        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete, last)
-            .await?;
+        let started = self
+            .start_fresh_life_locked(
+                identity,
+                &mut foreground_shutdown,
+                FreshLife::Delete,
+                last,
+                &mut owed_compaction,
+            )
+            .await;
+        if let Err(error) = started {
+            // Refused before the retirement was prepared, so before anything
+            // of the delete reached Core: the session goes on, and a batch
+            // its memory already holds is harvested as its live compaction's
+            // would be. One still owed in Core stays owed.
+            if let Some(lifecycle_projection::OwedCompaction::Fallback {
+                published: Some(session_key),
+                ..
+            }) = owed_compaction
+                && let Some(injector) = injector.as_ref()
+            {
+                injector.spawn_compaction_harvest(identity, &session_key, None);
+            }
+            return Err(error);
+        }
         // A deleted identity leaves the host's hold.
         self.release_host_hold(identity);
 

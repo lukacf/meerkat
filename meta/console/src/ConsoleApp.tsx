@@ -31,7 +31,7 @@ import {
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
 import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
-import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
+import { forgetOwnSends, rememberOwnCallerScope, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -212,6 +212,7 @@ import {
 import { TimelinePanel } from "./panels/TimelinePanel";
 import { OperatorPanel } from "./panels/OperatorPanel";
 import { GatingInboxPanel } from "./panels/GatingInboxPanel";
+import { decisionCardsOf, decisionPageCursor, decisionPageParams, mergeDecisionCards, renderingOf, wholeDecisionIds, type DecisionCardView } from "./panels/decision-cards";
 import { AccessPanel, type AccessPreviewResult } from "./panels/AccessPanel";
 import {
   MemoryPanel,
@@ -302,9 +303,12 @@ export interface ConsoleAppProps {
 }
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
-type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
+type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number; retention?: string | null };
 /** The recorded approvals the Approvals panel reads: the newest 50. */
 const GATING_AUDIT_LIMIT = 50;
+/** How many open durable decisions the Approvals panel reads a page, of
+ *  what the caller may see; "Load more" reads the next. */
+const DECISION_PAGE_LIMIT = 100;
 type RoutingReadState = {
   scope: string;
   loading: boolean;
@@ -1262,6 +1266,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [caller, setCaller] = React.useState<ConsoleWhoami | null>();
   const adoptCaller = React.useCallback((whoami: ConsoleWhoami | null) => {
     setCaller(whoami);
+    // The same answer names this console's caller for the transcript: a
+    // message whose recorded sender carries this caller scope reads "You
+    // asked", in every tab.
+    rememberOwnCallerScope(whoami?.callerScope);
     // A queued message the drain kept while no caller was known drains now:
     // its finished requests are forgotten, so the next render tries again.
     for (const [key, request] of autoDrainRequestedRef.current) {
@@ -4023,8 +4031,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [gatingAuditError, setGatingAuditError] = React.useState<string | null>(null);
   const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
     try {
-      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT }) as { entries?: unknown[] };
-      setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT }) as { entries?: unknown[]; retention?: unknown };
+      setGatingData({
+        pending: [],
+        audit: Array.isArray(audit?.entries) ? audit.entries : [],
+        updatedAtMs: Date.now(),
+        retention: typeof audit?.retention === "string" ? audit.retention : null,
+      });
       setGatingAuditError(null);
     } catch (error) {
       // The panel keeps the loaded records and shows why the refresh failed.
@@ -4032,6 +4045,68 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error;
     }
   }), [baseUrl, panelRefreshFlight]);
+
+  // The durable decisions the caller may see, on the Approvals panel's
+  // Pending tab, read only: the open ones, a page at a time, with the
+  // rendering of each one the caller may read whole. "Load more" follows the
+  // list's cursor; no further page is read by itself, and a refresh reads
+  // the first page again. They belong to the scope (principal and runtime)
+  // that read them. A gateway that lists no decision methods shows none.
+  const [decisionRead, setDecisionRead] = React.useState<{
+    scope: string;
+    cards: DecisionCardView[];
+    nextAfter?: string;
+    loadingMore?: boolean;
+  }>({ scope: "", cards: [] });
+  async function readDecisionPage(after?: string): Promise<{ cards: DecisionCardView[]; nextAfter?: string }> {
+    const target = controlWorkbenchTarget("gating");
+    const page = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDecisions, target, decisionPageParams(DECISION_PAGE_LIMIT, after));
+    const renderings = new Map<string, string>();
+    await Promise.all(wholeDecisionIds(page).map(async (decisionId) => {
+      try {
+        const rendering = renderingOf(await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.getDecisionRendering, target, { decision_id: decisionId }));
+        if (rendering !== undefined) renderings.set(decisionId, rendering);
+      } catch {
+        // A rendering that cannot be read leaves its card without one.
+      }
+    }));
+    return { cards: decisionCardsOf(page, renderings), nextAfter: decisionPageCursor(page) };
+  }
+  const refreshDecisions = React.useCallback(() => panelRefreshFlight("decisions", async () => {
+    const scope = accessScopeRef.current;
+    try {
+      const first = await readDecisionPage();
+      if (scope !== accessScopeRef.current) return;
+      setDecisionRead({ scope, cards: first.cards, nextAfter: first.nextAfter });
+    } catch (error) {
+      if (scope !== accessScopeRef.current) return;
+      setDecisionRead({ scope, cards: [] });
+      // No decision methods on this gateway, or none for this caller: no
+      // cards, and nothing to report.
+      if ((error as { kind?: unknown } | null)?.kind === "console-capability-unavailable") return;
+      throw error;
+    }
+  }), [baseUrl, panelRefreshFlight]);
+  const loadMoreDecisions = React.useCallback((after: string) => {
+    const scope = accessScopeRef.current;
+    setDecisionRead((current) => (current.scope === scope ? { ...current, loadingMore: true } : current));
+    void (async () => {
+      try {
+        const more = await readDecisionPage(after);
+        if (scope !== accessScopeRef.current) return;
+        setDecisionRead((current) => (current.scope === scope && current.nextAfter === after
+          ? { scope, cards: mergeDecisionCards(current.cards, more.cards), nextAfter: more.nextAfter }
+          : current));
+      } catch {
+        // The cursor stays: the control asks for the same page again.
+        if (scope !== accessScopeRef.current) return;
+        setDecisionRead((current) => (current.scope === scope ? { ...current, loadingMore: false } : current));
+      }
+    })();
+  }, [baseUrl]);
+  const decisionCards = decisionRead.scope === accessScope ? decisionRead.cards : [];
+  const decisionNextAfter = decisionRead.scope === accessScope ? decisionRead.nextAfter : undefined;
+  const decisionLoadingMore = decisionRead.scope === accessScope && decisionRead.loadingMore === true;
 
   // Routing reads need routing access (runtime.admin): a refusal shows the
   // no-access state, never "no routes". The data belongs to the principal
@@ -4095,9 +4170,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       openPanels.some((t) => t.kind === "gating" || t.kind === "gates")
     ) {
       refreshes.push(refreshGatingAudit());
+      refreshes.push(refreshDecisions());
     }
     await Promise.all(refreshes);
-  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
+  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshDecisions, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
 
   const refreshPanelDataRef = React.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
@@ -6405,17 +6481,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           pending={activeApprovals?.requests.map(request => request.raw) || []}
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
-          onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefresh={() => {
+            void approvalResourceRef.current?.refresh();
+            void refreshDecisions().catch(() => {});
+          }}
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
           auditLimit={GATING_AUDIT_LIMIT}
+          auditRetention={gatingData.retention}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
           showPending={approvalOpens}
+          decisions={decisionCards}
+          decisionsNextAfter={decisionNextAfter}
+          onLoadMoreDecisions={loadMoreDecisions}
+          decisionsLoadingMore={decisionLoadingMore}
+          signedIn={Boolean(experience?.access?.subject)}
         />
       );
     if (target.kind === "topology") {
@@ -6514,17 +6599,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           pending={activeApprovals?.requests.map(request => request.raw) || []}
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
-          onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefresh={() => {
+            void approvalResourceRef.current?.refresh();
+            void refreshDecisions().catch(() => {});
+          }}
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
           auditLimit={GATING_AUDIT_LIMIT}
+          auditRetention={gatingData.retention}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
           showPending={approvalOpens}
+          decisions={decisionCards}
+          decisionsNextAfter={decisionNextAfter}
+          onLoadMoreDecisions={loadMoreDecisions}
+          decisionsLoadingMore={decisionLoadingMore}
+          signedIn={Boolean(experience?.access?.subject)}
         />
       );
     if (target.kind === "logs")

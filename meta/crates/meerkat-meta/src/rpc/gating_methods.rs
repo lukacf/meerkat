@@ -308,10 +308,12 @@ pub(super) fn parse_gating_audit_params(
 /// after it; without one, the newest `limit` entries. `next_cursor` is the
 /// last returned id, the given cursor when nothing new was returned, or null
 /// after a gap with nothing returned (the stale cursor is not echoed).
+/// `retention` says how long the owner's gating state is kept.
 pub(super) fn gating_audit_result(
     entries: Vec<crate::runtime::GatingAuditEntry>,
     gap: bool,
     after_audit_id: Option<&str>,
+    retention: crate::runtime::RecordRetention,
 ) -> Value {
     let next_cursor = entries
         .last()
@@ -325,6 +327,7 @@ pub(super) fn gating_audit_result(
         "entries": entries,
         "next_cursor": next_cursor,
         "gap": gap,
+        "retention": retention,
     })
 }
 

@@ -1635,6 +1635,128 @@ async fn settling_detached_writes_lands_the_cursor_writes_in_flight() {
     );
 }
 
+/// Realm documents (the console audit log's pages, a runtime's kept gating
+/// state) are documents of the host store realm: written, listed by prefix
+/// and removed, and read again after a failover.
+#[tokio::test]
+async fn realm_documents_survive_a_failover() {
+    let fixture = Fixture::new();
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+        assert_eq!(
+            metadata.realm_document_retention(),
+            Some(crate::runtime::RecordRetention::Durable)
+        );
+        for (key, document) in [
+            ("console-audit/page/1", "one"),
+            ("console-audit/page/2", "two"),
+            ("gating/state", "gating"),
+        ] {
+            metadata
+                .set_realm_document(key, Some(document))
+                .await
+                .expect("write a realm document");
+        }
+        metadata
+            .set_realm_document("console-audit/page/2", None)
+            .await
+            .expect("remove a realm document");
+    }
+
+    fixture.lapse();
+    let provider = fixture.open(&fixture.process()).await.expect("failover");
+    let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        metadata
+            .realm_document("console-audit/page/1")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("one")
+    );
+    assert_eq!(
+        metadata
+            .realm_document("console-audit/page/2")
+            .await
+            .expect("read"),
+        None
+    );
+    let keys = metadata
+        .realm_document_keys("console-audit/")
+        .await
+        .expect("list");
+    assert!(
+        keys.contains(&"console-audit/page/1".to_string()),
+        "{keys:?}"
+    );
+    assert!(!keys.contains(&"gating/state".to_string()), "{keys:?}");
+    assert_eq!(
+        metadata
+            .realm_document("gating/state")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("gating")
+    );
+}
+
+/// The console audit log's age bound holds on a host store realm as it does
+/// in memory: three full pages, each written a while after the last, under
+/// an age bound shorter than the gap, keep only the third. The realm still
+/// lists the first page's key after the first prune removed it.
+#[tokio::test]
+async fn host_store_audit_log_keeps_its_age_bound() {
+    async fn oldest_after_three_pages(store: Arc<dyn PersistentMetadataStore>) -> Option<u64> {
+        let log = crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::new(20_000, Duration::from_millis(40)),
+        )
+        .expect("the store keeps realm documents");
+        for _page in 0..3 {
+            for _row in 0..64 {
+                let entry = crate::console_audit::ConsoleAuditEntry::answered(
+                    crate::console_audit::ConsoleAuditActor {
+                        kind: "person",
+                        principal: Some("alice@example.test".to_string()),
+                        issuer: None,
+                        subject: None,
+                        assurance: None,
+                        login_scope_digest: None,
+                    },
+                    "meta/mob_labels/set".to_string(),
+                    crate::console_audit::audit_target(&serde_json::json!({})),
+                    &serde_json::json!({ "result": { "accepted": true } }),
+                );
+                log.record(entry).await.expect("a row is written");
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        log.page(None, 500)
+            .await
+            .expect("read")
+            .oldest_available_seq
+    }
+
+    let in_memory =
+        oldest_after_three_pages(Arc::new(crate::runtime::InMemoryMetadataStore::new())).await;
+    let fixture = Fixture::new();
+    let provider = fixture.open(&fixture.process()).await.expect("open");
+    let host_store = oldest_after_three_pages(Arc::new(SpiMetadataStore::new(
+        provider.realm.documents().clone(),
+    )))
+    .await;
+    assert_eq!(
+        in_memory,
+        Some(129),
+        "the in-memory store prunes pages 0 and 1"
+    );
+    assert_eq!(
+        host_store, in_memory,
+        "the host store realm prunes as the in-memory store does"
+    );
+}
+
 /// The host's fence timing shows in the storage census, and a restart waits
 /// at most its lease.
 #[tokio::test]
@@ -3007,6 +3129,19 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
         "the queue refused the write",
         1_700_000_000_001,
     );
+    // A compaction harvest's failure of the same incarnation: a document of
+    // its own, apart from the other failures' prefix.
+    let harvest_failure = LifecycleEffectFailure::new(
+        mob_id.clone(),
+        "incarnation-1",
+        40,
+        ALICE,
+        3,
+        LifecycleEffectKind::CompactionHarvest,
+        1,
+        "the harvest failed",
+        1_700_000_000_003,
+    );
     {
         let provider = fixture.open(&fixture.process()).await.expect("open");
         let store = SpiMetadataStore::new(provider.realm.documents().clone());
@@ -3033,6 +3168,10 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .record_lifecycle_effect_failure(&failure)
             .await
             .expect("record the failure");
+        store
+            .record_lifecycle_effect_failure(&harvest_failure)
+            .await
+            .expect("record the harvest's failure");
     }
 
     fixture.lapse();
@@ -3094,7 +3233,20 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
             .await
             .expect("list the failures"),
-        vec![failure]
+        vec![failure.clone(), harvest_failure],
+        "the listing holds the harvest's failure beside the exit interview's"
+    );
+    store
+        .clear_lifecycle_effect_failure(&mob_id, 3, LifecycleEffectKind::CompactionHarvest, ALICE)
+        .await
+        .expect("clear the harvest's failure");
+    assert_eq!(
+        store
+            .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
+            .await
+            .expect("list the failures"),
+        vec![failure],
+        "clearing the harvest's failure keeps the others"
     );
     assert_eq!(
         store

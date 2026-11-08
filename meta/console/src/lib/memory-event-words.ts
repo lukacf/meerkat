@@ -38,16 +38,19 @@ function withDetail(line: string, detail: string): string {
   return detail ? `${line} · ${detail}` : line;
 }
 
-/** Who wrote or proposed a memory, as the console reads it. */
+/** Who wrote or proposed a memory, as the console reads it. An operator's
+ * `principal` names the person when the write came from the console. */
 export type MemoryAuthorRef =
   | { author: "agent"; identity: string }
   | { author: "steward"; run_id?: string }
   | { author: "distiller"; run_id?: string }
-  | { author: "operator" }
+  | { author: "operator"; principal?: string }
   | { author: "application" };
 
 const DEBUG_RECORD_AUTHOR =
   /^\s*(Agent|Steward|Distiller)\s*\{\s*(identity|run_id)\s*:\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\}\s*$/;
+const DEBUG_OPERATOR_AUTHOR =
+  /^\s*Operator\s*\{\s*principal\s*:\s*(?:None|Some\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*,?\s*\}\s*$/;
 const DEBUG_UNIT_AUTHOR = /^\s*(Operator|Application)\s*$/;
 
 /** The text of a Rust Debug string literal's body: `\"` reads `"`. */
@@ -76,15 +79,17 @@ function unescapeDebugText(text: string): string {
  * A memory author from what the server sends. Proposal authors and the
  * `memory.write.quarantined` event's author arrive as Rust Debug text
  * (`Agent { identity: "billing" }`, `Steward { run_id: "dream-7" }`,
- * `Operator`) until the server sends the structured author (S5); both read
- * the same here. A bare key reads as the agent it names. Null when there is
- * nothing to read.
+ * `Operator { principal: Some("bob@example.test") }`, or `Operator` from an
+ * older server) until the server sends the structured author (S5); both
+ * read the same here. A bare key reads as the agent it names. Null when
+ * there is nothing to read.
  */
 export function parseMemoryAuthor(value: unknown): MemoryAuthorRef | null {
   if (value && typeof value === "object") {
     const author = (value as { author?: unknown }).author;
     const identity = (value as { identity?: unknown }).identity;
     const runId = (value as { run_id?: unknown }).run_id;
+    const principal = (value as { principal?: unknown }).principal;
     switch (author) {
       case "agent":
         return typeof identity === "string" && identity.trim() ? { author: "agent", identity: identity.trim() } : null;
@@ -92,6 +97,9 @@ export function parseMemoryAuthor(value: unknown): MemoryAuthorRef | null {
       case "distiller":
         return typeof runId === "string" && runId ? { author, run_id: runId } : { author };
       case "operator":
+        return typeof principal === "string" && principal.trim()
+          ? { author: "operator", principal: principal.trim() }
+          : { author: "operator" };
       case "application":
         return { author };
       default:
@@ -108,6 +116,11 @@ export function parseMemoryAuthor(value: unknown): MemoryAuthorRef | null {
     const kind = variant === "Steward" ? "steward" : "distiller";
     return text ? { author: kind, run_id: text } : { author: kind };
   }
+  const operator = DEBUG_OPERATOR_AUTHOR.exec(value);
+  if (operator) {
+    const principal = operator[1] === undefined ? "" : unescapeDebugText(operator[1]).trim();
+    return principal ? { author: "operator", principal } : { author: "operator" };
+  }
   const unit = DEBUG_UNIT_AUTHOR.exec(value);
   if (unit) return { author: unit[1] === "Operator" ? "operator" : "application" };
   const key = value.trim();
@@ -115,8 +128,9 @@ export function parseMemoryAuthor(value: unknown): MemoryAuthorRef | null {
   return { author: "agent", identity: key };
 }
 
-/** An author in a sentence: the agent's name, "the memory steward", "an
- * operator". Run ids and keys never show. */
+/** An author in a sentence: the agent's name, "the memory steward", the
+ * person an operator write names, else "an operator". Run ids and keys
+ * never show. */
 export function memoryAuthorWords(author: MemoryAuthorRef, names: MemoryEventNames = {}): string {
   switch (author.author) {
     case "agent":
@@ -126,7 +140,7 @@ export function memoryAuthorWords(author: MemoryAuthorRef, names: MemoryEventNam
     case "distiller":
       return "the memory distiller";
     case "operator":
-      return "an operator";
+      return author.principal || "an operator";
     case "application":
       return "the application";
   }

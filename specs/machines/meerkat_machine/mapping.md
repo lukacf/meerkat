@@ -2657,6 +2657,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BindInputAuthorityStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindScopedContextIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4920,6 +4935,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CancelQueuedLiveDelegationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationNarrationIdle`

@@ -576,6 +576,22 @@ class TestBuilderChain:
         with pytest.raises(ValueError):
             Meta.builder().fork_instruction_policy("inherit")
 
+    def test_decision_ingresses_default_to_omitted(self):
+        b = Meta.builder()
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert "decisions" not in params["runtime_options"]
+
+    def test_decision_ingresses_set_the_decisions_runtime_option(self):
+        chat = {"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000}
+        b = Meta.builder().decision_ingresses([chat])
+        chat["max_clock_skew_ms"] = 1
+        params = MetaRuntime(b._config)._build_init_params()
+
+        assert params["runtime_options"]["decisions"] == {
+            "ingresses": [{"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000}]
+        }
+
     def test_member_restore_defaults_to_omitted(self):
         b = Meta.builder()
         params = MetaRuntime(b._config)._build_init_params()

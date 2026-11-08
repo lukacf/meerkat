@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Check the bind-attempt ownership model: RED legs first, then GREEN.
+
+Usage: verify-attempt-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY
+Order: every mutant must violate exactly its attributed invariant with the
+intended final state, every row must be reachable (its negated end state
+violated), then the clean base must pass with every non-fault action taken,
+and every control (a fault an earlier mark masks) must pass. Generic deadlock
+checking stays on. A bounded contract model, not the current binder's code.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+SUMMARY = r'^.*states generated, .*distinct states found, .*states left on queue\.$'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def final_state(text):
+    states = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+    if not states:
+        raise ValueError('missing counterexample')
+    # A value may continue over several lines (TLC wraps long records and sets).
+    fields, current = {}, None
+    for line in states[-1].split('\n\n', 1)[0].splitlines():
+        match = re.match(r'^/\\ (\w+) = (.*)$', line)
+        if match:
+            current = match[1]
+            fields[current] = match[2].strip()
+        elif current is not None:
+            fields[current] += ' ' + line.strip()
+    fields = {name: re.sub(r'\s+', ' ', value) for name, value in fields.items()}
+    actions = re.findall(r'^State \d+: <(\w+)', text, re.MULTILINE)
+    return fields, actions
+
+
+def records(value):
+    return [dict(re.findall(r'(\w+) \|-> ("[^"]*"|\w+)', body)) for body in re.findall(r'\[([^\]]*)\]', value or '')]
+
+
+def seq(value):
+    # A tuple of plain values (strings, numbers, booleans), unquoted.
+    inner = (value or '').strip()
+    if not (inner.startswith('<<') and inner.endswith('>>')):
+        return []
+    inner = inner[2:-2].strip()
+    return [item.strip().strip('"') for item in inner.split(',')] if inner else []
+
+
+def counts(value):
+    rows = records(value)
+    return {key: int(number) for key, number in rows[0].items()} if rows else {}
+
+
+def witness(name, fields, actions):
+    f = fields.get
+    a_stage = f('stage') == '"A"'
+    first, ended, effect, wrote = seq(f('firstw')), seq(f('ended')), seq(f('effect')), seq(f('wrote'))
+
+    def g3(site_funnel, site, attempt, door, last, first_site=None):
+        # The witness names the write, on the attempt whose first durable write it is (a
+        # peer delivery's first is its pre-section record).
+        return (a_stage and f('door') == f'"{door}"' and actions[-1] == last
+                and f('witness') == f'{{<<"{site_funnel}", "{site}", {attempt}>>}}' and f('silent') == '{}'
+                and len(first) >= attempt and first[attempt - 1] == (first_site or site))
+
+    def after(site, attempt_end, door):
+        # The write is the second attempt's first, after the first attempt ended so.
+        return (a_stage and f('door') == f'"{door}"' and f('attempt') == '2' and first[1:2] == [site]
+                and ended[:1] == [attempt_end])
+
+    checks = {
+        'drop-controller-mark': g3('grants.change', 'FI:533', 1, 'Find', 'WriterIssue')
+            and [r.get('vis') for r in records(f('bw'))] == ['1'],
+        'silent-blocking-writer': a_stage and f('silent') == '{"FI:533"}' and f('witness') == '{}'
+            and actions[-1] == 'WriterIssue' and [r.get('vis') for r in records(f('bw'))] == ['0'],
+        'drop-callback-mark': g3('grants.change', 'callbacks.rs:106', 1, 'ClassInput', 'InlineWrite'),
+        'drop-service-setup-mark': g3('grants.change', 'service.rs:325', 1, 'BatchSetup', 'InlineWrite'),
+        'drop-first-binding-mark': f('initial') == '"Partial"'
+            and g3('toolkit_store.compare_and_swap', 'PO:1610', 1, 'Find', 'InlineWrite'),
+        'drop-first-binding-mark-after-drop': f('initial') == '"First"'
+            and g3('toolkit_store.compare_and_swap', 'PO:1610', 2, 'Find', 'InlineWrite')
+            and 'DropBind' in actions and f('attempt') == '2',
+        'nested-fresh-attempt': a_stage and f('door') == '"Console"' and f('pc') == '"P"'
+            and f('nested') == '2' and effect == ['console.source_record', '']
+            and f('witness') == '{}' and f('backstop') == 'FALSE',
+        # The re-offer of a delivery whose first offer made every write and ended without an
+        # answer: the re-offer's bind writes nothing, so PI's entry note is its only mark.
+        'peer-entry-unmarked': a_stage and f('door') == '"Peer"' and f('pc') == '"P"'
+            and f('initial') == '"First"' and f('attempt') == '2' and f('offers') == '2'
+            and effect[:2] == ['peer.operation_grant', ''] and wrote[:2] == ['TRUE', 'TRUE']
+            and first[:2] == ['PI:872-876', ''] and f('witness') == '{}' and f('silent') == '{}'
+            and 'PeerRecord' in actions,
+        'spawned-writer': a_stage and f('silent') == '{"spawned_task"}' and f('witness') == '{}'
+            and actions[-1] == 'SpawnedWrite',
+        'early-decision': a_stage and f('misplaced') == '{"FI:533"}' and actions[-1] == 'WriterIssue',
+        'late-not-now': a_stage and f('answer') == '"NotNow"' and f('pc') == '"Answered"'
+            and f('decided') == '<<"original.admitted", "">>' and actions[-1] == 'PostWrites',
+        'duplicate-issue': a_stage and counts(f('issue_count')).get('controller_grant') == 2
+            and 'DropBind' in actions,
+        'wait-in-protected-b': f('stage') == '"B"' and f('pc') == '"WaitInPlace"',
+        'drop-configured-setup-mark': g3('toolkit_store.compare_and_swap', 'configured_setup.rs:414', 1,
+                                         'ConfiguredSetup', 'InlineWrite'),
+        'drop-setup-request-grant-mark': g3('grants.change', 'setup_request.rs:318', 1, 'SetupRequest',
+                                            'WriterIssue'),
+        'drop-native-root-mark': g3('grants.change', 'native_operations.rs:894', 1, 'FindNative', 'WriterIssue'),
+        'drop-peer-operation-and-entry-note': g3('grants.change', 'peer_ingress.rs:615', 1, 'Peer', 'WriterIssue',
+                                                 first_site='PI:872-876')
+            and f('offers') == '1' and wrote[:1] == ['TRUE'],
+        # The record's CAS committed, then the bind was dropped at its await.
+        'drop-configured-setup-grant-mark': g3('grants.change', 'configured_setup.rs:293', 2,
+                                               'ConfiguredSetup', 'WriterIssue')
+            and ended[:1] == ['Gone'] and actions[actions.index('DropBind') - 1] == 'InlineWrite',
+        # The dropped bind's writer issued the child; the resend's writer issues the targets.
+        'drop-setup-target-mark-configured': g3('grants.change', 'setup_targets.rs:154', 2, 'ConfiguredSetup',
+                                                'WriterIssue') and ended[:1] == ['Gone'],
+        'drop-setup-target-mark-request': g3('grants.change', 'setup_targets.rs:154', 2, 'SetupRequest',
+                                             'WriterIssue') and ended[:1] == ['Gone'],
+        # The dropped bind's writer issued the root, then its child write failed.
+        'drop-native-child-mark': g3('grants.change', 'native_operations.rs:938', 2, 'FindNative', 'WriterIssue')
+            and ended[:1] == ['Gone'] and 'WriterFail' in actions,
+        'drop-native-child-mark-after-crash': g3('grants.change', 'native_operations.rs:938', 2, 'FindNative',
+                                                 'WriterIssue') and ended[:1] == ['Crashed'],
+        # The root was issued and the leaf issuance refused, in the same closure.
+        'drop-callback-leaf-mark': g3('grants.change', 'callbacks.rs:165', 2, 'ClassInput', 'InlineWrite')
+            and ended[:1] == ['Refused'] and 'InlineFail' in actions,
+        'drop-callback-leaf-mark-after-crash': g3('grants.change', 'callbacks.rs:165', 2, 'ClassInput',
+                                                  'InlineWrite') and ended[:1] == ['Crashed'],
+        # The selection record under another original's callback grants (found, not
+        # written), or after the check before it refused once the grants were issued.
+        'drop-class-input-mark': g3('toolkit_store.compare_and_swap', 'class_input.rs:284', 1, 'ClassInput',
+                                    'InlineWrite') and f('initial') == '"Shared"',
+        'drop-class-input-mark-after-refusal': g3('toolkit_store.compare_and_swap', 'class_input.rs:284', 2,
+                                                  'ClassInput', 'InlineWrite')
+            and ended[:1] == ['Refused'] and 'InlineFail' in actions,
+        'drop-class-input-mark-class-native': g3('toolkit_store.compare_and_swap', 'class_input.rs:284', 1,
+                                                 'ClassNative', 'InlineWrite') and f('initial') == '"Shared"',
+        # The native child under a root another original issued, with no drop or failure.
+        'drop-native-child-mark-shared': g3('grants.change', 'native_operations.rs:938', 1, 'FindNative',
+                                            'WriterIssue') and f('initial') == '"Shared"'
+            and 'DropBind' not in actions and 'WriterFail' not in actions,
+        # The child's grant was issued, then its observation refused (or the process stopped).
+        'drop-service-observation-mark': g3('toolkit_store.compare_and_swap', 'service.rs:379', 2, 'BatchSetup',
+                                            'InlineWrite') and ended[:1] == ['Refused'] and 'InlineFail' in actions,
+        'drop-service-observation-mark-after-crash': g3('toolkit_store.compare_and_swap', 'service.rs:379', 2,
+                                                        'BatchSetup', 'InlineWrite') and ended[:1] == ['Crashed'],
+        # The failed write noted its mark and wrote nothing; the not-now reaches the backstop.
+        'notnow-after-failed-write': a_stage and f('backstop') == 'TRUE' and f('door') == '"ClassInput"'
+            and effect[:1] == ['original.class_input'] and wrote[:1] == ['FALSE'] and actions[-1] == 'Handle'
+            and 'InlineFail' in actions,
+        # The callback root was written, the leaf refused: Meta waits on the refusal.
+        'refused-waits': a_stage and f('pc') == '"MetaWait"' and f('answer') == '"Refused"'
+            and wrote[:1] == ['TRUE'] and actions[-1] == 'Handle' and 'InlineFail' in actions,
+        'row-class-first-send-a': a_stage and f('door') == '"ClassInput"' and f('outcome') == '"Admitted"'
+            and f('waited') == 'TRUE' and f('notnow_seen') == 'FALSE' and f('attempt') == '1'
+            and effect == ['original.callback_grant', ''],
+        'row-batch-first-send-a': a_stage and f('door') == '"BatchSetup"' and f('outcome') == '"Admitted"'
+            and f('waited') == 'TRUE' and f('notnow_seen') == 'FALSE' and f('attempt') == '1'
+            and effect == ['original.service_setup_grant', ''],
+        'row-class-first-send-b': f('stage') == '"B"' and f('door') == '"ClassInput"'
+            and f('outcome') == '"Admitted"' and f('notnow_seen') == 'TRUE' and f('attempt') == '2'
+            and f('waited') == 'FALSE',
+        'row-batch-first-send-b': f('stage') == '"B"' and f('door') == '"BatchSetup"'
+            and f('outcome') == '"Admitted"' and f('notnow_seen') == 'TRUE' and f('attempt') == '2'
+            and f('waited') == 'FALSE',
+        'row-bound-resend-a': a_stage and f('door') == '"Find"' and f('outcome') == '"Admitted"'
+            and f('notnow_seen') == 'TRUE' and f('attempt') == '2',
+        'row-orphan-duplicate': a_stage and f('dup_refused') == 'TRUE'
+            and counts(f('issue_count')).get('controller_grant') == 1
+            and f('outcome') == '"Refused"' and 'DropBind' in actions,
+        'row-orphan-duplicate-retry': a_stage and f('dup_refused') == 'TRUE'
+            and counts(f('issue_count')).get('controller_grant') == 1
+            and f('outcome') == '"Admitted"' and f('attempt') == '3' and 'DropBind' in actions,
+        'row-orphan-duplicate-peer-retry': a_stage and f('door') == '"Peer"' and f('dup_refused') == 'TRUE'
+            and counts(f('issue_count')).get('controller_grant') == 1 and f('outcome') == '"Admitted"'
+            and f('offers') == '3' and 'DropBind' in actions,
+        'row-leaf-first-after-refusal': after('callbacks.rs:165', 'Refused', 'ClassInput')
+            and 'InlineFail' in actions,
+        'row-leaf-first-after-crash': after('callbacks.rs:165', 'Crashed', 'ClassInput'),
+        'row-native-child-first-after-drop': after('native_operations.rs:938', 'Gone', 'FindNative')
+            and 'WriterFail' in actions,
+        'row-native-child-first-after-crash': after('native_operations.rs:938', 'Crashed', 'FindNative'),
+        'row-configured-targets-first-after-drop': after('setup_targets.rs:154', 'Gone', 'ConfiguredSetup'),
+        'row-request-targets-first-after-drop': after('setup_targets.rs:154', 'Gone', 'SetupRequest'),
+        'row-configured-grant-first-after-drop': after('configured_setup.rs:293', 'Gone', 'ConfiguredSetup'),
+        'row-class-selection-first-shared': a_stage and f('initial') == '"Shared"'
+            and f('door') in ('"ClassInput"', '"ClassNative"') and f('attempt') == '1'
+            and first[:1] == ['class_input.rs:284'],
+        'row-class-selection-first-after-refusal': after('class_input.rs:284', 'Refused', 'ClassInput')
+            and 'InlineFail' in actions,
+        'row-native-child-first-shared': a_stage and f('initial') == '"Shared"' and f('door') == '"FindNative"'
+            and f('attempt') == '1' and first[:1] == ['native_operations.rs:938'],
+        'row-service-observation-first-after-refusal': after('service.rs:379', 'Refused', 'BatchSetup')
+            and 'InlineFail' in actions,
+        'row-service-observation-first-after-crash': after('service.rs:379', 'Crashed', 'BatchSetup'),
+    }
+    if name not in checks:
+        raise ValueError('no final-state predicate for ' + name)
+    if not checks[name]:
+        raise ValueError('wrong final state for ' + name)
+
+
+def main():
+    generated, run = [Path(arg).resolve() for arg in sys.argv[1:]]
+    manifest = json.loads((generated / 'manifest.json').read_text())
+    generator = Path(__file__).with_name('generate-attempt-composition')
+    if sha(generator) != manifest['generator_sha256']:
+        raise ValueError('generator changed after export')
+    source = Path(__file__).resolve().parents[1] / 'models' / manifest['model']
+    if sha(source) != manifest['model_sha256'] or sha(generated / manifest['model']) != manifest['model_sha256']:
+        raise ValueError('exported model differs from the repository source')
+    artifacts = manifest['artifact_hashes']
+    if any(sha(generated / name) != digest for name, digest in artifacts.items()):
+        raise ValueError('export changed')
+    for name in manifest['profiles']:
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', (generated / (name + '.cfg')).read_text()):
+            raise ValueError('generic deadlock checking must stay on')
+    run.mkdir(exist_ok=False)
+    inputs = run / 'inputs'
+    shutil.copytree(generated, inputs)
+    result = {'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'scope': manifest['scope'], 'full_b1_acceptance': False,
+              'manifest_sha256': sha(generated / 'manifest.json'),
+              'verifier_sha256': sha(Path(__file__)), 'profiles': {},
+              'resources': {'workers': 1, 'heap_mib': 1024, 'timeout_seconds': 600,
+                            'sequential': True, 'generic_deadlock_checking': 'ON'}}
+    save(run / 'STARTED.json', result)
+    env = os.environ.copy()
+    env['JAVA_TOOL_OPTIONS'] = '-Xmx1024m'
+    order = ([n for n, p in manifest['profiles'].items() if p['kind'] in ('mutant', 'row')]
+             + [n for n, p in manifest['profiles'].items() if p['kind'] in ('base', 'control')])
+    passed = True
+    for name in order:
+        profile = manifest['profiles'][name]
+        invariant = profile['expected_invariant']
+        log = run / (name + '.log')
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / manifest['model'])]
+        row = {'kind': profile['kind'], 'command': command, 'expected_invariant': invariant}
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out, stderr=subprocess.STDOUT,
+                                         env=env, timeout=600, check=False)
+            text = log.read_text()
+            row['exit_code'] = process.returncode
+            row['states'] = re.findall(SUMMARY, text, re.MULTILINE)
+            if invariant is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('expected a clean pass')
+                if profile['kind'] == 'base':
+                    counts = {action: {'distinct': int(d), 'total': int(t)} for action, d, t in re.findall(
+                        r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module bind_attempt>: (\d+):(\d+)$',
+                        text, re.MULTILINE) if action in manifest['actions']}
+                    required = set(manifest['actions']) - set(manifest['fault_only_actions'])
+                    if set(counts) != set(manifest['actions']) or any(counts[a]['total'] == 0 for a in required):
+                        raise ValueError('not every non-fault action was taken')
+                    if any(counts[a]['total'] != 0 for a in manifest['fault_only_actions']):
+                        raise ValueError('a fault-only action ran in the clean base')
+                    row['action_coverage'] = counts
+            else:
+                if process.returncode != 12 or f'Invariant {invariant} is violated.' not in text:
+                    raise ValueError('did not violate its attributed invariant')
+                fields, actions = final_state(text)
+                witness(name, fields, actions)
+                row['final_state'] = fields
+                row['actions'] = actions
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(json.dumps({'profile': name, 'kind': profile['kind'], 'passed': row['passed'],
+                          'exit': row.get('exit_code'), 'states': row.get('states'),
+                          'error': row.get('error')}), flush=True)
+    result['export_unchanged'] = all(sha(generated / n) == d for n, d in artifacts.items())
+    result['inputs_unchanged'] = all(sha(inputs / n) == d for n, d in artifacts.items())
+    result['generator_unchanged'] = sha(generator) == manifest['generator_sha256']
+    result['model_unchanged'] = sha(source) == manifest['model_sha256']
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (len(result['profiles']) == len(manifest['profiles'])
+               and all(value for key, value in result.items() if key.endswith('_unchanged')))
+    result['result'] = 'passed_slice' if passed else 'failed_or_incomplete'
+    result['at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

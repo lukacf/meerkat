@@ -190,7 +190,7 @@ async fn seed_identity_record(
                 evidence: vec![],
                 verification: None,
             },
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("seed memory record");
@@ -787,7 +787,7 @@ async fn builder_full_memory_stack_installs_engines_and_panel() {
                 evidence: Vec::new(),
                 verification: None,
             },
-            meerkat_meta::memory::records::MemoryAuthor::Operator,
+            meerkat_meta::memory::records::MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("write through the stack store");

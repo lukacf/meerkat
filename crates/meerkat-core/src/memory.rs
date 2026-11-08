@@ -924,6 +924,25 @@ pub trait MemoryStore: Send + Sync {
         })
     }
 
+    /// [`Self::finalize_compaction_batch`], answering the records this call
+    /// published: the batch's entries, in stage order, exactly as
+    /// [`Self::enumerate_scoped`] then reads them. A call that finds the
+    /// stage already finalized, or the scope dropped, publishes nothing and
+    /// answers no record.
+    ///
+    /// A cold settle of a session no live agent hosts uses it: the batch's
+    /// discards reach the caller without a second read of the scope.
+    /// Unsupported by default.
+    async fn finalize_compaction_batch_reporting(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+        let _ = projection;
+        Err(MemoryStoreError::Unsupported {
+            operation: "finalize_compaction_batch_reporting",
+        })
+    }
+
     /// Idempotently discard one uncommitted invisible stage.
     async fn abort_compaction_batch(
         &self,

@@ -57,6 +57,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Request {
                 request_id: "req-1".into(),
@@ -88,6 +89,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: "test body".into(),
@@ -145,6 +147,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: "hello".into(),
             typed_turn_appends: Vec::new(),

@@ -502,6 +502,21 @@ the same key. A tool whose effect must not happen twice records the key with
 the effect and answers a repeat from that record; see
 [Durable Runs: Tools That Run Again](/guides/durable-runs#tools-that-run-again).
 
+Since 0.9.11 a request also carries `requester` when the run the call serves
+has an original requester (see
+[Authorization](/concepts/authorization#sources%2C-peers%2C-and-knowledge-services)):
+`{"principal": {"kind": "human", "id": "...", "qualification": {"kind":
+"qualified", "trust_domain_id": "..."}}}`, with `"carried": true` when the
+run's work reached its agent through another actor, such as a peer hop. The
+runtime sets it from the run's admitted inputs; a `requester` inside
+`arguments` is only an argument. A tool that acts in one person's name serves
+only that person's requester, and only when it is not carried; it refuses a
+call with another requester or none. The `callback/job/start` request of a
+detached callback tool carries the same field: the requester of the run that
+submitted the job, recorded with the job. The SDKs pass it to a handler that
+declares a `requester` parameter (Python), or as the handler's optional third
+argument (TypeScript).
+
 Keep reading and answering reverse requests while waiting for the turn's
 result, or the turn cannot finish its callback. This foreground RPC exchange
 is neither MCP's `pending_tool_calls`/`meerkat_resume` continuation nor the

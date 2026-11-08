@@ -463,7 +463,7 @@ mod tests {
         (rule, child)
     }
     #[test]
-    fn every_configured_fixture_root_reaches_the_plain_generated_transitions() {
+    fn every_configured_fixture_root_reaches_the_plain_issuance_revocation_and_use_transitions() {
         for deep in [false, true] {
             let rows = plain_rows(&rows(deep));
             for pair in rows.chunks_exact(2) {
@@ -511,6 +511,76 @@ mod tests {
                         .is_err()
                 );
             }
+        }
+    }
+    /// The custody end, reached from Active and from Uncertain: every later
+    /// change and use is refused, the retained facts stay, and a second
+    /// release changes nothing.
+    #[test]
+    fn custody_end_refuses_every_later_change_and_use() {
+        let rows = rows(false);
+        let root = actual(&rows[0]);
+        let child = actual(&rows[1]);
+        for uncertain_first in [false, true] {
+            let mut owner = configured(&rows[0]);
+            owner
+                .apply(GrantAuthorityInput::IssueRoot {
+                    actor: root.issuer.clone(),
+                    record: root.clone(),
+                })
+                .expect("IssueRoot");
+            if uncertain_first {
+                let uncertain = owner
+                    .apply(GrantAuthorityInput::RecordUncertainAppend)
+                    .expect("RecordUncertainAppend");
+                assert!(matches!(
+                    uncertain.effects(),
+                    [GrantAuthorityEffect::CustodyUncertain]
+                ));
+                assert_eq!(
+                    owner.state().lifecycle_phase,
+                    GrantAuthorityPhase::Uncertain
+                );
+                assert!(
+                    owner
+                        .apply(GrantAuthorityInput::RecordUncertainAppend)
+                        .is_err()
+                );
+            }
+            let retained = owner.state().clone();
+            let released = owner
+                .apply(GrantAuthorityInput::ReleaseCustody)
+                .expect("ReleaseCustody");
+            assert!(matches!(
+                released.effects(),
+                [GrantAuthorityEffect::CustodyReleased]
+            ));
+            assert_eq!(owner.state().lifecycle_phase, GrantAuthorityPhase::Released);
+            assert_eq!(owner.state().records, retained.records);
+            assert_eq!(owner.state().revision, retained.revision);
+            let after_release = owner.state().clone();
+            for refused in [
+                GrantAuthorityInput::IssueChild {
+                    actor: child.issuer.clone(),
+                    record: child.clone(),
+                    derived: attenuation(),
+                    chain: vec![root.clone()],
+                    now_ms: 1,
+                },
+                GrantAuthorityInput::Revoke {
+                    actor: root.issuer.clone(),
+                    record: root.clone(),
+                },
+                resolve(&root, vec![root.clone()], 1),
+                GrantAuthorityInput::RecordUncertainAppend,
+            ] {
+                assert!(owner.apply(refused).is_err());
+            }
+            let again = owner
+                .apply(GrantAuthorityInput::ReleaseCustody)
+                .expect("ReleaseCustodyAgain");
+            assert!(again.effects().is_empty());
+            assert_eq!(owner.state(), &after_release);
         }
     }
     #[test]

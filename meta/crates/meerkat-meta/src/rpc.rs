@@ -75,6 +75,10 @@ pub const CONSOLE_REVOKE_SESSIONS_METHOD: &str = "meta/console/revoke_sessions";
 /// accepted, and the caller scope a client sends back with a change. Served
 /// on the Console route only; the stdin host is not a Console caller.
 pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
+/// The console audit log: one row per console change, naming who made it and
+/// how it ended, read a page at a time after a cursor. Served on the Console
+/// route only, under the `audit.view` access action.
+pub const CONSOLE_AUDIT_METHOD: &str = "meta/console/audit";
 /// Sign the calling request's caller out of one Console login: the login its
 /// token belongs to (the issuer's `sid`, or the token alone without one).
 /// The Console refuses every token of that login issued before the
@@ -531,7 +535,8 @@ pub const MEMORY_QUARANTINE_REVIEW_REFUSED_CODE: i64 = -32043;
 /// (seconds since the epoch) and the earliest `iat` a token of the principal
 /// is accepted with from now on. That is the fence plus the verifier's clock
 /// leeway, so a sign-in within that window after the revocation is refused
-/// too.
+/// too. `revoked_by` is the console caller whose revocation set the fence,
+/// `null` when it named no one.
 pub(crate) fn console_session_fence_json(
     fence: &crate::auth::session_fence::ConsoleSessionFence,
 ) -> Value {
@@ -541,6 +546,7 @@ pub(crate) fn console_session_fence_json(
         "accepts_tokens_issued_from": crate::runtime::session_fence_first_accepted_iat(
             fence.not_before_epoch_seconds,
         ),
+        "revoked_by": fence.revoked_by,
     })
 }
 
@@ -1309,6 +1315,7 @@ pub fn handle_meta_rpc_json(
                         entries,
                         gap,
                         params.after_audit_id.as_deref(),
+                        runtime.gating_retention(),
                     )),
                     error: None,
                 }
@@ -3863,6 +3870,7 @@ async fn handle_unified_rpc_json_inner(
                     }
                     None => (runtime.gating_audit_entries(params.limit).await, false),
                 };
+                let retention = runtime.gating_retention().await;
                 JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: response_id,
@@ -3870,6 +3878,7 @@ async fn handle_unified_rpc_json_inner(
                         entries,
                         gap,
                         params.after_audit_id.as_deref(),
+                        retention,
                     )),
                     error: None,
                 }
@@ -15825,6 +15834,7 @@ comms = true
                 "alpha",
                 "alpha-side",
                 None,
+                None,
             ))
             .await
             {
@@ -15995,6 +16005,7 @@ comms = true
                 None,
                 "alpha",
                 "alpha-side",
+                None,
                 None,
             ))
             .await

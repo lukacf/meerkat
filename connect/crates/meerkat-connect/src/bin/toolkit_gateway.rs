@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
+    use meerkat_connect::application_driver::finish_then_release;
     use meerkat_connect::application_gateway::{
         InheritedOperatorTerminal, serve_local_operator, serve_local_operator_with_setup,
     };
@@ -9,6 +10,7 @@ fn main() -> std::process::ExitCode {
     use meerkat_mobkit::{
         gateway_composition::gateway_tokio_runtime, rpc_gateway::run_persistent_with_host,
     };
+    use meerkat_toolkit::host_lifetime::control::PrivateHostLifetimeControl;
     use std::sync::Arc;
     use toolkit_mobkit::private_host::{
         InheritedHostPipes, PrivateHostConnection, PrivateHostStartup, PrivateHostStartupIntent,
@@ -210,23 +212,25 @@ fn main() -> std::process::ExitCode {
         let gateway_result = run_persistent_with_host(control_listen, host).await;
         // Even a failed gateway initialization closes and joins the exact
         // private owner. No ordinary error path exits the process first.
-        let private_result = private.finish().await;
-        // The private JoinSet and this presenter join preserve issuance custody
-        // even after RPC or parent loss. Neither observer aborts native work.
-        let operator_result = match operator_task {
-            Some(task) => task.await.map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string())),
-            None => Ok(()),
+        // The private JoinSet and these presenter joins preserve issuance
+        // custody even after RPC or parent loss. Neither observer aborts
+        // native work. The close's final release of the native custody
+        // follows them, within the host close's join bound.
+        let joins = async {
+            (
+                private.finish().await.map_err(|error| error.to_string()),
+                join_presenter(operator_task).await,
+                join_presenter(console_setup_task).await,
+                join_presenter(remote_task).await,
+            )
         };
-        let console_setup_result = match console_setup_task {
-            Some(task) => task.await.map_err(|error| error.to_string()).and_then(|result| result.map_err(|error| error.to_string())),
-            None => Ok(()),
-        };
-        let remote_result = match remote_task {
-            Some(task) => task.await.map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string())),
-            None => Ok(()),
-        };
+        let (joined, custody_result) = finish_then_release(
+            toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND, joins, owner.release_native_custody()).await;
+        let custody_result = custody_result.map_err(|error| error.to_string());
+        let (private_result, operator_result, console_setup_result, remote_result) =
+            joined.unwrap_or_else(|| (
+                Err("private host cleanup and its presenters did not finish within the close bound".into()),
+                Ok(()), Ok(()), Ok(())));
         let operator_result = match (operator_result, remote_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -239,15 +243,20 @@ fn main() -> std::process::ExitCode {
         let result = match (gateway_result, private_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error.to_string()),
-            (Ok(()), Err(error)) => Err(error.to_string()),
+            (Ok(()), Err(error)) => Err(error),
             (Err(gateway), Err(cleanup)) => Err(format!(
                 "{gateway}; private host cleanup also failed: {cleanup}"
             )),
         };
-        match (result, operator_result) {
+        let result = match (result, operator_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
             (Err(error), Err(operator)) => Err(format!("{error}; operator presenter cleanup also failed: {operator}")),
+        };
+        match (result, custody_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(custody)) => Err(format!("{error}; native custody release also failed: {custody}")),
         }
     });
     // All owned cleanup above has returned. Tokio's uncancellable stdin read
@@ -259,6 +268,20 @@ fn main() -> std::process::ExitCode {
             eprintln!("toolkit_gateway: {error}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// Join a presenter task, if one runs.
+#[cfg(unix)]
+async fn join_presenter<E: std::fmt::Display>(
+    task: Option<tokio::task::JoinHandle<Result<(), E>>>,
+) -> Result<(), String> {
+    match task {
+        Some(task) => task
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string())),
+        None => Ok(()),
     }
 }
 

@@ -25,6 +25,7 @@ pub mod child_mob_storage;
 pub mod compaction_policy;
 pub mod config_convention;
 pub mod console_aggregator;
+pub(crate) mod console_audit;
 pub mod console_auth_config;
 pub mod console_config;
 pub mod console_contracts;
@@ -39,6 +40,7 @@ pub mod detached_completion;
 #[cfg(test)]
 mod detached_delivery_route_tests;
 pub(crate) mod document_mcp_marker;
+pub mod durable_decisions;
 #[cfg(feature = "extension-state")]
 pub mod extension_state;
 pub(crate) mod fallback_wake;
@@ -48,6 +50,7 @@ pub mod gateway_composition;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gateway_mcp_composition;
 pub mod gateway_wiring;
+pub(crate) mod gating_persistence;
 pub mod governance;
 pub mod host_store;
 pub(crate) mod host_store_documents;
@@ -116,10 +119,10 @@ pub(crate) mod workgraph_resume_gate;
 pub mod workgraph_wiring;
 
 pub use access::{
-    ACCESS_ACTIONS, AccessApprover, AccessConfigError, AccessControlConfig, AccessController,
-    AccessDecision, AccessEffect, AccessGroup, AccessPrincipal, AccessPublicationAlreadyJoined,
-    AccessResource, AccessRule, AccessView, AgentResourceAttributes, evaluate_access,
-    validate_access_config,
+    ACCESS_ACTIONS, AccessApprover, AccessApproverPerson, AccessConfigError, AccessControlConfig,
+    AccessController, AccessDecision, AccessEffect, AccessGroup, AccessIngressSubject,
+    AccessPrincipal, AccessPublicationAlreadyJoined, AccessResource, AccessRule, AccessView,
+    AgentResourceAttributes, evaluate_access, validate_access_config,
 };
 pub use actor_loop_health::{
     ActorLoopHealth, ActorLoopHealthKind, ActorLoopHealthReport, ActorLoopHealthState,
@@ -153,14 +156,14 @@ pub use compaction_policy::{
 };
 pub use config_convention::ConventionalPaths;
 pub use console_aggregator::{
-    AllowAllConsoleVisibilityPolicy, AppendDisposition, AppendOutcome, ConsoleAggregatorOptions,
-    ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind, ConsoleFrame, ConsoleFrameLineageLink,
-    ConsoleFrameMemberProvenance, ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus,
-    ConsoleIdentityInspection, ConsoleIdentityRecord,
+    AllowAllConsoleVisibilityPolicy, AppendDisposition, AppendOutcome, ConsoleActorKind,
+    ConsoleAggregatorOptions, ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind,
+    ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance, ConsoleFrameSource,
+    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection, ConsoleIdentityRecord,
     ConsoleInteractionAccepted as ConsoleTimelineInteractionAccepted, ConsoleLogError,
     ConsoleLogResult, ConsoleLogStore, ConsoleReplayUnavailable, ConsoleRuntimeRegistration,
-    ConsoleSendDedupeDurability, ConsoleSendRequest, ConsoleTimelineEvent, ConsoleTimelineMode,
-    ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
+    ConsoleSendDedupeDurability, ConsoleSendRequest, ConsoleSender, ConsoleTimelineEvent,
+    ConsoleTimelineMode, ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
     ConsoleTimelineQueryResult, ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery,
     ConsoleTurnOrigin, ConsoleVisibility, ConsoleVisibilityPolicy,
     HideImplicitDelegateMembersConsoleVisibilityPolicy, InMemoryConsoleLogStore,
@@ -168,6 +171,7 @@ pub use console_aggregator::{
     ReplaySubscriptionTransition, SendEffect, SendState, SendTransition, SourceIngestionEffect,
     SourceIngestionState, SourceIngestionTransition, SqliteConsoleLogStore,
 };
+pub use console_audit::ConsoleAuditLimits;
 pub use console_config::{
     ConsoleActionsUiConfig, ConsoleAgentBadgeConfig, ConsoleAgentListConfig,
     ConsoleAgentSectionConfig, ConsoleAppearanceConfig, ConsoleAttentionSourceConfig,
@@ -186,6 +190,12 @@ pub use decisions::{
     RuntimeOpsPolicy, enforce_console_route_access, load_trusted_meta_modules_from_toml,
     parse_release_metadata_json, validate_bigquery_naming, validate_release_metadata,
     validate_runtime_ops_policy,
+};
+pub use durable_decisions::{
+    DecisionAttestationRequest, DecisionIngressDeclaration, DecisionIngressDeclarations,
+    DecisionIngressError, DecisionNoticeSink, MetaDecisionDecideParams, MetaDecisionListResult,
+    MetaDecisionNotice, MetaDecisionNoticeEvent, MetaDecisionStatus, MetaDecisionView,
+    RuntimeDecisions, StdioDecisionConnection,
 };
 #[allow(deprecated)]
 pub use governance::validate_phase0_governance_contracts;
@@ -299,7 +309,7 @@ pub use runtime::{
     ModuleCleanupObservation, ModuleCleanupOperation, ModuleCleanupPhase,
     ModuleCleanupProcessObservation, ModuleCleanupReapedProcess, ModuleHealthState,
     ModuleHealthTransition, ModuleRouteError, ModuleRouteRequest, ModuleRouteResponse,
-    NormalizationError, PersistentMetadataStore, RpcRouteError, RpcRuntimeError,
+    NormalizationError, PersistentMetadataStore, RecordRetention, RpcRouteError, RpcRuntimeError,
     RuntimeBoundaryError, RuntimeDecisionInputs, RuntimeDecisionState, RuntimeFromConfigError,
     RuntimeMetadataTable, RuntimeMutationError, RuntimeOptions, RuntimeRoute,
     RuntimeRouteMutationError, RuntimeShutdownReport, SessionPersistenceRow, SessionStoreContract,

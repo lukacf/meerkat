@@ -82,6 +82,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the new refusal kind `unsupported_param` (with `param`); 0.9.10
   accepted and ignored them.
 
+- Rust: `ConsoleUiConfig` gains `sign_out` (`Option<ConsoleSignOutConfig>`,
+  `#[serde(default)]`). A host that builds the struct literally adds
+  `sign_out: None` to keep today's behaviour.
+
+- Forge: a single shared console account
+  (`{"authentication":"local-password"}`) no longer approves frontend
+  changes, answers the controller review or answers the Forge setup
+  bridge's prompts: each is refused with 403 `approver_unauthenticated`.
+  The native Toolkit setup panel's answers are refused by the console itself
+  (403). Reads stay open. Named accounts
+  (`{"authentication":"local-accounts"}`) sign each person in as themselves;
+  they need the Meta runtime, so on the MobKit runtime the console approves
+  nothing.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -115,6 +129,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   against, so no edit lands over one its client never saw.
 - On a console without an access controller, a caller can no longer end
   another person's sessions.
+
+- A Flow Editor change on the console's listener re-checks, right before it
+  writes the draft store or writes a deploy's or a validation's archive and
+  runs `rkat`, that its caller's login is still current, and is refused with
+  `caller_not_current` otherwise; nothing is written or run.
+
+- Forge: logout also ends the login in the console
+  (`meta/console/sign_out`), so tokens minted for it stop working there;
+  when the console does not confirm, the front still ends its own session
+  and says so. Failed sign-ins are limited per account and per client
+  address, so one person's mistakes no longer lock out the others, and
+  login forms and sessions are bounded per address and per account. The
+  client address is the connection's peer, never a forwarded-for header;
+  an attempt counts before its password check, checks running at once are
+  capped, and every account costs the same scrypt check. Signing in over a
+  live session ends the earlier login, and a path with dot or empty
+  segments is refused.
+- Forge: with OIDC sign-in the console accepts only tokens the front
+  signed under its own issuer: not the provider's ID token, not another key
+  or issuer, not an unverified or missing email, and only the listed
+  people. A sign-in's state is spent once and bound to the browser that
+  started it; the provider's code exchange carries the PKCE verifier and
+  the client's credentials, and its tokens never reach the browser.
 
 ### Upgrade
 
@@ -168,6 +205,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   controller, call `meta/console/revoke_sessions` on the runtime's RPC
   surface, or install an access controller and revoke as an access admin.
 
+- Hosts that pass `storageNamespace` to the stock console: messages queued
+  under the namespace alone are offered once, as **Older queued messages**,
+  to the first user who loads the console after the upgrade; drafts kept
+  under it start empty.
+
+- Sign-outs live in the console session fence record
+  (`console-session-fences.json`) beside the revocations. A binary without
+  sign-out keeps them in the file but does not enforce them while it runs;
+  they apply again after the upgrade.
+
+- Forge: a product application set up with one shared console account
+  moves to named accounts on its next update. Every later Build of its
+  source declares `local-accounts`, and the installation's owner accepts
+  that one change and no other: the update changes only
+  `application/console.json` (`local-password` to `local-accounts`); the
+  private fields, the installation's own account and password, and the
+  operator stay as they are. The installation's own account then becomes
+  the operator's personal account and the first administrator: if others
+  know its Console password, change it (Change private settings) when you
+  switch. Add an account for each further person with
+  `.venv/bin/python setup.py` on the deployment computer.
+- Forge: named accounts need the Meta runtime. An application on the MobKit
+  runtime keeps one shared account, whose console approves nothing.
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console. To approve there,
+  build the application again on the product route.
+- Forge: the console keeps its access rules in
+  `.mobkit/console-access.toml`, copied once from `config/access.toml` at
+  the first start. An installation whose console already rewrote
+  `config/access.toml` needs its original bytes restored once. A rollback
+  to a package built by an earlier Forge leaves that copy as it is, but the
+  earlier package's console reads `config/access.toml`, so the
+  administrators added in the console are missing there and access fails
+  closed. Do not add them again in that console: it would rewrite
+  `config/access.toml`, and Forge would then refuse to start, change or
+  update the installation. Update forward instead; the console then reads
+  its kept copy again.
+- Forge: OIDC sign-in is an application's own choice, for a new
+  installation: no update moves an installation to it or from it. Forge's
+  normal build route always produces named accounts, so OIDC must come from
+  the application's own source. Register
+  `<Console address>/login/callback` as a redirect URI with the identity
+  provider (`http://127.0.0.1:<port>/login/callback` for the local
+  Console). Keep `.mobkit/console-oidc-issuer` and
+  `.mobkit/console-oidc-signing.pem` in the installation's backups, and keep
+  those backups private: the console knows each person by the issuer, so a
+  new one makes everyone new to the console, and the key signs the console
+  tokens of every person, administrators included.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -186,6 +272,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An access admin releases anyone's WorkGraph claim from the console. The
   release is bound to its revision, and the work graph's Released event
   records the admin and the claim released (`break_glass`).
+
+- The stock console's top bar names who the console acts as (the signed-in
+  person, a shared account, a service, or nobody on an open console), with
+  **Sign out** when the console configuration names `[sign_out]`: `href`, a
+  same-origin path, and `method`, `"get"` (a link, the default) or `"post"`
+  (a form, for a front whose sign-out takes a POST).
+- Approval cards in the stock console say whom a request waits for: **For
+  you**, or **Waiting for** the approver it names (with no decision offered).
+  A request for you that someone else decides keeps its card, saying how and
+  by whom, read from the gating audit.
+
+- `meta/console/sign_out` signs the caller out of one console login: the
+  login its token belongs to (the issuer's `sid`, or the token alone when it
+  carries none). The Console refuses that login's tokens from then on and
+  ends the streams and voice sessions they opened; the caller's other logins
+  and its schedules are untouched. A principal keeps at most 64 sign-outs,
+  and the next folds the oldest into one fence of all its logins older than
+  that sign-out, which stops no schedule. Revoking a principal still ends
+  every login of that principal.
+
+- The Flow Editor RPC on the console's listener takes
+  `expected_caller_scope` on its changes (draft writes, deploys with
+  `execute`, validations with `rkat_validate`) and refuses a change made for
+  another caller with `caller_changed`. Its `meta/capabilities` reports the
+  caller's scope as `auth.caller_scope`, and the stock Flow Editor sends it
+  back with every request; after a 401 or a refusal of its caller it reads
+  the capabilities again before it sends another request. The changes are
+  the ones a candidate launch refuses, read from one list as each handler
+  parses its request.
+
+- Forge: named console accounts (`{"authentication":"local-accounts"}`).
+  The installation's own account comes from the same two private fields;
+  further accounts, one per person, are kept on the deployment computer as
+  password hashes and managed with the application's setup. At sign-in an
+  empty account name is the installation's own account. Each person is
+  their own principal in the console, its access rules and its records.
+- Forge: the front forwards native consent reads and decisions
+  (`/host/toolkit/consent/read` and `/decide`) under the setup routes'
+  rules, so people decide native consent in the console as themselves.
+- Forge: OIDC sign-in for the console
+  (`{"authentication":"oidc","issuer":...,"client_id":...,"client_secret":{"env":NAME}}`,
+  or `{"file":PATH}` for the secret). People sign in at the application's
+  identity provider with the authorization code flow, PKCE, state and
+  nonce. The front verifies the provider's ID token (its signature through
+  the provider's published keys, fetched again for an unknown key at most
+  every 30 seconds; issuer, audience, authorized party, expiry and issue
+  time within a minute, and the sign-in's nonce) and admits a verified
+  email that is the operator's (`CONSOLE_USER_ID`) or listed in
+  `CONSOLE_ALLOWED_EMAILS`. It keeps none of the provider's tokens and signs
+  the console's tokens itself, as its own issuer recorded once per
+  installation (`.mobkit/console-oidc-issuer`), with an ES256 key kept in
+  `.mobkit/console-oidc-signing.pem`; each token's subject carries the
+  provider's issuer and subject. The console gets the front's issuer and
+  public key only (`provider: "oidc"`). The client secret is referenced, by
+  a declared secret private field or a private file, never written into
+  source. Needs the Meta runtime.
 
 ### Changed
 
@@ -223,6 +365,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/member_status`, `meta/inspect_identity` and the console's per-member
   progress, where it reported `read_failed`. The Meta SDKs pass the value
   through, as they pass any reason they do not name.
+
+- The stock console reads `meta/console/whoami` once per console instance
+  and names that caller (`expected_caller_scope`) on every console request,
+  voice and MCP Apps tool calls included; a later answer for someone else
+  never changes whom it names. Its first change waits for that read. While
+  no read has answered, no console request that names a caller leaves: a
+  message sent then reads **Not sent**, a queued message stays queued, the
+  console commands that read (approvals and other panels) are refused too,
+  and the top bar shows no identity chip, so no **Sign out**. The console
+  reads its caller again with its next experience read, and loads again at
+  once when another tab of the console learns it. A change refused with
+  `caller_changed` reads **Not sent**, and the console loads again as the
+  caller the gateway now serves; a voice call, an MCP Apps tool call or a
+  blob upload refused that way, or with an ended login, does the same as a
+  send.
+- Console requests do not follow redirects (`redirect: "manual"`), and a
+  queued message the stock console sends on its own (when its agent becomes
+  idle) waits for a fresh read of the console experience first.
+- The stock console keeps a host's `storageNamespace` combined with the
+  server's `storage_scope` instead of in its place, so users of one browser
+  never share queued messages or drafts. Its display settings, the sidebar's
+  and the activity rail's collapse, and the agent list's category order and
+  collapse are kept per signed-in user; a value an earlier console kept for
+  everyone using the browser is read once, by the first user who loads it.
+- Importing **Older queued messages** removes the earlier copy (the first
+  console's unscoped queue, the predecessor console's queue, or a queue kept
+  under a host namespace alone), so no other user of the browser is offered
+  it. **Sign out** removes the user's queued messages and drafts from the
+  browser, in every tab of the console; preferences stay. Both also remove
+  the copy of a queue the storage lock keeps in IndexedDB on an origin
+  without Web Locks, and the browser leaves for the sign-out once that is
+  done, or after at most 1.5 seconds.
+
+- A candidate launch serves a `meta/mobpacks/validate` whose
+  `rkat_validate` is `false`, which runs no `rkat`, whatever `rkatValidate`
+  says; before, it refused it.
+
+- Forge builds new applications with named console accounts
+  (`local-accounts`). The operator signs in as before, with an empty account
+  name, and now signs in as a person.
 
 - The incident command center example generates images with
   `gpt-image-2.6-sunburst`, Core 0.9.11's OpenAI image default, unless
@@ -291,6 +473,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A Console WorkGraph action acts on the revision its card or row showed,
   never on one read at the click; an action whose card showed none changes
   nothing, says so, and reads the item again.
+
+- Switching the signed-in user in one tab of the stock console clears the
+  previous user's views, approvals, host items and queued messages at once,
+  in every tab of that console in the browser. Before, other tabs noticed
+  at their next 15-second experience read, and could send the previous
+  user's queued message under the new login.
+- An ended login (a 401, `caller_not_current`, or a front that redirects a
+  console request to its sign-in page) shows one sign-in state instead of
+  stale data. Approvals are no longer marked denied for good and the
+  timeline stream no longer stops without a word; signing in again in
+  another tab, or coming back to the tab, brings the console back, with
+  the message the person was writing and its images.
+- A console send that a front redirected to its sign-in page reads
+  **Not sent** (the request never reached the gateway). Before, it read as
+  an unknown outcome that no check could settle.
+- Two tabs of the stock console on a plain-HTTP origin (no Web Locks) no
+  longer lose queued-message updates: the storage lock's IndexedDB fallback
+  waits until the other tab's queue write is visible before it changes the
+  queue.
+- Pins set in two tabs of the stock console are both kept, and every tab
+  follows them. A tab left open no longer rewrites the panel layout another
+  tab arranged each time it reloads the console experience.
+- **Needs you** and the sidebar's Approvals count only the approval
+  requests that wait for you, not the ones routed to another approver.
+  Before, they counted every pending request, and a request decided
+  elsewhere vanished at the next poll.
+
+- Forge: the controller review is open to every console administrator. It
+  starts at an administrator's first sign-in, or when an administrator
+  opens it if that start could not run, and stays open after that person
+  signs out, until their sign-in would have expired (8 hours).
+- Forge: the console keeps its access edits (a second administrator, rules,
+  groups) in its own live copy, `.mobkit/console-access.toml`, so they no
+  longer stop Forge from changing private settings, starting, updating,
+  downloading or supervising the installation. `config/access.toml` stays
+  the package's exact bytes and may list further admins after the
+  installation's own account. The copy is published only once complete,
+  and an empty copy, which only a start stopped while copying can leave, is
+  copied again with a warning, so access control stays on. A temporary file
+  that a start or setup stopped while writing leaves in `.mobkit` is removed
+  by a later one.
+
+### Known limitations
+
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console: no frontend
+  changes, controller review or setup answers. Use the product route.
+- Forge: the same holds for an application on the MobKit runtime, since
+  named accounts need the Meta runtime.
+- Forge: OIDC sign-in needs the Meta runtime too. Signing out ends the
+  front's login and the console's tokens for it, not the person's session
+  at the identity provider: on a shared computer, **Continue to sign in**
+  can open the previous person's console without a prompt until they sign
+  out at the provider. A provider that does not send `email_verified: true`
+  signs nobody in. The front reaches the provider directly, not through a
+  proxy set in its environment.
+- Forge: sign-in forms and OIDC sign-ins waiting for the provider are
+  bounded per client address and in total; a full table drops its oldest
+  entry instead of refusing a new one, so one caller behind a shared address
+  cannot hold everyone else's sign-in off. A flood through one address can
+  still make other people's forms or waiting sign-ins expire early; put a
+  console that other computers reach behind a rate-limiting proxy.
 
 ## [0.9.10] - 2026-11-04
 

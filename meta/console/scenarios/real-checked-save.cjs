@@ -103,7 +103,11 @@ async function realCheckedSaveRecovery() {
     page.on("request", request => {
       if (!request.url().endsWith("/console/rpc") || request.method() !== "POST") return;
       const value = request.postDataJSON();
-      if (mutationMethods.has(value?.method)) browserWrites.push(value);
+      if (!mutationMethods.has(value?.method)) return;
+      // The gateway takes the console's `expected_caller_scope` (whom it acts
+      // for) out of the params; the method sees the rest.
+      const { expected_caller_scope: caller, ...params } = value.params ?? {};
+      browserWrites.push({ ...value, params, caller });
     });
     await openAccess(page, fixture.baseUrl);
     await preview(page, "reader@example.test", true, previewAttempts);
@@ -142,6 +146,7 @@ async function realCheckedSaveRecovery() {
     assert.equal(await draft.inputValue(), admins.join(", "));
     assert(await save.isDisabled());
     assert.deepEqual(browserWrites.map(value => value.params), [checked(original, { config: { ...original.config, admins } })]);
+    assert(browserWrites.every(value => typeof value.caller === "string" && value.caller.trim()), "every change names the caller the console acts as");
     assert.deepEqual(await ownerRpc(fixture, "meta/access/get"), newer, "stale write leaves real owner config and revision unchanged");
     await refresh(page);
     assert(await save.isDisabled(), "refresh alone must not rebase and retry the draft");

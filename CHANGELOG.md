@@ -226,6 +226,40 @@ them.
   Fixed). Code that builds it literally, or destructures it without `..`,
   must name them; a factory that only reads its fields is unaffected.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the MeerkatMachine gains a host's recovery hold and its settle of the run
+  a session retained (see Added). `RunStartHoldReason` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and the kernel `generated::meerkat`) gains
+  `HostRecovery`, appended last; the runtime's `RunStartHoldReason` and the
+  mob's `HostRunStartHoldReason` are `#[non_exhaustive]`. `MeerkatMachineInput`
+  and `MeerkatMachineInputVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain
+  `SettleRetainedRun { run_id }`, appended last. `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (the same two modules) and the kernel
+  `Effect` and `EffectKind` gain `RetainedRunSettleResolved { verdict,
+  run_id }`, appended last. The kernel `generated::meerkat::TransitionId`
+  gains the settle's 23 arms, appended last: `SettleRetainedRunAcceptedIdle`,
+  `SettleRetainedRunAcceptedAttached`,
+  `SettleRetainedRunBusyRunCurrentInitializing`,
+  `SettleRetainedRunBusyRunCurrentIdle`,
+  `SettleRetainedRunBusyRunCurrentAttached`,
+  `SettleRetainedRunBusyRunCurrentRunning`,
+  `SettleRetainedRunBusyRunCurrentRetired`,
+  `SettleRetainedRunBusyRunCurrentStopped`,
+  `SettleRetainedRunBusyDrainingIdle`, `SettleRetainedRunBusyDrainingAttached`,
+  `SettleRetainedRunBusyStaleRunIdle`, `SettleRetainedRunBusyStaleRunAttached`,
+  `SettleRetainedRunBusyNotServingInitializing`,
+  `SettleRetainedRunBusyNotServingRunning`,
+  `SettleRetainedRunBusyNotServingRetired`,
+  `SettleRetainedRunBusyNotServingStopped`,
+  `SettleRetainedRunNotRetainedInitializing`,
+  `SettleRetainedRunNotRetainedIdle`, `SettleRetainedRunNotRetainedAttached`,
+  `SettleRetainedRunNotRetainedRunning`, `SettleRetainedRunNotRetainedRetired`,
+  `SettleRetainedRunNotRetainedStopped` and `SettleRetainedRunInertDestroyed`.
+  An exhaustive match needs their arms.
+
 - `meerkat-core`: the variant
   `model_profile::catalog::OpenAiImageGenerationRequestShape::DallE` is
   removed, and with it `meerkat-openai`'s
@@ -456,16 +490,24 @@ them.
   a Chat Completions client GitHub Copilot's stream discipline (a finish
   reason is required, only choice 0 is read); both Copilot Chat Completions
   routes set it.
-- `meerkat-llm-core`: `LlmClient::prompt_token_limit` states the most input
-  tokens one request may carry on the client's account and model, when the
-  provider states one (default `None`; wrappers delegate). A GitHub Copilot
-  route states the account model's prompt limit (the tighter of
-  `max_prompt_tokens` and `max_context_window_tokens`).
+- `meerkat-llm-core`: `LlmClient::prompt_token_limit(output_budget)` states
+  the most input tokens one request that asks for `output_budget` output
+  tokens may carry on the client's account and model, when the provider
+  states a limit (default `None`; wrappers delegate). The factory passes the
+  session's own output budget, through a prepared controller too, and a
+  GitHub Copilot route states the account model's prompt limit for it (the
+  tighter of `max_prompt_tokens` and `max_context_window_tokens` less that
+  budget): the limit its gate enforces on the session's requests, also when
+  the account states no output limit.
 - `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
   model, state }` refuses a model the account lists under a policy that is
   not `enabled`, naming the state.
 - `meerkat-llm-core`: `AccountModelRefusal::NoEndpoints { credential, model }`
   refuses a model the account lists with an empty endpoint list.
+- `meerkat-llm-core`: `streaming::SseEventReader` reads a Server-Sent Events
+  body as the format defines its events (an event ends at its blank line,
+  its `data:` lines join with a line break, and the end of the body reads
+  the last line and the last event), one `streaming::SseStep` per line.
 
 - `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
   last }` and `RuntimeStoreError::UnsettledAtFenceWindow { cause }`: a host
@@ -481,6 +523,62 @@ them.
   `MobMemberPreviewUnavailableUnknown`, and the Web SDK, whose runtime is the
   same release, keeps its closed vocabulary. `mob_check_member` gives such a
   member a note of its own (see Fixed).
+
+- `meerkat-runtime`, `meerkat-mob`: a host settles the run a session
+  retained, without resuming it and without a model request, for an app's
+  Recover flow. `RunStartHoldReason::HostRecovery` (in the mob,
+  `HostRunStartHoldReason::HostRecovery`) is a run-start hold only its host
+  stages and releases: no mob or Meta path stages or releases it, so a
+  release of the tools hold or a mob Resume leaves it standing; a retire or
+  destroy of the member drops what the host staged for it.
+  `MeerkatMachine::settle_retained_run(&session_id)` and
+  `MobHandle::settle_member_retained_run(&identity)` answer
+  `RetainedRunSettlement`, and the machine decides the verdict (the
+  MeerkatMachine input `SettleRetainedRun`, the effect
+  `RetainedRunSettleResolved` and the enum `RetainedRunSettleVerdict`):
+  - `Settled { run_id, inputs }`, read under the session's mutation gate
+    after the settlement committed: the registration no longer keeps the
+    run, and every input bound to it holds its committed terminal
+    (`RetainedRunSettledInput { input_id, terminal }`):
+    `Abandoned { Cancelled }`, the run closed as interrupted with its
+    committed rounds kept, when the settle ended it, or the reason of a
+    stop, reset or retire that ended it first (`Cancelled`, `Reset`,
+    `Retired`).
+  - `NotRetained` when nothing is kept, which is also the answer to a retry
+    after the settle.
+  - `Busy { current_run_id: Some(_) }` when a run is current, which is never
+    stopped; `Busy { current_run_id: None }` when the registration cannot
+    settle the run now (it initializes, drains for its unregister, retired
+    or stopped): the host keeps its hold and settles again.
+  - A settlement that did not commit, or whose tail repair left the run's
+    tail standing, answers the registration's refusal, never `Settled`: a
+    durability reload refusal when its write failed (the reload loses the
+    stop, so the host keeps its hold, reloads and settles again) or its tail
+    repair failed (the reloaded registration keeps no run), and the refusal
+    of a session that leaves the process when another writer took its store
+    fence, or when an unregister ended the run first (its inputs then end
+    `Abandoned { Stopped }` when it keeps queued work, a mob Shutdown's
+    default, whatever their state, and `Abandoned { Cancelled }` when it
+    stops).
+  A repeat that arrives while the settle is pending joins it. The mob verb
+  never wakes a member, and answers typed refusals: `MemberNotFound`,
+  `MemberSessionNotLive` (not live in this process: dormant, gone, or leaving
+  through its unregister), `MemberReloadRequired` (its registration needs a
+  durability reload) and `UnsupportedForMode` (a placed member). The
+  durable-runs guide has the Recover recipe: hold, wake, settle, release on
+  every path that leaves no open run.
+- `meerkat-runtime`: `MeerkatMachine::session_work_state(&session_id)` reads
+  cold whether one session holds the work a start wakes a member for,
+  without loading its body or registering it, so a dormant mob member stays
+  dormant: `Registered` (read it live), `Idle`,
+  `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })`,
+  or `Unobserved(cause)` when the store cannot tell (never a guessed idle).
+  A compaction projection the session still owes is not reported: the
+  member's next wake finalizes it.
+  `RuntimeStore::runtime_holds_recovery_work(&runtime_id)` answers the mob
+  boot's recovery-work predicate for one runtime; its default answers
+  through the store-wide scan, and the SQLite and in-memory stores answer it
+  for the one runtime.
 
 - GPT Image 2.6 Flare (`gpt-image-2.6-flare`), OpenAI's faster GPT Image 2.6
   model, is a catalog image generation model. Select it by model; it runs on
@@ -547,13 +645,31 @@ them.
   again later, as before.
 - GitHub Copilot: a model listing that meets a 408, 502, 503 or 504, or a
   network failure or timeout, is tried once more at once, both attempts
-  within the listing's existing 30-second bound; any other answer is final,
-  as before.
+  within the listing's existing 30-second bound (the first within 15
+  seconds, so a first attempt that does not answer leaves the second the
+  rest); any other answer is final, as before.
 - GitHub Copilot: when a temporary token exchange failure leaves no valid
   token and the exchange sent `Retry-After`, every turn until then fails
   with the outage's retryable error without calling the exchange (for at
   most an hour); the first turn after it tries the exchange again. Without
   `Retry-After` the next turn tries it at once, as before.
+- `Retry-After` given as an HTTP date (IMF-fixdate, or the obsolete RFC 850
+  and asctime forms) is read as the delay until that date, none once it is
+  past: by every provider's error classification (a rate limit's retry hint,
+  `LlmError::parse_retry_after`) and by GitHub Copilot's transport (the token
+  exchange's pacing and outage, GitHub's rate limits). Before, only a number
+  of seconds was read.
+- `meerkat-openai`: the OpenAI Responses stream (every Responses route,
+  GitHub Copilot's included) is read as the SSE format defines its events:
+  an event ends at its blank line and the `data:` lines of one event join
+  with a line break, so an event whose data spans several lines is one event
+  instead of a parse error, and at the end of the body its last line counts
+  even without a line break, as does an event whose blank line never came.
+  A body that ends inside an event (its data cut) still ends the response
+  with the retryable incomplete-response error; a complete event whose data
+  does not parse, an empty `data:` field included, is a parse error.
+  A body that writes events on consecutive lines with no blank line between
+  them is read as one event.
 - GitHub Copilot: a session's default compaction threshold stays below the
   account model's prompt limit. The model-aware default (four-fifths of the
   model's context window or input ceiling) now also takes the selected
@@ -814,6 +930,18 @@ them.
   the retryable incomplete-response error, so the turn is tried again and
   nothing of the response is committed. A finish reason still completes a
   turn with or without `[DONE]`. Other routes are unchanged.
+- `meerkat-llm-core`: a `Retry-After` number of seconds too large for
+  milliseconds is the largest delay instead of an overflow
+  (`LlmError::parse_retry_after`).
+- `meerkat-openai`: an OpenAI Responses stream that ends at `[DONE]` without
+  a terminal response no longer drops an item it added
+  (`response.output_item.added` at an `output_index`) and never completed
+  (no `response.output_item.done` at that index), a started tool call
+  included, while the turn ends as complete, on the plain route and on
+  GitHub Copilot's, an item no event names with an id included: the
+  response fails with the retryable incomplete-response error naming the
+  item's `output_index`, nothing of it is committed, and the turn is tried
+  again.
 
 - `meerkat-runtime`: a host store commit no longer sends its batch past its
   fence token's lease. A commit whose outcome stayed unknown or unavailable
@@ -866,6 +994,14 @@ them.
   session's build resolved for the model, so the helper runs on the
   session's own route. An implicit mob created before this fix is reused.
   Affects 0.7.0 through 0.9.10.
+
+- Docs: the durable-runs guide and the platform skill's sessions reference
+  said a run that resumes from a committed round still gets the
+  tool-process recovery notice for a foreground shell call. The call's
+  `outcome_uncertain` result answers it, whether the run resumes or is
+  closed as interrupted, and no `tool_process_interrupted` block is added
+  for it; a background shell job, a monitor or a command hook keeps the
+  notice.
 
 ### Security
 

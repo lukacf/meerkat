@@ -8394,14 +8394,13 @@ impl AgentFactory {
                 .as_ref()
                 .and_then(|client| client.output_token_limit()),
         };
-        // Its own prompt limit, likewise: the session's default compaction
-        // threshold stays below it.
+        // Its own prompt limit, likewise, read once the session's output
+        // budget is resolved (below): the session's default compaction
+        // threshold stays below the limit for that budget.
         #[cfg(feature = "session-compaction")]
-        let account_prompt_token_limit = match prepared_controller.as_deref() {
-            Some(graph) => graph.account_prompt_token_limit,
-            None => llm_client
-                .as_ref()
-                .and_then(|client| client.prompt_token_limit()),
+        let account_limit_client = match prepared_controller.as_deref() {
+            Some(graph) => Some(Arc::clone(&graph.account_limit_client)),
+            None => llm_client.clone(),
         };
         let resolved_auth_credential_identity = resolved_llm_client_phase.credential_identity;
         let prompt_cache_backend = resolved_llm_client_phase.prompt_cache_backend;
@@ -8636,6 +8635,11 @@ impl AgentFactory {
                 );
                 account_output_token_limit.map_or(default, |limit| default.min(limit))
             });
+        // The selected account's prompt limit for this budget.
+        #[cfg(feature = "session-compaction")]
+        let account_prompt_token_limit = account_limit_client
+            .as_ref()
+            .and_then(|client| client.prompt_token_limit(max_tokens));
         let _realm_scope_root = self.realm_scope_root(&build_config);
         let _conventions_context_root = self
             .context_root
@@ -11026,7 +11030,7 @@ impl AgentFactory {
         })?;
         let account_output_token_limit = llm_client.output_token_limit();
         #[cfg(feature = "session-compaction")]
-        let account_prompt_token_limit = llm_client.prompt_token_limit();
+        let account_limit_client = Arc::clone(&llm_client);
         let identity = SessionLlmIdentity {
             model: build_config.model.clone(),
             provider,
@@ -11060,7 +11064,7 @@ impl AgentFactory {
             late_event,
             account_output_token_limit,
             #[cfg(feature = "session-compaction")]
-            account_prompt_token_limit,
+            account_limit_client,
             credential_identity: phase.credential_identity,
             auto_image_generation_executor: phase.auto_image_generation_executor,
             resolved_model: identity.model,
@@ -16198,6 +16202,174 @@ mod tests {
         assert_eq!(requested_output_budget(None).await, 64_000);
         assert_eq!(requested_output_budget(Some(128_000)).await, 128_000);
         assert_eq!(requested_output_budget(Some(1_024)).await, 1_024);
+    }
+
+    /// A client whose selected account states a prompt limit (as a Copilot
+    /// account model does) and whose provider measures every request's
+    /// prompt at `input_tokens`. With `less_the_budget` the account states a
+    /// context window of `prompt_limit` and no output limit, so its prompt
+    /// limit is that window less a request's output budget.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    struct AccountPromptLimitedClient {
+        prompt_limit: u32,
+        input_tokens: u64,
+        less_the_budget: bool,
+    }
+
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for AccountPromptLimitedClient {
+        fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+            Some(if self.less_the_budget {
+                self.prompt_limit.saturating_sub(output_budget)
+            } else {
+                self.prompt_limit
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        Provider::OpenAI,
+                        &request.model,
+                        meerkat_core::Usage {
+                            input_tokens: self.input_tokens,
+                            output_tokens: 1,
+                            ..Default::default()
+                        },
+                    ),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session, on a client
+    /// whose account allows prompts of at most 128_000 tokens, starts by
+    /// compacting after a first turn whose prompt measured `input_tokens`;
+    /// `threshold` is the build's explicit threshold override.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts(input_tokens: u64, threshold: Option<u64>) -> bool {
+        second_turn_compacts_on(
+            Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+                less_the_budget: false,
+            }),
+            None,
+            threshold,
+        )
+        .await
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session on `client`,
+    /// with the output budget `max_tokens` (the model default when `None`)
+    /// and the explicit threshold override `threshold`, starts by
+    /// compacting.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts_on(
+        client: Arc<dyn LlmClient>,
+        max_tokens: Option<u32>,
+        threshold: Option<u64>,
+    ) -> bool {
+        let session_id = SessionId::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.resume_session = Some(Session::with_id(session_id));
+        build.llm_client_override = Some(client);
+        build.max_tokens = max_tokens;
+        build.auto_compact_threshold_override = threshold.and_then(std::num::NonZeroU64::new);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("agent on the prompt-limited client");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("first".into()))
+            .await
+            .expect("first turn");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        agent
+            .run_with_events(meerkat_core::ContentInput::Text("second".into()), tx)
+            .await
+            .expect("second turn");
+        let mut compacted = false;
+        while let Ok(event) = rx.try_recv() {
+            compacted |= matches!(event, meerkat_core::AgentEvent::CompactionStarted { .. });
+        }
+        compacted
+    }
+
+    /// The selected account's prompt limit reaches the session's compactor:
+    /// on `gpt-5.5` (whose own default threshold is 840_000) an account that
+    /// allows 128_000 prompt tokens compacts from 102_400, four-fifths of its
+    /// limit, and an explicit 150_000 is lowered to the 128_000 limit.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_session_compactor() {
+        assert!(second_turn_compacts(110_000, None).await);
+        assert!(!second_turn_compacts(100_000, None).await);
+        assert!(second_turn_compacts(130_000, Some(150_000)).await);
+        assert!(!second_turn_compacts(125_000, Some(150_000)).await);
+    }
+
+    /// The account's prompt limit reaches the compactor for the session's
+    /// own output budget: an account stating a 128_000-token window and no
+    /// output limit lets a session with a 32_000-token budget send prompts of
+    /// 96_000 tokens, so the session compacts from 76_800, four-fifths of
+    /// that.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_compactor_for_the_session_budget() {
+        let window = |input_tokens| -> Arc<dyn LlmClient> {
+            Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+                less_the_budget: true,
+            })
+        };
+        assert!(second_turn_compacts_on(window(80_000), Some(32_000), None).await);
+        assert!(!second_turn_compacts_on(window(70_000), Some(32_000), None).await);
     }
 
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]

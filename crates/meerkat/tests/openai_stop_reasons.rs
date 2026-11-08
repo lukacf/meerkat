@@ -67,8 +67,8 @@ async fn spawn_responses_stub(
 }
 
 fn sse(lines: &[&str]) -> String {
-    let mut body = lines.join("\n");
-    body.push('\n');
+    let mut body = lines.join("\n\n");
+    body.push_str("\n\n");
     body
 }
 

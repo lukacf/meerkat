@@ -738,10 +738,10 @@ mod copilot_routes {
     use super::*;
 
     const RESPONSES_SSE: &str = concat!(
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
         "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",",
-        "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n",
-        "data: [DONE]\n",
+        "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        "data: [DONE]\n\n",
     );
     const CHAT_SSE: &str = concat!(
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},",

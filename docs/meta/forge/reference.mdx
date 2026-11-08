@@ -4,7 +4,7 @@ description: "Release packages, the Forge launcher and its settings, files and f
 icon: "book"
 ---
 
-*Mirrored from Meerkat Meta main at [44b3b12ffa44](https://github.com/lukacf/meerkat/commit/44b3b12ffa4413073241894c1e70111e27d0a6ff) on 2026-11-07; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 ## Releases
 
@@ -268,7 +268,7 @@ checked or installed source.
 | --- | --- |
 | `application/__init__.py` | Exports `build(context)`, returning an integration with optional `tools_for_agent(agent)`, `schedule_runnables()`, `start()` and `stop()` hooks. The generated `README.md` documents the complete hook contract. |
 | `application/configuration.json` | Declares the private setup fields the installation form and interview ask for. |
-| `application/console.json` | `{"authentication":"local-password"}` adds a password login to the Console, with the required fields `CONSOLE_USER_ID` and `CONSOLE_LOGIN_PASSWORD` (at least 12 characters). |
+| `application/console.json` | `{"authentication":"local-accounts"}` adds a login with named accounts: the installation's own account, from the required fields `CONSOLE_USER_ID` and `CONSOLE_LOGIN_PASSWORD` (at least 12 characters), and one account for each further person, which `.venv/bin/python setup.py` adds, re-keys and removes on the deployment computer. Named accounts need the Meta runtime. `{"authentication":"local-password"}` adds one shared password login with the same fields; a shared account chats but approves nothing. `{"authentication":"oidc","issuer":"https://...","client_id":"...","client_secret":{"env":"NAME"}}` signs people in at an identity provider instead: `issuer` is the provider's exact https issuer, the client secret is referenced by a declared required secret field (`{"env":NAME}`) or an absolute private file (`{"file":PATH}`) and never written into source, the required nonsecret `CONSOLE_USER_ID` is the operator's email, and an optional nonsecret `CONSOLE_ALLOWED_EMAILS` lists up to 100 more people. The provider's redirect URI is the Console address plus `/login/callback`. OIDC needs the Meta runtime, and Forge's normal build route always produces named accounts, so OIDC comes only from the application's own source. |
 | `application/experience.json` | Declares custom UI links: a label, an absolute URL path and a loopback port or port setting. |
 | `application/first-use.json` | First-task suggestions shown under **Use your application**. |
 | `application/trial.json` | Sample jobs for **Built application** trials: 1 to 12 cases in at most 100 KB, with labels up to 160 characters and requests up to 6,000 characters. |

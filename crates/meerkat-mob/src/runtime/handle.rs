@@ -20322,8 +20322,8 @@ impl MobHandle {
 
     /// Enter the actor's serialized principal gate for a door that acts on
     /// `identity`'s member session as its host (a turn start, a system
-    /// context append, a live channel's open or control), before the door
-    /// does anything. The handle's principal must hold `required`, the
+    /// context append, a live channel's open, control or close), before the
+    /// door does anything. The handle's principal must hold `required`, the
     /// door's own scope ([`MobError::ScopeDenied`] otherwise). An identity
     /// entry, or a member whose name is reserved unreadable, is reached only
     /// by a principal that also holds [`crate::ControlScope::AdminHost`]

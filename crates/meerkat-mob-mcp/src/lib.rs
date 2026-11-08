@@ -6994,8 +6994,12 @@ impl MobMcpState {
     /// the mark of external work
     /// ([`meerkat::ContinuationOwnerService::submit_external_work_for_member_incarnation`]),
     /// so its delivery asks again: a send committed before its member became
-    /// an entry, or before its member's runtime stopped admitting external
-    /// work, settles refused (`authority_denied`), and nothing is admitted.
+    /// an entry, or before its name became reserved unreadable, settles
+    /// refused (`authority_denied`), and nothing is admitted. A member's
+    /// runtime stops admitting external work only as a new incarnation (a
+    /// respawn or a rotation, onto a profile that admits none included),
+    /// which a send committed to the earlier one never reaches: it settles
+    /// stranded, as for any replaced incarnation.
     /// The member's host delivers its own keyed sends through
     /// [`Self::mob_member_send_keyed_as_host`].
     ///
@@ -8640,15 +8644,22 @@ impl MobMcpState {
     }
 
     /// Close one NAMED live channel (close-what-you-name, DEC-P6B-C9).
-    /// `Live`-gated at chokepoint (a).
+    /// `Live`-gated at chokepoint (a). The close ends a channel on the
+    /// member's session as its host, so an identity entry, or a member whose
+    /// name is reserved unreadable, needs `AdminHost` too
+    /// ([`MobHandle::admit_member_host_door`]), as the open and the control
+    /// verbs do.
     pub async fn mob_member_live_close(
         &self,
         mob_id: &MobId,
         identity: AgentIdentity,
         channel_id: String,
     ) -> Result<meerkat_contracts::wire::LiveCloseStatus, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_close(self.console_principal.clone(), identity, channel_id)
             .await
     }

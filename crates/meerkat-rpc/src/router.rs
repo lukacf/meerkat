@@ -22522,15 +22522,84 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 "the refusal is final: {again}"
             );
         }
+
+        /// The host's own keyed door commits its send to its identity entry
+        /// as the host's plain row: the drain asks it no external admission,
+        /// and the content is admitted into the entry's session, where an
+        /// external keyed send to the same entry is refused.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn the_hosts_keyed_send_to_its_identity_entry_is_admitted_at_delivery() {
+            let (router, runtime, _temp) = keyed_router(false).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-host").await;
+            let handle = seat_identity_entry(&router, &mob_id, "entry-1").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            let receipt = router
+                .mob_state
+                .mob_member_send_keyed_as_host(
+                    handle.mob_id(),
+                    entry.clone(),
+                    meerkat_core::types::ContentInput::from("Host item 41."),
+                    meerkat_core::types::HandlingMode::Queue,
+                    "host-41",
+                )
+                .await
+                .expect("the host's keyed send to its entry commits");
+            assert_eq!(
+                receipt.status,
+                meerkat_contracts::WireContinuationStatus::Pending,
+                "no delivery owner drains it yet"
+            );
+
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::global()),
+                None,
+                None,
+            );
+            runtime.arm_runtime_delivery_owner();
+            let settled = tokio::time::timeout(STATUS_WAIT, async {
+                loop {
+                    let status = keyed_send_status(&router, &mob_id, "entry-1", "host-41").await;
+                    if !matches!(status, meerkat::ContinuationStatus::Pending { .. }) {
+                        return status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the host's keyed send settles");
+            let meerkat::ContinuationStatus::Applied {
+                session: admitted_to,
+                ..
+            } = &settled
+            else {
+                panic!("the host's keyed send to its entry is admitted at delivery: {settled:?}");
+            };
+            let session = handle
+                .resolve_bridge_session_id(&entry)
+                .await
+                .expect("the entry's session");
+            assert_eq!(admitted_to, &session, "admitted into the entry's session");
+            use meerkat_runtime::SessionServiceRuntimeExt as _;
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .input_state_by_idempotency_key(&session, &receipt.delivery_id)
+                    .await
+                    .expect("read the entry's input ledger")
+                    .is_some(),
+                "the entry's session holds the input"
+            );
+        }
     }
 
     /// The doors that act on a member's session as its host
     /// (`mob/turn_start`, `mob/append_system_context`, `mob/member_live_open`,
-    /// `mob/member_live_control`) and the internal work origin of
-    /// `mob/submit_work`: an identity entry is reached through them only
-    /// with the `AdminHost` control scope, which the owner holds. A scoped
-    /// principal without it is refused before anything runs; on any other
-    /// member the doors are unchanged.
+    /// `mob/member_live_control`, `mob/member_live_close`) and the internal
+    /// work origin of `mob/submit_work`: an identity entry is reached through
+    /// them only with the `AdminHost` control scope, which the owner holds. A
+    /// scoped principal without it is refused before anything runs; on any
+    /// other member the doors are unchanged.
     #[cfg(feature = "mob")]
     mod identity_entry_host_doors {
         use super::caller_idempotency_key::{
@@ -22830,10 +22899,55 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             );
         }
 
+        /// `mob/member_live_close` ends a live channel on the member's
+        /// session as its host, as the control verbs drive one: a principal
+        /// that holds only `Live` closes no channel on an entry.
+        #[tokio::test]
+        async fn mob_member_live_close_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-close").await;
+            let close = |member: &str| {
+                doors.member_request(
+                    "mob/member_live_close",
+                    member,
+                    serde_json::json!({ "channel_id": "no-such-channel" }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("close-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, close("entry-1")).await,
+                "entry-1",
+                "a Live principal closes no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, close("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "close-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, close("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, close("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
         /// `origin: internal` on `mob/submit_work` acts as the mob's host:
-        /// it needs `AdminHost`, and a principal without it is refused
-        /// `ScopeDenied { required: admin_host }` before anything is
-        /// submitted. The default external origin is unchanged.
+        /// it needs `AdminHost` for every member, an entry or a worker, and a
+        /// principal without it is refused `ScopeDenied { required:
+        /// admin_host }` before anything is submitted. The default external
+        /// origin is unchanged.
         #[tokio::test]
         async fn mob_submit_work_with_the_internal_origin_needs_admin_host() {
             let doors = Doors::new("mob-door-submit").await;
@@ -22850,24 +22964,56 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             let (scoped, _scoped_rx) = doors
                 .scoped("work-operator", &[meerkat_mob::ControlScope::SendCommand])
                 .await;
-            let refused = call(&scoped, submit("entry-1", "internal")).await;
-            let error = refused
-                .error
-                .as_ref()
-                .unwrap_or_else(|| panic!("the internal origin is refused: {refused:?}"));
-            assert_eq!(
-                error.code,
-                meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
-                "{error:?}"
-            );
-            assert_eq!(
-                error.data,
-                Some(serde_json::json!({
-                    "required": "admin_host",
-                    "presented": ["send_command"]
-                })),
-                "{error:?}"
-            );
+            for member in ["entry-1", "worker-1"] {
+                let refused = call(&scoped, submit(member, "internal")).await;
+                let error = refused.error.as_ref().unwrap_or_else(|| {
+                    panic!("the internal origin to {member} is refused: {refused:?}")
+                });
+                assert_eq!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{member}: {error:?}"
+                );
+                assert_eq!(
+                    error.data,
+                    Some(serde_json::json!({
+                        "required": "admin_host",
+                        "presented": ["send_command"]
+                    })),
+                    "{member}: {error:?}"
+                );
+            }
+            // A principal that also lists the mob (and so can read which
+            // members are entries) is refused the same for every member: the
+            // door asks `AdminHost` of the internal origin itself, never only
+            // for the entries it can read.
+            let (lister, _lister_rx) = doors
+                .scoped(
+                    "work-lister",
+                    &[
+                        meerkat_mob::ControlScope::List,
+                        meerkat_mob::ControlScope::SendCommand,
+                    ],
+                )
+                .await;
+            for member in ["entry-1", "worker-1"] {
+                let refused = call(&lister, submit(member, "internal")).await;
+                let error = refused.error.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "the internal origin to {member} is refused for a principal that lists the mob: {refused:?}"
+                    )
+                });
+                assert_eq!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{member}: {error:?}"
+                );
+                assert_eq!(
+                    error.data.as_ref().map(|data| data["required"].clone()),
+                    Some(serde_json::json!("admin_host")),
+                    "{member}: {error:?}"
+                );
+            }
             let external = call(&scoped, submit("worker-1", "external")).await;
             assert!(
                 result_value(&external)["work_ref"].is_string(),

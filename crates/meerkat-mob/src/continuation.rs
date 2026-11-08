@@ -236,10 +236,14 @@ impl ContinuationAddressResolver for MobContinuationResolver {
     /// is asked again at its delivery: MobMachine's admission of external
     /// work for the member, as it answers an unkeyed member send
     /// ([`MobHandle::admit_external_work`]). A member that became an
-    /// identity entry since the commit, whose name is reserved unreadable,
-    /// or whose runtime admits no external work refuses it for good
-    /// (`AuthorityDenied`): the drain settles the row refused and admits
-    /// nothing. An address the mob does not serve (another incarnation of
+    /// identity entry since the commit, or whose name became reserved
+    /// unreadable, refuses it for good (`AuthorityDenied`): the drain settles
+    /// the row refused and admits nothing. MobMachine records a runtime's
+    /// external addressability when it seats that runtime, so a member stops
+    /// admitting external work only as a new incarnation (a respawn or a
+    /// rotation), whose address no longer serves the row: the row strands, as
+    /// below. A `NotExternallyAddressable` answer is refused all the same.
+    /// An address the mob does not serve (another incarnation of
     /// the mob, a replaced or retired member, a session address) is not
     /// refused here: the drain's own observation strands its row. A mob this
     /// host does not manage now, or an answer that cannot be read now (a

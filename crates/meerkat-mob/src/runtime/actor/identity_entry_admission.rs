@@ -76,8 +76,8 @@ impl MobActor {
     }
 
     /// A door that acts on `agent_identity`'s member session as its host (a
-    /// turn start, a system context append, a live channel's open or
-    /// control) reaches an identity entry, or a member whose name is
+    /// turn start, a system context append, a live channel's open, control
+    /// or close) reaches an identity entry, or a member whose name is
     /// reserved unreadable, only for a principal that holds `AdminHost`: any
     /// other caller is refused [`MobError::IdentityMember`]. Decided from
     /// Core's own entry read of this actor's state

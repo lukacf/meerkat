@@ -779,7 +779,7 @@ pub(super) enum ScopeAdmissionSubject {
     /// verb, which an agent never runs.
     DeclaredApply,
     /// A door that acts on this member's session as its host (a turn start,
-    /// a system context append, a live channel's open or control): it
+    /// a system context append, a live channel's open, control or close): it
     /// reaches an identity entry, or a member whose name is reserved
     /// unreadable, only for a principal that holds `AdminHost`, and an agent
     /// never acts on an entry's member through it.

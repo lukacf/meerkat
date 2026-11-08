@@ -110,14 +110,28 @@ struct NextBuildGate {
 
 /// A write's subject, resolved: whose grants, the gate a target must be in
 /// (with the servers its build configures ungated), the session serving the
-/// subject here when there is one, and for a member identity the gate its
-/// next build resolves.
+/// subject here when there is one, for a member identity the gate its next
+/// build resolves, and who commits the grant.
 struct GrantSubject {
     subject: ToolGrantSubject,
     gate: GrantGatedTools,
     ungated_servers: BTreeSet<String>,
     serving: Option<SessionId>,
     next_build: Option<NextBuildGate>,
+    commit: GrantCommit,
+}
+
+/// Who commits a grant: the runtime's grant service for a session subject;
+/// for a member identity, the mob's actor, which decides it against its live
+/// roster in order with the retirements that end an identity's grants.
+enum GrantCommit {
+    Session,
+    #[cfg(feature = "mob")]
+    Member {
+        handle: meerkat_mob::MobHandle,
+        mob_id: String,
+        identity: meerkat_mob::AgentIdentity,
+    },
 }
 
 async fn subject_for_grant(
@@ -148,6 +162,7 @@ async fn subject_for_grant(
                 ungated_servers: BTreeSet::new(),
                 serving: Some(session_id),
                 next_build: None,
+                commit: GrantCommit::Session,
             })
         }
         ToolGrantSubjectRequest::Identity { mob_id, identity } => {
@@ -301,11 +316,7 @@ mod members {
         let gate = match handle.member_grant_gate(&member).await {
             Ok(gate) => gate,
             Err(meerkat_mob::MobError::MemberNotFound(_)) => {
-                return Err(refused(
-                    id,
-                    &ToolGrantRequestRefusal::SubjectUnknown,
-                    format!("no member '{identity}' in mob '{mob_id}'"),
-                ));
+                return Err(unknown_member(id, mob_id, identity));
             }
             Err(error_value) => return Err(crate::handlers::mob::mob_call_error(id, &error_value)),
         };
@@ -318,7 +329,59 @@ mod members {
                 gated: gate.gated,
                 not_mounted: gate.not_mounted,
             }),
+            commit: GrantCommit::Member {
+                handle,
+                mob_id: mob_id.to_string(),
+                identity: member,
+            },
         })
+    }
+
+    /// The refusal of an identity the mob's roster does not hold, at the
+    /// read and at the commit alike.
+    fn unknown_member(id: Option<RpcId>, mob_id: &str, identity: &str) -> RpcResponse {
+        refused(
+            id,
+            &ToolGrantRequestRefusal::SubjectUnknown,
+            format!("no member '{identity}' in mob '{mob_id}'"),
+        )
+    }
+
+    /// Commit a member identity's grant through the mob's actor, which
+    /// decides it against its live roster: an identity retired since the
+    /// gate read is refused as the read refuses an unknown one.
+    pub(super) async fn commit(
+        id: Option<RpcId>,
+        handle: &meerkat_mob::MobHandle,
+        mob_id: &str,
+        identity: &meerkat_mob::AgentIdentity,
+        request: ToolGrantRequest,
+        serving: Option<&SessionId>,
+    ) -> Result<meerkat_runtime::tool_grant::StoredToolGrant, RpcResponse> {
+        use meerkat_mob::MemberToolGrantError;
+        let grant = meerkat_mob::MemberToolGrant {
+            target: request.target,
+            issuer: request.issuer,
+            reason: request.reason,
+            window: request.window,
+        };
+        match handle.grant_member_tool(identity, grant, serving).await {
+            Ok(grant) => Ok(grant),
+            Err(MemberToolGrantError::Mob(meerkat_mob::MobError::MemberNotFound(_))) => {
+                Err(unknown_member(id, mob_id, identity.as_str()))
+            }
+            Err(MemberToolGrantError::Mob(error_value)) => {
+                Err(crate::handlers::mob::mob_call_error(id, &error_value))
+            }
+            Err(MemberToolGrantError::Grant(error_value)) => {
+                Err(grant_error_to_response(id, error_value))
+            }
+            Err(MemberToolGrantError::NoRuntime) => Err(RpcResponse::error(
+                id,
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+                "this mob runs without a runtime: it holds no scoped tool grants",
+            )),
+        }
     }
 
     pub(super) async fn identity_for_read(
@@ -451,11 +514,29 @@ pub async fn handle_grant(
         reason: params.reason,
         window,
     };
-    let issued = runtime
-        .runtime_adapter()
-        .grant_tool(request, subject.serving.as_ref())
-        .await
-        .map_err(|error_value| grant_error_to_response(id.clone(), error_value));
+    let issued = match &subject.commit {
+        GrantCommit::Session => runtime
+            .runtime_adapter()
+            .grant_tool(request, subject.serving.as_ref())
+            .await
+            .map_err(|error_value| grant_error_to_response(id.clone(), error_value)),
+        #[cfg(feature = "mob")]
+        GrantCommit::Member {
+            handle,
+            mob_id,
+            identity,
+        } => {
+            members::commit(
+                id.clone(),
+                handle,
+                mob_id,
+                identity,
+                request,
+                subject.serving.as_ref(),
+            )
+            .await
+        }
+    };
     match issued {
         Ok(grant) => {
             let applies = match &subject.next_build {

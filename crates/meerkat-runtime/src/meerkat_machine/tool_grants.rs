@@ -189,6 +189,21 @@ impl MeerkatMachine {
     /// Arm the deadline driver of the session serving `subject` (its own
     /// session for a session subject, `serving` for an identity) for the
     /// subject with `deadline_ms`, when that session is served here. An
+    /// unserved session is left alone. A grant issued outside
+    /// [`Self::grant_tool`] (a mob member identity's, which the mob's actor
+    /// commits against its live roster) is armed this way once it is issued.
+    pub async fn arm_tool_grant_deadline(
+        &self,
+        subject: &ToolGrantSubject,
+        serving: Option<&SessionId>,
+        deadline_ms: u64,
+    ) {
+        self.arm_if_served(subject, serving, deadline_ms).await;
+    }
+
+    /// Arm the deadline driver of the session serving `subject` (its own
+    /// session for a session subject, `serving` for an identity) for the
+    /// subject with `deadline_ms`, when that session is served here. An
     /// unserved session is left alone.
     async fn arm_if_served(
         &self,

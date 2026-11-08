@@ -4,7 +4,8 @@
 //! its role's named profile) joined with its role's current gate. Nothing
 //! here is stored and nothing is woken: the reads are the roster entry, the
 //! identity's sealed intent, the definition, the realm profile store and the
-//! published machine state.
+//! published machine state. The one write is a grant to a member identity,
+//! which the mob's actor commits against its live roster.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -17,6 +18,39 @@ use crate::error::MobError;
 use crate::identity::{DesiredProfileSource, IdentityIntent, IdentityStoredObservation};
 use crate::ids::{AgentIdentity, ProfileName};
 use crate::profile::{Profile, ToolConfig};
+
+/// A scoped tool grant to a mob member identity, as
+/// [`super::MobHandle::grant_member_tool`] issues it: its subject is the
+/// identity in the mob's live incarnation.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, Clone)]
+pub struct MemberToolGrant {
+    /// What the grant opens.
+    pub target: meerkat_core::tool_grant::ToolGrantTarget,
+    /// Who issues it.
+    pub issuer: meerkat_core::tool_grant::ToolGrantIssuer,
+    /// Why, as the issuer records it.
+    pub reason: Option<String>,
+    /// How long it lives.
+    pub window: meerkat_runtime::tool_grant::ToolGrantWindow,
+}
+
+/// Why [`super::MobHandle::grant_member_tool`] issued no grant.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug, thiserror::Error)]
+pub enum MemberToolGrantError {
+    /// The mob refused: the identity is not in the roster, or no longer bound
+    /// to a member ([`MobError::MemberNotFound`]), or the mob cannot take the
+    /// command.
+    #[error(transparent)]
+    Mob(MobError),
+    /// The runtime's grant service refused the grant.
+    #[error(transparent)]
+    Grant(meerkat_runtime::tool_grant::ToolGrantServiceError),
+    /// The mob runs without a runtime, which holds no scoped tool grants.
+    #[error("this mob runs without a runtime, so it holds no scoped tool grants")]
+    NoRuntime,
+}
 
 /// The gate a member's next build resolves, split into what that build
 /// gates and the role entries it ignores as not mounted.
@@ -183,6 +217,49 @@ pub(crate) async fn member_build_profile<'a>(
 }
 
 impl super::MobHandle {
+    /// Issue a scoped tool grant to `identity`'s member in this mob's live
+    /// incarnation, decided against the live roster when it commits: the
+    /// mob's actor checks that the identity is in the roster and bound to a
+    /// member, then the runtime's grant service writes the grant, in the
+    /// actor's command order with the retirement, identity-entry end and
+    /// reset that end an identity's grants. A grant therefore never outlives
+    /// a retirement whose roster read came before it: either the grant
+    /// commits first and the retirement's end revokes it, or it is refused.
+    /// With `serving`, the session serving the identity here, the grant's
+    /// deadline is armed for that session once the grant is issued.
+    ///
+    /// # Errors
+    /// [`MemberToolGrantError::Mob`] with [`MobError::MemberNotFound`] for an
+    /// identity outside the roster or no longer bound to a member (the
+    /// refusal [`Self::member_grant_gate`] gives an unknown identity), the
+    /// mob's other refusals, [`MemberToolGrantError::Grant`] for the grant
+    /// service's, and [`MemberToolGrantError::NoRuntime`] for a mob without a
+    /// runtime.
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn grant_member_tool(
+        &self,
+        identity: &AgentIdentity,
+        grant: MemberToolGrant,
+        serving: Option<&meerkat_core::types::SessionId>,
+    ) -> Result<meerkat_runtime::tool_grant::StoredToolGrant, MemberToolGrantError> {
+        let issued = self
+            .send_actor_command(|reply_tx| super::state::MobCommand::GrantMemberTool {
+                identity: identity.clone(),
+                grant: Box::new(grant),
+                reply_tx,
+            })
+            .await
+            .map_err(MemberToolGrantError::Mob)??;
+        // Armed once the actor's command has returned: arming waits on the
+        // runtime only, never on the actor.
+        if let Some(runtime) = self.runtime_adapter.as_ref() {
+            runtime
+                .arm_tool_grant_deadline(&issued.record.subject, serving, issued.expires_at_ms)
+                .await;
+        }
+        Ok(issued)
+    }
+
     /// The tool grant gate `identity`'s next build resolves: the union of
     /// its own gate (the profile its build runs on: its spawn-time profile,
     /// else its role's current definition; for a store-owned identity

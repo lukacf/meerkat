@@ -479,6 +479,13 @@ them.
   `server_tools`, and `grantTool` takes `{ mcpServer, serverTools? }`; the
   generated types carry a gate's `mcp_servers` and
   `unconfigured_mcp_servers`, the `mcp_server` target, `applies` and `gate`.
+- `meerkat_mob::MobHandle::grant_member_tool` (with `MemberToolGrant` and
+  `MemberToolGrantError`) issues a member identity's grant through the mob's
+  actor, which decides it against its live roster as it commits, in order
+  with the retirements that end an identity's grants: a grant never
+  outlives a retirement whose roster read came before it.
+  `tool_grants/grant` commits identity grants this way.
+  `MeerkatMachine::arm_tool_grant_deadline` arms a grant issued so.
 - Rust: `meerkat_core::tool_grant::ToolGrantRequestRefusal` (`subject_unknown`,
   `target_not_gated`, `server_not_installed`, `no_live_grant`,
   `invalid_wait`, `invalid_window`, `empty_target`, `not_found`,
@@ -690,15 +697,6 @@ them.
   a rollback.
 
 ### Known limitations
-
-- A grant to a mob member identity can land after the end of the identity
-  it races: `tool_grants/grant` checks the mob's roster before it writes
-  the grant, and nothing orders that write against the identity's end. Such
-  a grant stays live until it expires (at most the maximum lifetime, 24
-  hours by default), and a name created again in the same mob incarnation
-  holds it. Grant only to a member whose retirement you have not started,
-  or revoke the identity's grants (`tool_grants/list`, then
-  `tool_grants/revoke`) once its end completes.
 
 - When an identity ends, its grants end with the grants of the session the
   mob holds for it then, but not those of an archived session the mob no

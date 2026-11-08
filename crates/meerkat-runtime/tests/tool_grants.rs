@@ -2745,6 +2745,72 @@ async fn an_agents_ask_never_joins_a_run_scoped_request() {
     }
 }
 
+/// An agent's ask that joins its subject's open window request is answered
+/// with that request's duration, which can differ from the one it asked, and
+/// says it joined; an ask that holds its own request answers its own
+/// duration.
+#[tokio::test]
+async fn an_ask_that_joins_a_request_answers_with_that_requests_duration() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let (machine, decisions) = machine_taking_requests(&durable, &clock);
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(bindings.tool_grants().expect("the session's grants"));
+        let hosts = hold_tool_grant_request(
+            &decisions,
+            &ToolGrantRequestPolicy::default(),
+            machine.tool_grant_service().policy().max_lifetime_ms(),
+            T0,
+            ToolGrantIssueRequest {
+                subject: ToolGrantSubject::session(session_id.clone()),
+                target: shell.clone(),
+                duration: Duration::from_mins(1),
+                run_scope: None,
+                reason: Some("the host's own reason".to_owned()),
+                origin: ToolGrantRequestOrigin::Host {
+                    request_id: "host-window".to_owned(),
+                },
+                requester: host_requester(),
+            },
+        )
+        .expect("the host's window request is held");
+        let run_id = RunId::new();
+
+        let joined = grants
+            .request_grant(agent_ask(&shell, &run_id, "call-1"))
+            .await
+            .expect("the ask answers");
+        assert_eq!(joined.decision_id, hosts.decision_id, "{backend:?}");
+        assert!(
+            joined.joined,
+            "{backend:?}: the ask joined the host's request"
+        );
+        assert_eq!(
+            joined.duration_ms, 60_000,
+            "{backend:?}: the joined request's duration, not the ten minutes asked"
+        );
+
+        let deploy = ToolGrantTarget::Tool {
+            name: ToolName::from("deploy"),
+        };
+        let own = grants
+            .request_grant(agent_ask(&deploy, &run_id, "call-2"))
+            .await
+            .expect("the request is held");
+        assert!(!own.joined, "{backend:?}: a request of its own");
+        assert_eq!(own.duration_ms, 600_000, "{backend:?}");
+    }
+}
+
 /// A list shows a declined request only while its deadline is within the
 /// grant policy's maximum lifetime of now: it reads the recent requests
 /// through the store's phase and deadline index, never the whole decision

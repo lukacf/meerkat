@@ -312,6 +312,8 @@ mod tests {
                 decision_id,
                 phase: DecisionPhase::Open,
                 deadline_at_ms: 1_800_000_000_000,
+                duration_ms: u64::try_from(request.duration.as_millis()).unwrap(),
+                joined: false,
             })
         }
     }
@@ -479,6 +481,89 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(grants.asked().len(), 3);
+    }
+
+    /// The tool answers the request's duration and whether the call joined
+    /// a request already open for its target: a joined request's duration is
+    /// that request's, which can differ from the one the agent asked.
+    #[tokio::test]
+    async fn the_answer_says_whether_the_call_joined_a_request_and_its_duration() {
+        /// A session whose every request joins one already open, of a
+        /// minute.
+        struct JoiningGrants;
+
+        #[async_trait::async_trait]
+        impl SessionToolGrants for JoiningGrants {
+            async fn open_names(
+                &self,
+                _gated: &GatedToolTable,
+                _run_id: Option<&RunId>,
+            ) -> Result<ToolNameSet, ToolGrantRefusal> {
+                Ok(ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &GatedToolTable,
+                _call: ToolGrantCall<'_>,
+            ) -> Result<(), ToolGrantRefusal> {
+                Err(ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(&self, _run_id: &RunId) -> Result<(), ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn request_grant(
+                &self,
+                _request: ToolGrantAgentRequest<'_>,
+            ) -> Result<ToolGrantRequestReceipt, ToolGrantAgentRequestRefusal> {
+                let decision_id = DecisionId::derive(
+                    &DecisionKind::new("tool_grant.issue").unwrap(),
+                    &DecisionSubjectKey::new("host:open").unwrap(),
+                );
+                Ok(ToolGrantRequestReceipt {
+                    grant_id: ToolGrantId::approved(&decision_id),
+                    decision_id,
+                    phase: DecisionPhase::Open,
+                    deadline_at_ms: 1_800_000_000_000,
+                    duration_ms: 60_000,
+                    joined: true,
+                })
+            }
+        }
+
+        let table = GatedToolTable::new(
+            BTreeMap::new(),
+            ["deploy"].into_iter().map(ToolName::from).collect(),
+        );
+        let joining = ToolGrantRequestDispatcher::new(ToolGrantGate::new(
+            Arc::new(JoiningGrants) as Arc<dyn SessionToolGrants>,
+            table,
+        ));
+        let run_id = RunId::new();
+        let args = serde_json::json!({"tool": "deploy", "duration_ms": 600_000});
+        let outcome = call(&joining, &in_run(&run_id), "call-1", args.clone())
+            .await
+            .expect("the ask answers");
+        let answer: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("a JSON answer");
+        assert_eq!(answer["status"], "requested", "{answer}");
+        assert_eq!(answer["joined"], serde_json::json!(true), "{answer}");
+        assert_eq!(answer["duration_ms"], serde_json::json!(60_000), "{answer}");
+
+        let grants = Arc::new(RecordingGrants::default());
+        let outcome = call(&dispatcher(&grants), &in_run(&run_id), "call-2", args)
+            .await
+            .expect("the request is held");
+        let answer: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("a JSON answer");
+        assert_eq!(answer["joined"], serde_json::json!(false), "{answer}");
+        assert_eq!(
+            answer["duration_ms"],
+            serde_json::json!(600_000),
+            "{answer}"
+        );
     }
 
     /// The tool answers the seam's refusal as a tool error: a host that takes

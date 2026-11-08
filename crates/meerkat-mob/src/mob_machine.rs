@@ -1406,6 +1406,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberBuildPreparation,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::BeginMemberRotation,
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },

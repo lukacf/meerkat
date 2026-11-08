@@ -4527,6 +4527,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberHostPreparationCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveMemberBuildPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberBuildPreparationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberBuildPreparationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginMemberRotationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4549,6 +4558,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveMemberRevivalRetryableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberRevivalRetryableBuildPreparationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AbandonMemberWakeDormantRunning`
@@ -6377,6 +6389,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `IdentityEntryTakenOver`
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
+- `MemberBuildPreparationRetryArmed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -6636,6 +6651,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `archived_session_record_is_unseated`
   - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `build_preparation_retry_belongs_to_a_member`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `role_hold_belongs_to_an_entry`
   - anchors: `mob_declared_apply_authority`

@@ -11786,6 +11786,10 @@ pub mod inputs {
     pub struct TakeOverIdentityEntry {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberBuildPreparation {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12045,6 +12049,7 @@ pub enum Input {
     EndPreparationConstruction(inputs::EndPreparationConstruction),
     UnlistIdentityEntry(inputs::UnlistIdentityEntry),
     TakeOverIdentityEntry(inputs::TakeOverIdentityEntry),
+    ResolveMemberBuildPreparation(inputs::ResolveMemberBuildPreparation),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12380,6 +12385,7 @@ impl Input {
             Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
             Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
             Self::TakeOverIdentityEntry(_) => InputKind::TakeOverIdentityEntry,
+            Self::ResolveMemberBuildPreparation(_) => InputKind::ResolveMemberBuildPreparation,
         }
     }
 }
@@ -12632,6 +12638,7 @@ pub enum InputKind {
     EndPreparationConstruction,
     UnlistIdentityEntry,
     TakeOverIdentityEntry,
+    ResolveMemberBuildPreparation,
 }
 
 pub mod signals {
@@ -14665,6 +14672,10 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: HostAdoptionEntryVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberBuildPreparationRetryArmed {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14866,6 +14877,7 @@ pub enum Effect {
     PreparationConstructionEnded(effects::PreparationConstructionEnded),
     IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
     IdentityEntryTakenOver(effects::IdentityEntryTakenOver),
+    MemberBuildPreparationRetryArmed(effects::MemberBuildPreparationRetryArmed),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -15062,6 +15074,7 @@ pub enum EffectKind {
     PreparationConstructionEnded,
     IdentityEntryUnlisted,
     IdentityEntryTakenOver,
+    MemberBuildPreparationRetryArmed,
 }
 
 pub mod command_capabilities {
@@ -17118,6 +17131,10 @@ pub enum TransitionId {
     TakeOverIdentityEntryMobNotRunningDestroyed,
     RecoverIdentityEntryAdoptingMarkedRunning,
     RecoverIdentityEntryAdoptingStaleRunning,
+    ResolveMemberRevivalRetryableBuildPreparationRunning,
+    ResolveMemberBuildPreparationRunning,
+    ResolveMemberBuildPreparationStopped,
+    ResolveMemberBuildPreparationCompleted,
     ResolveSubmitWorkRejectionIdentityMember,
     ResolveSubmitWorkRejectionIdentityMemberUnreadableName,
 }

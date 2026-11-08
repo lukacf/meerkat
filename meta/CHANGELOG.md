@@ -98,6 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   literal of `RestoreFlowResult` sets it; `restore_flow` and
   `lazy_register_flow`, which declare part of the roster, answer it empty.
 
+- `add_member_held` (on the identity-first context): a held add's hold
+  lasts for the process. An add that aborted keeps its identity owed
+  (`HeldCompletionOwed`) for every other wake and reset in this process;
+  after a restart the host holds the identity again through its held
+  bootstrap or a re-add, and an identity the host no longer holds is seated
+  as any declared identity is. 0.9.10 kept the add's owed state across a
+  restart, read back from its durable mark.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -135,6 +143,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
+- The held-completion marks (`<state>/held-completion-owed/`, and the
+  host store's documents) and the identity rotation records are still
+  written for a rollback to 0.9.10 only, with the contents 0.9.10 writes:
+  a rotation's record is written after Core's answer (see Changed), and a
+  rotation Core finishes on its own (a reset or delete a stop interrupted,
+  which Core finishes at the next start) removes its record once the
+  lifecycle projection reads the rotation's end. Nothing online reads
+  them. The gateway's identity census
+  (`held_completion_owed`) and the offline `identity-reset` read the marks
+  as diagnostics until the mirror is removed (the reset only refuses on a
+  mark). A stale mark stays for a rollback's read, which drops it.
+- A host that added a member held and wants it held again after a restart
+  holds it through its held bootstrap or a re-add (see Breaking).
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -156,6 +178,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   mob sets it from Core's journal; a bridge that builds its records with
   `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
   `#[non_exhaustive]`, so the field is additive.
+
+- `BridgeError::HostRejectedBuild`, and the resume refusal kind
+  `ResumeRejectionKind::HostRejectedBuild`: the member's host refused its
+  build, read typed from the data the gateway's session builder carries it
+  with (kind `meta_host_rejected_build`), never from text. A refused spawn,
+  create or resume is the variant; a member Core holds Broken for it (a
+  wake's, a delivery's) is the resume refusal of that kind. Both answer
+  `IdentityRuntimeError::HostRejectedBuild`, as before. Both enums are
+  `#[non_exhaustive]`.
+
+- `SessionBridge::members_holding_run_starts_for_published_tools`,
+  `SessionBridge::member_holds_run_starts_for_published_tools` and
+  `SessionBridge::resolve_member_build_preparation`, each a call of Core's
+  (`MobHandle::members_holding_run_starts` with `ToolsNotPublished`, the
+  same for one member with `MobHandle::member_holds_run_starts`, and
+  `MobHandle::resolve_member_build_preparation`). All have defaults: a
+  bridge without run-start holds holds none (the one-member read answers
+  from the list read), and one without build preparation records no
+  cause.
+
+- `SessionBridge::wait_member_lifecycle_settled`, Core's
+  `MobHandle::wait_member_lifecycle_settled`: it waits, at most a timeout,
+  until Core holds no lifecycle operation of an identity's member in flight,
+  and answers `meerkat_mob::MemberLifecycleSettlement`. The doors wait on it
+  (see Changed). Its default answers `BridgeError::Unsupported`, so a door
+  through a bridge without it answers Core's deferral at once; a host's own
+  wrapper of a session bridge forwards it.
 
 - Core's entry of a name, as `SessionBridge::identity_entry` answers it:
   `CoreIdentityEntry` (built with `entry`, `not_an_entry`, `reserved` and
@@ -281,11 +330,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keeps, restamps or moves each listed identity (MobMachine decides each
   verdict), and unlists each identity it holds declared that the roster no
   longer lists and retires its member, after which the identity leaves
-  Meta's registry. A send, a dispatch or a materialization of an identity
-  Core holds no member for, or one whose first-boot row, held role move or
-  host preparation is still owed, declares that identity alone before it
-  acts. A respawn of a built member is such a declaration: Core seats the
-  member again, Dormant, on the session it kept archived, building nothing,
+  Meta's registry. A send or a dispatch of an identity Core holds no member
+  for, or one whose first-boot row, held role move or host preparation is
+  still owed, and every materialization (a warm included), declares that
+  identity alone before it acts. Such a declaration that Core leaves to its
+  next apply, because a lifecycle operation of the identity's member is in
+  flight (the kickoff wake of the fresh life a reset seated, a delivery's
+  wake, its retirement), waits for that operation to end, up to 15 s, on
+  Core's machine state, and is declared again, so a warm right after a reset
+  answers the woken member. One still in flight then is refused retryable
+  (`-32052`, `identity_wake_retryable`). A roster pass leaves such an
+  identity to its next apply. A respawn of a built member is such a
+  declaration: Core seats the member again, Dormant, on the session it kept
+  archived, building nothing,
   and the wake that follows builds it once, so the host's `customize_build`
   runs twice (the seat's composed build, then the build's own), as for a
   lazily seated identity, where the seat step revived the member live with
@@ -311,6 +368,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   is a host's raw member. Every Meta from 0.9.4 to 0.9.10 respawned these
   members with the marker at its roster pass, so a state directory last run
   by the previous matched release holds none.
+
+- Held creation follows the host's hold: the identities a host holds in
+  this process (a held bootstrap's roster, a held add's identity) are
+  declared held, and Core decides (it awaits the held creation of an
+  identity it never created). Meta no longer reads its held-completion
+  marks; it still writes them for a rollback (see Upgrade).
+
+- The identity reset and delete verbs no longer read the rotation
+  records: the record is written after Core's answer, for a rollback, and
+  a refused rotation leaves it as it was.
+
+- The members Core holds for unpublished customizer tools, and a build
+  preparation the host asked to retry, are read from Core: the composition
+  publishes and releases the members Core holds, and a wake Core refused
+  for the retry reports the customizer's failure, typed. A status sweep
+  (`statuses`, `roster_inspect`) reads Core's held members once for every
+  identity, and one identity's status and a delivery read that member's
+  hold alone. A read that fails is never "none held": a status read
+  fails typed (`MemberHistoryUnavailable` for a sweep,
+  `IdentityHistoryUnavailable` for one identity), a delivery is refused
+  retryable, and a publication keeps the identity pending. The door
+  retries the preparation once (`resolve_member_build_preparation`) and
+  wakes, or delivers, once more; a second refusal surfaces typed.
+
+- The door answers Core's host preparation: on Core's
+  `HostPreparationPending` refusal it declares the identity once and
+  retries the delivery once; a second refusal surfaces typed. Meta keeps no
+  copy of the members it handed the mob as host-pending. It still declares
+  first an identity whose first-boot row its own records hold, and refuses
+  every delivery while those records cannot be read.
+
+- The host's refusal of a member's build is read typed (see Added): the
+  gateway's session builder carries the host's error answer to its build
+  callback as structured data, and nothing matches the error's text. A
+  callback that never completed stays the retryable failure it was.
 
 ### Fixed
 
@@ -353,6 +445,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   roster pass: its outcome is typed and its own, the other identities are
   declared and unlisted as usual, and the next complete roster retires it
   again.
+
+- A reset over a record store whose rotation records do not read starts
+  and finishes its rotation; it was refused, retryable.
+
+- Held creation without a state directory: a reset of an identity its
+  host holds and Core never created answers `HeldCompletionOwed` (it gave
+  the identity a fresh life), and a restart whose host holds the identity
+  again keeps it owed (it seated it). With a state directory or a host
+  store, an identity its host no longer holds is created as any other (its
+  mark refused it), a failover build included.
+
+- A build preparation the host asked to retry and a first-boot row are
+  told apart by Core (`BuildPreparationRetry`, `HostPreparationPending`): a
+  retry is no longer reported as Core's first-boot preparation, nor a
+  first-boot preparation as the customizer's failure.
+
+- A materialization, and every door that wakes a member itself (the
+  background warm, a compaction rebuild, a wake onto the last session, a
+  respawn), reads Core's refusal of the wake typed, as a delivery does: a
+  final refusal (a retiring incarnation, a host-owned member, a
+  composition that is not authoritative) answers `AdmissionFailed`
+  instead of `IdentityWakeRetryable`.
 
 ### Known limitations
 

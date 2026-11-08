@@ -12,6 +12,7 @@
 //! and the replay together.
 
 use super::identity_entry_rows::{predating_reader_journal, write_rollback_fixture};
+use super::member_wake_rows::refused_for_build_preparation_retry;
 use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::actor::member_wake::MemberWakeFailure;
@@ -138,6 +139,9 @@ struct ApplyMob {
     storage: MobStorage,
     handle: MobHandle,
     service: Arc<MockSessionService>,
+    /// The host's build preparer and the mob's wake retry backoff, at
+    /// every start, when set.
+    preparer: Option<(Arc<dyn crate::runtime::MemberBuildPreparer>, Duration)>,
 }
 
 impl ApplyMob {
@@ -148,25 +152,47 @@ impl ApplyMob {
     /// A new mob whose host owes the first-boot preparation of every
     /// identity of `pending` ([`MobBuilder::with_host_pending_members`]).
     async fn host_pending(label: &str, pending: &[&str]) -> Self {
+        Self::created(label, pending, None).await
+    }
+
+    /// [`Self::new`], with the host's build `preparer` and the mob's wake
+    /// retry backoff at `backoff`, at this start and every restart.
+    async fn with_preparer(
+        label: &str,
+        preparer: Arc<dyn crate::runtime::MemberBuildPreparer>,
+        backoff: Duration,
+    ) -> Self {
+        Self::created(label, &[], Some((preparer, backoff))).await
+    }
+
+    async fn created(
+        label: &str,
+        pending: &[&str],
+        preparer: Option<(Arc<dyn crate::runtime::MemberBuildPreparer>, Duration)>,
+    ) -> Self {
         let keys = tempfile::tempdir().expect("a comms identity root");
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let storage = MobStorage::in_memory();
-        let handle = MobBuilder::new(
+        let mut builder = MobBuilder::new(
             with_unique_mob_id(sample_definition(), label),
             storage.clone(),
         )
         .with_session_service(service.clone())
         .with_member_comms_identity_root(keys.path())
-        .with_host_pending_members(pending.iter().copied().map(id))
-        .create()
-        .await
-        .expect("create the mob");
+        .with_host_pending_members(pending.iter().copied().map(id));
+        if let Some((preparer, backoff)) = &preparer {
+            builder = builder
+                .with_member_build_preparer(preparer.clone())
+                .with_member_wake_retry_backoff(*backoff, *backoff);
+        }
+        let handle = builder.create().await.expect("create the mob");
         Self {
             keys,
             storage,
             handle,
             service,
+            preparer,
         }
     }
 
@@ -196,6 +222,7 @@ impl ApplyMob {
                 storage,
                 handle,
                 service,
+                preparer: None,
             },
             owner_bridge_session_id,
         )
@@ -228,21 +255,21 @@ impl ApplyMob {
         let _ = restarted.enable_runtime_adapter();
         crash_stop_and_release_routes(self.handle.clone()).await;
         self.service = restarted;
-        self.handle = tokio::time::timeout(
-            STEP,
-            Box::pin(
-                MobBuilder::for_resume(storage.clone())
-                    .with_session_service(self.service.clone())
-                    .with_member_comms_identity_root(self.keys.path())
-                    .with_composition_authority(authority)
-                    .with_host_pending_members(pending.iter().copied().map(id))
-                    .notify_orchestrator_on_resume(false)
-                    .resume(),
-            ),
-        )
-        .await
-        .expect("the restart answers")
-        .expect("the restart succeeds");
+        let mut builder = MobBuilder::for_resume(storage.clone())
+            .with_session_service(self.service.clone())
+            .with_member_comms_identity_root(self.keys.path())
+            .with_composition_authority(authority)
+            .with_host_pending_members(pending.iter().copied().map(id))
+            .notify_orchestrator_on_resume(false);
+        if let Some((preparer, backoff)) = &self.preparer {
+            builder = builder
+                .with_member_build_preparer(preparer.clone())
+                .with_member_wake_retry_backoff(*backoff, *backoff);
+        }
+        self.handle = tokio::time::timeout(STEP, Box::pin(builder.resume()))
+            .await
+            .expect("the restart answers")
+            .expect("the restart succeeds");
         self.storage = storage;
     }
 
@@ -2910,6 +2937,42 @@ async fn a_label_naming_another_identity_never_marks_a_member() {
     );
 }
 
+/// A legacy label marks a member only when it names the member's own
+/// identity: the label `mk--worker-1` names the identity `mk--worker-1`,
+/// seated as `mk--mk--worker-1`, never the member `worker-1`. A declared
+/// apply that lists `worker-1`, a raw member with that label and no
+/// durable-identity marker, refuses the name `NameHeldByWorker` and leaves
+/// the member as it is.
+///
+/// RED (`RED-F2-decoded-label.patch`): decode the label as if it were a
+/// member id: the label names `worker-1`, the member is a legacy member, and
+/// the apply adopts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listed_member_labelled_with_another_identity_is_refused() {
+    let mob = ApplyMob::new("apply-marker-label-other").await;
+    mob.handle
+        .spawn_spec(identity_labelled("worker-1", "mk--worker-1"))
+        .await
+        .expect("a host's raw member, labelled with another identity");
+    let session = mob.session("worker-1").await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([declared("worker-1")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&outcome, "worker-1"),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(mob.is_member("worker-1").await, "the member keeps serving");
+    assert_eq!(mob.standing("worker-1"), None, "it is no entry");
+    assert_eq!(mob.session("worker-1").await, session);
+}
+
 /// A member a legacy host seated under its identity before identity
 /// entries existed (its spawn row carries the durable-identity marker and
 /// the legacy label naming it), whose identity the roster dropped before the
@@ -3138,11 +3201,14 @@ async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_mark
 /// has the pass observe the member as such an earlier read does
 /// (`legacy_observation_hold::force_no_intent_row`): the legacy adoption reads
 /// the host's intent row in its own step, so MobMachine leaves the member as
-/// it is and the seal retires nothing.
+/// it is: the identity is no identity entry, and the seal retires nothing.
 ///
 /// RED (before the step reads the intent row): MobMachine decides on the
-/// pass's observation alone, adopts the member (`AdoptedUnlisted`), and the
-/// seal retires the host's member with the cause `Unlisted`.
+/// pass's observation alone and adopts the host's member as a Declared
+/// identity entry (`AdoptedUnlisted`). The seal, which reads the pass's own
+/// history read, then spares that entry only when the read already names
+/// the host's intent row (as it does here); otherwise it retires the host's
+/// member with the cause `Unlisted`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_adoption_the_pass_read_missed_keeps_the_member() {
     use crate::runtime::handle::legacy_observation_hold;
@@ -3204,6 +3270,14 @@ async fn a_host_adoption_the_pass_read_missed_keeps_the_member() {
         .await
         .expect("the apply answers")
         .expect("the apply runs");
+    assert!(
+        crate::runtime::identity_entry::machine_entry_origin(
+            &handle.machine_state_watch_rx.borrow(),
+            &id("missed"),
+        )
+        .is_none(),
+        "MobMachine adopted nothing: the identity is no identity entry"
+    );
     assert!(outcome.unlisted.is_empty(), "{outcome:?}");
     assert!(
         handle
@@ -4454,4 +4528,104 @@ async fn open_apply_fixture(dir: &std::path::Path, mob_id: &str) -> MobHandle {
     .create()
     .await
     .expect("create the fixture mob")
+}
+
+/// A host's build preparer that asks to retry every preparation and records
+/// the identity of each.
+#[derive(Default)]
+struct RetryingPreparer {
+    asked: Mutex<Vec<AgentIdentity>>,
+}
+
+impl RetryingPreparer {
+    fn asked(&self) -> Vec<AgentIdentity> {
+        self.asked.lock().expect("preparations").clone()
+    }
+}
+
+#[async_trait]
+impl crate::runtime::MemberBuildPreparer for RetryingPreparer {
+    async fn prepare_member_build(
+        &self,
+        request: crate::runtime::MemberBuildPreparation,
+    ) -> Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>
+    {
+        self.asked
+            .lock()
+            .expect("preparations")
+            .push(request.agent_identity.clone());
+        Err(crate::runtime::MemberBuildPreparationRefusal::Retryable {
+            reason: "the host is not ready for this member yet".to_string(),
+        })
+    }
+}
+
+/// A build preparation the host asked to retry and a first-boot preparation
+/// the host owes are told apart by MobMachine, and typed apart to the host.
+/// The first-boot identity's wakes are refused `HostPreparationPending` and
+/// never ask the host's build preparer; a seated member whose preparer asked
+/// to retry is recorded owing `BuildPreparationRetry`, and its wakes are
+/// refused `BuildPreparationRetry` without asking the preparer again. On the
+/// wire both are `host_preparation_pending`.
+///
+/// RED before MobMachine recorded the retry: the retried member owed nothing
+/// MobMachine knew of, its refusal was `HostPreparationPending`, and its
+/// next wake asked the preparer again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retryable_build_preparation_and_a_first_boot_request_are_told_apart_by_core() {
+    let preparer = Arc::new(RetryingPreparer::default());
+    let mut mob = ApplyMob::with_preparer(
+        "apply-preparations-told-apart",
+        preparer.clone(),
+        Duration::from_mins(10),
+    )
+    .await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([
+            declared("imported"),
+            declared("retried"),
+        ]))
+        .await;
+    for name in ["imported", "retried"] {
+        assert!(seated_on(&seated, name).is_some(), "{name}: {seated:?}");
+    }
+    mob.restart_host_pending(&["imported"]).await;
+    assert_eq!(
+        mob.preparation_owed("imported"),
+        Some(dsl::HostPreparationCause::FirstBootRow),
+        "the host owes the first-boot preparation of imported"
+    );
+    assert_eq!(mob.preparation_owed("retried"), None);
+
+    mob.wake_refused_for_host_preparation("imported").await;
+    assert!(
+        preparer.asked().is_empty(),
+        "a wake refused for a first-boot preparation never asks the build preparer"
+    );
+
+    for attempt in 1..=2 {
+        let refused = tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("retried")))
+            .await
+            .expect("the wake answers");
+        assert!(
+            refused_for_build_preparation_retry(&refused),
+            "wake {attempt} of retried is refused for the retry: {refused:?}"
+        );
+        assert_eq!(
+            mob.preparation_owed("retried"),
+            Some(dsl::HostPreparationCause::BuildPreparationRetry),
+            "wake {attempt}: MobMachine records the build preparation the host asked to retry"
+        );
+        assert_eq!(
+            preparer.asked(),
+            vec![id("retried")],
+            "wake {attempt}: the build preparer is asked once, by the first wake"
+        );
+    }
+    assert_eq!(
+        mob.preparation_owed("imported"),
+        Some(dsl::HostPreparationCause::FirstBootRow),
+        "the first-boot preparation is unchanged"
+    );
+    mob.wake_refused_for_host_preparation("imported").await;
 }

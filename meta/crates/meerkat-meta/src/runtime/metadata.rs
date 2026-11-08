@@ -888,16 +888,17 @@ pub trait PersistentMetadataStore: Send + Sync {
 
     /// Every rotation intent recorded for `mob_id`'s identities.
     ///
-    /// Required: the records carry a rotation (a reset, a delete) a crash
-    /// interrupted across the restart, which a rollback's roster pass drives
-    /// to its end.
+    /// Required: the records carry a rotation (a reset, a delete) that may
+    /// have started, which a rollback's roster pass (Meta 0.9.10's) drives to
+    /// its end. This Meta writes them for that rollback and never reads them.
     async fn load_identity_rotation_intents(
         &self,
         mob_id: &str,
     ) -> Result<Vec<IdentityRotationIntent>, MetadataStoreError>;
 
-    /// Record (or replace) an identity's rotation intent, durably, before
-    /// the rotation starts. An error refuses the rotation: nothing starts.
+    /// Record (or replace) an identity's rotation intent, durably: the
+    /// identity runtime writes it after Core's answer to a rotation that may
+    /// have started, for a rollback. An error is logged.
     async fn set_identity_rotation_intent(
         &self,
         intent: &IdentityRotationIntent,

@@ -305,14 +305,14 @@ async fn restore_registered_member(
             | RestoreOutcome::Resumed { .. },
         ) => {
             runtime.publish_restore_progress(&identity, IdentityRestoreProgress::Resuming, None);
-            let mut bound_bootstrap_generation = None;
+            let mut trace = super::runtime::EmbodimentTrace::default();
             match runtime
                 .embody_identity(
                     &identity,
                     None,
                     None,
                     None,
-                    &mut bound_bootstrap_generation,
+                    &mut trace,
                     EmbodimentOverrides {
                         spec: Some(&spec),
                         customizer,

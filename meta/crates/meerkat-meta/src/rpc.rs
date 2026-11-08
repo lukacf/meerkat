@@ -10376,9 +10376,12 @@ shell = true
             default_timeout: None,
         }));
         let owed = AgentIdentity::parse("owed-member")?;
-        // Its held pass ended without publishing it: Core never spawned it,
-        // and the identity owes its host a fresh held completion.
-        identity_rt.record_held_completion(&owed, false);
+        // Its host holds it (a held pass marked it and ended without
+        // publishing it): Core never spawned it, and the identity owes its
+        // host a held completion.
+        identity_rt
+            .mark_held_completion_owed(std::slice::from_ref(&owed))
+            .await?;
         let roster_provider = Arc::new(ContextRequiredStaticRosterProvider::new(vec![
             DurableAgentSpec {
                 identity: owed.clone(),

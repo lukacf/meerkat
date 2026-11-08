@@ -1094,6 +1094,42 @@ async fn the_agent_lane_unwires_rotates_and_cancels_no_entry() {
         .expect("the agent lane unwires two workers");
 }
 
+/// The build preparation a member's host asked to retry is the host's to
+/// retry: the agent lane never retries it (`resolve_member_build_preparation`
+/// is host-only), for an entry or a worker, and the host's retry of the same
+/// members answers.
+///
+/// Pin: classify the retry as addressing no member
+/// (`AgentLaneAdmission::Unaddressed`): the agent lane retries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agent_lane_retries_no_build_preparation() {
+    let mob = EntryMob::new("entry-agent-build-preparation").await;
+    mob.handle
+        .spawn_spec(entry_spec("preparation-entry"))
+        .await
+        .expect("the host declares its entry");
+    mob.handle
+        .spawn_spec(worker_spec("preparation-worker"))
+        .await
+        .expect("a worker");
+    let agent = mob.agent();
+
+    for name in ["preparation-entry", "preparation-worker"] {
+        let error = agent
+            .resolve_member_build_preparation(&id(name))
+            .await
+            .expect_err("the agent lane retries no build preparation");
+        assert!(
+            matches!(error, MobError::ScopeDenied(_)),
+            "{name}: {error:?}"
+        );
+        mob.handle
+            .resolve_member_build_preparation(&id(name))
+            .await
+            .expect("the host's retry answers");
+    }
+}
+
 /// The legacy adoption observes a member again when MobMachine answers its
 /// observation stale, a bounded number of times, and answers a retryable
 /// refusal when the incarnation keeps changing. The agent lane runs no

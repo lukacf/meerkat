@@ -251,6 +251,7 @@ pub enum MobMachineCatalogInput {
     EndPreparationConstruction,
     UnlistIdentityEntry,
     TakeOverIdentityEntry,
+    ResolveMemberBuildPreparation,
 }
 
 impl MobMachineCatalogInput {
@@ -502,6 +503,7 @@ impl MobMachineCatalogInput {
         Self::EndPreparationConstruction,
         Self::UnlistIdentityEntry,
         Self::TakeOverIdentityEntry,
+        Self::ResolveMemberBuildPreparation,
     ];
 
     #[must_use]
@@ -756,6 +758,7 @@ impl MobMachineCatalogInput {
             Self::EndPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndPreparationConstruction,
             Self::UnlistIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnlistIdentityEntry,
             Self::TakeOverIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::TakeOverIdentityEntry,
+            Self::ResolveMemberBuildPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberBuildPreparation,
         }
     }
 
@@ -1035,6 +1038,7 @@ impl MobMachineCatalogInput {
             Self::EndPreparationConstruction => "EndPreparationConstruction",
             Self::UnlistIdentityEntry => "UnlistIdentityEntry",
             Self::TakeOverIdentityEntry => "TakeOverIdentityEntry",
+            Self::ResolveMemberBuildPreparation => "ResolveMemberBuildPreparation",
         }
     }
 }

@@ -601,6 +601,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EndPreparationConstruction`(agent_identity: AgentIdentity, attempt: u64, end: ConstructionEndKind)
 - `UnlistIdentityEntry`(agent_identity: AgentIdentity)
 - `TakeOverIdentityEntry`(agent_identity: AgentIdentity)
+- `ResolveMemberBuildPreparation`(agent_identity: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -900,6 +901,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PreparationConstructionEnded`(agent_identity: AgentIdentity, attempt: u64, verdict: ConstructionEndVerdict)
 - `IdentityEntryUnlisted`(agent_identity: AgentIdentity, verdict: UnlistEntryVerdict)
 - `IdentityEntryTakenOver`(agent_identity: AgentIdentity, verdict: HostAdoptionEntryVerdict)
+- `MemberBuildPreparationRetryArmed`(agent_identity: AgentIdentity)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -1099,6 +1101,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `marked_entry_has_no_spawn_in_flight`
 - `held_creation_entry_was_never_created`
 - `archived_session_record_is_unseated`
+- `build_preparation_retry_belongs_to_a_member`
 - `role_hold_belongs_to_an_entry`
 - `placed_entry_custody_is_hosted_on_first_use`
 - `worker_reconcile_spares_entries`
@@ -16279,6 +16282,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveMemberHostPreparation`(agent_identity)
 - To: `Completed`
 
+### `ResolveMemberBuildPreparationRunning`
+- From: `Running`
+- On: `ResolveMemberBuildPreparation`(agent_identity)
+- To: `Running`
+
+### `ResolveMemberBuildPreparationStopped`
+- From: `Stopped`
+- On: `ResolveMemberBuildPreparation`(agent_identity)
+- To: `Stopped`
+
+### `ResolveMemberBuildPreparationCompleted`
+- From: `Completed`
+- On: `ResolveMemberBuildPreparation`(agent_identity)
+- To: `Completed`
+
 ### `BeginMemberRotationRunning`
 - From: `Running`
 - On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target, profile_name)
@@ -16462,7 +16480,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveMemberRevivalRetryable`(agent_identity, attempt, kind)
 - Guards:
   - `attempt_open`
+  - `no_build_preparation_to_record`
 - Emits: `MemberWakeFeedbackResolved`
+- To: `Running`
+
+### `ResolveMemberRevivalRetryableBuildPreparationRunning`
+- From: `Running`
+- On: `ResolveMemberRevivalRetryable`(agent_identity, attempt, kind)
+- Guards:
+  - `attempt_open`
+  - `build_preparation_refused`
+  - `no_host_preparation_owed`
+- Emits: `MemberWakeFeedbackResolved`, `MemberBuildPreparationRetryArmed`
 - To: `Running`
 
 ### `AbandonMemberWakeDormantRunning`

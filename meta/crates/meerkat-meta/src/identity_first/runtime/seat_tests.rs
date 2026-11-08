@@ -22,9 +22,9 @@ use tokio::sync::oneshot;
 
 use super::*;
 use crate::identity_first::bridge::{
-    BridgeDelivery, BridgeError, DormantSeatRequest, DormantSeatResult, MemberLifecycleJournalHead,
-    MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding, ResumeRejectionKind,
-    ResumeSessionOutcome, SessionBridge,
+    BridgeAdmissionError, BridgeDelivery, BridgeError, BridgeTurnReceipt, DormantSeatRequest,
+    DormantSeatResult, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding, ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
 };
 use crate::identity_first::core_test_bridge::{
     CoreReadsBridge, DeclaredSet, apply_through_seats, bind_live, register_live, respawn_live,
@@ -101,6 +101,13 @@ struct SeatCore {
     /// Core admits a delivery to a live member onto the member's session
     /// and records it; otherwise it delivers nothing.
     admits_deliveries: bool,
+    /// Every delivery Core was asked for when it admits deliveries: the
+    /// refused ones (a wake refused typed) included.
+    delivery_attempts: AtomicUsize,
+    /// Core ends the host preparation it keeps for an identity at that
+    /// identity's declaration, first-boot request or not (its declared
+    /// apply answers the identity it holds seated on that session).
+    ends_host_preparation_at_declaration: bool,
     /// The state directory whose first-boot manifest each rotation reads, to
     /// record whether the manifest still listed the identity's row.
     manifest_dir: Option<std::path::PathBuf>,
@@ -147,6 +154,18 @@ struct SeatCore {
     seat_gate: StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// Core refuses each wake with this verdict.
     wake_refusal: StdMutex<Option<meerkat_mob::MemberWakeRefusal>>,
+    /// Core's build preparation retries: the identities whose build
+    /// preparation their host asked to retry. Core refuses each one's wakes
+    /// (a delivery's included) `BuildPreparationRetry` until the host
+    /// retries the preparation
+    /// ([`SessionBridge::resolve_member_build_preparation`]).
+    build_preparation_retry: StdMutex<BTreeSet<AgentIdentity>>,
+    /// The host's build preparer refuses these identities' builds,
+    /// retryably: a wake Core makes of one records its retry and is refused
+    /// for it.
+    preparation_refuses: StdMutex<BTreeSet<AgentIdentity>>,
+    /// Every build preparation retry the host asked Core for, by member id.
+    resolves: StdMutex<Vec<String>>,
     /// Core answers each wake with this typed resume refusal on this
     /// session, as the bridge reads Core's Broken verdict on a member it
     /// holds.
@@ -227,6 +246,23 @@ struct SeatCore {
     /// Set while Core's seal of a complete roster retires the entries it no
     /// longer lists: each retirement starts for that cause.
     sealing: AtomicBool,
+    /// Core's dispatch reports each admitted turn's own output, so a send
+    /// or a dispatch the identity runtime tracks takes its ticketed lane.
+    tracks_turn_output: bool,
+    /// Every wake a governed input asked of Core before its bind.
+    governed_wakes: AtomicUsize,
+    /// The identities whose members Core holds for unpublished customizer
+    /// tools (`ToolsNotPublished`).
+    tools_held: StdMutex<BTreeSet<AgentIdentity>>,
+    /// Every read of Core's whole list of the members it holds for
+    /// unpublished customizer tools.
+    tools_held_list_reads: AtomicUsize,
+    /// Every read of whether Core holds one member for unpublished
+    /// customizer tools.
+    tools_held_point_reads: AtomicUsize,
+    /// Core's reads of the members it holds for unpublished customizer
+    /// tools fail, as a scope refusal or a store fault does.
+    tools_held_reads_fail: AtomicBool,
 }
 
 /// Takes one from `counter` when it is above zero: whether it was.
@@ -297,6 +333,93 @@ impl SeatCore {
     /// released or retired it.
     fn dematerialize(&self, runtime_id: &AgentRuntimeId) {
         lock(&self.materialized).remove(runtime_id);
+    }
+
+    /// Whether Core refuses a wake of `identity` for its build preparation
+    /// retry: Core keeps one, or the host's preparer refuses the wake's
+    /// preparation, which records one.
+    fn refuses_for_build_preparation(&self, identity: &AgentIdentity) -> bool {
+        let mut retries = lock(&self.build_preparation_retry);
+        if retries.contains(identity) {
+            return true;
+        }
+        if lock(&self.preparation_refuses).contains(identity) {
+            retries.insert(identity.clone());
+            return true;
+        }
+        false
+    }
+
+    /// Core's admission of one delivery to the member `runtime_id` names,
+    /// on any lane: refused while the member's host preparation is pending,
+    /// and (a member that is not materialized, which Core's dispatch wakes)
+    /// for a build preparation retry Core keeps; otherwise the member is
+    /// materialized and the delivery recorded on its session.
+    fn admit_delivery(&self, runtime_id: &AgentRuntimeId) -> Result<SessionId, BridgeError> {
+        if !self.admits_deliveries {
+            return Err(BridgeError::Mob(format!(
+                "{runtime_id}: a seat delivers nothing"
+            )));
+        }
+        let pending = lock(&self.host_pending)
+            .iter()
+            .find(|identity| {
+                self.core
+                    .live_member(identity)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|live| &live.agent_runtime_id == runtime_id)
+            })
+            .cloned();
+        self.delivery_attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(identity) = pending {
+            return Err(BridgeError::MemberWakeRefused {
+                identity: member_id(&identity),
+                refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+                detail: format!(
+                    "{runtime_id}: Core refuses the wake while the host preparation is pending"
+                ),
+            });
+        }
+        // Core's dispatch wakes a member that is not materialized, and
+        // refuses that wake for a build preparation retry it keeps.
+        let woken = (!lock(&self.materialized).contains(runtime_id))
+            .then(|| {
+                let candidates: Vec<AgentIdentity> = {
+                    let retries = lock(&self.build_preparation_retry);
+                    let refuses = lock(&self.preparation_refuses);
+                    retries.iter().chain(refuses.iter()).cloned().collect()
+                };
+                candidates.into_iter().find(|identity| {
+                    self.core
+                        .live_member(identity)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|live| &live.agent_runtime_id == runtime_id)
+                })
+            })
+            .flatten();
+        if let Some(identity) = woken
+            && self.refuses_for_build_preparation(&identity)
+        {
+            return Err(BridgeError::MemberWakeRefused {
+                identity: member_id(&identity),
+                refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+                detail: "Core holds the member's wakes for the build preparation its host \
+                         asked to retry"
+                    .to_string(),
+            });
+        }
+        let session = self
+            .core
+            .live_incarnation(runtime_id)
+            .and_then(|(session, _)| session)
+            .ok_or_else(|| BridgeError::Mob(format!("{runtime_id} is no live member")))?;
+        // Core's dispatch materializes a member that is not live before it
+        // delivers.
+        self.materialize(runtime_id);
+        lock(&self.delivered).push(runtime_id.clone());
+        Ok(session)
     }
 }
 
@@ -433,6 +556,23 @@ impl SessionBridge for SeatCore {
                 detail: format!("Core refused the wake: {}", refusal.as_str()),
             });
         }
+        // Core keeps the member's build preparation retry: the wake is
+        // refused for it, and the host's preparer is not asked. Without one,
+        // a preparer that refuses again makes Core record the retry. A
+        // member Core holds materialized is not woken.
+        let materialized = self
+            .core
+            .live_member(identity)?
+            .is_some_and(|live| lock(&self.materialized).contains(&live.agent_runtime_id));
+        if !materialized && self.refuses_for_build_preparation(identity) {
+            return Err(BridgeError::MemberWakeRefused {
+                identity: member_id(identity),
+                refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+                detail: "Core holds the member's wakes for the build preparation its host \
+                         asked to retry"
+                    .to_string(),
+            });
+        }
         if let Some((kind, session_id)) = lock(&self.wake_rejection).clone() {
             return Err(BridgeError::ResumeRejected {
                 kind,
@@ -445,6 +585,16 @@ impl SessionBridge for SeatCore {
             self.materialize(&live.agent_runtime_id);
         }
         Ok(live)
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id_asked: &meerkat_mob::AgentIdentity,
+    ) -> Result<(), BridgeError> {
+        lock(&self.resolves).push(member_id_asked.to_string());
+        lock(&self.build_preparation_retry)
+            .retain(|identity| member_id(identity) != *member_id_asked);
+        Ok(())
     }
 
     async fn member_binding_history(
@@ -714,33 +864,97 @@ impl SessionBridge for SeatCore {
         runtime_id: &AgentRuntimeId,
         _delivery: BridgeDelivery,
     ) -> Result<SessionId, BridgeError> {
-        if !self.admits_deliveries {
-            return Err(BridgeError::Mob(format!(
-                "{runtime_id}: a seat delivers nothing"
-            )));
+        self.admit_delivery(runtime_id)
+    }
+
+    fn tracks_turn_output(&self) -> bool {
+        self.tracks_turn_output
+    }
+
+    async fn begin_delivery_with_output(
+        &self,
+        runtime_id: &AgentRuntimeId,
+        _delivery: BridgeDelivery,
+    ) -> Result<BridgeTurnReceipt, BridgeAdmissionError> {
+        let session = self.admit_delivery(runtime_id)?;
+        Ok(BridgeTurnReceipt::with_output(
+            Ok::<_, BridgeError>(session),
+            async { Ok::<_, BridgeError>(crate::identity_first::types::TurnOutput::NoOwnResult) },
+        ))
+    }
+
+    async fn begin_awaiting_commit(
+        &self,
+        runtime_id: &AgentRuntimeId,
+        _content: &meerkat_core::ContentInput,
+        _system_prompt: Option<&str>,
+        _injected_context: &[meerkat_core::ContentInput],
+        _handling_mode: HandlingMode,
+        _interaction_id: Option<&str>,
+    ) -> Result<BridgeTurnReceipt, BridgeAdmissionError> {
+        let session = self.admit_delivery(runtime_id)?;
+        Ok(BridgeTurnReceipt::new(
+            Ok::<_, BridgeError>(session),
+            async { Ok::<(), BridgeError>(()) },
+        ))
+    }
+
+    async fn wake_for_governed_input(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), BridgeAdmissionError> {
+        self.governed_wakes.fetch_add(1, Ordering::SeqCst);
+        if lock(&self.host_pending).contains(identity) {
+            return Err(BridgeAdmissionError::MemberWakeRefused {
+                identity: member_id(identity),
+                refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+                detail: format!(
+                    "{identity}: Core refuses the wake while the host preparation is pending"
+                ),
+            });
         }
-        let pending = lock(&self.host_pending).iter().any(|identity| {
-            self.core
-                .live_member(identity)
-                .ok()
-                .flatten()
-                .is_some_and(|live| &live.agent_runtime_id == runtime_id)
-        });
-        if pending {
-            return Err(BridgeError::Mob(format!(
-                "{runtime_id}: Core refuses the wake while the host preparation is pending"
-            )));
-        }
-        let session = self
+        let materialized = self
             .core
-            .live_incarnation(runtime_id)
-            .and_then(|(session, _)| session)
-            .ok_or_else(|| BridgeError::Mob(format!("{runtime_id} is no live member")))?;
-        // Core's dispatch materializes a member that is not live before it
-        // delivers.
-        self.materialize(runtime_id);
-        lock(&self.delivered).push(runtime_id.clone());
-        Ok(session)
+            .live_member(identity)?
+            .is_some_and(|live| lock(&self.materialized).contains(&live.agent_runtime_id));
+        if !materialized && self.refuses_for_build_preparation(identity) {
+            return Err(BridgeAdmissionError::MemberWakeRefused {
+                identity: member_id(identity),
+                refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+                detail: "Core holds the member's wakes for the build preparation its host \
+                         asked to retry"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
+        self.tools_held_list_reads.fetch_add(1, Ordering::SeqCst);
+        if self.tools_held_reads_fail.load(Ordering::SeqCst) {
+            return Err(BridgeError::Mob(
+                "Core's members held for unpublished customizer tools did not read".to_string(),
+            ));
+        }
+        Ok(lock(&self.tools_held).iter().map(member_id).collect())
+    }
+
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.tools_held_point_reads.fetch_add(1, Ordering::SeqCst);
+        if self.tools_held_reads_fail.load(Ordering::SeqCst) {
+            return Err(BridgeError::Mob(
+                "Core's hold of the member for unpublished customizer tools did not read"
+                    .to_string(),
+            ));
+        }
+        Ok(lock(&self.tools_held)
+            .iter()
+            .any(|identity| member_id(identity) == *member))
     }
 
     async fn checkpoint_session(
@@ -830,6 +1044,11 @@ impl SessionBridge for SeatCore {
     ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
     {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        if self.ends_host_preparation_at_declaration {
+            for declared in &roster.identities {
+                lock(&self.host_pending).remove(&declared.spec.identity);
+            }
+        }
         let mut carried_out = BTreeSet::new();
         for (identity, request) in &roster.first_boot_requests {
             if matches!(request, meerkat_mob::FirstBootRequest::Resume { .. })
@@ -1955,10 +2174,7 @@ async fn r114_an_interrupted_rotation_is_core_s_to_finish_and_no_compile_drives_
     let runtime = runtime_over(None, &core);
     let specs = vec![spec(&alice)];
     roster_pass(&runtime, &specs, None).await;
-    runtime
-        .record_rotation_intent(&alice, "reset", Some(1))
-        .await
-        .expect("the rotation is recorded");
+    seed_rotation_record(&runtime, &alice, "reset", Some(1)).await;
     let rotations_before = core.rotation_calls.load(Ordering::SeqCst);
 
     let outcomes = roster_pass(&runtime, &specs, None).await;
@@ -1974,11 +2190,7 @@ async fn r114_an_interrupted_rotation_is_core_s_to_finish_and_no_compile_drives_
     assert_eq!(core.generation_of(&alice), Some(1));
     assert_eq!(core.session_of(&alice), Some(old_session));
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "Meta's record of the rotation stays written"
     );
 }
@@ -2323,6 +2535,29 @@ fn production_code(source: &str) -> String {
         }
     }
     kept.extend_from_slice(&code[copied..]);
+    String::from_utf8_lossy(&kept).into_owned()
+}
+
+/// [`production_code`] with its comments and strings kept: the source text
+/// outside its test modules.
+fn production_text(source: &str) -> String {
+    const TEST_GATE: &[u8] = b"#[cfg(test)]";
+    let code = code_only(source);
+    let raw = source.as_bytes();
+    let mut kept = Vec::with_capacity(raw.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(start) = find_from(&code, TEST_GATE, at) {
+        match test_module_end(&code, start + TEST_GATE.len()) {
+            Some(end) => {
+                kept.extend_from_slice(&raw[copied..start]);
+                copied = end;
+                at = end;
+            }
+            None => at = start + 1,
+        }
+    }
+    kept.extend_from_slice(&raw[copied..]);
     String::from_utf8_lossy(&kept).into_owned()
 }
 
@@ -2901,7 +3136,6 @@ async fn an_archived_first_boot_session_revived_dormant_ends_its_host_preparatio
     });
     lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(Some(state_dir.path()), &core);
-    runtime.seed_host_pending([member_id(&alice)]);
 
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
 
@@ -3288,7 +3522,6 @@ async fn a_declared_migration_over_a_done_first_boot_row_ends_its_host_preparati
     bind_live(&core.core, &alice, &previous, 0, Some(session.clone())).expect("Core holds alice");
     lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(Some(state_dir.path()), &core);
-    runtime.seed_host_pending([member_id(&alice)]);
 
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
 
@@ -3341,14 +3574,9 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
             .expect("registered live");
     }
     // An earlier reset of bob left its record.
-    runtime
-        .record_rotation_intent(&bob, "reset", Some(0))
+    seed_rotation_record(&runtime, &bob, "reset", Some(0)).await;
+    let earlier = rotation_records(&runtime)
         .await
-        .expect("record bob's earlier rotation");
-    let earlier = runtime
-        .pending_rotation_intents()
-        .await
-        .expect("the records read")
         .remove(&bob)
         .expect("bob's earlier record");
 
@@ -3363,10 +3591,7 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
         );
     }
 
-    let records = runtime
-        .pending_rotation_intents()
-        .await
-        .expect("the records read");
+    let records = rotation_records(&runtime).await;
     assert!(
         !records.contains_key(&alice),
         "the refused reset left no record: {records:?}"
@@ -3392,6 +3617,563 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
         Some(0),
         "alice keeps her generation"
     );
+}
+
+/// The rotation records the runtime's record store holds now, by identity:
+/// the mirror a rollback to 0.9.10 reads, read here as that rollback reads
+/// it (the runtime never reads it).
+async fn rotation_records(
+    runtime: &IdentityRuntime,
+) -> BTreeMap<AgentIdentity, crate::runtime::IdentityRotationIntent> {
+    let (store, mob_id) = runtime.identity_record_store();
+    store
+        .load_identity_rotation_intents(&mob_id)
+        .await
+        .expect("the records read")
+        .into_iter()
+        .map(|record| (identity(&record.identity), record))
+        .collect()
+}
+
+/// Write `who`'s rotation record into the runtime's record store, as an
+/// earlier call (or an earlier Meta) left it.
+async fn seed_rotation_record(
+    runtime: &IdentityRuntime,
+    who: &AgentIdentity,
+    verb: &str,
+    from_generation: Option<u64>,
+) {
+    let (store, mob_id) = runtime.identity_record_store();
+    store
+        .set_identity_rotation_intent(&crate::runtime::IdentityRotationIntent {
+            mob_id,
+            identity: who.as_str().to_string(),
+            verb: verb.to_string(),
+            from_generation,
+            recorded_at_ms: 1,
+        })
+        .await
+        .expect("the record is written");
+}
+
+/// A record store whose rotation records do not read; everything else is an
+/// in-memory store's.
+#[derive(Default)]
+struct RotationReadsFail {
+    inner: crate::runtime::InMemoryMetadataStore,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::PersistentMetadataStore for RotationReadsFail {
+    async fn get_subscription_cursor(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<u64>, crate::runtime::MetadataStoreError> {
+        self.inner.get_subscription_cursor(mob_id).await
+    }
+
+    async fn set_subscription_cursor(
+        &self,
+        mob_id: &str,
+        cursor: u64,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_subscription_cursor(mob_id, cursor).await
+    }
+
+    async fn identity_tool_record(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Result<Option<crate::runtime::IdentityToolRecord>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.identity_tool_record(mob_id, identity).await
+    }
+
+    async fn set_identity_tool_record(
+        &self,
+        record: &crate::runtime::IdentityToolRecord,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_identity_tool_record(record).await
+    }
+
+    async fn load_identity_rotation_intents(
+        &self,
+        _mob_id: &str,
+    ) -> Result<Vec<crate::runtime::IdentityRotationIntent>, crate::runtime::MetadataStoreError>
+    {
+        Err(crate::runtime::MetadataStoreError::Io(
+            "the rotation records do not read".to_string(),
+        ))
+    }
+
+    async fn set_identity_rotation_intent(
+        &self,
+        intent: &crate::runtime::IdentityRotationIntent,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_identity_rotation_intent(intent).await
+    }
+
+    async fn clear_identity_rotation_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner
+            .clear_identity_rotation_intent(mob_id, identity)
+            .await
+    }
+
+    async fn lifecycle_projection_cursor(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<crate::runtime::LifecycleProjectionCursor>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.lifecycle_projection_cursor(mob_id).await
+    }
+
+    async fn set_lifecycle_projection_cursor(
+        &self,
+        cursor: &crate::runtime::LifecycleProjectionCursor,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_lifecycle_projection_cursor(cursor).await
+    }
+
+    async fn lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        key: &crate::runtime::LifecycleIntentKey,
+    ) -> Result<Option<crate::runtime::LifecycleEffectIntent>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.lifecycle_effect_intent(mob_id, key).await
+    }
+
+    async fn set_lifecycle_effect_intent(
+        &self,
+        intent: &crate::runtime::LifecycleEffectIntent,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_lifecycle_effect_intent(intent).await
+    }
+
+    async fn clear_lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        key: &crate::runtime::LifecycleIntentKey,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.clear_lifecycle_effect_intent(mob_id, key).await
+    }
+
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<crate::runtime::LifecycleEffectIntent>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.lifecycle_effect_intents(mob_id).await
+    }
+
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &crate::runtime::LifecycleEffectFailure,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.record_lifecycle_effect_failure(failure).await
+    }
+
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<crate::runtime::LifecycleEffectFailure>, crate::runtime::MetadataStoreError>
+    {
+        self.inner
+            .lifecycle_effect_failures(mob_id, skip, limit)
+            .await
+    }
+
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, crate::runtime::MetadataStoreError> {
+        self.inner
+            .prune_lifecycle_effect_failures(mob_id, keep)
+            .await
+    }
+}
+
+/// A reset over a record store whose rotation records do not read starts
+/// and finishes its rotation: the records are a mirror written for a
+/// rollback to 0.9.10, which the verb writes after Core's answer and never
+/// reads. The mirror then holds what 0.9.10 leaves at rest after a
+/// rotation: no record.
+///
+/// RED before the verbs stopped reading the records: the reset was refused,
+/// retryable, because they could not be read.
+#[tokio::test]
+async fn rotation_survives_an_unreadable_meta_record_store() {
+    use crate::runtime::PersistentMetadataStore as _;
+
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let records = Arc::new(RotationReadsFail::default());
+    runtime.set_identity_records(records.clone(), "unreadable".to_string());
+    let session = SessionId::new();
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+
+    let fresh = runtime
+        .reset(&alice)
+        .await
+        .expect("the reset starts and finishes its rotation");
+
+    assert_ne!(
+        fresh.session_id(),
+        Some(&session),
+        "the reset gives alice a fresh session"
+    );
+    assert_eq!(
+        lock(&core.rotations).clone(),
+        vec![alice.clone()],
+        "Core rotated alice once"
+    );
+    assert!(
+        records
+            .inner
+            .load_identity_rotation_intents("unreadable")
+            .await
+            .expect("the inner records read")
+            .is_empty(),
+        "the mirror holds no record after the rotation"
+    );
+}
+
+/// The rotation mirror after a rotation holds no record for the identity,
+/// an earlier call's included: 0.9.10 writes its record over the earlier one
+/// and removes it once Core answers, so that is what a rollback finds.
+#[tokio::test]
+async fn the_rotation_mirror_after_a_rotation_holds_no_record() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    // An earlier reset of alice left its record.
+    seed_rotation_record(&runtime, &alice, "reset", Some(0)).await;
+
+    runtime
+        .reset(&alice)
+        .await
+        .expect("the reset rotates alice");
+
+    assert!(
+        rotation_records(&runtime).await.is_empty(),
+        "the rotation left no record, and took the earlier one with it"
+    );
+}
+
+/// The rotation mirror after a delete whose rotation may have started names
+/// that rotation as 0.9.10 leaves it at rest (its verb and the generation it
+/// rotates from), so a rollback drives it to its end.
+#[tokio::test]
+async fn the_rotation_mirror_after_a_delete_that_may_have_started_names_it() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    *lock(&core.rotation_failure) = Some(BridgeError::Mob(
+        "the retirement ran past its bound".to_string(),
+    ));
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+
+    let failed = runtime.delete_identity(&alice).await;
+    let Err(IdentityRuntimeError::Internal(detail)) = &failed else {
+        panic!("the delete answers that its rotation may have started: {failed:?}");
+    };
+    assert!(detail.contains("may have started"), "{detail}");
+    let kept = rotation_records(&runtime).await.remove(&alice);
+    assert_eq!(
+        kept.as_ref()
+            .map(|record| (record.verb.as_str(), record.from_generation)),
+        Some(("delete_identity", Some(0))),
+        "{kept:?}"
+    );
+}
+
+/// Every production source of this crate: each `.rs` file under `src/` (its
+/// binaries included), by its path from `src/`, except the test files
+/// (`*_tests.rs`, `tests.rs`, and the files of a `tests` or `*_tests`
+/// directory). A guard that reads these reads a file added later too.
+fn crate_production_sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the crate's sources list") {
+            let path = entry.expect("a source entry reads").path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if path.is_dir() {
+                if name != "tests" && !name.ends_with("_tests") {
+                    dirs.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs") || name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("a source reads");
+            let relative = path
+                .strip_prefix(&root)
+                .expect("a source under src")
+                .to_string_lossy()
+                .replace('\\', "/");
+            sources.push((relative, source));
+        }
+    }
+    sources.sort();
+    sources
+}
+
+/// Source guard: nothing in the crate reads the rotation records. They are
+/// a mirror written for a rollback to 0.9.10, whose roster pass drives the
+/// rotation a record names to its end, kept only while that rollback is
+/// supported (until 0.9.12): a verb writes its record after Core's answer
+/// and reads none, and nothing else reads them online. Every production
+/// source is read ([`crate_production_sources`]), a file added later
+/// included: a store that implements the read defines it and calls it
+/// nowhere.
+///
+/// RED before the verbs stopped reading the records: the reset and delete
+/// verbs read them to put an earlier call's record back after a refusal. A
+/// reader planted in a new file fails it too.
+#[test]
+fn the_identity_runtime_never_reads_its_rotation_records() {
+    let sources = crate_production_sources();
+    assert!(
+        sources
+            .iter()
+            .any(|(file, _)| file == "identity_first/runtime.rs"),
+        "the crate's sources were read"
+    );
+    for (file, source) in &sources {
+        let production = production_code(source);
+        let named = production
+            .matches("load_identity_rotation_intents(")
+            .count();
+        let defined = production
+            .matches("fn load_identity_rotation_intents(")
+            .count();
+        assert_eq!(
+            named - defined,
+            0,
+            "{file} reads `load_identity_rotation_intents`: the rotation records are a \
+             rollback's mirror, written and never read"
+        );
+        assert!(
+            !production.contains("pending_rotation_intents"),
+            "{file} names `pending_rotation_intents`: the rotation records are a rollback's \
+             mirror, written and never read"
+        );
+    }
+}
+
+/// A reset of an identity its host holds in this process (a held pass's
+/// roster or a held add marked it) and that Core never created asks Core's
+/// verdict first, by the identity's declaration: Core answers that it
+/// awaits its held creation, so the reset answers `HeldCompletionOwed` and
+/// asks Core for no fresh life.
+///
+/// RED before the host's hold was the declaration's held flag: with no
+/// state directory the mark was kept nowhere, so the reset gave the identity
+/// a fresh life outside its host's held protocol.
+#[tokio::test]
+async fn a_reset_of_an_identity_its_host_holds_answers_core_s_held_creation_verdict() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    // The host holds alice before her registration declares her, as a
+    // held pass's roster or a held add holds an identity first.
+    runtime
+        .mark_held_completion_owed(std::slice::from_ref(&alice))
+        .await
+        .expect("the host holds alice");
+    register_all(&runtime, &[spec(&alice)]).await;
+    let applied = core.apply_calls.load(Ordering::SeqCst);
+
+    let refused = runtime.reset(&alice).await;
+
+    assert!(
+        matches!(
+            &refused,
+            Err(IdentityRuntimeError::HeldCompletionOwed { identity }) if *identity == alice
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        core.apply_calls.load(Ordering::SeqCst) > applied,
+        "the reset asked Core's verdict by the identity's declaration"
+    );
+    assert_eq!(
+        core.rotation_calls.load(Ordering::SeqCst),
+        0,
+        "Core was asked for no fresh life"
+    );
+    assert!(
+        core.session_of(&alice).is_none(),
+        "Core holds no member of alice"
+    );
+}
+
+/// Held creation follows the host's hold in each process, in every
+/// composition (a state directory, or none): the marks a held pass writes
+/// are the mirror for a rollback to 0.9.10, never read here. After a restart
+/// over the same Core, an identity a held pass never published awaits its
+/// held creation when the restarted host holds it again, and is seated as
+/// any other identity when it does not; Core never created it, so Core's
+/// verdict decides either way. (The host store composition is
+/// `a_failover_build_never_reads_the_held_completion_marks_the_realm_keeps`.)
+///
+/// RED before the marks stopped being read: without a state directory the
+/// restarted host's hold reached no declaration (the identity was seated
+/// outside its held protocol), and with one the marks refused an identity
+/// its host no longer held.
+#[tokio::test]
+async fn held_creation_follows_the_host_s_hold_across_a_restart_in_every_composition() {
+    for durable in [false, true] {
+        let alice = identity("personal:alice");
+        let core = Arc::new(SeatCore::default());
+        let state_dir = tempfile::tempdir().expect("state dir");
+        let compose = |core: &Arc<SeatCore>| {
+            let runtime = runtime_over(None, core);
+            runtime.set_held_completion_state_dir(durable.then(|| state_dir.path().to_path_buf()));
+            runtime
+        };
+        // The first process: a held pass marks alice before it declares
+        // her, and never publishes her.
+        {
+            let runtime = compose(&core);
+            runtime
+                .mark_held_completion_owed(std::slice::from_ref(&alice))
+                .await
+                .expect("the host holds alice");
+            register_all(&runtime, &[spec(&alice)]).await;
+        }
+        // A restart whose host holds alice again: she awaits her held
+        // creation, and a door is refused typed.
+        {
+            let runtime = compose(&core);
+            runtime
+                .mark_held_completion_owed(std::slice::from_ref(&alice))
+                .await
+                .expect("the host holds alice again");
+            register_all(&runtime, &[spec(&alice)]).await;
+            let refused = runtime.materialize(&alice).await;
+            assert!(
+                matches!(
+                    &refused,
+                    Err(IdentityRuntimeError::HeldCompletionOwed { .. })
+                ),
+                "durable={durable}: {refused:?}"
+            );
+            assert!(
+                core.session_of(&alice).is_none(),
+                "durable={durable}: Core seated nothing"
+            );
+        }
+        // A restart whose host does not hold alice: she is seated as any
+        // other identity.
+        {
+            let runtime = compose(&core);
+            let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
+            assert!(
+                pass_refusal(&outcomes[&alice]).is_none(),
+                "durable={durable}: {:?}",
+                outcomes[&alice]
+            );
+            assert!(
+                core.session_of(&alice).is_some(),
+                "durable={durable}: Core seated alice"
+            );
+        }
+    }
+}
+
+/// Source guard: nothing online reads the held-completion marks. They are
+/// the mirror written for a rollback to 0.9.10, whose runtime reads them back
+/// after a restart, kept only while that rollback is supported (until
+/// 0.9.12); held creation follows the host's hold in this process and Core's
+/// verdict. Two offline diagnostics read them until the mirror expires, each
+/// in one function: the gateway's identity census (`held_completion_owed`)
+/// and the offline `identity-reset`, which refuses on a mark and never acts
+/// on it. Every production source is read ([`crate_production_sources`]), a
+/// file added later included: the marks' own module defines the readers and
+/// calls them nowhere.
+///
+/// RED before the marks stopped being read: the identity runtime read them
+/// before a declaration, a held create and a fresh life. A reader planted in
+/// a new file fails it too.
+#[test]
+fn nothing_online_reads_the_held_completion_marks() {
+    const READERS: [&str; 4] = [
+        "load_held_completion_marks",
+        "read_host_store_marks",
+        "read_host_store_rollback_marks",
+        "read_rollback_marks",
+    ];
+    const OFFLINE: [(&str, &str); 2] = [
+        (
+            "storage_migrate_native/offline_identities.rs",
+            "fn identity_census_offline(",
+        ),
+        ("storage_migrate_native/identity_reset.rs", "fn reset("),
+    ];
+    let sources = crate_production_sources();
+    for (offline, _) in OFFLINE {
+        assert!(
+            sources.iter().any(|(file, _)| file == offline),
+            "{offline} was read"
+        );
+    }
+    for (file, source) in &sources {
+        let production = production_code(source);
+        let offline = OFFLINE
+            .iter()
+            .find(|(offline, _)| offline == file)
+            .map(|(_, function)| *function);
+        for reader in READERS {
+            if offline.is_some() && reader == "read_rollback_marks" {
+                continue;
+            }
+            let named = production.matches(&format!("{reader}(")).count();
+            let defined = production.matches(&format!("fn {reader}(")).count();
+            assert_eq!(
+                named - defined,
+                0,
+                "{file} reads the held-completion marks (`{reader}`): they are a rollback's \
+                 mirror, written and never read"
+            );
+        }
+        let Some(function) = offline else {
+            continue;
+        };
+        let body = item_body(&production, function);
+        let everywhere = production.matches("read_rollback_marks(").count();
+        assert!(
+            body.contains("read_rollback_marks("),
+            "{file}: `{function}` reads the rollback mirror as its offline diagnostic"
+        );
+        assert_eq!(
+            body.matches("read_rollback_marks(").count(),
+            everywhere,
+            "{file} reads the held-completion marks outside `{function}`"
+        );
+    }
 }
 
 /// A roster pass that moves a seated identity to another profile keeps it a
@@ -3534,6 +4316,966 @@ async fn ready_bootstrap_entry(runtime: &IdentityRuntime, identity: &AgentIdenti
         snapshot.complete = true;
         snapshot.refresh_aggregates();
     });
+}
+
+/// A door's wake Core refuses for the build preparation the member's host
+/// asked to retry (`BuildPreparationRetry`) retries that preparation
+/// (`resolve_member_build_preparation`) and wakes the member again, once:
+/// the member is materialized on the retry.
+///
+/// RED before the door answered Core's typed refusal: the materialization
+/// was refused retryable, and Core was asked for no retry.
+#[tokio::test]
+async fn a_door_wake_refused_for_a_build_preparation_retry_retries_it_once() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    lock(&core.build_preparation_retry).insert(alice.clone());
+    let wakes = core.wakes.load(Ordering::SeqCst);
+
+    let woken = runtime.materialize(&alice).await;
+
+    assert!(
+        woken.is_ok(),
+        "the retried wake materializes alice: {woken:?}"
+    );
+    assert_eq!(
+        *lock(&core.resolves),
+        vec![member_id(&alice).to_string()],
+        "the door retried the build preparation once"
+    );
+    assert_eq!(
+        core.wakes.load(Ordering::SeqCst) - wakes,
+        2,
+        "the refused wake and its one retry"
+    );
+}
+
+/// A send whose delivery Core refuses for the build preparation the
+/// member's host asked to retry retries that preparation and delivers once:
+/// the door's one retry covers a delivery's wake as it covers its own.
+///
+/// RED before the door answered Core's typed refusal: the send was refused
+/// retryable, and nothing was delivered.
+#[tokio::test]
+async fn a_send_refused_for_a_build_preparation_retry_is_delivered_after_one_retry() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    lock(&core.build_preparation_retry).insert(alice.clone());
+
+    let sent = runtime.send(&alice, &text("hello")).await;
+
+    assert!(sent.is_ok(), "the retried delivery goes through: {sent:?}");
+    assert_eq!(
+        *lock(&core.resolves),
+        vec![member_id(&alice).to_string()],
+        "the door retried the build preparation once"
+    );
+    assert_eq!(lock(&core.delivered).len(), 1, "delivered once");
+}
+
+/// A healthy door wake asks Core for nothing extra: no build preparation
+/// retry, one wake.
+#[tokio::test]
+async fn a_healthy_door_wake_retries_no_build_preparation() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let wakes = core.wakes.load(Ordering::SeqCst);
+
+    let woken = runtime.materialize(&alice).await;
+
+    assert!(woken.is_ok(), "{woken:?}");
+    assert!(lock(&core.resolves).is_empty(), "no retry was asked");
+    assert_eq!(core.wakes.load(Ordering::SeqCst) - wakes, 1);
+}
+
+/// A door's retried wake that Core refuses again for the build preparation
+/// (the host's preparer refused the retry too) surfaces typed and
+/// retryable: the door retries once, never in a loop.
+///
+/// RED before the door answered Core's typed refusal: the first refusal
+/// surfaced, and Core was asked for no retry.
+#[tokio::test]
+async fn a_second_build_preparation_retry_refusal_surfaces_typed() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    lock(&core.preparation_refuses).insert(alice.clone());
+    lock(&core.build_preparation_retry).insert(alice.clone());
+    let wakes = core.wakes.load(Ordering::SeqCst);
+
+    let refused = runtime.materialize(&alice).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(IdentityRuntimeError::IdentityWakeRetryable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        *lock(&core.resolves),
+        vec![member_id(&alice).to_string()],
+        "the door retried the build preparation once"
+    );
+    assert_eq!(
+        core.wakes.load(Ordering::SeqCst) - wakes,
+        2,
+        "the refused wake and its one retry, never more"
+    );
+}
+
+/// A governed input's binder no row reaches: the lane's steps before any
+/// bind are what the rows read.
+struct NeverBound;
+
+#[async_trait::async_trait]
+impl crate::identity_first::bridge::GovernedInputBinder for NeverBound {
+    async fn bind(
+        &self,
+        _context: &crate::identity_first::bridge::GovernedBindContext,
+        _input: meerkat_runtime::Input,
+    ) -> Result<crate::identity_first::bridge::BoundGovernedInput, String> {
+        Err("never bound".to_string())
+    }
+
+    fn retain_unresolved(
+        &self,
+        _settlement: Box<dyn crate::identity_first::bridge::GovernedSettlement>,
+        _detail: &str,
+    ) {
+    }
+}
+
+/// The seven places a door wakes or delivers a member, each of which
+/// answers Core's refusal for the build preparation the member's host asked
+/// to retry.
+#[derive(Clone, Copy, Debug)]
+enum DoorLane {
+    Materialize,
+    GovernedInput,
+    SendIngress,
+    SendTicketed,
+    SendAwaitingCommit,
+    DispatchTicketed,
+    DispatchPlain,
+}
+
+/// The door's one build preparation retry, on every lane: a lane whose
+/// first attempt Core refuses for the build preparation the member's host
+/// asked to retry (`BuildPreparationRetry`) retries that preparation once
+/// (`resolve_member_build_preparation`), which ends Core's cause, and
+/// attempts once more, so Core sees the lane's attempt twice. The lanes:
+/// the materialization, the governed input's wake before its bind, the
+/// three send lanes (ingress, ticketed, awaiting commit) and the two
+/// dispatch lanes (ticketed, plain).
+///
+/// Pin: a lane that took no door step surfaces Core's refusal with no retry
+/// asked, and one that took the step and attempted no more answers the
+/// refusal the step ended, after one attempt. Every lane is driven, and
+/// every lane that does not retry is named.
+#[tokio::test]
+async fn every_door_lane_retries_a_build_preparation_once() {
+    let mut not_retried = Vec::new();
+    for lane in [
+        DoorLane::Materialize,
+        DoorLane::GovernedInput,
+        DoorLane::SendIngress,
+        DoorLane::SendTicketed,
+        DoorLane::SendAwaitingCommit,
+        DoorLane::DispatchTicketed,
+        DoorLane::DispatchPlain,
+    ] {
+        let alice = identity("personal:alice");
+        let core = Arc::new(SeatCore {
+            admits_deliveries: true,
+            tracks_turn_output: true,
+            ..SeatCore::default()
+        });
+        let runtime = runtime_over(None, &core);
+        register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        lock(&core.build_preparation_retry).insert(alice.clone());
+        let attempted = lane_attempts(&core, lane);
+
+        let answered = drive_door_lane(&runtime, &alice, lane).await;
+
+        let attempts = lane_attempts(&core, lane) - attempted;
+        let resolves = lock(&core.resolves).clone();
+        let cause_ended = lock(&core.build_preparation_retry).is_empty();
+        if resolves != vec![member_id(&alice).to_string()] || !cause_ended || attempts != 2 {
+            not_retried.push(format!(
+                "{lane:?}: retries asked {resolves:?}, cause ended {cause_ended}, attempts \
+                 {attempts} ({answered:?})"
+            ));
+        }
+    }
+    assert!(
+        not_retried.is_empty(),
+        "every lane's door retries the build preparation once, ends Core's cause and \
+         attempts once more: {not_retried:#?}"
+    );
+}
+
+/// Wake or deliver to `identity` on `lane` once, as a host does: what the
+/// lane answered.
+async fn drive_door_lane(
+    runtime: &Arc<IdentityRuntime>,
+    identity: &AgentIdentity,
+    lane: DoorLane,
+) -> Result<(), IdentityRuntimeError> {
+    match lane {
+        DoorLane::Materialize => runtime.materialize(identity).await.map(|_| ()),
+        DoorLane::GovernedInput => runtime
+            .send_governed_with_turn_ticket(
+                identity,
+                None,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new("hello", None)),
+                Arc::new(NeverBound),
+            )
+            .await
+            .map(|_| ()),
+        DoorLane::SendIngress => runtime.send(identity, &text("hello")).await.map(|_| ()),
+        DoorLane::SendTicketed => runtime
+            .send_with_turn_ticket(identity, None, &text("hello"), HandlingMode::Queue, None)
+            .await
+            .map(|_| ()),
+        DoorLane::SendAwaitingCommit => runtime
+            .send_awaiting_commit(identity, &text("hello"))
+            .await
+            .map(|_| ()),
+        DoorLane::DispatchTicketed => runtime
+            .dispatch_with_turn_ticket(
+                identity,
+                None,
+                &crate::identity_first::DispatchInput::system("hello"),
+            )
+            .await
+            .map(|_| ()),
+        DoorLane::DispatchPlain => runtime
+            .dispatch(
+                identity,
+                &crate::identity_first::DispatchInput::system("hello"),
+            )
+            .await
+            .map(|_| ()),
+    }
+}
+
+/// The attempts of `lane` Core has seen: the materialization's wakes, the
+/// governed input's wakes before its bind, and every other lane's
+/// deliveries, a refused one included.
+fn lane_attempts(core: &SeatCore, lane: DoorLane) -> usize {
+    match lane {
+        DoorLane::Materialize => core.wakes.load(Ordering::SeqCst),
+        DoorLane::GovernedInput => core.governed_wakes.load(Ordering::SeqCst),
+        DoorLane::SendIngress
+        | DoorLane::SendTicketed
+        | DoorLane::SendAwaitingCommit
+        | DoorLane::DispatchTicketed
+        | DoorLane::DispatchPlain => core.delivery_attempts.load(Ordering::SeqCst),
+    }
+}
+
+/// The door's one step for a host preparation Core keeps that Meta's own
+/// records do not name (`HostPreparationPending`), on every delivery lane:
+/// the governed input's wake before its bind, the three send lanes
+/// (ingress, ticketed, awaiting commit) and the two dispatch lanes
+/// (ticketed, plain). Core refuses each lane's first attempt; the door
+/// declares the identity once, which ends Core's mark, and attempts once
+/// more, so Core sees the lane's attempt twice. (The materialization
+/// declares the identity before it wakes it.)
+///
+/// Pin: a lane that took no door step surfaces Core's refusal, declares
+/// nothing and leaves the mark, and one that declared and attempted no more
+/// answers the refusal the declaration ended, after one attempt. Every lane
+/// is driven, and every lane that does not declare is named.
+#[tokio::test]
+async fn every_delivery_lane_declares_and_retries_a_host_preparation_once() {
+    let mut not_declared = Vec::new();
+    for lane in [
+        DoorLane::GovernedInput,
+        DoorLane::SendIngress,
+        DoorLane::SendTicketed,
+        DoorLane::SendAwaitingCommit,
+        DoorLane::DispatchTicketed,
+        DoorLane::DispatchPlain,
+    ] {
+        let alice = identity("personal:alice");
+        let core = Arc::new(SeatCore {
+            admits_deliveries: true,
+            tracks_turn_output: true,
+            ends_host_preparation_at_declaration: true,
+            ..SeatCore::default()
+        });
+        let runtime = runtime_over(None, &core);
+        register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        lock(&core.host_pending).insert(alice.clone());
+        let applied = core.apply_calls.load(Ordering::SeqCst);
+        let attempted = lane_attempts(&core, lane);
+
+        let answered = drive_door_lane(&runtime, &alice, lane).await;
+
+        let declared = core.apply_calls.load(Ordering::SeqCst) - applied;
+        let attempts = lane_attempts(&core, lane) - attempted;
+        let mark_ended = !lock(&core.host_pending).contains(&alice);
+        if declared != 1 || !mark_ended || attempts != 2 {
+            not_declared.push(format!(
+                "{lane:?}: declared {declared} times, mark ended {mark_ended}, attempts \
+                 {attempts} ({answered:?})"
+            ));
+        }
+    }
+    assert!(
+        not_declared.is_empty(),
+        "every delivery lane's door declares the identity once, ends Core's mark and \
+         attempts once more: {not_declared:#?}"
+    );
+}
+
+/// The background warm item of a roster pass a newer pass superseded (its
+/// generation is no longer the identity's) answers cancelled, typed: it
+/// reports no materialization failure (`None`), and Core is asked for no
+/// wake and no declaration.
+#[tokio::test]
+async fn a_superseded_background_warm_item_answers_cancelled_and_asks_core_nothing() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let current = runtime
+        .entries
+        .read()
+        .await
+        .get(&alice)
+        .expect("alice's entry")
+        .bootstrap_generation;
+    let (wakes, applied) = (
+        core.wakes.load(Ordering::SeqCst),
+        core.apply_calls.load(Ordering::SeqCst),
+    );
+    let (_cancel, mut cancellation) = tokio::sync::watch::channel(false);
+
+    let answered = runtime
+        .materialize_for_background(&alice, &mut cancellation, current + 1)
+        .await;
+
+    assert!(
+        answered.is_none(),
+        "a superseded warm item reports nothing: {answered:?}"
+    );
+    assert_eq!(
+        (
+            core.wakes.load(Ordering::SeqCst) - wakes,
+            core.apply_calls.load(Ordering::SeqCst) - applied
+        ),
+        (0, 0),
+        "Core is asked for nothing"
+    );
+}
+
+/// When the cancellation lands in an embodiment: before the door's
+/// declaration (cancelled already when the step reaches it), or during it
+/// (while Core's seat call holds the declaration).
+#[derive(Clone, Copy, Debug)]
+enum CancelPoint {
+    BeforeTheDeclaration,
+    DuringTheDeclaration,
+}
+
+/// Retire `identity`'s live member in the double, so the door's declaration
+/// seats it again through Core's seat call, and hold that call at the
+/// gate: the receivers of its arrival and the sender of its release.
+fn hold_the_doors_seat_call(
+    core: &SeatCore,
+    live: &AgentRuntimeId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    core.core.retire(live);
+    *lock(&core.seat_gate) = Some((reached_tx, release_rx));
+    (reached_rx, release_tx)
+}
+
+/// A background warm item cancelled before the door's declaration, or
+/// during it, answers cancelled, typed: it reports no materialization
+/// failure (`None`), and Core is asked for no wake.
+#[tokio::test]
+async fn a_background_warm_item_cancelled_before_or_during_its_declaration_answers_cancelled() {
+    let mut failed = Vec::new();
+    for point in [
+        CancelPoint::BeforeTheDeclaration,
+        CancelPoint::DuringTheDeclaration,
+    ] {
+        let alice = identity("personal:alice");
+        let core = Arc::new(SeatCore::default());
+        let runtime = runtime_over(None, &core);
+        let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        let current = runtime
+            .entries
+            .read()
+            .await
+            .get(&alice)
+            .expect("alice's entry")
+            .bootstrap_generation;
+        let wakes = core.wakes.load(Ordering::SeqCst);
+        let (cancel, mut cancellation) = tokio::sync::watch::channel(false);
+        let answered = match point {
+            CancelPoint::BeforeTheDeclaration => {
+                cancel.send_replace(true);
+                runtime
+                    .materialize_for_background(&alice, &mut cancellation, current)
+                    .await
+            }
+            CancelPoint::DuringTheDeclaration => {
+                let (reached, release) = hold_the_doors_seat_call(&core, &live);
+                let warm = tokio::spawn({
+                    let runtime = Arc::clone(&runtime);
+                    let alice = alice.clone();
+                    async move {
+                        runtime
+                            .materialize_for_background(&alice, &mut cancellation, current)
+                            .await
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(10), reached)
+                    .await
+                    .expect("the warm's declaration reaches Core's seat call")
+                    .expect("the gate signals");
+                cancel.send_replace(true);
+                release.send(()).expect("release the seat call");
+                warm.await.expect("the warm task")
+            }
+        };
+        let woken = core.wakes.load(Ordering::SeqCst) - wakes;
+        if answered.is_some() || woken != 0 {
+            failed.push(format!(
+                "{point:?}: answered {answered:?}, Core woke {woken}"
+            ));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a cancelled warm item answers cancelled and wakes nothing: {failed:#?}"
+    );
+}
+
+/// A shutdown that lands in a foreground materialization (before the
+/// door's declaration, or during it) ends the materialization cancelled and
+/// leaves the identity's bootstrap entry Dormant, not marked by the
+/// materialization's error; Core is asked for no wake.
+#[tokio::test]
+async fn a_shutdown_during_a_foreground_materialization_leaves_its_bootstrap_entry_dormant() {
+    let mut failed = Vec::new();
+    for point in [
+        CancelPoint::BeforeTheDeclaration,
+        CancelPoint::DuringTheDeclaration,
+    ] {
+        let alice = identity("personal:alice");
+        let core = Arc::new(SeatCore::default());
+        let runtime = runtime_over(None, &core);
+        let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        ready_bootstrap_entry(&runtime, &alice).await;
+        let wakes = core.wakes.load(Ordering::SeqCst);
+        let answered = match point {
+            CancelPoint::BeforeTheDeclaration => {
+                runtime.close_foreground_operations();
+                runtime.materialize(&alice).await.map(|_| ())
+            }
+            CancelPoint::DuringTheDeclaration => {
+                let (reached, release) = hold_the_doors_seat_call(&core, &live);
+                let materialized = tokio::spawn({
+                    let runtime = Arc::clone(&runtime);
+                    let alice = alice.clone();
+                    async move { runtime.materialize(&alice).await.map(|_| ()) }
+                });
+                tokio::time::timeout(Duration::from_secs(10), reached)
+                    .await
+                    .expect("the materialization's declaration reaches Core's seat call")
+                    .expect("the gate signals");
+                runtime.close_foreground_operations();
+                release.send(()).expect("release the seat call");
+                materialized.await.expect("the materialization task")
+            }
+        };
+        let state = runtime
+            .identity_bootstrap_status()
+            .identities
+            .get(&alice)
+            .map(|entry| entry.state);
+        let woken = core.wakes.load(Ordering::SeqCst) - wakes;
+        if answered.is_ok() || state != Some(super::IdentityBootstrapState::Dormant) || woken != 0 {
+            failed.push(format!(
+                "{point:?}: answered {answered:?}, entry {state:?}, Core woke {woken}"
+            ));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a shutdown ends a foreground materialization cancelled with its entry Dormant: \
+         {failed:#?}"
+    );
+}
+
+/// Register `count` identities live (`personal:member-{n}`), the first
+/// `held` of them members Core holds for unpublished customizer tools.
+async fn register_held_live(
+    runtime: &IdentityRuntime,
+    core: &SeatCore,
+    count: usize,
+    held: usize,
+) -> Vec<AgentIdentity> {
+    let mut identities = Vec::with_capacity(count);
+    for n in 0..count {
+        let who = identity(&format!("personal:member-{n}"));
+        register_live(runtime, &core.core, spec(&who), 0, SessionId::new())
+            .await
+            .expect("registered live");
+        if n < held {
+            lock(&core.tools_held).insert(who.clone());
+        }
+        identities.push(who);
+    }
+    identities
+}
+
+/// A status sweep reads Core's members held for unpublished customizer
+/// tools once, whatever the number of identities: `statuses()` and
+/// `roster_inspect()` each make one read and answer every identity's
+/// pending tools from it, and one identity's status reads only its own
+/// member's hold.
+///
+/// RED before the sweep read them once: each identity's status read Core's
+/// whole list again, so a sweep of three identities made three reads.
+#[tokio::test]
+async fn a_status_sweep_reads_core_s_held_members_once() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let identities = register_held_live(&runtime, &core, 3, 1).await;
+    let reads = || core.tools_held_list_reads.load(Ordering::SeqCst);
+
+    let before = reads();
+    let statuses = runtime.statuses().await.expect("the statuses read");
+    assert_eq!(
+        reads() - before,
+        1,
+        "one sweep, one read of Core's held members"
+    );
+    let pending = statuses
+        .iter()
+        .filter(|status| status.customizer_tools_pending.is_some())
+        .map(|status| status.identity.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pending,
+        vec![identities[0].clone()],
+        "the held identity's tools are pending, the others' are not"
+    );
+
+    let before = reads();
+    let inspected = runtime.roster_inspect().await.expect("the roster reads");
+    assert_eq!(
+        reads() - before,
+        1,
+        "one inspection, one read of Core's held members"
+    );
+    assert!(
+        inspected[&identities[0]]
+            .1
+            .customizer_tools_pending
+            .is_some()
+    );
+
+    let before = reads();
+    let status = runtime
+        .status(&identities[1])
+        .await
+        .expect("one identity's status reads");
+    assert_eq!(
+        reads() - before,
+        0,
+        "one identity's status reads only its own member's hold"
+    );
+    assert!(status.customizer_tools_pending.is_none());
+}
+
+/// One identity's status reports Core's hold of its member: a member Core
+/// holds for unpublished customizer tools reads its tools pending (published
+/// once the runtime is composed), from one read of that member's hold and
+/// no read of Core's whole list; an identity whose member Core does not
+/// hold reads nothing pending.
+///
+/// Pin: a status that read the hold and dropped it would answer nothing
+/// pending for the held identity, which the sweep reads pending.
+#[tokio::test]
+async fn one_identity_s_status_reports_core_s_hold_of_its_member() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let identities = register_held_live(&runtime, &core, 2, 1).await;
+    let lists = || core.tools_held_list_reads.load(Ordering::SeqCst);
+    let points = || core.tools_held_point_reads.load(Ordering::SeqCst);
+
+    let (lists_before, points_before) = (lists(), points());
+    let held = runtime
+        .status(&identities[0])
+        .await
+        .expect("the held identity's status reads");
+    assert_eq!(
+        held.customizer_tools_pending
+            .as_ref()
+            .map(|pending| pending.reason.as_str()),
+        Some(crate::identity_first::build_preparer::PUBLISHED_ONCE_COMPOSED),
+        "the status reports Core's hold of the member"
+    );
+    assert_eq!(
+        points() - points_before,
+        1,
+        "one read of the member's own hold"
+    );
+    assert_eq!(
+        lists() - lists_before,
+        0,
+        "no read of Core's whole list of held members"
+    );
+
+    let unheld = runtime
+        .status(&identities[1])
+        .await
+        .expect("the other identity's status reads");
+    assert!(
+        unheld.customizer_tools_pending.is_none(),
+        "a member Core does not hold has nothing pending: {unheld:?}"
+    );
+}
+
+/// The status sweep at scale: 800 identities, 400 of them members Core
+/// holds for unpublished customizer tools, are answered from one read of
+/// Core's held members, by `statuses()` and by `roster_inspect()` alike.
+///
+/// RED before the sweep read them once: 800 reads of a 400-member list per
+/// sweep.
+#[tokio::test]
+async fn a_status_sweep_of_800_identities_reads_core_s_held_members_once() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_held_live(&runtime, &core, 800, 400).await;
+    let reads = || core.tools_held_list_reads.load(Ordering::SeqCst);
+
+    let before = reads();
+    let statuses = runtime.statuses().await.expect("the statuses read");
+    assert_eq!(
+        reads() - before,
+        1,
+        "800 statuses, one read of Core's held members"
+    );
+    assert_eq!(statuses.len(), 800);
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| status.customizer_tools_pending.is_some())
+            .count(),
+        400
+    );
+
+    let before = reads();
+    let inspected = runtime.roster_inspect().await.expect("the roster reads");
+    assert_eq!(
+        reads() - before,
+        1,
+        "800 identities inspected, one read of Core's held members"
+    );
+    assert_eq!(inspected.len(), 800);
+}
+
+/// A delivery reads Core's hold of its own member only (one point read),
+/// never Core's whole list of held members.
+///
+/// RED before the delivery read only its member: each delivery read Core's
+/// whole list.
+#[tokio::test]
+async fn a_delivery_reads_only_its_own_member_s_hold() {
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    let identities = register_held_live(&runtime, &core, 3, 0).await;
+    let lists = core.tools_held_list_reads.load(Ordering::SeqCst);
+    let points = core.tools_held_point_reads.load(Ordering::SeqCst);
+
+    runtime
+        .send(&identities[0], &text("hello"))
+        .await
+        .expect("the delivery goes through");
+
+    assert_eq!(
+        core.tools_held_list_reads.load(Ordering::SeqCst) - lists,
+        0,
+        "no read of Core's whole list of held members"
+    );
+    assert_eq!(
+        core.tools_held_point_reads.load(Ordering::SeqCst) - points,
+        1,
+        "one read of the member's own hold"
+    );
+}
+
+/// A failed read of Core's members held for unpublished customizer tools
+/// fails the status read typed, never reads as "none held": the sweep and
+/// the inspection answer `MemberHistoryUnavailable`, and one identity's
+/// status `IdentityHistoryUnavailable`.
+///
+/// RED before the read failed closed: the failure read as no member held,
+/// and every status said that no tools were pending.
+#[tokio::test]
+async fn a_failed_read_of_core_s_held_members_fails_the_status_read_typed() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let identities = register_held_live(&runtime, &core, 2, 1).await;
+    core.tools_held_reads_fail.store(true, Ordering::SeqCst);
+
+    let swept = runtime.statuses().await;
+    assert!(
+        matches!(
+            &swept,
+            Err(IdentityRuntimeError::MemberHistoryUnavailable { detail })
+                if detail.contains("unpublished customizer tools")
+        ),
+        "{swept:?}"
+    );
+    let inspected = runtime.roster_inspect().await;
+    assert!(
+        matches!(
+            &inspected,
+            Err(IdentityRuntimeError::MemberHistoryUnavailable { .. })
+        ),
+        "{inspected:?}"
+    );
+    let one = runtime.status(&identities[0]).await;
+    assert!(
+        matches!(
+            &one,
+            Err(IdentityRuntimeError::IdentityHistoryUnavailable { identity, .. })
+                if identity == &identities[0]
+        ),
+        "{one:?}"
+    );
+}
+
+/// A delivery whose read of Core's hold of its member fails is refused,
+/// typed and retryable, and delivers nothing: a member whose run starts Core
+/// may hold is not admitted behind a hold that did not read.
+///
+/// RED before the read failed closed: the failure read as no hold, and the
+/// delivery went through.
+#[tokio::test]
+async fn a_delivery_whose_held_member_read_fails_is_refused_retryable() {
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    let identities = register_held_live(&runtime, &core, 1, 1).await;
+    core.tools_held_reads_fail.store(true, Ordering::SeqCst);
+
+    let refused = runtime.send(&identities[0], &text("hello")).await;
+
+    assert!(
+        matches!(
+            &refused,
+            Err(IdentityRuntimeError::IdentityWakeRetryable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert!(lock(&core.delivered).is_empty(), "nothing was delivered");
+}
+
+/// A rotation Core finishes itself leaves no rotation record: a reset whose
+/// rotation may have started keeps its record (the rollback mirror), and
+/// once Core carries that rotation out on its own (as at the mob's next
+/// start), the lifecycle projection reads the rotation's terminal seat and
+/// removes the record, as 0.9.10's next roster pass leaves it at rest. A
+/// rollback then finds no rotation to drive again.
+///
+/// RED before the projection removed it: the record stayed for good.
+#[tokio::test]
+async fn a_rotation_core_finishes_itself_leaves_no_rotation_record() {
+    rotation_core_finishes_itself(CoreFinishes::Successor).await;
+}
+
+/// The same when the reset's retirement ended before Core seated the fresh
+/// life: Core journals that seat as a fresh life after the retired
+/// incarnation (`SeatRotation::FreshLifeAfter`), one shape of a reset or a
+/// delete a stop interrupted, which Core finishes at the next start, and
+/// the lifecycle projection removes the record on it as on a successor's
+/// seat.
+///
+/// Pin: a projection that removed the record on a successor's seat only
+/// would keep it here, and a rollback after a later retirement would rotate
+/// the identity again.
+#[tokio::test]
+async fn a_fresh_life_core_seats_after_the_retirement_leaves_no_rotation_record() {
+    rotation_core_finishes_itself(CoreFinishes::FreshLifeAfter).await;
+}
+
+/// How Core finishes on its own the rotation a reset may have started: by
+/// the rotation's terminal step, which retires the live incarnation and
+/// seats its successor (`SeatRotation::Successor`), or, once the reset's
+/// retirement ended, by a fresh life after the retired incarnation
+/// (`SeatRotation::FreshLifeAfter`).
+#[derive(Clone, Copy, Debug)]
+enum CoreFinishes {
+    Successor,
+    FreshLifeAfter,
+}
+
+/// A reset of alice whose rotation may have started, and Core finishing
+/// that rotation on its own as `finishes` says: the record stays after the
+/// reset and is gone once the lifecycle projection read Core's seat.
+async fn rotation_core_finishes_itself(finishes: CoreFinishes) {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    *lock(&core.rotation_failure) = Some(BridgeError::Mob(
+        "the retirement ran past its bound".to_string(),
+    ));
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+
+    let failed = runtime.reset(&alice).await;
+    assert!(
+        matches!(
+            &failed,
+            Err(IdentityRuntimeError::Internal(detail)) if detail.contains("may have started")
+        ),
+        "{failed:?}"
+    );
+    runtime.settle_lifecycle_projection().await;
+    assert!(
+        rotation_records(&runtime).await.contains_key(&alice),
+        "the record of a rotation that may have started stays"
+    );
+
+    if let CoreFinishes::FreshLifeAfter = finishes {
+        // The reset's retirement ends first: no member holds alice when
+        // Core seats her fresh life.
+        let retiring = core
+            .core
+            .live_member(&alice)
+            .expect("Core's members read")
+            .expect("alice's member is retiring");
+        core.core.retire(&retiring.agent_runtime_id);
+    }
+    // Core carries out the rotation it started, on its own.
+    let next = AgentRuntimeId::parse(&format!("rt:{alice}:1")).expect("a runtime id");
+    core.core.rotate(
+        &alice,
+        &MemberRuntimeBinding {
+            agent_runtime_id: next,
+            session_id: Some(SessionId::new()),
+        },
+        &meerkat_mob::ProfileName::from("personal"),
+    );
+    let seat = last_seat_rotation(&core.core, &alice);
+    let journaled = match finishes {
+        CoreFinishes::Successor => {
+            matches!(seat, Some(meerkat_mob::SeatRotation::Successor { .. }))
+        }
+        CoreFinishes::FreshLifeAfter => {
+            matches!(seat, Some(meerkat_mob::SeatRotation::FreshLifeAfter { .. }))
+        }
+    };
+    assert!(journaled, "Core journals a {finishes:?} seat: {seat:?}");
+    runtime.settle_lifecycle_projection().await;
+
+    assert!(
+        rotation_records(&runtime).await.is_empty(),
+        "the rotation's terminal seat removed the record ({finishes:?})"
+    );
+}
+
+/// The rotation Core's journal names on `identity`'s last seat, if any.
+fn last_seat_rotation(
+    core: &CoreTestMembers,
+    identity: &AgentIdentity,
+) -> Option<meerkat_mob::SeatRotation> {
+    let member = member_id(identity);
+    core.journal_page(0, usize::MAX)
+        .expect("Core's journal reads")
+        .records
+        .into_iter()
+        .rev()
+        .find_map(|record| match record.fact {
+            crate::identity_first::bridge::MemberLifecycleFact::Seated {
+                member: seated,
+                rotation,
+                ..
+            } if seated == member => Some(rotation),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// A held pass whose rollback mark cannot be written is refused, and the
+/// host holds none of its identities: the hold extends only once the mirror
+/// is written, so a failed write never leaves an identity held for the rest
+/// of the process.
+///
+/// RED before the hold waited for the write: the identity stayed held.
+#[tokio::test]
+async fn a_failed_rollback_mark_write_leaves_the_identity_unheld() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let state = tempfile::tempdir().expect("a state directory");
+    // A file where the marks directory belongs: no mark can be written.
+    std::fs::write(
+        state
+            .path()
+            .join(crate::identity_first::HELD_COMPLETION_OWED_DIR),
+        b"",
+    )
+    .expect("the file is written");
+    runtime.set_held_completion_state_dir(Some(state.path().to_path_buf()));
+
+    let refused = runtime
+        .mark_held_completion_owed(std::slice::from_ref(&alice))
+        .await;
+
+    assert!(refused.is_err(), "the mark write fails: {refused:?}");
+    assert!(
+        !runtime.host_holds(&alice),
+        "the failed write left alice unheld"
+    );
 }
 
 /// An explicit materialization or warm that Core refuses with a refusal
@@ -3782,7 +5524,6 @@ async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
     .expect("Core holds alice");
     lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(Some(state_dir.path()), &core);
-    runtime.seed_host_pending([member_id(&alice)]);
 
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
 
@@ -3804,10 +5545,11 @@ async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
     );
 }
 
-/// A delivery to an identity whose first-boot row is still owed declares the
-/// identity first, with the row's `Resume` request: Core keeps the member it
-/// holds on the row's session and carries the request out, which ends its
-/// host preparation, so the delivery goes through. Nothing is seated.
+/// A delivery to an identity whose first-boot row Meta's own records still
+/// hold declares the identity first, with the row's `Resume` request: Core
+/// keeps the member it holds on the row's session and carries the request
+/// out, which ends its host preparation, so the delivery goes through, and
+/// Core is asked for it once. Nothing is seated.
 #[tokio::test]
 async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
     let alice = identity("personal:alice");
@@ -3833,13 +5575,17 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
     .expect("the manifest writes");
     runtime.set_first_boot_state_dir(Some(state_dir.path().to_path_buf()));
     lock(&core.host_pending).insert(alice.clone());
-    runtime.seed_host_pending([member_id(&alice)]);
 
     runtime
         .send(&alice, &text("hello"))
         .await
         .expect("the delivery goes through");
 
+    assert_eq!(
+        core.delivery_attempts.load(Ordering::SeqCst),
+        1,
+        "declared first, the delivery reaches Core once"
+    );
     assert!(
         !lock(&core.host_pending).contains(&alice),
         "the delivery's declaration ended the mark"
@@ -3851,6 +5597,202 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
         None,
         "the carried-out row leaves the manifest"
     );
+}
+
+/// The door answers Core's typed refusal of a delivery's wake for a host
+/// preparation Core keeps that Meta's own first-boot records do not name
+/// (`HostPreparationPending`): Meta keeps no copy of Core's mark, so the
+/// delivery reaches Core and is refused there; the door declares the
+/// identity once, Core ends its mark at that declaration, and the delivery
+/// goes through on the door's one retry.
+///
+/// RED before the door answered Core's refusal: the refusal surfaced, and
+/// nothing was declared or retried.
+#[tokio::test]
+async fn a_delivery_core_refuses_for_a_host_preparation_meta_s_records_do_not_name_is_declared_and_retried()
+ {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ends_host_preparation_at_declaration: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    lock(&core.host_pending).insert(alice.clone());
+    let applied = core.apply_calls.load(Ordering::SeqCst);
+
+    let delivered = runtime.send(&alice, &text("hello")).await;
+
+    assert!(
+        delivered.is_ok(),
+        "the delivery goes through on the door's retry: {delivered:?}"
+    );
+    assert_eq!(
+        core.delivery_attempts.load(Ordering::SeqCst),
+        2,
+        "refused for the host preparation, then delivered on the retry"
+    );
+    assert_eq!(
+        core.apply_calls.load(Ordering::SeqCst) - applied,
+        1,
+        "the door declared alice once"
+    );
+    assert!(
+        !lock(&core.host_pending).contains(&alice),
+        "the declaration ended the mark"
+    );
+    assert_eq!(lock(&core.delivered).len(), 1, "one delivery");
+}
+
+/// When Core refuses the retried delivery again for its host preparation
+/// (the declaration did not end it), the second refusal surfaces typed
+/// and retryable: the door declares once and retries once, never in a
+/// loop, and nothing is delivered.
+///
+/// RED before the door answered Core's refusal: the first refusal
+/// surfaced, and nothing was declared or retried.
+#[tokio::test]
+async fn a_second_host_preparation_refusal_after_the_door_declared_surfaces_typed() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    lock(&core.host_pending).insert(alice.clone());
+    let applied = core.apply_calls.load(Ordering::SeqCst);
+
+    let refused = runtime.send(&alice, &text("hello")).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(IdentityRuntimeError::IdentityWakeRetryable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        core.delivery_attempts.load(Ordering::SeqCst),
+        2,
+        "refused, declared, and refused once more"
+    );
+    assert_eq!(
+        core.apply_calls.load(Ordering::SeqCst) - applied,
+        1,
+        "the door declared alice once"
+    );
+    assert!(lock(&core.delivered).is_empty(), "nothing was delivered");
+}
+
+/// Source guard: Meta keeps no copy of the host preparation Core keeps for
+/// an identity (the members it handed the mob as host-pending before its
+/// build): the door answers Core's typed refusal instead.
+///
+/// RED before the copy went: the identity runtime kept `host_pending_seeded`,
+/// seeded by both compositions.
+#[test]
+fn the_door_keeps_no_copy_of_core_s_host_preparation() {
+    let sources = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        ("rpc_gateway.rs", include_str!("../../rpc_gateway.rs")),
+        (
+            "unified_runtime/builder.rs",
+            include_str!("../../unified_runtime/builder.rs"),
+        ),
+    ];
+    for (file, source) in sources {
+        let production = production_code(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production code was read"
+        );
+        for name in ["host_pending_seeded", "seed_host_pending"] {
+            assert!(
+                !production.contains(name),
+                "{file} names `{name}`: Core's host preparation is Core's, answered from its \
+                 typed wake refusal"
+            );
+        }
+    }
+}
+
+/// Source guard: no text probe of the host's build answer remains. The
+/// host's refusal is read from its typed form (the gateway builder's
+/// structured data, the bridge's typed refusal), on the wake path too: the
+/// identity runtime, its bridge and the unified runtime's surface name
+/// neither the gateway's callback rendering nor a probe of it.
+///
+/// RED before the probe went: `is_host_rejected_build_error` matched the
+/// gateway's callback rendering.
+#[test]
+fn no_text_probe_of_the_hosts_build_answer_remains() {
+    let sources = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        (
+            "identity_first/runtime/build_preparation.rs",
+            include_str!("build_preparation.rs"),
+        ),
+        ("identity_first/bridge.rs", include_str!("../bridge.rs")),
+        (
+            "unified_runtime/http.rs",
+            include_str!("../../unified_runtime/http.rs"),
+        ),
+    ];
+    for (file, source) in sources {
+        let production = production_text(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production text was read"
+        );
+        for probe in ["is_host_rejected_build_error", "callback/build_agent"] {
+            assert!(
+                !production.contains(probe),
+                "{file} names `{probe}`: the host's build refusal is read typed, never from text"
+            );
+        }
+    }
+}
+
+/// Source guard: the background warm's cancellation is a typed fact of the
+/// embodiment, never read back from an error's text: nothing compares an
+/// error's message with `BACKGROUND_WARM_CANCELLED`, the text a cancelled
+/// embodiment answers with.
+///
+/// RED before the cancellation was typed: the foreground materialization
+/// and the background warm compared the internal error's text with it.
+#[test]
+fn the_warm_cancellation_is_never_read_from_an_errors_text() {
+    let production = production_code(include_str!("../runtime.rs"));
+    assert!(
+        !production.trim().is_empty(),
+        "identity_first/runtime.rs: no production code was read"
+    );
+    for probe in [
+        "== BACKGROUND_WARM_CANCELLED",
+        "BACKGROUND_WARM_CANCELLED ==",
+    ] {
+        assert!(
+            !production.contains(probe),
+            "identity_first/runtime.rs compares an error's text with the warm's \
+             cancellation (`{probe}`): the cancellation is the embodiment's typed fact"
+        );
+    }
 }
 
 /// The members Meta hands the mob as host-pending before its build name
@@ -3909,12 +5851,15 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_no_compile_rotates_i
     };
     assert!(detail.contains("may have started"), "{detail}");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the record of a rotation that may have started stays"
+    );
+    let kept = rotation_records(&runtime).await.remove(&alice);
+    assert_eq!(
+        kept.as_ref()
+            .map(|record| (record.verb.as_str(), record.from_generation)),
+        Some(("reset", Some(0))),
+        "the record names the rotation as 0.9.10 leaves it at rest: {kept:?}"
     );
     let asked = core.rotation_calls.load(Ordering::SeqCst);
 
@@ -3927,11 +5872,7 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_no_compile_rotates_i
     );
     assert!(lock(&core.rotations).is_empty(), "nothing was rotated");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the record stays written"
     );
 }
@@ -3958,11 +5899,7 @@ async fn a_reset_whose_spec_cannot_be_lowered_leaves_no_rotation_to_carry_out() 
         "{refused:?}"
     );
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
+        rotation_records(&runtime).await.is_empty(),
         "the record of a rotation that never started is taken back"
     );
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
@@ -4072,11 +6009,7 @@ async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() 
     }
 
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
+        rotation_records(&runtime).await.is_empty(),
         "the refused rotation left no record"
     );
     let host_pending =
@@ -6524,11 +8457,7 @@ async fn a_delete_core_refuses_while_a_host_rotation_ends_keeps_nothing() {
         "{refused:?}"
     );
     assert!(
-        !runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        !rotation_records(&runtime).await.contains_key(&alice),
         "the refused delete keeps no rotation record"
     );
     runtime.settle_lifecycle_projection().await;
@@ -6857,11 +8786,7 @@ async fn a_host_fresh_life_a_refused_delete_raced_owes_no_delete() {
         "the refused delete recorded nothing it owes"
     );
     assert!(
-        !runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        !rotation_records(&runtime).await.contains_key(&alice),
         "the refused delete recorded no rotation"
     );
     let fresh = core
@@ -7053,11 +8978,7 @@ async fn a_reset_whose_journal_head_does_not_read_asks_core_nothing() {
         "Core was asked nothing"
     );
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
+        rotation_records(&runtime).await.is_empty(),
         "the refused reset left no record"
     );
 }
@@ -7085,11 +9006,7 @@ async fn a_refusal_whose_records_are_kept_says_the_rotation_may_have_started() {
     };
     assert!(detail.contains("may have started"), "{detail}");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the reset's rotation record stays written"
     );
 }
@@ -7487,11 +9404,7 @@ async fn a_reset_whose_incarnation_a_host_retired_first_keeps_what_it_recorded()
     };
     assert!(detail.contains("may have started"), "{detail}");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the reset's rotation record stays written"
     );
 }

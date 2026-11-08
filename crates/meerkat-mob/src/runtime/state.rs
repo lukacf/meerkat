@@ -1020,6 +1020,9 @@ pub(super) enum MobCommand {
     },
     /// Internal: the retry of a member whose boot work is still owed is due.
     RetryOwedMemberWake { agent_identity: AgentIdentity },
+    /// Internal: the retry timer of a member's build preparation the host
+    /// asked to retry (BuildPreparationRetry) is due.
+    RetryMemberBuildPreparation { agent_identity: AgentIdentity },
     /// An owed edge repair's timer fired (the actor's own self-send).
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
@@ -1487,6 +1490,13 @@ pub(super) enum MobCommand {
         release_rx: oneshot::Receiver<()>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-only: whether `agent_identity`'s owed-boot wake retry timer is
+    /// armed now.
+    #[cfg(test)]
+    OwedMemberWakeRetryArmedForTest {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -1540,6 +1550,12 @@ pub(super) enum MobCommand {
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
+    },
+    /// The host retries the build preparation it asked to retry for a member
+    /// ([`super::MobHandle::resolve_member_build_preparation`]).
+    ResolveMemberBuildPreparation {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
     /// Release a host's run-start hold on a member (#1500).
     ReleaseMemberRunStarts {
@@ -2347,6 +2363,7 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2417,6 +2434,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2430,6 +2449,7 @@ impl MobCommand {
             Self::ProjectMemberList { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReleaseMemberRunStarts { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveMemberBuildPreparation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PlanDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2558,6 +2578,8 @@ impl MobCommand {
             Self::WakeMember { .. } => "WakeMember",
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
+            Self::RetryMemberBuildPreparation { .. } => "RetryMemberBuildPreparation",
+            Self::ResolveMemberBuildPreparation { .. } => "ResolveMemberBuildPreparation",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
             Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
@@ -2654,6 +2676,8 @@ impl MobCommand {
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
+            #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
             #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"

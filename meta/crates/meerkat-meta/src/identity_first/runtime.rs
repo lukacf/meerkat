@@ -69,6 +69,7 @@ mod records;
 mod roster_pass_tests;
 #[cfg(test)]
 mod seat_tests;
+use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
 pub(crate) use records::host_pending_members_before_build;
 
@@ -76,6 +77,17 @@ const MANAGED_PEER_RECONCILE_CONCURRENCY: usize = 64;
 const RAW_MEMBER_ALIAS_LOCK_SWEEP_MIN: usize = 256;
 const BACKGROUND_WARM_CANCELLED: &str =
     "identity background warm cancelled before session installation";
+
+/// What an embodiment reports beside its answer: the bootstrap generation
+/// it bound itself to, and whether its caller's cancellation ended it before
+/// the member's session was installed. A cancelled embodiment answers an
+/// internal error whose text is [`BACKGROUND_WARM_CANCELLED`]; its callers
+/// read the cancellation here, never from that text.
+#[derive(Debug, Default)]
+pub(crate) struct EmbodimentTrace {
+    pub(crate) bootstrap_generation: Option<u64>,
+    pub(crate) cancelled: bool,
+}
 fn durable_spec_uses_external_binding(spec: &DurableAgentSpec) -> bool {
     matches!(spec.backend, Some(meerkat_mob::MobBackendKind::External))
         || matches!(
@@ -786,12 +798,12 @@ impl FreshLife {
 }
 
 /// What a fresh life's rotation that Core did not carry out leaves to settle
-/// ([`IdentityRuntime::refused_rotation`]): the rotation record an earlier
-/// call left, the retirement the call prepared, the head of Core's journal
-/// the call read before it asked Core, and the fact the rotation journals
-/// first.
+/// ([`IdentityRuntime::refused_rotation`]): the generation the rotation
+/// rotates from (its rotation record's, should the rotation have started),
+/// the retirement the call prepared, the head of Core's journal the call
+/// read before it asked Core, and the fact the rotation journals first.
 struct RefusedRotation {
-    earlier: Option<crate::runtime::IdentityRotationIntent>,
+    from_generation: Option<u64>,
     retiring: Option<lifecycle_projection::PreparedRetirement>,
     asked_after: Option<u64>,
     first: lifecycle_projection::StepFirstFact,
@@ -1061,11 +1073,13 @@ pub enum IdentityRuntimeError {
         refusal: super::held_bootstrap::HeldBootstrapRefusal,
         completion: super::held_bootstrap::HeldCompletionOutcome,
     },
-    /// A held bootstrap's member that the pass did not publish owes its host
-    /// a fresh held completion: an ordinary (unheld) embodiment would publish
-    /// a new instance whose finished surface the host's completion never saw,
-    /// so every wake outside a held pass that covers it refuses it typed,
-    /// until such a pass completes it.
+    /// An identity whose creation its host holds in this process (a held
+    /// bootstrap's roster, a held add), and whose member no held pass
+    /// published, owes its host a fresh held completion: Core never created
+    /// it, and an ordinary (unheld) embodiment would publish a new instance
+    /// whose finished surface the host's completion never saw, so every wake
+    /// outside a held pass that covers it refuses it typed, until such a
+    /// pass completes it.
     HeldCompletionOwed {
         identity: AgentIdentity,
     },
@@ -1164,8 +1178,8 @@ pub enum IdentityRuntimeError {
         detail: String,
     },
     /// The build of the identity's member was refused DETERMINISTICALLY: the
-    /// host answered the app-side `callback/build_agent` round trip with an
-    /// error (the candidate-mode effect gate class), provider authentication
+    /// host answered the app-side build callback with an error, typed (the
+    /// candidate-mode effect gate class), provider authentication
     /// refused it with a credential kind no unattended retry can change,
     /// the placement host's realm backend is not persistent while the
     /// identity needs durable sessions, its profile declares
@@ -1407,11 +1421,11 @@ impl std::fmt::Display for IdentityRuntimeError {
             ),
             Self::HeldCompletionOwed { identity } => write!(
                 f,
-                "identity {identity} owes its host a fresh held completion: its held member \
-                 was not published, so it is not embodied unheld. Run the host's held \
-                 bootstrap again (a pass that covers the identity publishes it); if the host \
-                 will never complete it, remove its mark from the state directory's \
-                 held-completion-owed directory"
+                "identity {identity} owes its host a fresh held completion: its host holds its \
+                 creation and its held member was not published, so it is not embodied unheld. \
+                 A held pass that covers the identity publishes it (the host's held bootstrap, \
+                 or a held add of it); a restarted host that no longer holds it creates it as \
+                 any other identity"
             ),
             Self::IdentityUnresumable {
                 identity,
@@ -1594,16 +1608,6 @@ impl std::fmt::Display for IdentityRuntimeError {
     }
 }
 
-/// A build failure whose root cause is the HOST's own answer: the
-/// `callback/build_agent` round trip COMPLETED and the app returned an error
-/// (rpc_gateway mints `callback/build_agent failed: callback error: <host
-/// message>` for exactly this case; see `StdioCallbackBridge::call`).
-/// Transport-tier callback failures ("callback transport closed", timeouts,
-/// dropped channels) deliberately do NOT match: those are retryable.
-pub(crate) fn is_host_rejected_build_error(detail: &str) -> bool {
-    detail.contains("callback/build_agent failed: callback error:")
-}
-
 /// Whether a typed provider-auth kind is a DETERMINISTIC build wall: a fact
 /// about configuration that no unattended retry can change, so the wake
 /// refuses with the reason instead of reporting a retryable fault. The
@@ -1650,9 +1654,9 @@ pub(crate) const fn is_deterministic_provider_auth_kind(kind: meerkat_core::Auth
 /// sessions ([`BridgeError::NonDurableService`]; the reason names the
 /// remedy), the launch's member auth binding refusing the member's build
 /// ([`BridgeError::MemberRouteRefused`]; the reason names the remedy), and
-/// the host's own `callback/build_agent` answer
-/// ([`is_host_rejected_build_error`], the one place a string probe remains
-/// because `rpc_gateway` mints that text).
+/// the host's own typed refusal of the build ([`BridgeError::HostRejectedBuild`],
+/// and the resume refusal of kind [`ResumeRejectionKind::HostRejectedBuild`]
+/// for a member Core holds Broken for it), read typed, never from text.
 pub(crate) fn deterministic_build_rejection_reason(error: &BridgeError) -> Option<String> {
     match error {
         BridgeError::ProviderAuthRejected { failure, detail } => {
@@ -1670,10 +1674,12 @@ pub(crate) fn deterministic_build_rejection_reason(error: &BridgeError) -> Optio
              durable from the profile"
         )),
         BridgeError::MemberRouteRefused { detail, .. } => Some(member_route_refusal_reason(detail)),
-        other => {
-            let detail = other.to_string();
-            is_host_rejected_build_error(&detail).then_some(detail)
-        }
+        refused @ (BridgeError::HostRejectedBuild { .. }
+        | BridgeError::ResumeRejected {
+            kind: ResumeRejectionKind::HostRejectedBuild,
+            ..
+        }) => Some(refused.to_string()),
+        _ => None,
     }
 }
 
@@ -3491,19 +3497,6 @@ impl IdentityEdgeOwnership {
 pub(crate) type HeldFreshnessHook =
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
 
-/// The durable held-completion marks as this process knows them (see
-/// [`super::held_bootstrap::HeldCompletionMarks`]).
-enum HeldMarks {
-    /// No state directory or host store realm is configured: the marks live
-    /// in memory only.
-    NoStateDir,
-    /// Not read yet: the first wake or held pass reads them into
-    /// `held_completion_owed`.
-    Unread(super::held_bootstrap::HeldCompletionMarksAt),
-    /// Read into `held_completion_owed`; new marks are written here.
-    Read(super::held_bootstrap::HeldCompletionMarksAt),
-}
-
 /// The first-boot manifest as this process knows it.
 enum FirstBootRows {
     /// No state directory or host store realm is configured, so there is no
@@ -3581,30 +3574,21 @@ pub struct IdentityRuntime {
     /// Set whenever an agent customizer exists; the same registry backs the
     /// mob's `CustomizerToolsSpawnCustomizer`.
     customizer_tools: RwLock<Option<Arc<super::customizer_tools::CustomizerToolRegistry>>>,
-    /// Identities whose customizer tools are not published to their member
-    /// yet although Core built it: Core built it held (before the runtime
-    /// was composed, or for an identity the roster does not list), and the
-    /// publication that releases it has not succeeded. Each is published by
-    /// the next composition, or by its member's wake or delivery.
-    customizer_tools_pending: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
-    /// The member ids Meta handed the mob as host-pending before it was
-    /// built (`MobBuilder::with_host_pending_members`): Core refuses their
-    /// wakes until the declaration that carries each one's first-boot row
-    /// out ends its mark. Each leaves this set once Core names its row
-    /// carried out.
-    host_pending_seeded: StdMutex<BTreeSet<meerkat_mob::AgentIdentity>>,
+    /// Why each identity's customizer last failed to publish its tools: the
+    /// host's `customize_build` failed in a member build preparation (Core
+    /// then keeps the member's build preparation retry and refuses its
+    /// wakes, `BuildPreparationRetry`) or in the publication for a member
+    /// Core holds for unpublished tools. Meta's own text, for the identity's
+    /// status and the typed answer to a refused delivery. Which members Core
+    /// holds, and which wakes it refuses, are Core's
+    /// (`SessionBridge::members_holding_run_starts_for_published_tools`, the
+    /// typed wake refusal). A publication that succeeds clears it.
+    customizer_failures: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
     /// The bootstrap entry an explicit materialization or warm replaced when
     /// it marked the identity warming, by identity: a refusal that clears
     /// on its own puts it back exactly.
     bootstrap_warming_replaced:
         StdMutex<BTreeMap<AgentIdentity, (IdentityBootstrapState, Option<String>)>>,
-    /// Identities whose last member build preparation failed: Core did not
-    /// build the member, which stays Dormant, and its next wake's
-    /// preparation publishes its tools. Reported with the pending ones
-    /// ([`Self::customizer_tools_pending_for`]) and answered typed to a
-    /// delivery, but never published from a delivery: the member is not
-    /// built, so the wake's preparation is the one publication.
-    refused_build_preparations: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
     /// Meta's preparer of Core's member builds, when the mob was built with
     /// one ([`super::build_preparer::IdentityBuildPreparer`]).
     member_build_preparer: StdRwLock<Option<Arc<super::build_preparer::IdentityBuildPreparer>>>,
@@ -3636,18 +3620,21 @@ pub struct IdentityRuntime {
     /// The held bootstrap pass in progress, if any: fresh creations of its
     /// roster identities are held until the pass decides them.
     held_create_pass: StdMutex<Option<Arc<super::held_bootstrap::HeldCreatePass>>>,
-    /// Identities whose member a held bootstrap pass did not publish (it
-    /// ended Broken in that pass): each owes its host a fresh held
-    /// completion, and no embodiment outside a held pass that covers it
-    /// creates it meanwhile. A held pass that publishes it discharges it.
-    /// With a state directory it also holds the durable marks read back
-    /// after a restart (`held_completion_marks`).
-    held_completion_owed: StdMutex<BTreeSet<AgentIdentity>>,
-    /// Where the held-completion marks are kept durably, so a restart
-    /// keeps them.
-    held_completion_marks: StdMutex<HeldMarks>,
-    /// Serializes the first read of the durable held-completion marks.
-    held_completion_marks_reader: Mutex<()>,
+    /// The host's hold: the identities it asked to hold in this process
+    /// (a held bootstrap's roster, each held add's identity), its input to
+    /// every declaration of them (`held_creation`). Core decides: an
+    /// identity it never created awaits its held creation, which only a
+    /// held pass carries out, and no other embodiment creates it. An
+    /// identity leaves the set when a held pass publishes its member or
+    /// when it is deleted. Kept in memory and never written: after a
+    /// restart the host holds an identity again through its held bootstrap
+    /// or a held add.
+    host_held: StdMutex<BTreeSet<AgentIdentity>>,
+    /// Where this runtime writes the held-completion marks: the mirror for
+    /// a rollback to 0.9.10, whose runtime reads them back after a restart,
+    /// kept only while that rollback is supported (until 0.9.12). Nothing
+    /// here reads them.
+    held_completion_marks: StdMutex<Option<super::held_bootstrap::HeldCompletionMarksAt>>,
     /// The first-boot manifest: the rows of it this process has not
     /// carried out yet. Process-local: each row is read against Core's
     /// member history again before it is carried out.
@@ -4367,52 +4354,56 @@ impl IdentityRuntime {
             .clone()
     }
 
-    /// Whether `identity` owes its host a fresh held completion (see
-    /// [`IdentityRuntimeError::HeldCompletionOwed`]).
-    pub(crate) fn held_completion_owed(&self, identity: &AgentIdentity) -> bool {
-        self.held_completion_owed
+    /// Whether the host holds `identity`'s creation in this process (see
+    /// `host_held`): every declaration of it carries `held_creation`, and an
+    /// identity Core never created then awaits its held creation
+    /// ([`IdentityRuntimeError::HeldCompletionOwed`] outside a held pass that
+    /// covers it).
+    pub(crate) fn host_holds(&self, identity: &AgentIdentity) -> bool {
+        self.host_held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(identity)
     }
 
-    /// Record how a held pass settled `identity`'s member: published, it
-    /// discharges any held completion the identity owed; Broken, the
-    /// identity owes its host a fresh held completion.
+    /// Record how a held pass settled `identity`'s member: a published member
+    /// leaves the host's hold. A member the pass did not publish stays held,
+    /// as the pass's own marking left it.
     pub(crate) fn record_held_completion(&self, identity: &AgentIdentity, published: bool) {
-        let mut owed = self
-            .held_completion_owed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if published {
-            owed.remove(identity);
-        } else {
-            owed.insert(identity.clone());
+            self.release_host_hold(identity);
         }
     }
 
-    /// Point the runtime at its state directory, where the held-completion
-    /// marks are kept durably, one file per identity under
-    /// [`super::HELD_COMPLETION_OWED_DIR`]; the first wake or
-    /// held pass reads them. `None` keeps the marks in memory only, so a
-    /// restart forgets them.
+    /// `identity` leaves the host's hold: a held pass published its member,
+    /// or it was deleted.
+    pub(crate) fn release_host_hold(&self, identity: &AgentIdentity) {
+        self.host_held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(identity);
+    }
+
+    /// Point the runtime at its state directory, where it writes the
+    /// held-completion marks, one file per identity under
+    /// [`super::HELD_COMPLETION_OWED_DIR`]: the mirror for a rollback to
+    /// 0.9.10, whose runtime reads them back after a restart (until 0.9.12).
+    /// This runtime never reads them: held creation follows the host's hold
+    /// in this process and Core's verdict. `None` writes no marks.
     pub fn set_held_completion_state_dir(&self, state_dir: Option<PathBuf>) {
         *self
             .held_completion_marks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = match state_dir {
-            Some(state_dir) => {
-                HeldMarks::Unread(super::held_bootstrap::HeldCompletionMarksAt::StateDir(
-                    super::held_bootstrap::HeldCompletionMarks::in_state_dir(&state_dir),
-                ))
-            }
-            None => HeldMarks::NoStateDir,
-        };
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = state_dir.map(|state_dir| {
+            super::held_bootstrap::HeldCompletionMarksAt::StateDir(
+                super::held_bootstrap::HeldCompletionMarks::in_state_dir(&state_dir),
+            )
+        });
     }
 
-    /// Point the runtime at the host store realm that keeps its
-    /// held-completion marks, one document per identity; the first wake or
-    /// held pass reads them, on whichever host the runtime starts.
+    /// Point the runtime at the host store realm where it writes the
+    /// held-completion marks, one document per identity: the rollback mirror,
+    /// as [`Self::set_held_completion_state_dir`] writes it.
     pub(crate) fn set_held_completion_host_store(
         &self,
         documents: crate::host_store_documents::MetaDocuments,
@@ -4420,101 +4411,45 @@ impl IdentityRuntime {
         *self
             .held_completion_marks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = HeldMarks::Unread(
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
             super::held_bootstrap::HeldCompletionMarksAt::HostStore(documents),
         );
     }
 
-    /// The durable held-completion marks, when a state directory or a host
-    /// store realm keeps them.
+    /// Where the held-completion marks are written, when a state directory or
+    /// a host store realm keeps them.
     fn held_completion_marks(&self) -> Option<super::held_bootstrap::HeldCompletionMarksAt> {
-        match &*self
-            .held_completion_marks
+        self.held_completion_marks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
-            HeldMarks::NoStateDir => None,
-            HeldMarks::Unread(marks) | HeldMarks::Read(marks) => Some(marks.clone()),
-        }
+            .clone()
     }
 
-    /// Read the durable held-completion marks into `held_completion_owed`,
-    /// once. A marked identity that Core's member history binds was
-    /// published by the held pass that marked it (removing its mark did not
-    /// land), so it owes nothing and its mark is removed now. A read that
-    /// fails refuses the caller, and the next call reads again: which
-    /// identities owe a completion is unknown until then.
-    async fn load_held_completion_marks(&self) -> Result<(), IdentityRuntimeError> {
-        let unread = matches!(
-            &*self
-                .held_completion_marks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            HeldMarks::Unread(_)
-        );
-        if !unread {
-            return Ok(());
-        }
-        let _reader = self.held_completion_marks_reader.lock().await;
-        let marks = match &*self
-            .held_completion_marks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
-            HeldMarks::Unread(marks) => marks.clone(),
-            HeldMarks::NoStateDir | HeldMarks::Read(_) => return Ok(()),
-        };
-        let marked = match &marks {
-            super::held_bootstrap::HeldCompletionMarksAt::StateDir(files) => {
-                let reader = files.clone();
-                tokio::task::spawn_blocking(move || reader.read())
-                    .await
-                    .map_err(|error| {
-                        IdentityRuntimeError::Internal(format!(
-                            "reading the held-completion marks did not finish: {error}"
-                        ))
-                    })?
-                    .map_err(|error| error.to_string())
-            }
-            super::held_bootstrap::HeldCompletionMarksAt::HostStore(documents) => {
-                super::held_bootstrap::read_host_store_marks(documents).await
-            }
-        }
-        .map_err(|error| {
-            IdentityRuntimeError::Internal(format!(
-                "reading the held-completion marks in {}: {error}",
-                marks.describe()
-            ))
-        })?;
-        let mut owed = BTreeSet::new();
-        for identity in marked {
-            if self.bridge.is_some() && self.core_last_binding(&identity).await?.is_some() {
-                self.clear_held_completion_mark(&identity).await;
-                continue;
-            }
-            owed.insert(identity);
-        }
-        self.held_completion_owed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(owed);
-        *self
-            .held_completion_marks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = HeldMarks::Read(marks);
-        Ok(())
-    }
-
-    /// Mark `identities` durably as owing their host a held completion,
-    /// before a held pass creates any of their members.
+    /// The host holds `identities`' creation in this process: a held pass is
+    /// about to create their members. Each is marked in the rollback mirror,
+    /// durably and before any member exists, as 0.9.10 marks it; nothing
+    /// here reads the marks. The hold extends only once the marks are
+    /// written: a write that fails refuses the pass, as it does there, and
+    /// leaves none of its identities held.
     pub(crate) async fn mark_held_completion_owed(
         &self,
         identities: &[AgentIdentity],
     ) -> Result<(), IdentityRuntimeError> {
-        self.load_held_completion_marks().await?;
-        let Some(marks) = self.held_completion_marks() else {
-            return Ok(());
-        };
+        if let Some(marks) = self.held_completion_marks() {
+            Self::write_held_completion_marks(marks, identities).await?;
+        }
+        self.host_held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(identities.iter().cloned());
+        Ok(())
+    }
+
+    /// Write `identities`' marks where `marks` keeps them, durably.
+    async fn write_held_completion_marks(
+        marks: super::held_bootstrap::HeldCompletionMarksAt,
+        identities: &[AgentIdentity],
+    ) -> Result<(), IdentityRuntimeError> {
         let dir = marks.describe();
         match marks {
             super::held_bootstrap::HeldCompletionMarksAt::StateDir(files) => {
@@ -4537,10 +4472,10 @@ impl IdentityRuntime {
         })
     }
 
-    /// Remove `identity`'s durable held-completion mark once a held pass
-    /// published its member. A removal that fails leaves a stale mark, which
-    /// the next read drops, since Core's member history then binds the
-    /// identity.
+    /// Remove `identity`'s held-completion mark from the rollback mirror once
+    /// a held pass published its member, as 0.9.10 removes it. A removal that
+    /// fails leaves a stale mark, which a rollback's read drops, since Core's
+    /// member history then binds the identity.
     pub(crate) async fn clear_held_completion_mark(&self, identity: &AgentIdentity) {
         let Some(marks) = self.held_completion_marks() else {
             return;
@@ -4564,8 +4499,8 @@ impl IdentityRuntime {
         tracing::warn!(
             %identity,
             error = %failure,
-            "the held-completion mark of a published member was not removed; the next read \
-             of the marks drops it"
+            "the held-completion mark of a published member was not removed; a rollback's \
+             read of the marks drops it"
         );
     }
 
@@ -4606,9 +4541,7 @@ impl IdentityRuntime {
             raw_member_alias_locks: RwLock::new(RawMemberAliasLockTable::default()),
             customizer: RwLock::new(None),
             customizer_tools: RwLock::new(None),
-            customizer_tools_pending: std::sync::RwLock::new(BTreeMap::new()),
-            refused_build_preparations: std::sync::RwLock::new(BTreeMap::new()),
-            host_pending_seeded: StdMutex::new(BTreeSet::new()),
+            customizer_failures: std::sync::RwLock::new(BTreeMap::new()),
             bootstrap_warming_replaced: StdMutex::new(BTreeMap::new()),
             member_build_preparer: StdRwLock::new(None),
             candidate_launch: AtomicBool::new(false),
@@ -4623,9 +4556,8 @@ impl IdentityRuntime {
             bootstrap_generation: StdMutex::new(0),
             bootstrap_controller: Mutex::new(()),
             held_create_pass: StdMutex::new(None),
-            held_completion_owed: StdMutex::new(BTreeSet::new()),
-            held_completion_marks: StdMutex::new(HeldMarks::NoStateDir),
-            held_completion_marks_reader: Mutex::new(()),
+            host_held: StdMutex::new(BTreeSet::new()),
+            held_completion_marks: StdMutex::new(None),
             first_boot: StdMutex::new(FirstBootRows::NoStateDir),
             first_boot_writer: Arc::new(Mutex::new(())),
             #[cfg(test)]
@@ -5516,22 +5448,48 @@ impl IdentityRuntime {
     /// Publish one successful `customize_build` result for `identity` and
     /// point the draft at the identity's stable dispatcher, so the spawn (or
     /// the adopted occupant, which already holds it) serves the new tools.
-    /// When the identity's tools were pending, Core holds its live member's
-    /// run starts: the publication releases the hold.
+    /// When Core holds the identity's member for unpublished tools
+    /// ([`Self::core_holds_unpublished_tools`]), the publication releases
+    /// the hold.
     async fn publish_customizer_tools(
         &self,
         identity: &AgentIdentity,
         draft: &mut AgentBuildDraft,
     ) {
-        let was_pending = self
-            .publish_customizer_tools_unreleased(identity, draft)
+        self.publish_customizer_tools_unreleased(identity, draft)
             .await;
         // A candidate launch releases nothing: its members' runs belong to
         // the authoritative launch.
-        if was_pending
-            && !self.is_candidate_launch()
-            && let Some(bridge) = self.bridge.as_ref()
-        {
+        if self.is_candidate_launch() {
+            return;
+        }
+        let held = match self.core_holds_unpublished_tools(identity) {
+            Ok(held) => held,
+            // Fail closed: a hold that did not read keeps the identity
+            // pending, so nothing is admitted behind it until a later
+            // publication reads it and releases it.
+            Err(error) => {
+                let reason = format!(
+                    "customizer tools published, but Core's hold of the member for them did \
+                     not read: {error}"
+                );
+                tracing::error!(
+                    %identity,
+                    %reason,
+                    "the member may stay held: it starts no run until a later publication \
+                     reads its hold and releases it"
+                );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason,
+                        artifact_refusal: None,
+                    },
+                );
+                return;
+            }
+        };
+        if held && let Some(bridge) = self.bridge.as_ref() {
             let member_id = crate::member_comms_id::mob_member_id(identity.as_str());
             if let Err(error) = bridge
                 .release_member_run_starts_for_published_tools(&member_id)
@@ -5543,95 +5501,192 @@ impl IdentityRuntime {
                     %reason,
                     "the member stays held: it starts no run until the hold is released"
                 );
-                self.customizer_tools_pending
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        identity.clone(),
-                        CustomizerToolsPending {
-                            reason,
-                            artifact_refusal: None,
-                        },
-                    );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason,
+                        artifact_refusal: None,
+                    },
+                );
             }
         }
     }
 
     /// [`Self::publish_customizer_tools`] without the release: for a build
-    /// Core is about to perform, which starts with no hold. Returns whether
-    /// the identity's tools were pending.
+    /// Core is about to perform, which starts with no hold. The publication
+    /// clears the identity's last customizer failure.
     async fn publish_customizer_tools_unreleased(
         &self,
         identity: &AgentIdentity,
         draft: &mut AgentBuildDraft,
-    ) -> bool {
+    ) {
         let Some(registry) = self.customizer_tools.read().await.clone() else {
-            return false;
+            return;
         };
         let entry = registry.publish(identity, draft.local_external_tools.dispatcher());
         draft.local_external_tools = super::types::LocalExternalToolOverlay::new(entry);
-        // A publication supersedes a refused preparation of the identity.
-        self.refused_build_preparations
+        self.customizer_failures
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(identity);
-        self.customizer_tools_pending
+    }
+
+    /// Record why `identity`'s customizer failed to publish its tools, for
+    /// its status and the typed answer to a refused delivery.
+    pub(crate) fn record_customizer_failure(
+        &self,
+        identity: &AgentIdentity,
+        failure: CustomizerToolsPending,
+    ) {
+        self.customizer_failures
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(identity)
-            .is_some()
+            .insert(identity.clone(), failure);
     }
 
-    /// Why `identity`'s customizer tools are not published, if they are
-    /// not: the member Core built held, or the member's refused build
-    /// preparation.
-    pub(crate) fn customizer_tools_pending_for(
+    /// Why `identity`'s customizer last failed to publish its tools, if a
+    /// failure stands.
+    pub(crate) fn customizer_failure(
         &self,
         identity: &AgentIdentity,
     ) -> Option<CustomizerToolsPending> {
-        self.held_customizer_tools_pending(identity).or_else(|| {
-            self.refused_build_preparations
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(identity)
-                .cloned()
-        })
-    }
-
-    /// Why the customizer tools of `identity`'s member, which Core built
-    /// held, are not published yet; `None` when Core holds no such member.
-    fn held_customizer_tools_pending(
-        &self,
-        identity: &AgentIdentity,
-    ) -> Option<CustomizerToolsPending> {
-        self.customizer_tools_pending
+        self.customizer_failures
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(identity)
             .cloned()
     }
 
-    /// Publish the customizer tools of a member Core holds live while they
-    /// are still pending: Core built it held before the runtime was composed,
-    /// and the composition's publication failed. Core holds its run starts
-    /// until they are published, and nothing rebuilds a live member, so no
-    /// build preparation reaches it: the next composition, or its wake or
-    /// delivery here, publishes them. The publication releases the hold.
+    /// The registered identities whose members Core holds for unpublished
+    /// customizer tools: Core's own read
+    /// ([`SessionBridge::members_holding_run_starts_for_published_tools`]),
+    /// each member id taken to the identity it names. One read serves a
+    /// sweep of every identity (a composition, the statuses, the roster's
+    /// inspection). A read that fails is an error, never "none held".
+    pub(crate) fn members_core_holds_for_unpublished_tools(
+        &self,
+    ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(BTreeSet::new());
+        };
+        Ok(bridge
+            .members_holding_run_starts_for_published_tools()?
+            .iter()
+            .filter_map(|member| {
+                AgentIdentity::parse(&crate::member_comms_id::durable_identity_for_roster_member(
+                    member.as_str(),
+                ))
+                .ok()
+            })
+            .collect())
+    }
+
+    /// Whether Core holds `identity`'s member for unpublished customizer
+    /// tools: Core's read of that member alone
+    /// ([`SessionBridge::member_holds_run_starts_for_published_tools`]), for
+    /// a delivery, a publication or one identity's status. A read that
+    /// fails is an error, never "not held".
+    pub(crate) fn core_holds_unpublished_tools(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(false);
+        };
+        bridge.member_holds_run_starts_for_published_tools(&crate::member_comms_id::mob_member_id(
+            identity.as_str(),
+        ))
+    }
+
+    /// Why `identity`'s customizer tools are not published, if they are
+    /// not, given whether Core holds its member for unpublished tools
+    /// (`core_holds`, read already): the customizer's last failure, or,
+    /// while Core holds the member, that they are published once the
+    /// runtime is composed. A candidate launch's holds are the authoritative
+    /// launch's to release, never a sign of unpublished tools: its status
+    /// names only a failure.
+    fn customizer_tools_pending_given(
+        &self,
+        identity: &AgentIdentity,
+        core_holds: bool,
+    ) -> Option<CustomizerToolsPending> {
+        self.customizer_failure(identity).or_else(|| {
+            (!self.is_candidate_launch() && core_holds).then(|| CustomizerToolsPending {
+                reason: super::build_preparer::PUBLISHED_ONCE_COMPOSED.to_string(),
+                artifact_refusal: None,
+            })
+        })
+    }
+
+    /// [`Self::customizer_tools_pending_given`] for one identity, reading
+    /// Core's hold of its member when no customizer failure answers first.
+    /// A read that fails is an error, never "nothing pending".
+    pub(crate) fn customizer_tools_pending_for(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<CustomizerToolsPending>, BridgeError> {
+        if let Some(failure) = self.customizer_failure(identity) {
+            return Ok(Some(failure));
+        }
+        if self.is_candidate_launch() {
+            return Ok(None);
+        }
+        let core_holds = self.core_holds_unpublished_tools(identity)?;
+        Ok(self.customizer_tools_pending_given(identity, core_holds))
+    }
+
+    /// Publish the customizer tools of a member Core holds for unpublished
+    /// tools ([`Self::core_holds_unpublished_tools`]): Core built it held
+    /// before the runtime was composed, and no publication has released it
+    /// yet. Core holds its run starts until they are published, and nothing
+    /// rebuilds a live member, so no build preparation reaches it: the next
+    /// composition, its build's report, or its wake or delivery here,
+    /// publishes them. The publication releases the hold.
     ///
     /// While they cannot be published the wake or delivery is refused, so
     /// nothing is admitted behind the hold: a refused build answers
-    /// `ToolArtifactRefused` or `IdentityWakeRetryable` and keeps the
-    /// identity pending with the new reason. The host's build is bounded by
-    /// the runtime's shutdown, like the other wake builds. A member whose
-    /// build preparation was refused is not built, so nothing is published
-    /// for it here: its next wake's preparation publishes.
-    async fn publish_pending_customizer_tools(
+    /// `ToolArtifactRefused` or `IdentityWakeRetryable` and records the new
+    /// reason. The host's build is bounded by the runtime's shutdown, like
+    /// the other wake builds. A member whose build preparation was refused is
+    /// not built, so Core holds none of its run starts and nothing is
+    /// published for it here: its next wake's preparation publishes.
+    pub(crate) async fn publish_pending_customizer_tools(
         &self,
         identity: &AgentIdentity,
         session_id: Option<&SessionId>,
         operation: &'static str,
     ) -> Result<(), IdentityRuntimeError> {
-        if self.held_customizer_tools_pending(identity).is_none() {
+        let refused = |detail: String| IdentityRuntimeError::IdentityWakeRetryable {
+            identity: identity.clone(),
+            session_id: session_id.cloned(),
+            detail,
+        };
+        let unread = |error: BridgeError| {
+            refused(format!(
+                "Core's hold of the member for unpublished customizer tools did not read \
+                 ({error}); nothing is admitted behind a hold that did not read, retry"
+            ))
+        };
+        if !self
+            .core_holds_unpublished_tools(identity)
+            .map_err(unread)?
+        {
+            return Ok(());
+        }
+        // A candidate launch releases no hold, so Core keeps holding a member
+        // whose tools it published: once published in this process, they are
+        // not published again.
+        if self.is_candidate_launch()
+            && self
+                .customizer_tools
+                .read()
+                .await
+                .as_ref()
+                .and_then(|registry| {
+                    registry.for_member(&crate::member_comms_id::mob_member_id(identity.as_str()))
+                })
+                .is_some_and(|tools| tools.generation() > 0)
+        {
             return Ok(());
         }
         let Some(customizer) = self.customizer.read().await.clone() else {
@@ -5645,11 +5700,6 @@ impl IdentityRuntime {
             .map(|entry| entry.spec.clone())
         else {
             return Ok(());
-        };
-        let refused = |detail: String| IdentityRuntimeError::IdentityWakeRetryable {
-            identity: identity.clone(),
-            session_id: session_id.cloned(),
-            detail,
         };
         let mut shutdown = self.foreground_cancel.subscribe();
         if *shutdown.borrow() {
@@ -5687,8 +5737,9 @@ impl IdentityRuntime {
                 // A release that failed keeps the identity pending (and the
                 // member held): nothing is admitted behind it.
                 match self.customizer_tools_pending_for(identity) {
-                    None => Ok(()),
-                    Some(pending) => Err(refused(pending.reason)),
+                    Ok(None) => Ok(()),
+                    Ok(Some(pending)) => Err(refused(pending.reason)),
+                    Err(error) => Err(unread(error)),
                 }
             }
             Err(error) => {
@@ -5705,16 +5756,13 @@ impl IdentityRuntime {
                     "live member's customizer tools are still unpublished; its {operation} is \
                      refused until they are"
                 );
-                self.customizer_tools_pending
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        identity.clone(),
-                        CustomizerToolsPending {
-                            reason: reason.clone(),
-                            artifact_refusal,
-                        },
-                    );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason: reason.clone(),
+                        artifact_refusal,
+                    },
+                );
                 if let super::types::CustomizerError::ToolArtifactRefused(refusal) = error {
                     return Err(IdentityRuntimeError::ToolArtifactRefused(refusal));
                 }
@@ -7838,15 +7886,18 @@ impl IdentityRuntime {
     }
 
     /// Make a send or dispatch target a member of Core's mob before its
-    /// admission, when Core does not hold it yet, its pending first-boot
-    /// row is still to carry out, its role migration is held, or Core still
-    /// keeps the host preparation Meta asked for at start: the identity is
-    /// declared again in Core's mob ([`Self::declare_identity_locked`]), and
-    /// Core seats it (on its archived session, or its first-boot row's) or
-    /// answers why not, typed. The delivery goes to Core, whose dispatch
-    /// materializes a Dormant member before it delivers, so the seat
-    /// materializes nothing. An identity Core holds, with nothing owed,
-    /// takes no Core step at all.
+    /// admission, when Core does not hold it yet, Meta's own first-boot
+    /// records still hold its row (or cannot be read), or its role migration
+    /// is held: the identity is declared again in Core's mob
+    /// ([`Self::declare_identity_locked`]), and Core seats it (on its
+    /// archived session, or its first-boot row's) or answers why not, typed.
+    /// The delivery goes to Core, whose dispatch materializes a Dormant
+    /// member before it delivers, so the seat materializes nothing. An
+    /// identity Core holds, with nothing owed in Meta's records and nothing
+    /// held, takes no Core step at all. A host preparation Core keeps that
+    /// Meta's records do not name is Core's to name: the delivery's wake is
+    /// refused typed, and the door answers that refusal
+    /// ([`Self::door_retries`]).
     ///
     /// A target seated here had no managed edges while it was not a member:
     /// its own edges are reconciled after the seat, bounded (see
@@ -7865,7 +7916,6 @@ impl IdentityRuntime {
             && !self.has_pending_first_boot_row(identity)
             && !self.first_boot_unread()
             && !self.held_for_role_migration(identity).await?
-            && !self.host_pending_seeded_contains(identity)
         {
             return Ok(());
         }
@@ -8072,7 +8122,7 @@ impl IdentityRuntime {
         // global generation here is insufficient: a newer reconcile can
         // publish G+1 and win that lock before this future reaches the entry,
         // in which case the materialized spec belongs to G+1, not G.
-        let mut bootstrap_generation = None;
+        let mut trace = EmbodimentTrace::default();
         let mut shutdown = self.foreground_cancel.subscribe();
         let result = self
             .embody_identity(
@@ -8080,7 +8130,7 @@ impl IdentityRuntime {
                 expected_alias,
                 Some(&mut shutdown),
                 None,
-                &mut bootstrap_generation,
+                &mut trace,
                 EmbodimentOverrides {
                     expected_spec_digest,
                     ..EmbodimentOverrides::default()
@@ -8091,10 +8141,8 @@ impl IdentityRuntime {
                 *already_active = outcome.already_active;
             });
         after_inner.await;
-        if matches!(
-            &result,
-            Err(IdentityRuntimeError::Internal(message)) if message == BACKGROUND_WARM_CANCELLED
-        ) {
+        let bootstrap_generation = trace.bootstrap_generation;
+        if trace.cancelled {
             if let Some(generation) = bootstrap_generation {
                 self.mark_bootstrap_materialization_cancelled(identity, Some(generation));
             }
@@ -8450,14 +8498,14 @@ impl IdentityRuntime {
         cancellation: &mut watch::Receiver<bool>,
         generation: u64,
     ) -> Option<Result<(), IdentityRuntimeError>> {
-        let mut bound_generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity(
                 identity,
                 None,
                 Some(cancellation),
                 Some(generation),
-                &mut bound_generation,
+                &mut trace,
                 EmbodimentOverrides {
                     off_ready_path: true,
                     ..EmbodimentOverrides::default()
@@ -8465,10 +8513,7 @@ impl IdentityRuntime {
             )
             .await
             .map(|_| ());
-        if matches!(
-            &result,
-            Err(IdentityRuntimeError::Internal(message)) if message == BACKGROUND_WARM_CANCELLED
-        ) {
+        if trace.cancelled {
             return None;
         }
         // A candidate's refusal of a roster change defers the identity to
@@ -8485,7 +8530,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         cancellation: Option<&mut watch::Receiver<bool>>,
         expected_bootstrap_generation: Option<u64>,
-        bound_bootstrap_generation: &mut Option<u64>,
+        trace: &mut EmbodimentTrace,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         // A seat the embodiment asks Core for tells its customizer
@@ -8498,7 +8543,7 @@ impl IdentityRuntime {
             expected_alias,
             cancellation,
             expected_bootstrap_generation,
-            bound_bootstrap_generation,
+            trace,
             overrides,
         )
         .await
@@ -9238,7 +9283,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         cancellation: Option<&mut watch::Receiver<bool>>,
         expected_bootstrap_generation: Option<u64>,
-        bound_bootstrap_generation: &mut Option<u64>,
+        trace: &mut EmbodimentTrace,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         let result = self
@@ -9247,7 +9292,7 @@ impl IdentityRuntime {
                 expected_alias,
                 cancellation,
                 expected_bootstrap_generation,
-                bound_bootstrap_generation,
+                trace,
                 overrides,
             )
             .await;
@@ -9277,7 +9322,9 @@ impl IdentityRuntime {
     /// - Then Core materializes the member (`ensure_member_live`, Core's
     ///   wake): Core's own restore builds it on its durable session, or
     ///   answers typed (a session Core cannot resume is Broken through its
-    ///   machine; a refused wake keeps its kind). One attempt, no retry loop.
+    ///   machine; a refused wake keeps its kind). One attempt, and the door's
+    ///   one retry of a wake Core refused for a cause the door ends
+    ///   ([`Self::door_retries`]); no loop.
     ///   A member the seat built (its archived session's revival, as after a
     ///   respawn's own retirement, or a declared role migration's restamp) is
     ///   live already: Core answers the wake so, and builds nothing again.
@@ -9287,7 +9334,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         cancellation: Option<&mut watch::Receiver<bool>>,
         expected_bootstrap_generation: Option<u64>,
-        bound_bootstrap_generation: &mut Option<u64>,
+        trace: &mut EmbodimentTrace,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         let bootstrap_generation = {
@@ -9297,12 +9344,13 @@ impl IdentityRuntime {
                 .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
                 .bootstrap_generation
         };
-        *bound_bootstrap_generation = Some(bootstrap_generation);
+        trace.bootstrap_generation = Some(bootstrap_generation);
         // A background item belongs to one controller generation. If a newer
         // roster pass converged the entry before this item acquired lifecycle
         // authority, treat the old work as cancelled instead of waking the
         // newer spec on behalf of a superseded pass.
         if expected_bootstrap_generation.is_some_and(|expected| expected != bootstrap_generation) {
+            trace.cancelled = true;
             return Err(IdentityRuntimeError::Internal(
                 BACKGROUND_WARM_CANCELLED.to_string(),
             ));
@@ -9354,6 +9402,7 @@ impl IdentityRuntime {
             .as_ref()
             .is_some_and(|cancellation| *cancellation.borrow())
         {
+            trace.cancelled = true;
             return Err(IdentityRuntimeError::Internal(
                 BACKGROUND_WARM_CANCELLED.to_string(),
             ));
@@ -9361,7 +9410,10 @@ impl IdentityRuntime {
         // Make the identity a member of Core's mob first: its declaration in
         // Core's mob, whose verdict seats it (on its archived session, or its
         // pending first-boot row's), keeps it, or moves it, and is typed when
-        // it leaves no member to wake. The wake below makes the member live.
+        // it leaves no member to wake. Core decides it once a lifecycle
+        // operation of the member in flight (the kickoff wake of the fresh
+        // life a reset seated, a delivery's wake) ended: the door waits for
+        // it. The wake below makes the member live.
         let seat = self
             .declare_identity_locked(&spec, overrides.customizer)
             .await?;
@@ -9369,33 +9421,46 @@ impl IdentityRuntime {
             .as_ref()
             .is_some_and(|cancellation| *cancellation.borrow())
         {
+            trace.cancelled = true;
             return Err(IdentityRuntimeError::Internal(
                 BACKGROUND_WARM_CANCELLED.to_string(),
             ));
         }
         // Core's wake (cause Operator): Core materializes the member through
-        // its own restore, or answers typed.
-        let binding = match bridge.ensure_member_live(identity).await {
-            Ok(Some(binding)) => binding,
-            Ok(None) => {
-                return Err(IdentityRuntimeError::IdentityHistoryUnavailable {
-                    identity: identity.clone(),
-                    detail: "Core holds no member for the identity after its seat; nothing was \
-                             materialized"
-                        .to_string(),
-                });
-            }
-            Err(error) => {
-                // The seat names a session only when it bound one. For a
-                // member Core already held (the usual case) it names none, so
-                // the session Core's typed refusal names is read, as a
-                // delivery reads it: a durable resume hold Core keeps on its
-                // Broken verdict then answers held, not retryable.
-                let session_id = seat.session_id.clone().or_else(|| match &error {
-                    BridgeError::ResumeRejected { session_id, .. } => Some(session_id.clone()),
-                    _ => None,
-                });
-                return Err(self.wake_error(identity, session_id.as_ref(), error));
+        // its own restore, or answers typed. A wake refused for a cause the
+        // door ends (a build preparation retry, a first-boot row's host
+        // preparation) is retried once, after the door's step.
+        let mut door_retried = false;
+        let binding = loop {
+            match bridge.ensure_member_live(identity).await {
+                Ok(Some(binding)) => break binding,
+                Ok(None) => {
+                    return Err(IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity: identity.clone(),
+                        detail: "Core holds no member for the identity after its seat; \
+                                 nothing was materialized"
+                            .to_string(),
+                    });
+                }
+                Err(error) => {
+                    if self
+                        .door_retries(identity, &mut door_retried, door_refusal_of(&error))
+                        .await?
+                    {
+                        continue;
+                    }
+                    // The seat names a session only when it bound one. For a
+                    // member Core already held (the usual case) it names
+                    // none, so the session Core's typed refusal names is
+                    // read, as a delivery reads it: a durable resume hold
+                    // Core keeps on its Broken verdict then answers held, not
+                    // retryable.
+                    let session_id = seat.session_id.clone().or_else(|| match &error {
+                        BridgeError::ResumeRejected { session_id, .. } => Some(session_id.clone()),
+                        _ => None,
+                    });
+                    return Err(self.wake_error(identity, session_id.as_ref(), error));
+                }
             }
         };
         self.refuse_unprojected_session(identity, &binding).await?;
@@ -9425,7 +9490,6 @@ impl IdentityRuntime {
         override_customizer: Option<&dyn AgentCustomizer>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         refuse_runtime_plane_creation(identity)?;
-        self.load_held_completion_marks().await?;
         // A candidate launch creates no member: the roster is the
         // authoritative launch's to change.
         if self.is_candidate_launch() {
@@ -10778,12 +10842,27 @@ impl IdentityRuntime {
         // Core's dispatch would wake a Dormant member only after the bind
         // below, and the wake decides the member's session (a seat's first
         // wake creates it, a missing one moves to its successor): Core wakes
-        // it first, so the binding read below is the woken member's.
+        // it first, so the binding read below is the woken member's. A wake
+        // refused for a cause the door ends is retried once, after the
+        // door's step ([`Self::door_retries`]).
         if let Some(bridge) = self.bridge.as_ref() {
-            bridge
-                .wake_for_governed_input(identity)
-                .await
-                .map_err(|error| self.admission_error(identity, error))?;
+            let mut door_retried = false;
+            loop {
+                let woken = bridge.wake_for_governed_input(identity).await;
+                if let Err(error) = &woken
+                    && self
+                        .door_retries(
+                            identity,
+                            &mut door_retried,
+                            admission_door_refusal_of(error),
+                        )
+                        .await?
+                {
+                    continue;
+                }
+                woken.map_err(|error| self.admission_error(identity, error))?;
+                break;
+            }
         }
         let (live, scope) = self.live_delivery_target(identity, operation).await?;
         let runtime_id = Some(live.agent_runtime_id);
@@ -11685,13 +11764,26 @@ impl IdentityRuntime {
                     delivery.interaction_id = bridge_interaction_id.map(ToString::to_string);
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure (same
-                    // rule as the other lanes).
+                    // rule as the other lanes); and the door's one retry of a
+                    // wake Core refused for a cause the door ends.
                     let mut reload_attempted = false;
+                    let mut door_retried = false;
                     loop {
-                        let attempt = match bridge
+                        let attempt = bridge
                             .begin_delivery_with_output(rid, delivery.clone())
-                            .await
+                            .await;
+                        if let Err(error) = &attempt
+                            && self
+                                .door_retries(
+                                    identity,
+                                    &mut door_retried,
+                                    admission_door_refusal_of(error),
+                                )
+                                .await?
                         {
+                            continue;
+                        }
+                        let attempt = match attempt {
                             Err(BridgeAdmissionError::UnsupportedForMode {
                                 mode, detail, ..
                             }) => {
@@ -11736,8 +11828,10 @@ impl IdentityRuntime {
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure. Never a
                     // loop: a second refusal after a reload is an operator
-                    // matter.
+                    // matter. The door's one retry of a wake Core refused for
+                    // a cause the door ends, likewise.
                     let mut reload_attempted = false;
+                    let mut door_retried = false;
                     loop {
                         let attempt = if local_human {
                             let session = human_session.as_ref().ok_or(
@@ -11776,8 +11870,15 @@ impl IdentityRuntime {
                                     bridge_interaction_id,
                                 )
                                 .await
+                        };
+                        if let Err(error) = &attempt
+                            && self
+                                .door_retries(identity, &mut door_retried, door_refusal_of(error))
+                                .await?
+                        {
+                            continue;
                         }
-                        .map_err(|e| self.ingress_error(identity, e));
+                        let attempt = attempt.map_err(|e| self.ingress_error(identity, e));
                         match attempt {
                             Ok(delivered) => {
                                 self.record_delivery_success(identity).await;
@@ -11857,8 +11958,10 @@ impl IdentityRuntime {
                     // ADMITTED. Bounded; still under the lock. One automatic
                     // non-destructive reload on a typed reload-required
                     // refusal, then the typed failure (same rule as the
-                    // ingress lane).
+                    // ingress lane), and the door's one retry of a wake Core
+                    // refused for a cause the door ends.
                     let mut reload_attempted = false;
+                    let mut door_retried = false;
                     let receipt = loop {
                         let attempt = bridge
                             .begin_awaiting_commit(
@@ -11869,8 +11972,19 @@ impl IdentityRuntime {
                                 handling_mode,
                                 bridge_interaction_id,
                             )
-                            .await
-                            .map_err(|err| self.admission_error(identity, err));
+                            .await;
+                        if let Err(error) = &attempt
+                            && self
+                                .door_retries(
+                                    identity,
+                                    &mut door_retried,
+                                    admission_door_refusal_of(error),
+                                )
+                                .await?
+                        {
+                            continue;
+                        }
+                        let attempt = attempt.map_err(|err| self.admission_error(identity, err));
                         match attempt {
                             Ok(receipt) => {
                                 self.record_delivery_success(identity).await;
@@ -12857,11 +12971,28 @@ impl IdentityRuntime {
             // meerkat's typed pre-admission refusal of the tracked admission
             // (the member's ACTUAL runtime mode) sends the dispatch down the
             // ingress lane below: nothing was delivered by the refused attempt.
+            // A wake Core refused for a cause the door ends is retried once,
+            // after the door's step ([`Self::door_retries`]).
             let tracked_attempt = if ticketed {
-                match bridge
-                    .begin_delivery_with_output(rid, delivery.clone())
-                    .await
-                {
+                let mut door_retried = false;
+                let attempt = loop {
+                    let attempt = bridge
+                        .begin_delivery_with_output(rid, delivery.clone())
+                        .await;
+                    if let Err(error) = &attempt
+                        && self
+                            .door_retries(
+                                identity,
+                                &mut door_retried,
+                                admission_door_refusal_of(error),
+                            )
+                            .await?
+                    {
+                        continue;
+                    }
+                    break attempt;
+                };
+                match attempt {
                     Err(BridgeAdmissionError::UnsupportedForMode { mode, detail, .. }) => {
                         turn = Some(runtime_refused_tracking(identity, mode, &detail));
                         None
@@ -12926,10 +13057,19 @@ impl IdentityRuntime {
                     }
                 }
             } else {
-                let attempt = bridge
-                    .deliver_admitted(rid, delivery)
-                    .await
-                    .map_err(|error| self.ingress_error(identity, error));
+                let mut door_retried = false;
+                let attempt = loop {
+                    let attempt = bridge.deliver_admitted(rid, delivery.clone()).await;
+                    if let Err(error) = &attempt
+                        && self
+                            .door_retries(identity, &mut door_retried, door_refusal_of(error))
+                            .await?
+                    {
+                        continue;
+                    }
+                    break attempt;
+                }
+                .map_err(|error| self.ingress_error(identity, error));
                 match attempt {
                     Ok(delivered) => {
                         self.record_delivery_success(identity).await;
@@ -13127,8 +13267,10 @@ impl IdentityRuntime {
     /// member of it, after Core refused its wake for good; Dormant
     /// otherwise. The Core facts come from one read of Core's entry of the
     /// identity's name (machine state the mob's actor published: no actor
-    /// command, no wake) and one read of Core's member history, a store read
-    /// that never waits on the mob actor; a fault of either is typed history
+    /// command, no wake), one read of Core's member history, a store read
+    /// that never waits on the mob actor, and one read of whether Core holds
+    /// the identity's member for unpublished customizer tools. A fault of
+    /// any of them, the held member's included, is typed history
     /// unavailable, never a guess.
     pub async fn status(
         &self,
@@ -13143,14 +13285,26 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
-        self.status_from(identity, history.as_ref()).await
+        let tools_held = self
+            .core_holds_unpublished_tools(identity)
+            .map_err(|error| IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: format!(
+                    "reading Core's hold of the member for unpublished customizer tools: {error}"
+                ),
+            })?;
+        self.status_from(identity, history.as_ref(), tools_held)
+            .await
     }
 
-    /// [`Self::status`] over Core's member history already read.
+    /// [`Self::status`] over Core's member history and whether Core holds
+    /// the identity's member for unpublished customizer tools (`tools_held`),
+    /// each read already.
     async fn status_from(
         &self,
         identity: &AgentIdentity,
         history: Option<&meerkat_mob::MemberBindingHistory>,
+        tools_held: bool,
     ) -> Result<IdentityStatus, IdentityRuntimeError> {
         let spec = self
             .entries
@@ -13184,7 +13338,7 @@ impl IdentityRuntime {
             wake_refusal,
             replaced_session: None,
             session_repair_required,
-            customizer_tools_pending: self.customizer_tools_pending_for(identity),
+            customizer_tools_pending: self.customizer_tools_pending_given(identity, tools_held),
         })
     }
 
@@ -13281,10 +13435,12 @@ impl IdentityRuntime {
     }
 
     /// Return statuses for every registered identity without waking any.
-    /// One read of Core's member history serves every identity, beside one
-    /// read of Core's entry of each; when a read fails the call fails typed
-    /// (`MemberHistoryUnavailable`): no status is guessed, none is left out
-    /// and no empty list stands in for "none".
+    /// One read of Core's member history and one of the members Core holds
+    /// for unpublished customizer tools serve every identity, beside one read
+    /// of Core's entry of each; when a read fails, the read of the held
+    /// members included, the call fails typed (`MemberHistoryUnavailable`):
+    /// no status is guessed, none is left out and no empty list stands in
+    /// for "none".
     pub async fn statuses(&self) -> Result<Vec<IdentityStatus>, IdentityRuntimeError> {
         let identities = self
             .entries
@@ -13298,9 +13454,18 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
+        // One read of Core's held members serves every identity.
+        let tools_held = self
+            .members_core_holds_for_unpublished_tools()
+            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!(
+                    "reading Core's members held for unpublished customizer tools: {error}"
+                ),
+            })?;
         let mut statuses = Vec::with_capacity(identities.len());
         for identity in identities {
-            match self.status_from(&identity, history.as_ref()).await {
+            let held = tools_held.contains(&identity);
+            match self.status_from(&identity, history.as_ref(), held).await {
                 Ok(status) => statuses.push(status),
                 // An identity unregistered between the two reads has no
                 // status.
@@ -13413,20 +13578,24 @@ impl IdentityRuntime {
                 change.registry.clear_owned(identity, change.operation_id);
             }
         }
-        let mut generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity_locked(
                 identity,
                 None,
                 None,
                 None,
-                &mut generation,
+                &mut trace,
                 EmbodimentOverrides::default(),
             )
             .await
             .map(|outcome| outcome.binding);
-        self.mark_bootstrap_materialization_finished(identity, result.as_ref().err(), generation)
-            .await;
+        self.mark_bootstrap_materialization_finished(
+            identity,
+            result.as_ref().err(),
+            trace.bootstrap_generation,
+        )
+        .await;
         change
             .registry
             .finish_owned_build(identity, change.operation_id);
@@ -13733,21 +13902,21 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
     ) -> Result<MemberReloadOutcome, IdentityRuntimeError> {
         let before = self.core_last_binding(identity).await?;
-        let mut bound_generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity_locked(
                 identity,
                 None,
                 None,
                 None,
-                &mut bound_generation,
+                &mut trace,
                 EmbodimentOverrides::default(),
             )
             .await;
         self.mark_bootstrap_materialization_finished(
             identity,
             result.as_ref().err(),
-            bound_generation,
+            trace.bootstrap_generation,
         )
         .await;
         let outcome = result?;
@@ -14163,19 +14332,23 @@ impl IdentityRuntime {
             self.settle_lifecycle_retirement(prepared).await;
             self.entries.notify_binding_changed();
         }
-        let mut generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity_locked(
                 identity,
                 None,
                 None,
                 None,
-                &mut generation,
+                &mut trace,
                 EmbodimentOverrides::default(),
             )
             .await;
-        self.mark_bootstrap_materialization_finished(identity, result.as_ref().err(), generation)
-            .await;
+        self.mark_bootstrap_materialization_finished(
+            identity,
+            result.as_ref().err(),
+            trace.bootstrap_generation,
+        )
+        .await;
         result?;
         // Core's retirement ended the identity's wiring with the member it
         // retired: its managed and topology-controlled edges are wired again
@@ -14406,18 +14579,26 @@ impl IdentityRuntime {
     /// exactly once. Inputs still queued on the retired incarnation end with
     /// it, typed. Never composed from a spawn and a retire.
     ///
-    /// The rotation is recorded durably before Core is asked and removed
-    /// once Core answers; Core finishes a rotation a crash interrupted from
-    /// its own record. A rotation Core refuses before any of it
-    /// starts takes its record back and answers the refusal, and so does one
-    /// whose fresh life the launch's member auth binding refuses at its
-    /// build (Core spawns the fresh life of an identity it does not hold
-    /// that owes a kickoff live; answered final, `HostRejectedBuild`), so no
-    /// later compile or restart carries it out. Returns the fresh session.
+    /// Core finishes a rotation a crash interrupted from its own record. A
+    /// rotation Core refuses before any of it starts answers the refusal,
+    /// and so does one whose fresh life the launch's member auth binding
+    /// refuses at its build (Core spawns the fresh life of an identity it
+    /// does not hold that owes a kickoff live; answered final,
+    /// `HostRejectedBuild`), so no later compile or restart carries it out.
+    /// Returns the fresh session.
+    ///
+    /// The rotation record is a mirror written for a rollback to 0.9.10,
+    /// whose roster pass drives the rotation a record names to its end,
+    /// kept only while that rollback is supported (until 0.9.12). It is
+    /// written after Core's answer and never read: a rotation Core carried
+    /// out removes the identity's record, one that may have started writes
+    /// it (its verb and the generation it rotates from), as 0.9.10 leaves
+    /// its record at rest, and one Core refused before any of it started
+    /// leaves the records as they were.
     ///
     /// What the retirement of the live incarnation owes (`life`'s side
     /// effects, run by the lifecycle projection once Core journaled it) is
-    /// recorded before Core is asked too, with the incarnation as the
+    /// recorded before Core is asked, with the incarnation as the
     /// retirement hook reads it and the build the customizer is told of.
     /// `last` is Core's binding of the identity as the verb read it, before
     /// the build: Core's binding is read again once the head of Core's
@@ -14433,21 +14614,6 @@ impl IdentityRuntime {
         last: Option<meerkat_mob::MemberBinding>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
-        // An identity a held pass did not publish owes its host a fresh held
-        // completion. A fresh life outside a held pass that covers it would
-        // have Core bind a member that completion never saw, and after a
-        // restart that binding would read as the pass's publication and drop
-        // the mark; so it is refused typed before Core is asked anything.
-        self.load_held_completion_marks().await?;
-        if self.held_completion_owed(identity)
-            && self
-                .held_create_pass()
-                .is_none_or(|pass| !pass.covers(identity))
-        {
-            return Err(IdentityRuntimeError::HeldCompletionOwed {
-                identity: identity.clone(),
-            });
-        }
         let bridge = Arc::clone(self.core_bridge(identity)?);
         let spec = self
             .entries
@@ -14457,26 +14623,26 @@ impl IdentityRuntime {
             .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
             .spec
             .clone();
+        // An identity whose creation its host holds, that Core never created,
+        // awaits its held creation: a fresh life outside a held pass that
+        // covers it would have Core bind a member its host's completion never
+        // saw. Core's verdict says so, asked by the identity's declaration,
+        // which answers it typed (`HeldCompletionOwed`) before Core is asked
+        // for any fresh life.
+        if last.is_none()
+            && self.host_holds(identity)
+            && self
+                .held_create_pass()
+                .is_none_or(|pass| !pass.covers(identity))
+        {
+            self.declare_identity_locked(&spec, None).await?;
+        }
         if self.core_live_member(identity).await?.is_some() {
             self.clear_wake_notes_of_live_member(identity).await;
         }
         let (draft, customizer) = self
             .fresh_life_draft(identity, &spec, foreground_shutdown, operation)
             .await?;
-        // A rotation an earlier call left recorded, which Core may have
-        // started, stays recorded whatever this call's answer.
-        let earlier_rotation = self
-            .pending_rotation_intents()
-            .await
-            .map_err(|error| IdentityRuntimeError::IdentityWakeRetryable {
-                identity: identity.clone(),
-                session_id: None,
-                detail: format!(
-                    "the {operation} was not started: the identity's rotation records could not \
-                     be read ({error})"
-                ),
-            })?
-            .remove(identity);
         // The head of Core's journal before Core is asked: after a failure,
         // the fact the rotation journals first, past it, says the rotation
         // reached Core. A head that does not read refuses the step here.
@@ -14514,16 +14680,11 @@ impl IdentityRuntime {
         let retiring = self
             .prepare_lifecycle_retirement_of(identity, last, life.effect_verb(), asked_after)
             .await?;
+        // The generation the rotation rotates from, which its rotation
+        // record names should the rotation have started.
         let from_generation = retiring
             .as_ref()
             .and_then(lifecycle_projection::PreparedRetirement::live_generation);
-        if let Err(error) = self
-            .record_rotation_intent(identity, operation, from_generation)
-            .await
-        {
-            self.abandon_lifecycle_retirement(retiring).await;
-            return Err(error);
-        }
         // The customizer that built the fresh life is told of its session
         // once the lifecycle projection reaches its seat.
         if customizer.is_some() {
@@ -14537,7 +14698,7 @@ impl IdentityRuntime {
                         identity,
                         operation,
                         RefusedRotation {
-                            earlier: earlier_rotation,
+                            from_generation,
                             retiring,
                             asked_after,
                             first,
@@ -14549,6 +14710,8 @@ impl IdentityRuntime {
         };
         self.run_fresh_life_answered_hook().await;
         self.bind_lifecycle_build(identity, &session_id);
+        // Core carried the rotation out: the mirror holds no record of the
+        // identity, as 0.9.10 leaves it at rest once Core answers.
         self.clear_rotation_intent(identity).await;
         self.settle_lifecycle_retirement(retiring).await;
         // Core's rotation ends the identity's wiring with its incarnation:
@@ -14571,15 +14734,16 @@ impl IdentityRuntime {
     /// what the call recorded. Core's journal says whether any of the
     /// rotation reached Core ([`Self::lifecycle_step_reach`]): when the fact
     /// the rotation journals first does not follow the head the call read
-    /// before it asked Core, nothing of it reached Core, so the rotation
-    /// record this call wrote is taken back, an earlier call's put back as
-    /// it was, and so is what the retirement it prepared would owe
-    /// (`retiring`): no later compile or restart carries the rotation out,
-    /// and the bridge's error picks the answer. Otherwise (the fact follows,
-    /// or the journal does not read) the rotation may have started, so its
-    /// records stay: Core finishes it when the mob next starts, and the same
-    /// verb asked again while it stands finishes it now. The answer says so,
-    /// whatever the error.
+    /// before it asked Core, nothing of it reached Core, so what the
+    /// retirement it prepared would owe (`retiring`) is taken back and the
+    /// rotation records stay as they were: no later compile or restart
+    /// carries the rotation out, and the bridge's error picks the answer.
+    /// Otherwise (the fact follows, or the journal does not read) the
+    /// rotation may have started, so what the retirement owes stays, and
+    /// its rotation record is written, as 0.9.10 leaves it at rest: Core
+    /// finishes it when the mob next starts, and the same verb asked again
+    /// while it stands finishes it now. The answer says so, whatever the
+    /// error.
     async fn refused_rotation(
         &self,
         identity: &AgentIdentity,
@@ -14588,7 +14752,7 @@ impl IdentityRuntime {
         error: BridgeError,
     ) -> IdentityRuntimeError {
         let RefusedRotation {
-            earlier,
+            from_generation,
             retiring,
             asked_after,
             first,
@@ -14598,6 +14762,12 @@ impl IdentityRuntime {
             .await
             != lifecycle_projection::StepReach::NotReached
         {
+            // The rollback mirror, written after Core's answer. A process
+            // that stops after Core journaled the rotation and before this
+            // write leaves no record: a rollback's Core 0.9.10 finishes that
+            // rotation from its own record (RecoverMemberRotationIntent).
+            self.record_rotation_intent(identity, operation, from_generation)
+                .await;
             return IdentityRuntimeError::Internal(format!(
                 "{operation} of identity {identity}: Core's rotation failed ({error}); it may \
                  have started: Core finishes it when the mob next starts, and the {operation} \
@@ -14606,7 +14776,6 @@ impl IdentityRuntime {
         }
         self.forget_lifecycle_build(identity);
         self.abandon_lifecycle_retirement(retiring).await;
-        self.restore_rotation_intent(identity, earlier).await;
         match error {
             BridgeError::RotationRefused { detail, .. } => {
                 IdentityRuntimeError::IdentityWakeRetryable {
@@ -14783,6 +14952,8 @@ impl IdentityRuntime {
         // retired.
         self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete, last)
             .await?;
+        // A deleted identity leaves the host's hold.
+        self.release_host_hold(identity);
 
         // The fresh life is committed in Core from here. The drop of the old
         // session's semantic-memory scope (Ask 2 GC: the identity never
@@ -14809,9 +14980,12 @@ impl IdentityRuntime {
     // Roster inspection - REQ-32
     // -----------------------------------------------------------------------
 
-    /// Return every registered identity with its spec and status (one read
-    /// of Core's member history serves them all, beside one read of Core's
-    /// entry of each; a failed read fails typed, as [`Self::statuses`]).
+    /// Return every registered identity with its spec and status. As
+    /// [`Self::statuses`], one read each of Core's member history and the
+    /// members it holds for unpublished customizer tools serves them all,
+    /// beside one read of Core's entry of each, and a failed read of any of
+    /// them, the held members included, fails the call typed
+    /// (`MemberHistoryUnavailable`).
     pub async fn roster_inspect(
         &self,
     ) -> Result<BTreeMap<AgentIdentity, (DurableAgentSpec, IdentityStatus)>, IdentityRuntimeError>
@@ -14828,9 +15002,18 @@ impl IdentityRuntime {
                 detail: format!("reading Core's member history: {error}"),
             }
         })?;
+        // One read of Core's held members serves every identity.
+        let tools_held = self
+            .members_core_holds_for_unpublished_tools()
+            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!(
+                    "reading Core's members held for unpublished customizer tools: {error}"
+                ),
+            })?;
         let mut result = BTreeMap::new();
         for (identity, spec) in specs {
-            match self.status_from(&identity, history.as_ref()).await {
+            let held = tools_held.contains(&identity);
+            match self.status_from(&identity, history.as_ref(), held).await {
                 Ok(status) => {
                     result.insert(identity, (spec, status));
                 }
@@ -16626,6 +16809,8 @@ mod reset_reprofile_tests {
     struct RunStartReleaseBridge {
         fail: bool,
         released: std::sync::Mutex<Vec<String>>,
+        /// The members whose run starts Core holds for unpublished tools.
+        held: std::sync::Mutex<BTreeSet<String>>,
     }
 
     impl RunStartReleaseBridge {
@@ -16634,6 +16819,15 @@ mod reset_reprofile_tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
+        }
+
+        /// Core holds `identity`'s member for unpublished tools, as its build
+        /// staged the hold.
+        fn stage_hold(&self, identity: &AgentIdentity) {
+            self.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(crate::member_comms_id::mob_member_id(identity.as_str()).to_string());
         }
     }
 
@@ -16698,7 +16892,23 @@ mod reset_reprofile_tests {
             if self.fail {
                 return Err(BridgeError::Mob("mob refused the release".to_string()));
             }
+            self.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(member_id.as_str());
             Ok(())
+        }
+
+        fn members_holding_run_starts_for_published_tools(
+            &self,
+        ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
+            Ok(self
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|member| meerkat_mob::AgentIdentity::from(member.as_str()))
+                .collect())
         }
 
         async fn apply_declared_roster(
@@ -16714,10 +16924,10 @@ mod reset_reprofile_tests {
 
     /// R111: a member Core built held before the identity runtime was
     /// composed (`HoldUntilReleased`, staged as `ToolsNotPublished`) is
-    /// pending. The publication that clears its pending record releases that
-    /// hold exactly once; publishing for an identity that was not pending
-    /// releases nothing; a failed release keeps the identity pending with the
-    /// error, so a member left held is visible in its status.
+    /// pending while Core holds it. The publication releases that hold
+    /// exactly once; publishing for an identity Core does not hold releases
+    /// nothing; a failed release records the error, so a member left held is
+    /// visible in its status.
     #[tokio::test]
     async fn publishing_a_pending_identitys_tools_releases_its_run_start_hold()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -16742,7 +16952,7 @@ mod reset_reprofile_tests {
                     super::super::customizer_tools::CustomizerToolRegistry::new(),
                 ))
                 .await;
-            runtime.hold_member_build(&identity);
+            bridge.stage_hold(&identity);
             let draft = || AgentBuildDraft {
                 model: None,
                 system_prompt: None,
@@ -16759,7 +16969,9 @@ mod reset_reprofile_tests {
                 .await;
             let member = crate::member_comms_id::mob_member_id(identity.as_str()).to_string();
             assert_eq!(bridge.released(), vec![member.clone()]);
-            let pending = runtime.customizer_tools_pending_for(&identity);
+            let pending = runtime
+                .customizer_tools_pending_for(&identity)
+                .map_err(|error| error.to_string())?;
             if fail {
                 let pending = pending.ok_or("a failed release keeps the identity pending")?;
                 assert!(
@@ -16816,11 +17028,16 @@ mod reset_reprofile_tests {
             compaction_curator: Default::default(),
         };
 
-        runtime.hold_member_build(&identity);
+        bridge.stage_hold(&identity);
         runtime
             .publish_customizer_tools(&identity, &mut draft)
             .await;
-        assert!(runtime.customizer_tools_pending_for(&identity).is_none());
+        assert!(
+            runtime
+                .customizer_tools_pending_for(&identity)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
 
         assert_eq!(
             bridge.released(),
@@ -16900,9 +17117,9 @@ mod reset_reprofile_tests {
             "the reason names the remedy: {durable}"
         );
         assert!(durable.contains("'durable-worker'"), "{durable}");
-        let host_gate = BridgeError::Mob(
-            "spawn_member: callback/build_agent failed: callback error: gate refused".to_string(),
-        );
+        let host_gate = BridgeError::HostRejectedBuild {
+            detail: "spawn_member: the host's build gate refused the member".to_string(),
+        };
         assert!(deterministic_build_rejection_reason(&host_gate).is_some());
         let transport = BridgeError::Mob("callback transport closed".to_string());
         assert!(deterministic_build_rejection_reason(&transport).is_none());
@@ -20722,10 +20939,9 @@ mod wake_refusal_classifier_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let classified = classify(
             Some(&SessionId::new()),
-            BridgeError::Mob(
-                "spawn_member: callback/build_agent failed: callback error: gate refused"
-                    .to_string(),
-            ),
+            BridgeError::HostRejectedBuild {
+                detail: "resume: the host's build gate refused the member".to_string(),
+            },
         )?;
         assert!(
             matches!(
@@ -20736,6 +20952,77 @@ mod wake_refusal_classifier_tests {
             classified.error
         );
         assert!(classified.recorded.is_none());
+        Ok(())
+    }
+
+    /// The bridge's form of a member Core holds Broken because its host
+    /// refused the build its wake restored it with.
+    fn host_refused_wake(session_id: &SessionId) -> BridgeError {
+        BridgeError::ResumeRejected {
+            kind: ResumeRejectionKind::HostRejectedBuild,
+            session_id: session_id.clone(),
+            detail: format!(
+                "ensure_member_live: member agent-alpha failed to restore session {session_id}: \
+                 the host's build gate refused the member"
+            ),
+        }
+    }
+
+    /// The bridge's form of a create its host refused.
+    fn host_refused_create() -> BridgeError {
+        BridgeError::HostRejectedBuild {
+            detail: "create_session: the host's build gate refused the member".to_string(),
+        }
+    }
+
+    /// The host's typed build refusal is the identity's `HostRejectedBuild`
+    /// refusal, from the bridge's typed form alone: on a wake (the door's,
+    /// and a delivery's through the admission seam) and on a create, with a
+    /// reason that names no callback. Text alone is never the host's
+    /// refusal: a mob error carrying the old callback rendering is retryable.
+    ///
+    /// RED before the bridge typed the refusal and the probe went: the typed
+    /// forms did not exist, and the callback text was read as the host's
+    /// refusal.
+    #[test]
+    fn the_hosts_typed_build_refusal_is_host_rejected_build_with_no_text_match()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let session_id = SessionId::new();
+        let woken = classify(Some(&session_id), host_refused_wake(&session_id))?;
+        assert!(
+            matches!(woken.error, IdentityRuntimeError::HostRejectedBuild { .. }),
+            "the door's wake: {:?}",
+            woken.error
+        );
+        assert!(woken.recorded.is_none(), "never recorded");
+        let delivered = admission_phase_error(
+            &keeper()?,
+            BridgeAdmissionError::from(host_refused_wake(&session_id)),
+        );
+        assert!(
+            matches!(delivered, IdentityRuntimeError::HostRejectedBuild { .. }),
+            "a delivery's wake: {delivered:?}"
+        );
+        assert!(
+            deterministic_build_rejection_reason(&host_refused_create()).is_some(),
+            "a refused create is the host's build refusal"
+        );
+        let text_only = BridgeError::Mob(
+            "spawn_member: callback/build_agent failed: callback error: gate refused".to_string(),
+        );
+        assert!(
+            deterministic_build_rejection_reason(&text_only).is_none(),
+            "text alone is never the host's build refusal"
+        );
+        let classified = classify(Some(&session_id), text_only)?;
+        assert!(
+            matches!(
+                classified.error,
+                IdentityRuntimeError::IdentityWakeRetryable { .. }
+            ),
+            "{:?}",
+            classified.error
+        );
         Ok(())
     }
 

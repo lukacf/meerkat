@@ -636,12 +636,14 @@ async fn a_clean_restart_builds_no_member_and_answers_resolved_tools_from_its_re
 }
 
 /// R112, R109: after a clean restart the member is Dormant, and the build
-/// preparation of its first delivery's wake fails: the host refuses the
-/// build. Core refuses the wake retryable and keeps the member Dormant, so
-/// the delivery is refused, typed, with the host's reason, nothing is built
-/// and nothing runs, and the identity's customizer tools read pending with
-/// that reason. The next delivery wakes the member again: its build is
-/// prepared with the tools, its turn offers them, and nothing stays pending.
+/// preparation of its first delivery's wake fails, and so does the door's
+/// one retry of it: the host refuses the build twice. Core refuses the wake
+/// for the build preparation's retry and keeps the member Dormant, so the
+/// delivery is refused, typed, with the host's reason, nothing is built and
+/// nothing runs, and the identity's customizer tools read pending with that
+/// reason. The next delivery retries the preparation and wakes the member:
+/// its build is prepared with the tools, its turn offers them, and nothing
+/// stays pending.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_build_preparation_keeps_the_member_dormant_until_the_next_delivery_builds_it() {
     const MOB_ID: &str = "customizer-tools-restart-b";
@@ -652,7 +654,7 @@ async fn a_refused_build_preparation_keeps_the_member_dormant_until_the_next_del
     let capture = CaptureClient::default();
     let customizer = Arc::new(ToolCustomizer {
         calls: AtomicUsize::new(0),
-        fail_calls: BTreeSet::from([1]),
+        fail_calls: BTreeSet::from([1, 2]),
     });
     let runtime = boot(
         MOB_ID,
@@ -671,17 +673,22 @@ async fn a_refused_build_preparation_keeps_the_member_dormant_until_the_next_del
     let refused = send_member(&runtime, "refused").await;
     match &refused {
         Err(IdentityRuntimeError::IdentityWakeRetryable { detail, .. }) => {
-            assert!(detail.contains("host refused build 1"), "{detail}");
+            assert!(detail.contains("host refused build 2"), "{detail}");
         }
         other => panic!("the delivery is refused retryable with the host's reason: {other:?}"),
     }
+    assert_eq!(
+        customizer.calls.load(Ordering::SeqCst),
+        2,
+        "the wake's preparation and the door's one retry of it"
+    );
     let status = member_status(&runtime).await;
     let pending = status
         .customizer_tools_pending
         .expect("the refused preparation is recorded");
     assert!(
         pending.reason.contains("customize_build failed")
-            && pending.reason.contains("host refused build 1"),
+            && pending.reason.contains("host refused build 2"),
         "{pending:?}"
     );
     assert_eq!(
@@ -693,7 +700,7 @@ async fn a_refused_build_preparation_keeps_the_member_dormant_until_the_next_del
 
     send_member(&runtime, "wake")
         .await
-        .expect("the next delivery builds the member");
+        .expect("the next delivery retries the preparation and builds the member");
     wait_for_turn(
         &capture,
         1,
@@ -3677,4 +3684,62 @@ async fn a_bootstrap_spec_declaring_its_customizer_continues_a_killed_run_only_w
     assert_eq!(member_run_starts_held(&runtime).await, Some(false));
     assert!(resolved_tools(&runtime).await.contains(&TOOL.to_string()));
     runtime.shutdown().await;
+}
+
+/// The door's own wake (`IdentityRuntime::materialize`) of a member whose
+/// build preparation the host refuses retryably, through the real session
+/// bridge and Core: Core records the build preparation retry and refuses
+/// the wake for it (`BuildPreparationRetry`), the door retries the
+/// preparation once, as it does for a delivery's wake, and the host is
+/// asked twice. The second refusal answers with the customizer's own
+/// failure, typed and retryable.
+///
+/// RED before the door's own wake read Core's refusal typed: the host was
+/// asked once, and the materialization answered Core's rendering as mob
+/// text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_build_preparation_on_the_doors_own_wake_is_retried_once() {
+    const MOB_ID: &str = "customizer-tools-restart-door-wake";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    first_boot(MOB_ID, &state).await;
+
+    let capture = CaptureClient::default();
+    let customizer = Arc::new(ToolCustomizer {
+        calls: AtomicUsize::new(0),
+        fail_calls: BTreeSet::from([1, 2]),
+    });
+    let runtime = boot(
+        MOB_ID,
+        &state,
+        capture.clone(),
+        customizer.clone(),
+        IdentityBootstrapMode::LazyMaterialize,
+    )
+    .await;
+    assert_eq!(
+        customizer.calls.load(Ordering::SeqCst),
+        0,
+        "the restart builds no member"
+    );
+
+    let refused = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .materialize(&id(MEMBER))
+        .await;
+    let calls = customizer.calls.load(Ordering::SeqCst);
+    runtime.shutdown().await;
+    assert_eq!(
+        calls, 2,
+        "the wake's preparation and the door's one retry of it: {refused:?}"
+    );
+    match &refused {
+        Err(IdentityRuntimeError::IdentityWakeRetryable { detail, .. }) => {
+            assert!(detail.contains("host refused build 2"), "{detail}");
+        }
+        other => {
+            panic!("the materialization is refused retryable with the host's reason: {other:?}")
+        }
+    }
 }

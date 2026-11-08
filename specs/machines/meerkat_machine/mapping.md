@@ -8354,6 +8354,75 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SettleRetainedRunInertDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestCompactionRecordedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionRecordedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionAlreadyRecordedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionAlreadyRecordedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionAlreadyRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestTakenRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestTakenRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestNoneRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestNoneRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestStaleRunRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestStaleRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestOutsideCheckRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestOutsideCheckRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -9143,6 +9212,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RetainedRunSettleResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompactionRequestResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompactionRequestConsumed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

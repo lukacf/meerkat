@@ -1383,6 +1383,13 @@ meerkat_machine_runtime_internal_inputs!(
     RunExecutionLifecycle => [
         SettleRetainedRun,
     ],
+    // A host's compaction request, applied directly by
+    // `MeerkatMachine::request_compaction`, and its consumption by the
+    // agent's compaction check through the session's turn-state handle.
+    RunExecutionLifecycle => [
+        RequestCompaction,
+        ConsumeCompactionRequest,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {
@@ -1476,6 +1483,11 @@ meerkat_machine_fieldless_runtime_internal_inputs!(
     ],
     UserInterruptDispatch => [
         InterruptCurrentRun,
+    ],
+    // A host's compaction request, applied directly by
+    // `MeerkatMachine::request_compaction` (appended last).
+    RuntimeOwner => [
+        RequestCompaction,
     ],
 );
 

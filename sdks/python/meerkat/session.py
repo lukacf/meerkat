@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .generated.types import CommsSendResult, StopRunResult
+from .generated.types import CommsSendResult, CompactSessionResult, StopRunResult
 from .types import (
     ContentBlock,
     ForkInstructionPolicy,
@@ -250,6 +250,18 @@ class Session:
         ``run_id`` returns a ``not_current`` receipt and touches nothing.
         """
         return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
+
+    async def compact(self) -> CompactSessionResult:
+        """Ask this live session's next compaction check to compact.
+
+        The session is not rebuilt and its compaction thresholds do not
+        change: the check before its next model request (in the running turn,
+        or in the next one) compacts. The outcome is ``requested``, or
+        ``already_requested`` when a request no check consumed yet was
+        already recorded. A session with no live runtime in the server is
+        refused, never loaded or woken.
+        """
+        return await self._client._compact(self._id)  # noqa: SLF001
 
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
@@ -610,6 +622,18 @@ class DeferredSession:
         ``run_id`` returns a ``not_current`` receipt and touches nothing.
         """
         return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
+
+    async def compact(self) -> CompactSessionResult:
+        """Ask this live session's next compaction check to compact.
+
+        The session is not rebuilt and its compaction thresholds do not
+        change: the check before its next model request (in the running turn,
+        or in the next one) compacts. The outcome is ``requested``, or
+        ``already_requested`` when a request no check consumed yet was
+        already recorded. A session with no live runtime in the server is
+        refused, never loaded or woken.
+        """
+        return await self._client._compact(self._id)  # noqa: SLF001
 
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""

@@ -260,7 +260,78 @@ them.
   `SettleRetainedRunNotRetainedStopped` and `SettleRetainedRunInertDestroyed`.
   An exhaustive match needs their arms.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the MeerkatMachine records a host's compaction request and its
+  consumption by the agent's compaction check (see Added).
+  `MeerkatMachineState` (meerkat-machine-schema and meerkat-runtime) and the
+  kernel `State` gain `compaction_requested`. `MeerkatMachineInput` and
+  `MeerkatMachineInputVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain `RequestCompaction` and
+  `ConsumeCompactionRequest { run_id }`, and
+  `MeerkatMachineFieldlessRuntimeInternalInput` (meerkat-runtime) gains
+  `RequestCompaction`. `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (the same two modules) and the kernel
+  `Effect` and `EffectKind` gain `CompactionRequestResolved { verdict }`
+  and `CompactionRequestConsumed { run_id }`. The kernel
+  `generated::meerkat::TransitionId` gains the request's and the
+  consumption's 23 arms: `RequestCompactionRecordedIdle`,
+  `RequestCompactionRecordedAttached`, `RequestCompactionRecordedRunning`,
+  `RequestCompactionAlreadyRecordedIdle`,
+  `RequestCompactionAlreadyRecordedAttached`,
+  `RequestCompactionAlreadyRecordedRunning`,
+  `RequestCompactionNotServingInitializing`,
+  `RequestCompactionNotServingRetired`, `RequestCompactionNotServingStopped`,
+  `RequestCompactionNotServingDestroyed`,
+  `ConsumeCompactionRequestTakenRunning`,
+  `ConsumeCompactionRequestTakenRetired`,
+  `ConsumeCompactionRequestNoneRunning`, `ConsumeCompactionRequestNoneRetired`,
+  `ConsumeCompactionRequestStaleRunRunning`,
+  `ConsumeCompactionRequestStaleRunRetired`,
+  `ConsumeCompactionRequestOutsideCheckRunning`,
+  `ConsumeCompactionRequestOutsideCheckRetired`,
+  `ConsumeCompactionRequestInertInitializing`,
+  `ConsumeCompactionRequestInertIdle`, `ConsumeCompactionRequestInertAttached`,
+  `ConsumeCompactionRequestInertStopped` and
+  `ConsumeCompactionRequestInertDestroyed`. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm; a `MeerkatMachineState` literal that ends with
+  `..Default::default()` keeps compiling.
+
 ### Added
+
+- `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-rpc`,
+  `meerkat-contracts`, the Python and TypeScript SDKs: a host can ask a
+  live session to compact now, without a rebuild and without changing any
+  compaction threshold. `MeerkatMachine::request_compaction` records the
+  request on the session's runtime registration (MeerkatMachine
+  `RequestCompaction`) and answers `CompactionRequestReceipt::Requested`, or
+  `AlreadyRequested` when a request no check consumed yet was already
+  recorded. The session's next compaction check consumes it
+  (`ConsumeCompactionRequest`, through the new provided method
+  `TurnStateHandle::consume_compaction_request`): the check before the next
+  model request, in the running turn once its tool results are in or in the
+  next turn, compacts without asking the compactor's trigger (its
+  thresholds and cadence). The compaction's own rules hold (a turn in
+  flight keeps its request and newest round; a check with nothing to fold
+  compacts nothing, and so does the session's first model request), and it
+  publishes the ordinary
+  compaction events. The request is never persisted, a per-build threshold
+  override is neither read nor changed, and a registration that is
+  initializing, retired, stopped or gone refuses it with
+  `RuntimeDriverError::NotReady`. Nothing is woken or loaded for a request.
+  JSON-RPC `session/compact` (`CompactSessionParams`, `CompactSessionResult`)
+  answers `outcome` `requested` or `already_requested`
+  (`WireCompactionRequestOutcome`); a session with no live runtime in the
+  server is refused `-32003`. `mob/compact_member` (`MobCompactMemberParams`,
+  `MobCompactMemberResult`, `MobHandle::compact_member`, `SendCommand`-scoped)
+  asks the same of a live mob member without a respawn: a dormant or waking
+  member is refused `MemberSessionNotLive` and never woken, a placed member
+  `UnsupportedForMode`. Python `Session.compact()` and `Mob.compact_member()`,
+  TypeScript `session.compact()` and `mob.compactMember()`. (#2113, thanks
+  @zond)
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
   identity's member build (`DeclaredEntry::build`, set with

@@ -3015,13 +3015,14 @@ pub enum LiveContextRowDisposition {
 }
 
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+    CompactionRequestVerdict, EmptyResumeRetirementVerdict, RetainedRunSettleVerdict,
+    SessionResidencyOwner,
+};
+pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     DurableRecoveryOwnership, LiveContextDeliveryReadiness, LiveContextPayloadAvailability,
     LiveContextPreparationFailure, LiveContextPreparationPhase, LiveContextRowAuthor,
     LiveContextRowSource, LiveConversationStartCause, RunStartHoldReason, RunSuspensionCause,
     StopInputDisposition, UnregisterQueuedInputsDisposition,
-};
-pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
-    EmptyResumeRetirementVerdict, RetainedRunSettleVerdict, SessionResidencyOwner,
 };
 
 /// Bridging copy of the catalog-owned delegation result disposition.

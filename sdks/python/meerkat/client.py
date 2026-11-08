@@ -81,6 +81,9 @@ from .generated.types import (
     InterruptResult,
     StopRunParams,
     StopRunResult,
+    CompactSessionParams,
+    CompactSessionResult,
+    WireCompactionRequestOutcome,
     ToolDispatchAdmissionSource,
     ToolDispatchSettlementFailure,
     ToolDispatchTerminalErrorKind,
@@ -133,6 +136,8 @@ from .generated.types import (
     MobHardCancelParams,
     MobStopMemberRunParams,
     MobStopMemberRunResult,
+    MobCompactMemberParams,
+    MobCompactMemberResult,
     MobHostStatus,
     MobIdParams,
     MobIngressInteractionParams,
@@ -4166,6 +4171,28 @@ class MeerkatClient:
             receipt=self._parse_run_stop_receipt(result.get("receipt"), context),
         )
 
+    async def compact_mob_member(
+        self,
+        mob_id: str,
+        agent_identity: str,
+    ) -> MobCompactMemberResult:
+        """Ask a live member's next compaction check to compact.
+
+        The member is not respawned and its compaction thresholds do not
+        change: the check before its next model request compacts. The outcome
+        is ``requested``, or ``already_requested`` when a request no check
+        consumed yet was already recorded. A dormant member is refused, never
+        woken.
+        """
+        params = MobCompactMemberParams(mob_id=mob_id, agent_identity=agent_identity)
+        result = await self._request("mob/compact_member", _wire_params(params))
+        context = "Invalid mob/compact_member response"
+        return MobCompactMemberResult(
+            mob_id=self._require_string_field(result, "mob_id", context),
+            agent_identity=self._require_string_field(result, "agent_identity", context),
+            outcome=self._parse_compaction_request_outcome(result.get("outcome"), context),
+        )
+
     async def open_mob_member_live(
         self,
         mob_id: str,
@@ -5291,6 +5318,27 @@ class MeerkatClient:
             session_id=self._require_string_field(result, "session_id", context),
             receipt=self._parse_run_stop_receipt(result.get("receipt"), context),
         )
+
+    async def _compact(self, session_id: str) -> CompactSessionResult:
+        params = CompactSessionParams(session_id=session_id)
+        result = await self._request("session/compact", _wire_params(params))
+        context = "Invalid session/compact response"
+        return CompactSessionResult(
+            session_id=self._require_string_field(result, "session_id", context),
+            outcome=self._parse_compaction_request_outcome(result.get("outcome"), context),
+        )
+
+    @staticmethod
+    def _parse_compaction_request_outcome(
+        raw: Any, context: str
+    ) -> WireCompactionRequestOutcome:
+        """Validate a compaction request's outcome (a closed vocabulary)."""
+        if raw not in ("requested", "already_requested"):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: outcome must be 'requested' or 'already_requested'",
+            )
+        return raw
 
     @staticmethod
     def _parse_run_stop_receipt(raw: Any, context: str) -> WireRunStopReceipt:

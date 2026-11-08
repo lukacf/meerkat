@@ -1812,6 +1812,14 @@ pub(super) enum MobCommand {
         agent_identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
     },
+    /// A host's request that a LOCAL member's next compaction check compact,
+    /// without a respawn and without changing its thresholds: the member
+    /// runtime's machine decides (`RequestCompaction`). `SendCommand`-scoped
+    /// at chokepoint (a); never wakes the member.
+    RequestMemberCompaction {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::CompactionRequestReceipt, MobError>>,
+    },
     /// Open a live channel on a member (§16 phase 6b, DEC-P6B-C2).
     /// Identity-addressed and placement-blind (DL3); `Live`-scoped at
     /// chokepoint (a). There is deliberately NO MobMachine input for the
@@ -2459,6 +2467,7 @@ impl MobCommand {
             Self::HardCancelMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StopMemberRun { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SettleMemberRetainedRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RequestMemberCompaction { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveOpen { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveClose { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveStatus { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2718,6 +2727,7 @@ impl MobCommand {
             Self::HardCancelMember { .. } => "HardCancelMember",
             Self::StopMemberRun { .. } => "StopMemberRun",
             Self::SettleMemberRetainedRun { .. } => "SettleMemberRetainedRun",
+            Self::RequestMemberCompaction { .. } => "RequestMemberCompaction",
             Self::MemberHistory { .. } => "MemberHistory",
             Self::CompleteHostForkedParticipantSpawn { .. } => "CompleteHostForkedParticipantSpawn",
             Self::CreateForkedParticipant { .. } => "CreateForkedParticipant",

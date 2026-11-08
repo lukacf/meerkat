@@ -19862,6 +19862,21 @@
     ],
     "title": "CommsSendParams"
   },
+  "CompactSessionParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Parameters for `session/compact`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "CompactSessionParams",
+    "type": "object"
+  },
   "CoreCreateParams": {
     "$defs": {
       "BindingId": {
@@ -30347,6 +30362,25 @@
       "work_ref"
     ],
     "title": "MobCancelWorkParams",
+    "type": "object"
+  },
+  "MobCompactMemberParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Parameters for `mob/compact_member`.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity"
+    ],
+    "title": "MobCompactMemberParams",
     "type": "object"
   },
   "MobConcludeObjectiveParams": {

@@ -913,6 +913,15 @@ WireRunStopCompletion = Literal['completed', 'completed_without_result', 'callba
 # Typed wire projection of an input's terminal outcome.
 WireInputTerminalOutcome = Literal['completed', 'abandoned', 'superseded', 'coalesced', 'cancelled']
 
+# What a compaction request recorded on the session's registration.
+#
+# `requested`: the session's next compaction check compacts, before the
+# next model request of its running turn or of its next run, whatever the
+# compaction thresholds would decide. `already_requested`: a request no
+# check consumed yet was already recorded; nothing changed, and the next
+# check compacts once.
+WireCompactionRequestOutcome = Literal['requested', 'already_requested']
+
 # `auth/login/device_complete` success body.
 class WireDeviceCompleteResultPending(TypedDict, total=False):
     state: Required[Literal['pending']]
@@ -1834,6 +1843,19 @@ class WireRunStopContributor:
     completion: WireRunStopCompletion
     input_id: str
     terminal: Optional[WireInputTerminalOutcome] = None
+
+
+@dataclass
+class CompactSessionParams:
+    """Parameters for `session/compact`."""
+    session_id: str
+
+
+@dataclass
+class CompactSessionResult:
+    """Result for `session/compact`."""
+    outcome: WireCompactionRequestOutcome
+    session_id: str
 
 
 @dataclass
@@ -4081,6 +4103,21 @@ class MobStopMemberRunResult:
     agent_identity: str
     mob_id: str
     receipt: WireRunStopReceipt
+
+
+@dataclass
+class MobCompactMemberParams:
+    """Parameters for `mob/compact_member`."""
+    agent_identity: str
+    mob_id: str
+
+
+@dataclass
+class MobCompactMemberResult:
+    """Result for `mob/compact_member`."""
+    agent_identity: str
+    mob_id: str
+    outcome: WireCompactionRequestOutcome
 
 
 @dataclass

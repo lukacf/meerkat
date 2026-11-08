@@ -36,6 +36,8 @@ from .types import (
     CommsPeersResult,
     CommsSendParams,
     CommsSendResult,
+    CompactSessionParams,
+    CompactSessionResult,
     ConfigEnvelope,
     ConfigPatchParams,
     ConfigSetParams,
@@ -146,6 +148,8 @@ from .types import (
     MobCancelWorkResult,
     MobClaimCallbackRouteParams,
     MobClaimCallbackRouteResult,
+    MobCompactMemberParams,
+    MobCompactMemberResult,
     MobConcludeObjectiveParams,
     MobConcludeObjectiveResult,
     MobCreateParams,
@@ -612,6 +616,14 @@ class RpcRequest(Protocol):
         params: StopRunParams,
         /,
     ) -> Awaitable[StopRunResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/compact"],
+        params: CompactSessionParams,
+        /,
+    ) -> Awaitable[CompactSessionResult]: ...
 
     @overload
     def __call__(
@@ -1732,6 +1744,14 @@ class RpcRequest(Protocol):
         params: MobStopMemberRunParams,
         /,
     ) -> Awaitable[MobStopMemberRunResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/compact_member"],
+        params: MobCompactMemberParams,
+        /,
+    ) -> Awaitable[MobCompactMemberResult]: ...
 
     @overload
     def __call__(

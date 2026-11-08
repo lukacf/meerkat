@@ -19,7 +19,11 @@
  * ```
  */
 
-import type { PeerDirectoryEntry, StopRunResult } from "./generated/types.js";
+import type {
+  CompactSessionResult,
+  PeerDirectoryEntry,
+  StopRunResult,
+} from "./generated/types.js";
 import type {
   AgentEventEnvelope,
   CommsCommand,
@@ -131,6 +135,18 @@ export class Session {
    */
   async stopRun(runId: string, reason: string): Promise<StopRunResult> {
     return this._client._stopRun(this._id, runId, reason);
+  }
+
+  /**
+   * Ask this live session's next compaction check to compact. The session
+   * is not rebuilt and its compaction thresholds do not change: the check
+   * before its next model request (in the running turn, or in the next one)
+   * compacts. The outcome is `requested`, or `already_requested` when a
+   * request no check consumed yet was already recorded. A session with no
+   * live runtime in the server is refused, never loaded or woken.
+   */
+  async compact(): Promise<CompactSessionResult> {
+    return this._client._compact(this._id);
   }
 
   async archive(): Promise<void> {
@@ -365,6 +381,18 @@ export class DeferredSession {
    */
   async stopRun(runId: string, reason: string): Promise<StopRunResult> {
     return this._client._stopRun(this._id, runId, reason);
+  }
+
+  /**
+   * Ask this live session's next compaction check to compact. The session
+   * is not rebuilt and its compaction thresholds do not change: the check
+   * before its next model request (in the running turn, or in the next one)
+   * compacts. The outcome is `requested`, or `already_requested` when a
+   * request no check consumed yet was already recorded. A session with no
+   * live runtime in the server is refused, never loaded or woken.
+   */
+  async compact(): Promise<CompactSessionResult> {
+    return this._client._compact(this._id);
   }
 
   async archive(): Promise<void> {

@@ -483,6 +483,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_overlay_peer_endpoints`: `Set<PeerEndpoint>`
 - `peer_projection_epoch`: `u64`
 - `mob_overlay_epoch`: `u64`
+- `compaction_requested`: `Bool`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId, runtime_epoch_id: Option<RuntimeEpochId>, initial_run_start_holds: Set<RunStartHoldReason>)
@@ -917,6 +918,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `SettleRetainedRun`(run_id: Option<RunId>)
+- `RequestCompaction`
+- `ConsumeCompactionRequest`(run_id: RunId)
 
 ## Signals
 - `Initialize`
@@ -1193,6 +1196,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 - `InputControllerReleased`
 - `RetainedRunSettleResolved`(verdict: RetainedRunSettleVerdict, run_id: Option<RunId>)
+- `CompactionRequestResolved`(verdict: CompactionRequestVerdict)
+- `CompactionRequestConsumed`(run_id: RunId)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -29463,6 +29468,171 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `SettleRetainedRun`(run_id)
 - Emits: `RetainedRunSettleResolved`
+- To: `Destroyed`
+
+### `RequestCompactionRecordedIdle`
+- From: `Idle`
+- On: `RequestCompaction`()
+- Guards:
+  - `no_compaction_requested`
+- Emits: `CompactionRequestResolved`
+- To: `Idle`
+
+### `RequestCompactionRecordedAttached`
+- From: `Attached`
+- On: `RequestCompaction`()
+- Guards:
+  - `no_compaction_requested`
+- Emits: `CompactionRequestResolved`
+- To: `Attached`
+
+### `RequestCompactionRecordedRunning`
+- From: `Running`
+- On: `RequestCompaction`()
+- Guards:
+  - `no_compaction_requested`
+- Emits: `CompactionRequestResolved`
+- To: `Running`
+
+### `RequestCompactionAlreadyRecordedIdle`
+- From: `Idle`
+- On: `RequestCompaction`()
+- Guards:
+  - `compaction_requested`
+- Emits: `CompactionRequestResolved`
+- To: `Idle`
+
+### `RequestCompactionAlreadyRecordedAttached`
+- From: `Attached`
+- On: `RequestCompaction`()
+- Guards:
+  - `compaction_requested`
+- Emits: `CompactionRequestResolved`
+- To: `Attached`
+
+### `RequestCompactionAlreadyRecordedRunning`
+- From: `Running`
+- On: `RequestCompaction`()
+- Guards:
+  - `compaction_requested`
+- Emits: `CompactionRequestResolved`
+- To: `Running`
+
+### `RequestCompactionNotServingInitializing`
+- From: `Initializing`
+- On: `RequestCompaction`()
+- Emits: `CompactionRequestResolved`
+- To: `Initializing`
+
+### `RequestCompactionNotServingRetired`
+- From: `Retired`
+- On: `RequestCompaction`()
+- Emits: `CompactionRequestResolved`
+- To: `Retired`
+
+### `RequestCompactionNotServingStopped`
+- From: `Stopped`
+- On: `RequestCompaction`()
+- Emits: `CompactionRequestResolved`
+- To: `Stopped`
+
+### `RequestCompactionNotServingDestroyed`
+- From: `Destroyed`
+- On: `RequestCompaction`()
+- Emits: `CompactionRequestResolved`
+- To: `Destroyed`
+
+### `ConsumeCompactionRequestTakenRunning`
+- From: `Running`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_calling_llm`
+  - `compaction_requested`
+- Emits: `CompactionRequestConsumed`
+- To: `Running`
+
+### `ConsumeCompactionRequestTakenRetired`
+- From: `Retired`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_calling_llm`
+  - `compaction_requested`
+- Emits: `CompactionRequestConsumed`
+- To: `Retired`
+
+### `ConsumeCompactionRequestNoneRunning`
+- From: `Running`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_calling_llm`
+  - `no_compaction_requested`
+- To: `Running`
+
+### `ConsumeCompactionRequestNoneRetired`
+- From: `Retired`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_calling_llm`
+  - `no_compaction_requested`
+- To: `Retired`
+
+### `ConsumeCompactionRequestStaleRunRunning`
+- From: `Running`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_not_current`
+- To: `Running`
+
+### `ConsumeCompactionRequestStaleRunRetired`
+- From: `Retired`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_not_current`
+- To: `Retired`
+
+### `ConsumeCompactionRequestOutsideCheckRunning`
+- From: `Running`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_not_calling_llm`
+- To: `Running`
+
+### `ConsumeCompactionRequestOutsideCheckRetired`
+- From: `Retired`
+- On: `ConsumeCompactionRequest`(run_id)
+- Guards:
+  - `run_matches_current`
+  - `turn_not_calling_llm`
+- To: `Retired`
+
+### `ConsumeCompactionRequestInertInitializing`
+- From: `Initializing`
+- On: `ConsumeCompactionRequest`(run_id)
+- To: `Initializing`
+
+### `ConsumeCompactionRequestInertIdle`
+- From: `Idle`
+- On: `ConsumeCompactionRequest`(run_id)
+- To: `Idle`
+
+### `ConsumeCompactionRequestInertAttached`
+- From: `Attached`
+- On: `ConsumeCompactionRequest`(run_id)
+- To: `Attached`
+
+### `ConsumeCompactionRequestInertStopped`
+- From: `Stopped`
+- On: `ConsumeCompactionRequest`(run_id)
+- To: `Stopped`
+
+### `ConsumeCompactionRequestInertDestroyed`
+- From: `Destroyed`
+- On: `ConsumeCompactionRequest`(run_id)
 - To: `Destroyed`
 
 ## Coverage

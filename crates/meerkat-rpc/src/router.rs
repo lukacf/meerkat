@@ -3017,6 +3017,9 @@ impl MethodRouter {
             "turn/stop_run" => {
                 routed_arm(|| handlers::turn::handle_stop_run(id, params, &self.runtime)).await
             }
+            "session/compact" => {
+                routed_arm(|| handlers::session::handle_compact(id, params, &self.runtime)).await
+            }
             "turn/interrupt" => {
                 #[cfg(feature = "mob")]
                 {
@@ -3339,6 +3342,11 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/stop_member_run" => {
                 routed_arm(|| handlers::mob::handle_stop_member_run(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/compact_member" => {
+                routed_arm(|| handlers::mob::handle_compact_member(id, params, &self.mob_state))
                     .await
             }
             #[cfg(feature = "mob")]
@@ -18435,6 +18443,96 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
             .await
             .unwrap();
         assert_eq!(error_code(&resp), error::SESSION_NOT_FOUND);
+    }
+
+    /// `session/compact` wire contract: a live session's registration
+    /// records the request (`requested`, then `already_requested`); an
+    /// unknown session is not found; unknown params are invalid; and a
+    /// session with no live runtime registration (unloaded) is refused as not
+    /// running, and the request does not register it again.
+    #[tokio::test]
+    async fn session_compact_records_once_on_a_live_session_and_never_loads_one() {
+        let (router, _notif_rx) = test_router().await;
+        let create_req = make_request("session/create", serde_json::json!({"prompt": "Hello"}));
+        let create_resp = router.dispatch(create_req).await.unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = router
+            .dispatch(make_request(
+                "session/compact",
+                serde_json::json!({"session_id": session_id}),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&resp);
+        assert_eq!(
+            result,
+            serde_json::json!({"session_id": session_id, "outcome": "requested"})
+        );
+        let decoded: meerkat_contracts::CompactSessionResult =
+            serde_json::from_value(result).expect("typed CompactSessionResult");
+        assert_eq!(
+            decoded.outcome,
+            meerkat_contracts::WireCompactionRequestOutcome::Requested
+        );
+        let resp = router
+            .dispatch(make_request(
+                "session/compact",
+                serde_json::json!({"session_id": session_id}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&resp)["outcome"], "already_requested");
+
+        let resp = router
+            .dispatch(make_request(
+                "session/compact",
+                serde_json::json!({"session_id": meerkat_core::SessionId::new().to_string()}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&resp), error::SESSION_NOT_FOUND);
+
+        let resp = router
+            .dispatch(make_request(
+                "session/compact",
+                serde_json::json!({"session_id": session_id, "threshold": 1}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&resp), error::INVALID_PARAMS);
+
+        // Unload the session's runtime registration: the session stays in
+        // the store, and a request never loads it again.
+        let sid = meerkat_core::SessionId::parse(&session_id).expect("session id");
+        let registration = router
+            .runtime_adapter
+            .current_session_registration_witness(&sid)
+            .await
+            .expect("the live session's registration");
+        assert!(
+            router
+                .runtime_adapter
+                .unregister_session_registration_until_terminal_if_current(&registration)
+                .await
+                .expect("unregister the session's runtime registration"),
+            "the registration is torn down"
+        );
+        let resp = router
+            .dispatch(make_request(
+                "session/compact",
+                serde_json::json!({"session_id": session_id}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&resp), error::SESSION_NOT_RUNNING);
+        assert!(
+            !router.runtime_adapter.contains_session(&sid).await,
+            "the request does not load the session"
+        );
     }
 
     #[tokio::test]

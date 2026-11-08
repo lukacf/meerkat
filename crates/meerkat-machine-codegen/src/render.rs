@@ -580,6 +580,31 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SettleRetainedRunNotRetainedRetired",
     "SettleRetainedRunNotRetainedStopped",
     "SettleRetainedRunInertDestroyed",
+    // A host's compaction request and its consumption by the agent's
+    // compaction check (0.9.11).
+    "RequestCompactionRecordedIdle",
+    "RequestCompactionRecordedAttached",
+    "RequestCompactionRecordedRunning",
+    "RequestCompactionAlreadyRecordedIdle",
+    "RequestCompactionAlreadyRecordedAttached",
+    "RequestCompactionAlreadyRecordedRunning",
+    "RequestCompactionNotServingInitializing",
+    "RequestCompactionNotServingRetired",
+    "RequestCompactionNotServingStopped",
+    "RequestCompactionNotServingDestroyed",
+    "ConsumeCompactionRequestTakenRunning",
+    "ConsumeCompactionRequestTakenRetired",
+    "ConsumeCompactionRequestNoneRunning",
+    "ConsumeCompactionRequestNoneRetired",
+    "ConsumeCompactionRequestStaleRunRunning",
+    "ConsumeCompactionRequestStaleRunRetired",
+    "ConsumeCompactionRequestOutsideCheckRunning",
+    "ConsumeCompactionRequestOutsideCheckRetired",
+    "ConsumeCompactionRequestInertInitializing",
+    "ConsumeCompactionRequestInertIdle",
+    "ConsumeCompactionRequestInertAttached",
+    "ConsumeCompactionRequestInertStopped",
+    "ConsumeCompactionRequestInertDestroyed",
 ];
 
 // Append-only emission tails for the other machines, whose public

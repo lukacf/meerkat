@@ -172,6 +172,7 @@ of this full catalog.
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
+| `session/compact` | Session | `CompactSessionParams` | `CompactSessionResult` | Ask a live session's next compaction check to compact, without a rebuild |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
 | `turn/stop_run` | Turn | `StopRunParams` | `StopRunResult` | Stop one exact run and terminalize every contributor bound to it |
@@ -250,6 +251,7 @@ of this full catalog.
 | `mob/revoke_host` | Mob | `MobRevokeHostParams` | `MobRevokeHostResult` | Revoke a bound (or bind-requested) member host (mob feature) |
 | `mob/hard_cancel_member` | Mob | `MobHardCancelParams` | `MobHardCancelResult` | Hard-cancel a mob member; immediate user-interrupt authority (mob feature) |
 | `mob/stop_member_run` | Mob | `MobStopMemberRunParams` | `MobStopMemberRunResult` | Stop one exact run of a mob member and terminalize its contributors (mob feature) |
+| `mob/compact_member` | Mob | `MobCompactMemberParams` | `MobCompactMemberResult` | Ask a live mob member's next compaction check to compact, without a respawn (mob feature) |
 | `mob/member_live_open` | Mob | `MobMemberLiveOpenParams` | `LiveOpenResult` | Open a live realtime channel on a mob member by identity (mob feature) |
 | `mob/member_live_close` | Mob | `MobMemberLiveChannelParams` | `LiveCloseResult` | Close one named live channel on a mob member (mob feature) |
 | `mob/member_live_status` | Mob | `MobMemberLiveStatusParams` | `LiveStatusResult` | Read live channel status for a mob member; omit channel_id to discover (mob feature) |
@@ -1261,6 +1263,52 @@ Remove a session from the runtime.
 
 <ParamField body="session_id" type="string" required>
   Session ID to archive.
+</ParamField>
+
+### session/compact
+
+Ask a live session's next compaction check to compact. The session is not
+rebuilt and no compaction threshold changes: the check that precedes the
+session's next model request (in its running turn, once that turn's tool
+results are in, or in its next turn) runs a compaction whatever the
+thresholds and their cadence would decide. The compaction publishes the
+ordinary `compaction_started` and `compaction_completed` events. Its own
+rules still hold: a turn in flight keeps its request and newest round, a
+check with nothing to fold compacts nothing, and so does a session's first
+model request (a request made before it is consumed there).
+
+The request lives in the session's runtime registration only. It is never
+persisted: a restart of the server, an unload or a reload of the session
+drops it, and a per-build threshold override is neither read nor changed.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":9,"method":"session/compact","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001"}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":9,"result":{"session_id":"01936f8a-7b2c-7000-8000-000000000001","outcome":"requested"}}
+```
+</CodeGroup>
+
+The `outcome` is `requested`, or `already_requested` when a request that no
+check consumed yet was already recorded (nothing changes, and the next check
+compacts once). A request never loads or wakes a session. Refusals:
+
+- an unknown or archived session: `-32001` (session not found);
+- a session with no live runtime in this server (not opened since the server
+  started, unloaded, or a mob member's session its mob has not woken):
+  `-32003` (session not running);
+- a retired or stopped session runtime: `-32600`.
+
+`mob/compact_member` (`mob_id`, `agent_identity`) asks the same of a live mob
+member, without a respawn, and answers the same `outcome` with the member's
+`mob_id` and `agent_identity`. A member that is dormant or waking, or whose
+runtime is retired or stopped, is refused as not live and is never woken; a
+member placed on a member host is refused as unsupported.
+
+<ParamField body="session_id" type="string" required>
+  Session ID.
 </ParamField>
 
 ## Turn methods

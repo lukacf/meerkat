@@ -19,6 +19,7 @@ from .generated.types import (
     MobHostStatus,
     MobMemberHistoryResult,
     MobStopMemberRunResult,
+    MobCompactMemberResult,
     MobAdoptMemberIdentityDeclarationParams,
     MobRevokeHostResult,
     MobRouteInstallsResult,
@@ -617,6 +618,14 @@ class Mob:
         return await self._client.stop_mob_member_run(
             self.id, agent_identity, run_id, reason
         )
+
+    async def compact_member(self, agent_identity: str) -> MobCompactMemberResult:
+        """Ask a live member's next compaction check to compact.
+
+        No respawn and no threshold change; a dormant member is refused,
+        never woken.
+        """
+        return await self._client.compact_mob_member(self.id, agent_identity)
 
     async def member_live_open(
         self,

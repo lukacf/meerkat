@@ -96573,6 +96573,34 @@
     ],
     "title": "CommsSendResult"
   },
+  "CompactSessionResult": {
+    "$defs": {
+      "WireCompactionRequestOutcome": {
+        "description": "What a compaction request recorded on the session's registration.\n\n`requested`: the session's next compaction check compacts, before the\nnext model request of its running turn or of its next run, whatever the\ncompaction thresholds would decide. `already_requested`: a request no\ncheck consumed yet was already recorded; nothing changed, and the next\ncheck compacts once.",
+        "enum": [
+          "requested",
+          "already_requested"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `session/compact`.",
+    "properties": {
+      "outcome": {
+        "$ref": "#/$defs/WireCompactionRequestOutcome"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "outcome"
+    ],
+    "title": "CompactSessionResult",
+    "type": "object"
+  },
   "ConfigEnvelope": {
     "$defs": {
       "ConfigResolvedPaths": {
@@ -126656,6 +126684,38 @@
       "mob_id"
     ],
     "title": "MobClaimCallbackRouteResult",
+    "type": "object"
+  },
+  "MobCompactMemberResult": {
+    "$defs": {
+      "WireCompactionRequestOutcome": {
+        "description": "What a compaction request recorded on the session's registration.\n\n`requested`: the session's next compaction check compacts, before the\nnext model request of its running turn or of its next run, whatever the\ncompaction thresholds would decide. `already_requested`: a request no\ncheck consumed yet was already recorded; nothing changed, and the next\ncheck compacts once.",
+        "enum": [
+          "requested",
+          "already_requested"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result for `mob/compact_member`.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "outcome": {
+        "$ref": "#/$defs/WireCompactionRequestOutcome"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity",
+      "outcome"
+    ],
+    "title": "MobCompactMemberResult",
     "type": "object"
   },
   "MobConcludeObjectiveResult": {
@@ -166135,6 +166195,16 @@
     ],
     "title": "WireCanonicalPart",
     "type": "object"
+  },
+  "WireCompactionRequestOutcome": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What a compaction request recorded on the session's registration.\n\n`requested`: the session's next compaction check compacts, before the\nnext model request of its running turn or of its next run, whatever the\ncompaction thresholds would decide. `already_requested`: a request no\ncheck consumed yet was already recorded; nothing changed, and the next\ncheck compacts once.",
+    "enum": [
+      "requested",
+      "already_requested"
+    ],
+    "title": "WireCompactionRequestOutcome",
+    "type": "string"
   },
   "WireConnectorAccountSelection": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -221,6 +221,12 @@
       "result_type": "StopRunResult"
     },
     {
+      "description": "Ask a live session's next compaction check to compact, without a rebuild",
+      "name": "session/compact",
+      "params_type": "CompactSessionParams",
+      "result_type": "CompactSessionResult"
+    },
+    {
       "description": "Read config",
       "name": "config/get",
       "result_type": "ConfigEnvelope"
@@ -1048,6 +1054,12 @@
       "name": "mob/stop_member_run",
       "params_type": "MobStopMemberRunParams",
       "result_type": "MobStopMemberRunResult"
+    },
+    {
+      "description": "Ask a live mob member's next compaction check to compact, without a respawn",
+      "name": "mob/compact_member",
+      "params_type": "MobCompactMemberParams",
+      "result_type": "MobCompactMemberResult"
     },
     {
       "description": "Open a live realtime channel on a mob member by identity",

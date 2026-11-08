@@ -2050,6 +2050,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Accepted", "Busy", "NotRetained"],
             ),
             NamedTypeBinding::string_enum(
+                "CompactionRequestVerdict",
+                &["Requested", "AlreadyRequested", "NotServing"],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputPhase",
                 &[
                     "Queued",
@@ -3539,6 +3543,12 @@ runtime_internal_inputs!(
         // by `MeerkatMachine::settle_retained_run`, which answers the
         // machine's verdict.
         SettleRetainedRun,
+        // A host's compaction request, applied directly by
+        // `MeerkatMachine::request_compaction`, which answers the machine's
+        // verdict, and its consumption by the agent's compaction check
+        // through the session's turn-state handle.
+        RequestCompaction,
+        ConsumeCompactionRequest,
     ]
 );
 

@@ -32599,6 +32599,13 @@ impl MobActor {
                     self.handle_settle_member_retained_run(agent_identity, reply_tx)
                         .await;
                 }
+                MobCommand::RequestMemberCompaction {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    self.handle_request_member_compaction(agent_identity, reply_tx)
+                        .await;
+                }
                 MobCommand::MemberHistory {
                     agent_identity,
                     from_index,
@@ -42627,6 +42634,78 @@ impl MobActor {
         self.actor_io_tasks.spawn(async move {
             let result = provisioner
                 .settle_member_retained_run(&member_ref, &agent_identity)
+                .await;
+            let _ = reply_tx.send(result);
+        });
+    }
+
+    /// A host's request that a local member's next compaction check compact,
+    /// without a respawn and without changing its thresholds. The member
+    /// runtime's machine decides (`RequestCompaction`); see
+    /// [`MobHandle::compact_member`](super::MobHandle::compact_member). A
+    /// member the mob does not hold is `MemberNotFound`. A member not
+    /// materialized in this process (dormant, or waking) is
+    /// `MemberSessionNotLive`, and nothing wakes it. A placed member's
+    /// runtime lives on its member host (`UnsupportedForMode`). A member
+    /// runtime that needs a durability reload is `MemberReloadRequired`. The
+    /// request runs on a DETACHED task (ADJ-P4-12).
+    async fn handle_request_member_compaction(
+        &mut self,
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::CompactionRequestReceipt, MobError>>,
+    ) {
+        let projection = self.machine_projection_for_identity(&agent_identity);
+        if projection.runtime_id.is_none() {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let placed = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity));
+        if placed {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a placed member's compaction is requested on its member host".to_string(),
+            }));
+            return;
+        }
+        let Some(session_id) = entry.member_ref.bridge_session_id().cloned() else {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a compaction request requires a session-backed member".to_string(),
+            }));
+            return;
+        };
+        if super::boot_plan::domain_member_is_unmaterialized(
+            self.dsl_authority.state(),
+            &agent_identity,
+        ) || !projection.live_runtime
+        {
+            let _ = reply_tx.send(Err(MobError::MemberSessionNotLive {
+                agent_identity,
+                session_id,
+            }));
+            return;
+        }
+        if let Err(error) = self.ensure_member_runtime_durability_ready(&entry).await {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        let provisioner = self.provisioner.clone();
+        let member_ref = entry.member_ref.clone();
+        self.actor_io_tasks.spawn(async move {
+            let result = provisioner
+                .request_member_compaction(&member_ref, &agent_identity)
                 .await;
             let _ = reply_tx.send(result);
         });

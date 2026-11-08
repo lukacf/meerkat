@@ -220,6 +220,21 @@ stopped, is stopped without waiting: `stopped` with no `contributors`, and
 its inputs end cancelled when the runtime settles it (once the store takes
 writes again, after a gap).
 
+### `compact`
+
+```python
+result = await session.compact()
+result = await mob.compact_member(agent_identity)
+```
+
+Asks the live session's (or mob member's) next compaction check to compact,
+without a rebuild or a respawn and without changing any compaction
+threshold: the check before its next model request compacts. Returns
+`CompactSessionResult` / `MobCompactMemberResult` whose `outcome` is
+`requested`, or `already_requested` when a request no check consumed yet was
+already recorded. The request is never persisted, and a session or member
+with no live runtime is refused, never woken.
+
 ### `send_external_event`
 
 ```python

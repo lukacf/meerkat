@@ -4589,6 +4589,27 @@ where
         Box::pin(self.execute_turn_effects_unboxed(transition, turn_count, event_tx))
     }
 
+    /// Consume a host's compaction request at the compaction check being
+    /// evaluated.
+    ///
+    /// MeerkatMachine owns the request (`RequestCompaction`) and decides
+    /// whether this check consumes it (`ConsumeCompactionRequest`): only the
+    /// current run's check, while its turn calls the model. An agent with no
+    /// turn-state authority or no started run holds no request.
+    fn consume_compaction_request(&self) -> Result<bool, AgentError> {
+        let (Some(handle), Some(run_id)) = (
+            self.turn_state_handle.as_deref(),
+            self.runtime_started_run_id.clone(),
+        ) else {
+            return Ok(false);
+        };
+        handle.consume_compaction_request(run_id).map_err(|err| {
+            AgentError::InternalError(format!(
+                "runtime turn-state handle rejected ConsumeCompactionRequest: {err}"
+            ))
+        })
+    }
+
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects emitted on CallingLlm entry.
     ///
@@ -4707,7 +4728,23 @@ where
                                 Some(crate::agent::compact::CompactionScope::Whole)
                             )
                         });
-                    if compactor.should_compact(&ctx) {
+                    // A host's compaction request is consumed by this check:
+                    // the machine answers whether this check compacts at the
+                    // host's request, without asking the compactor's trigger
+                    // (its thresholds and cadence). The compaction's own
+                    // rules below still hold, and the session's first-ever
+                    // check has nothing to compact: a request it consumes
+                    // compacts nothing.
+                    let requested = self.consume_compaction_request()?;
+                    let compact_on_request = requested && current_boundary_index > 0;
+                    if requested {
+                        tracing::info!(
+                            run_id = ?self.runtime_started_run_id,
+                            compacts = compact_on_request,
+                            "a compaction request of the session's host was consumed at this check"
+                        );
+                    }
+                    if compact_on_request || compactor.should_compact(&ctx) {
                         // A writer past its self-fence window sends no
                         // summarization request either.
                         self.check_dispatch_fence().await?;

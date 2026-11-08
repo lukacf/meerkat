@@ -1297,6 +1297,60 @@ impl std::fmt::Display for CommsRuntimeId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum CompactionRequestVerdict {
+    #[default]
+    #[serde(rename = "Requested")]
+    Requested,
+    #[serde(rename = "AlreadyRequested")]
+    AlreadyRequested,
+    #[serde(rename = "NotServing")]
+    NotServing,
+}
+impl CompactionRequestVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Requested => "Requested",
+            Self::AlreadyRequested => "AlreadyRequested",
+            Self::NotServing => "NotServing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CompactionRequestVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Requested" => Ok(Self::Requested),
+            "AlreadyRequested" => Ok(Self::AlreadyRequested),
+            "NotServing" => Ok(Self::NotServing),
+            other => Err(format!("invalid CompactionRequestVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CompactionRequestVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CompactionRequestVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ContentShape {
     #[default]
     #[serde(rename = "conversation")]
@@ -14721,6 +14775,7 @@ pub struct State {
     pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     pub peer_projection_epoch: u64,
     pub mob_overlay_epoch: u64,
+    pub compaction_requested: bool,
 }
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -16294,6 +16349,7 @@ impl std::fmt::Debug for State {
             )
             .field("peer_projection_epoch", &self.peer_projection_epoch)
             .field("mob_overlay_epoch", &self.mob_overlay_epoch)
+            .field("compaction_requested", &self.compaction_requested)
             .finish()
     }
 }
@@ -19157,6 +19213,12 @@ pub mod inputs {
     pub struct SettleRetainedRun {
         pub run_id: Option<RunId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestCompaction {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeCompactionRequest {
+        pub run_id: RunId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19592,6 +19654,8 @@ pub enum Input {
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     SettleRetainedRun(inputs::SettleRetainedRun),
+    RequestCompaction(inputs::RequestCompaction),
+    ConsumeCompactionRequest(inputs::ConsumeCompactionRequest),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20193,6 +20257,8 @@ impl Input {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
             Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
+            Self::RequestCompaction(_) => InputKind::RequestCompaction,
+            Self::ConsumeCompactionRequest(_) => InputKind::ConsumeCompactionRequest,
         }
     }
 }
@@ -20617,6 +20683,8 @@ pub enum InputKind {
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
     SettleRetainedRun,
+    RequestCompaction,
+    ConsumeCompactionRequest,
 }
 
 pub mod signals {
@@ -22403,6 +22471,14 @@ pub mod effects {
         pub verdict: RetainedRunSettleVerdict,
         pub run_id: Option<RunId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompactionRequestResolved {
+        pub verdict: CompactionRequestVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompactionRequestConsumed {
+        pub run_id: RunId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22682,6 +22758,8 @@ pub enum Effect {
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
     RetainedRunSettleResolved(effects::RetainedRunSettleResolved),
+    CompactionRequestResolved(effects::CompactionRequestResolved),
+    CompactionRequestConsumed(effects::CompactionRequestConsumed),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22948,6 +23026,8 @@ pub enum EffectKind {
     EmptyResumeRetirementResolved,
     InputControllerReleased,
     RetainedRunSettleResolved,
+    CompactionRequestResolved,
+    CompactionRequestConsumed,
 }
 
 pub mod command_capabilities {
@@ -26190,6 +26270,29 @@ pub enum TransitionId {
     SettleRetainedRunNotRetainedRetired,
     SettleRetainedRunNotRetainedStopped,
     SettleRetainedRunInertDestroyed,
+    RequestCompactionRecordedIdle,
+    RequestCompactionRecordedAttached,
+    RequestCompactionRecordedRunning,
+    RequestCompactionAlreadyRecordedIdle,
+    RequestCompactionAlreadyRecordedAttached,
+    RequestCompactionAlreadyRecordedRunning,
+    RequestCompactionNotServingInitializing,
+    RequestCompactionNotServingRetired,
+    RequestCompactionNotServingStopped,
+    RequestCompactionNotServingDestroyed,
+    ConsumeCompactionRequestTakenRunning,
+    ConsumeCompactionRequestTakenRetired,
+    ConsumeCompactionRequestNoneRunning,
+    ConsumeCompactionRequestNoneRetired,
+    ConsumeCompactionRequestStaleRunRunning,
+    ConsumeCompactionRequestStaleRunRetired,
+    ConsumeCompactionRequestOutsideCheckRunning,
+    ConsumeCompactionRequestOutsideCheckRetired,
+    ConsumeCompactionRequestInertInitializing,
+    ConsumeCompactionRequestInertIdle,
+    ConsumeCompactionRequestInertAttached,
+    ConsumeCompactionRequestInertStopped,
+    ConsumeCompactionRequestInertDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26739,5 +26842,6 @@ pub fn initial_state() -> State {
         mob_overlay_peer_endpoints: Default::default(),
         peer_projection_epoch: 0,
         mob_overlay_epoch: 0,
+        compaction_requested: false,
     }
 }

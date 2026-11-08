@@ -1910,6 +1910,21 @@ pub trait MobProvisioner: Send + Sync {
             reason: "this provisioner serves no retained-run settle".to_string(),
         })
     }
+    /// Ask a LOCAL member's next compaction check to compact, through the
+    /// member session's MeerkatMachine (`request_compaction`). A session
+    /// with no runtime registration in this process is `member_identity`'s
+    /// [`MobError::MemberSessionNotLive`]. Default = typed reject.
+    async fn request_member_compaction(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, MobError> {
+        let _ = (member_ref, member_identity);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "this provisioner serves no compaction request".to_string(),
+        })
+    }
     /// Level-triggered cancellation of one exact tracked placed input.
     /// Implementations must preserve the full residency fence and return only
     /// an authenticated, replay-stable host receipt; transport failure is
@@ -15241,6 +15256,53 @@ fn retained_run_settle_refusal(
     }
 }
 
+/// The mob's refusal for a runtime refusal of a member's compaction request
+/// ([`MobProvisioner::request_member_compaction`]). `unregister_owed` is the
+/// runtime's [`MeerkatMachine::unregister_owed`] for the member's session,
+/// read after the refusal.
+///
+/// - The member's registration is gone from this process, drains for its
+///   unregister, owes one, or does not serve (initializing, retired or
+///   stopped): the member's session has no live runtime here to hold the
+///   request, `MemberSessionNotLive`. Nothing wakes it.
+/// - The registration needs a durability reload: `MemberReloadRequired`.
+///   The host reloads the member and requests again.
+/// - Anything else stays internal.
+#[cfg(feature = "runtime-adapter")]
+fn compaction_request_refusal(
+    error: meerkat_runtime::RuntimeDriverError,
+    member_identity: &AgentIdentity,
+    session_id: SessionId,
+    unregister_owed: bool,
+) -> MobError {
+    use meerkat_runtime::RuntimeDriverError;
+    match error {
+        RuntimeDriverError::NotReady { .. }
+        | RuntimeDriverError::UnregisterInProgress { .. }
+        | RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. } => {
+            MobError::MemberSessionNotLive {
+                agent_identity: member_identity.clone(),
+                session_id,
+            }
+        }
+        RuntimeDriverError::ValidationFailed { .. } if unregister_owed => {
+            MobError::MemberSessionNotLive {
+                agent_identity: member_identity.clone(),
+                session_id,
+            }
+        }
+        RuntimeDriverError::RecoveryRepairBlocked { reason, .. } => {
+            MobError::MemberReloadRequired {
+                member_id: member_identity.clone(),
+                reason,
+            }
+        }
+        error => MobError::Internal(format!(
+            "the compaction request for '{session_id}' failed: {error}"
+        )),
+    }
+}
+
 /// One fresh member, provisioned and held before its publication.
 ///
 /// Its agent is built and finished, under the selection its host made from
@@ -16072,6 +16134,31 @@ impl MobProvisioner for SessionBackend {
             Err(error) => {
                 let unregister_owed = adapter.unregister_owed(&session_id).await;
                 Err(retained_run_settle_refusal(
+                    error,
+                    member_identity,
+                    session_id,
+                    unregister_owed,
+                ))
+            }
+        }
+    }
+
+    async fn request_member_compaction(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, MobError> {
+        let session_id = Self::require_session(member_ref, "request compaction")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Err(MobError::Internal(format!(
+                "a compaction request for '{session_id}' requires MeerkatMachine runtime authority"
+            )));
+        };
+        match adapter.request_compaction(&session_id).await {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                let unregister_owed = adapter.unregister_owed(&session_id).await;
+                Err(compaction_request_refusal(
                     error,
                     member_identity,
                     session_id,
@@ -20119,6 +20206,25 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
         self.session
             .settle_member_retained_run(member_ref, member_identity)
+            .await
+    }
+
+    async fn request_member_compaction(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, MobError> {
+        // A legacy unplaced peer-only member has no local runtime to ask.
+        if matches!(member_ref, MemberRef::BackendPeer { .. }) {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a legacy peer-only member has no local runtime whose compaction \
+                         could be requested"
+                    .to_string(),
+            });
+        }
+        self.session
+            .request_member_compaction(member_ref, member_identity)
             .await
     }
 

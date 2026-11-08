@@ -248,6 +248,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobHardCancelResult",
     "MobStopMemberRunParams",
     "MobStopMemberRunResult",
+    "MobCompactMemberParams",
+    "MobCompactMemberResult",
     "MobMemberLiveOpenParams",
     "MobMemberLiveChannelParams",
     "MobMemberLiveStatusParams",
@@ -434,6 +436,8 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "StopRunParams",
     "StopRunResult",
     "WireRunStopContributor",
+    "CompactSessionParams",
+    "CompactSessionResult",
     "ListSessionTranscriptRevisionsParams",
     "ListSessionsParams",
     "ListSessionsResult",
@@ -513,6 +517,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireRunStopReceipt",
     "WireRunStopCompletion",
     "WireInputTerminalOutcome",
+    "WireCompactionRequestOutcome",
     "WireDeviceCompleteResult",
     "AuthLogoutParams",
     "AuthStatusParams",
@@ -1113,6 +1118,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         "WireRunStopCompletion",
         "WireInputTerminalOutcome",
         "WireRuntimeState",
+        # A compaction request's outcome stays named inside
+        # `CompactSessionResult` / `MobCompactMemberResult`.
+        "WireCompactionRequestOutcome",
     }
 
 

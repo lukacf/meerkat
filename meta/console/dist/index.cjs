@@ -67914,6 +67914,7 @@ var ACCESS_ACTION_WORDS = {
   "agent.respawn": "Restart agents",
   "agent.retire": "Retire agents",
   "agent.reset": "Reset agents",
+  "agent.tool_grants.manage": "Grant tools to agents",
   "gating.view": "View approvals",
   "gating.decide": "Decide approvals",
   "workgraph.view": "View work items",
@@ -67937,6 +67938,7 @@ var ACCESS_ACTION_WORDS = {
 var FAMILY_WORDS = {
   agent: "agent",
   "agent.memory": "agent memory",
+  "agent.tool_grants": "agent tool grant",
   operator: "operator",
   "operator.memory": "operator memory",
   mob: "team",
@@ -67973,6 +67975,7 @@ var ACCESS_FAMILIES = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
   { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
+  { id: "tools", label: "Tools", actions: ["agent.tool_grants.manage"] },
   { id: "approvals", label: "Approvals", actions: ["gating.view", "gating.decide"] },
   {
     id: "memory",

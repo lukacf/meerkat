@@ -4047,6 +4047,186 @@ external_addressable = true
         runtime.shutdown().await;
     }
 
+    /// A schedule fire addressed to a name this runtime has not registered,
+    /// which Core holds for an identity, is answered at the internal door by
+    /// the identity's refusal, never by a member door: an identity created at
+    /// runtime (a created entry, which no roster pass of this runtime
+    /// registers) ends the fire `TargetMissing`, and an entry a host
+    /// declared, before this process's roster pass registered it, leaves the
+    /// fire reclaimable (`DeliveryRepairDeferred`). Nothing reaches either
+    /// member.
+    ///
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
+    /// (the fire is then not the internal door's, and falls back to the
+    /// surface's member door), or keep a final refusal reclaimable (the fire
+    /// of a created entry is then retried for good).
+    #[tokio::test]
+    async fn a_schedule_fire_to_an_unregistered_identity_name_ends_typed_or_stays_reclaimable() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let factory = AgentFactory::new(temp_dir.path()).comms(true);
+        let session_service = Arc::new(meerkat::build_ephemeral_service(
+            factory,
+            Config::default(),
+            4,
+        ));
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "schedule-unregistered"
+
+[profiles.general]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .expect("schedule test mob definition");
+        let mob_spec = crate::mob_handle_runtime::MobBootstrapSpec::new(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            session_service,
+        )
+        .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(meerkat_client::TestClient::for_provider(
+                meerkat_core::Provider::OpenAI,
+            ))),
+        });
+        let runtime = crate::UnifiedRuntime::bootstrap(
+            mob_spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: "schedule-unregistered".to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("bootstrap schedule test runtime");
+
+        let bridge = Arc::new(crate::identity_first::core_test_bridge::CoreReadsBridge::default());
+        let created =
+            crate::identity_first::AgentIdentity::parse("sched-created").expect("identity");
+        let declared =
+            crate::identity_first::AgentIdentity::parse("sched-declared").expect("identity");
+        // Core holds a member of the created entry and of the declared one.
+        for identity in [&created, &declared] {
+            crate::identity_first::core_test_bridge::bind_live(
+                &bridge.core,
+                identity,
+                &meerkat_mob::ProfileName::from("general"),
+                1,
+                Some(SessionId::new()),
+            )
+            .expect("Core's member");
+        }
+        bridge.hold_created(&created);
+        bridge.hold_declared(&declared);
+        // This process has run no roster pass: it registered nothing.
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("identity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-unregistered".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        let schedule = Schedule::new(CreateScheduleRequest {
+            name: Some("identity-unregistered".to_string()),
+            description: None,
+            trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("deliver".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("schedule");
+        let occurrence = Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("occurrence");
+        let host = InternalDeliveryScheduleMobHost {
+            inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
+            handle: runtime.mob_handle(),
+            identity_runtime: Some(identity_runtime),
+        };
+        let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        let content = meerkat_core::ContentInput::Text("deliver".to_string());
+
+        // A created entry: the fire ends typed, its target missing.
+        let dispatch = host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-unregistered",
+                "sched-created",
+                &content,
+            )
+            .await
+            .expect("the identity's refusal answers the fire, never a member door")
+            .expect("a final refusal ends the fire, it is not deferred");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(meerkat::DeliveryFailureReason::TargetMissing),
+            "{:?}",
+            terminal.detail
+        );
+
+        // A declared entry before its roster pass: the fire stays reclaimable.
+        match host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-unregistered",
+                "sched-declared",
+                &content,
+            )
+            .await
+        {
+            Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred { detail, .. })) => {
+                assert!(detail.contains("sched-declared"), "{detail}");
+            }
+            Some(Err(other)) => panic!("the fire stays reclaimable, not {other:?}"),
+            Some(Ok(_)) => panic!("the fire of an entry before its roster pass is deferred"),
+            None => panic!("the identity's refusal answers the fire, never a member door"),
+        }
+        assert!(
+            bridge.delivered().is_empty(),
+            "nothing reaches either member"
+        );
+        runtime.shutdown().await;
+    }
+
     /// A downstream app on 0.7.26 "last link" e2e: an agent-authored one-shot must
     /// DELIVER through the real schedule host — the full rpc_gateway chain
     /// (attach_schedule_tools_with_identity_targets → agent tool dispatch →

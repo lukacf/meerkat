@@ -15510,6 +15510,165 @@ comms = true
         Ok(())
     }
 
+    /// `meta/retire_member` by a name this runtime has not registered, which
+    /// Core holds for an identity, answers the identity door's typed refusal,
+    /// and the mob's raw plane retires nothing, though a raw member holds the
+    /// name there: a created entry and a removed name answer `-32001`, an
+    /// unreadable name `-32014` (`identity_name_unreadable`), and an entry a
+    /// host declared, before this process's roster pass registered it,
+    /// `-32052` (`identity_history_unavailable`, retryable).
+    ///
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity" in
+    /// the RPC member verbs: the raw plane retires the member under the name,
+    /// and the verb answers it accepted.
+    #[tokio::test]
+    async fn retire_member_of_a_name_no_roster_pass_registers_is_refused_typed()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = Box::pin(
+            UnifiedRuntime::builder()
+                .mob_spec(rpc_test_mob_spec(&temp_dir)?)
+                .module_config(MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace: "rpc-unregistered-retire-test".to_string(),
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                })
+                .timeout(Duration::from_secs(5))
+                .build(),
+        )
+        .await?;
+        let names = [
+            "door-created",
+            "door-removed",
+            "door-unreadable",
+            "door-declared",
+        ];
+        // A raw member holds each name in the mob: what a raw retire ends.
+        for name in names {
+            runtime
+                .spawn(SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    name.to_string(),
+                    None,
+                    None,
+                    None,
+                ))
+                .await?;
+        }
+
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let created = AgentIdentity::parse("door-created")?;
+        let declared = AgentIdentity::parse("door-declared")?;
+        // Core holds a member of the created entry and of the declared one.
+        for identity in [&created, &declared] {
+            bind_live(
+                &core_bridge.core,
+                identity,
+                &meerkat_mob::ProfileName::from("worker"),
+                1,
+                Some(meerkat_core::types::SessionId::new()),
+            )
+            .map_err(|err| format!("Core's member of {identity}: {err:?}"))?;
+        }
+        core_bridge.hold_created(&created);
+        core_bridge.hold_declared(&declared);
+        core_bridge.hold_removed(&AgentIdentity::parse("door-removed")?);
+        core_bridge.hold_unreadable(&AgentIdentity::parse("door-unreadable")?);
+        // This process has run no roster pass: it registered nothing.
+        let identity_rt = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "rpc-unregistered-retire-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                Arc::clone(&identity_rt),
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: None,
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+
+        for (id, (name, code, data)) in [
+            ("door-created", -32001, Value::Null),
+            ("door-removed", -32001, Value::Null),
+            (
+                "door-unreadable",
+                crate::rpc::STORAGE_RESOLUTION_CODE,
+                json!({
+                    "kind": "identity_name_unreadable",
+                    "identity": "door-unreadable",
+                    "remedy": "repair_or_upgrade",
+                    "retryable": false,
+                }),
+            ),
+            (
+                "door-declared",
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "door-declared",
+                    "retryable": true,
+                }),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let raw = handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "meta/retire_member",
+                    "params": { "member_id": name },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                Some(&identity_ctx),
+            )
+            .await;
+            let response: Value = serde_json::from_str(&raw)?;
+            assert!(
+                response["result"].is_null(),
+                "{name}: meta/retire_member is refused: {response:#?}"
+            );
+            assert_eq!(
+                (
+                    response["error"]["code"].clone(),
+                    response["error"]["data"].clone()
+                ),
+                (json!(code), data),
+                "{name}: the identity door's typed refusal: {response:#?}"
+            );
+        }
+
+        let members = runtime.mob_handle().list_members().await;
+        for name in names {
+            assert!(
+                members
+                    .iter()
+                    .any(|entry| entry.agent_identity.as_str() == name),
+                "{name}: the raw plane retired nothing: {members:?}"
+            );
+        }
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
     /// Regression (meerkat 0.7.1 migration): an idle member's session
     /// machine sits in `Stopped`, where the archive step's final `Retire`
     /// transition is guard-rejected ("disposal completed but ArchiveSession

@@ -361,12 +361,11 @@ them.
   read until it logged in itself or restarted. A failed save of that
   process's refresh stores the other process's credential back with the
   generation it was published under, instead of one the publishing process
-  refuses. The lease keeps its own generation, which never goes back, and
-  records the one the stored record carries and the publication time of a
-  credential it withdrew; a record published at or before that time stays
-  refused. A managed-store provider credential follows the same rule, keeps
-  its cached use through such a lease, and a GitHub Copilot refusal of it
-  withdraws it.
+  refuses. The lease keeps the larger of the two generations, which never
+  goes back, and records the one the stored record carries and the
+  publication time of a credential it withdrew; a record published at or
+  before that time stays refused. A managed-store provider lease that
+  withdrew its credential takes such a later login too.
 
 ### Upgrade notes
 

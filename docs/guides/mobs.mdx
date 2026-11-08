@@ -100,10 +100,12 @@ delegates. That is the session's current identity: after a turn that named
 another `model`, `provider`, `self_hosted_server_id` or `auth_binding`, the
 next `delegate` follows the switch. The helper also resolves its credentials
 through the session's auth binding; a session with none leaves the helper to
-the realm's resolution. Two helpers do not take the session's binding: one
+the realm's resolution. Three helpers do not take the session's binding: one
 whose `tooling` supplies an inline profile builds on that profile, which names
-no binding, and one placed on another host resolves its credentials on that
-host. A `delegate` whose session's route changed since the last one replaces
+no binding; one whose `tooling` names a realm profile builds on that profile's
+binding, or on the realm's default; and one placed on another host resolves
+its credentials on that host. A `delegate` whose session's route changed since
+the last one replaces
 the session's implicit mob, with everything in it (members spawned there
 included), and its result says it created the mob. The current identity is
 read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
@@ -376,7 +378,10 @@ A profile's `auth_binding` is an explicit build input: its members build on
 that binding, a resumed member included, and a spawn that names its own
 binding wins over it. Only an operator's own definition may name it: a mob
 pack whose definition names one fails validation, and Connect refuses an
-application setup definition that names one. A member placed on a member host
+application setup definition that names one. An owner can also write a realm
+profile that names one, through JSON-RPC `mob/profile/create` and
+`mob/profile/update` and the MCP profile tools; reading that profile back does
+not show the binding. A member placed on a member host
 resolves its credentials there and does not carry the profile's binding, and
 an adaptive layer refuses a profile that names one.
 

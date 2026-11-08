@@ -796,12 +796,14 @@ them.
   binding leaves its helpers to the realm's resolution, as before. An
   implicit mob made by an earlier release records no binding, so a session
   that has one gets its implicit mob replaced, once, at its next
-  `delegate`. Two cases are left as they were: a `delegate` given an inline
-  `tooling` profile builds its helper on that profile, which names no
-  binding, and a helper placed on another host resolves its credentials on
-  that host. The current identity is read from the session's retained
-  metadata; a session on `EphemeralSessionService`, which keeps none, still
-  delegates on the route it was built with. (#2102, thanks @zond)
+  `delegate`. Three cases are left as they were: a `delegate` given an
+  inline `tooling` profile builds its helper on that profile, which names
+  no binding; one whose `tooling` names a realm profile builds on that
+  profile's binding, or on the realm's default; and a helper placed on
+  another host resolves its credentials on that host. The current identity
+  is read from the session's retained metadata; a session on
+  `EphemeralSessionService`, which keeps none, still delegates on the route
+  it was built with. (#2102, thanks @zond)
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends

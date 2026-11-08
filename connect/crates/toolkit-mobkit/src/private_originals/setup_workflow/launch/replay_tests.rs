@@ -912,7 +912,14 @@ async fn owner_close_or_selection_drift_during_either_wait_never_replays() {
                         let machine = f.machine.clone();
                         let revoke = move || {
                             let mut custody = machine.try_controller_grant_mutation().unwrap();
-                            grants.revoke(&administrator, &leaf, &mut custody).unwrap();
+                            grants
+                                .revoke(
+                                    &meerkat_core::AdmissionGuard::none(),
+                                    &administrator,
+                                    &leaf,
+                                    &mut custody,
+                                )
+                                .unwrap();
                         };
                         match inject {
                             // The held change owns the publication writer the

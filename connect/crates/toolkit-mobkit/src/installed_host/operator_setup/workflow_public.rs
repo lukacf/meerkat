@@ -159,7 +159,14 @@ pub(crate) fn issue(
     let child = match grants.issued_reference(&id).map_err(refusal)? {
         Some(reference) => reference,
         None => grants
-            .issue_child(application, &base[0], id, executor.clone(), expected)
+            .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
+                application,
+                &base[0],
+                id,
+                executor.clone(),
+                expected,
+            )
             .map_err(refusal)?,
     };
     let public = vec![base[0].clone(), child];

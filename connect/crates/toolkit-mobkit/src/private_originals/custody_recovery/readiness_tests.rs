@@ -31,6 +31,7 @@ impl Pending {
         let base = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("base").unwrap(),
                 principal("admin"),

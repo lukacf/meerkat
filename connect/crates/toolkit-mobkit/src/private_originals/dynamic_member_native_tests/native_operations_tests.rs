@@ -703,7 +703,12 @@ async fn selected_native_targets_keep_audience_revocation_and_cancellation_fence
                 .source
                 .owner
                 .grants()
-                .revoke(&authority, &lineage[0], &mut mutation)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &authority,
+                    &lineage[0],
+                    &mut mutation,
+                )
                 .unwrap();
             drop(mutation);
             let grants = fixture.source.owner.grants();
@@ -1377,7 +1382,12 @@ async fn new_add_retains_exact_standing_parents_before_activation_and_revoke_nev
             assert_eq!(&same, issued);
             let mut mutation = fixture.machine.try_controller_grant_mutation().unwrap();
             grants
-                .revoke(&context.operator, &issued.peer_message, &mut mutation)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &context.operator,
+                    &issued.peer_message,
+                    &mut mutation,
+                )
                 .unwrap();
             drop(mutation);
             assert_eq!(
@@ -1466,6 +1476,7 @@ async fn partial_standing_parent_issue_retains_ids_and_retires_without_activatio
             let existing = context
                 .grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &context.operator,
                     recorder_id.clone(),
                     context.application.clone(),
@@ -1791,6 +1802,7 @@ async fn a_callback_leaf_issued_first_in_a_bind_attempt_is_marked() {
             let root = context
                 .grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &context.operator,
                     EvidenceId::new("stage-a-callback-root").unwrap(),
                     context.application.clone(),
@@ -1865,6 +1877,7 @@ async fn setup_targets_issued_first_in_a_bind_attempt_are_marked() {
             let parent = context
                 .grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &context.operator,
                     EvidenceId::new("stage-a-target-parent").unwrap(),
                     context.application.clone(),

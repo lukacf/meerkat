@@ -97,6 +97,9 @@ fn child_writer_variant(error: &OriginalWriterError) -> &'static str {
         OriginalWriterError::Grant(GrantRefusal::Unavailable) => {
             "OriginalWriterError::Grant::Unavailable"
         }
+        OriginalWriterError::Grant(GrantRefusal::AdmissionFence) => {
+            "OriginalWriterError::Grant::AdmissionFence"
+        }
     }
 }
 
@@ -107,6 +110,7 @@ fn child_grant_variant(error: &meerkat_authorization::grants::GrantRefusal) -> &
         GrantRefusal::Duplicate => "GrantRefusal::Duplicate",
         GrantRefusal::ControllerInUse => "GrantRefusal::ControllerInUse",
         GrantRefusal::Unavailable => "GrantRefusal::Unavailable",
+        GrantRefusal::AdmissionFence => "GrantRefusal::AdmissionFence",
     }
 }
 

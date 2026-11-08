@@ -1540,7 +1540,12 @@ async fn revoked_receiver_parent_refuses_actual_peer_delivery_without_input() {
             let mut mutation = fixture.machine.try_controller_grant_mutation().unwrap();
             context
                 .grants
-                .revoke(&context.operator, &roots.peer_message, &mut mutation)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &context.operator,
+                    &roots.peer_message,
+                    &mut mutation,
+                )
                 .unwrap();
             drop(mutation);
             let before = fixture

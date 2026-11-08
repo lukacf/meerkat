@@ -400,6 +400,7 @@ pub fn provision(
         let grants = source.grants();
         let parent = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &operator,
                 EvidenceId::new("controller-parent").unwrap(),
                 application.clone(),
@@ -415,6 +416,7 @@ pub fn provision(
             .map_err(|_| HostLifetimeError::Denied)?;
         let operation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &operator,
                 EvidenceId::new("mcp-selection").unwrap(),
                 executor.clone(),

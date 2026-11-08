@@ -3911,6 +3911,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
         root_bounds.delegation_depth = DelegationDepth::remaining(1);
         let root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 id("workflow-base"),
                 application.clone(),
@@ -3920,6 +3921,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
             .unwrap();
         let leaf = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 &root,
                 id("workflow-leaf"),
@@ -3934,6 +3936,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
         target_root.delegation_depth = DelegationDepth::remaining(1);
         let root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 ids[0].clone(),
                 application.clone(),
@@ -3943,6 +3946,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
             .unwrap();
         let leaf = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 &root,
                 ids[1].clone(),
@@ -4011,7 +4015,12 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
             {
                 let mut custody = machine.try_controller_grant_mutation().unwrap();
                 grants
-                    .revoke(&application, &public[1], &mut custody)
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &application,
+                        &public[1],
+                        &mut custody,
+                    )
                     .unwrap();
             }
             // Historical task shape/isolation and base/MCP restoration remain
@@ -4034,7 +4043,12 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
         {
             let mut custody = machine.try_controller_grant_mutation().unwrap();
             grants
-                .revoke(&application, &target[0], &mut custody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &application,
+                    &target[0],
+                    &mut custody,
+                )
                 .unwrap();
         }
         let after_revoke = std::fs::read(&path).unwrap();

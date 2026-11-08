@@ -643,6 +643,7 @@ async fn open_for_effect_dedicated_workflow_selected(
             let parent = source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     EvidenceId::new(format!("helper-{server}")).unwrap(),
                     route.logical_executor.clone(),
@@ -1214,6 +1215,7 @@ fn provision_selected_source_with_workflow_members(
                 let parent = source
                     .grants()
                     .issue_root(
+                        &meerkat_core::AdmissionGuard::none(),
                         &root,
                         EvidenceId::new(format!("workflow-controller-parent-{index}")).unwrap(),
                         native.grant_administrator.clone(),

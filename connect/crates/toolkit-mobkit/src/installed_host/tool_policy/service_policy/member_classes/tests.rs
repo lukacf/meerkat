@@ -859,6 +859,7 @@ async fn build_runtime() -> meerkat_mob::MobHandle {
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: vec![],

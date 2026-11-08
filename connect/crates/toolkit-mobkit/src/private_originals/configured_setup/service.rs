@@ -386,6 +386,7 @@ impl PrivateOriginals {
                 meerkat_core::protected_section::note_effect("original.service_setup_grant");
                 crate::no_wait::wait_at("service_setup.issue_child", || {
                     grants.issue_child(
+                        &meerkat_core::AdmissionGuard::none(),
                         &facts.application,
                         &child.parent,
                         child.id.clone(),

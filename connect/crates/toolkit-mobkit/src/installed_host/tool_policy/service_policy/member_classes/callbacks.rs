@@ -25,7 +25,14 @@ pub(crate) fn issue_callback_leaf(
     // A bind attempt's durable effect: no "not now" may follow it.
     meerkat_core::protected_section::note_effect("original.callback_grant");
     crate::no_wait::wait_at("class_callbacks.issue_leaf", || {
-        grants.issue_child(application, root, id, executor, bounds)
+        grants.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
+            application,
+            root,
+            id,
+            executor,
+            bounds,
+        )
     })
 }
 
@@ -129,6 +136,7 @@ impl ServicePolicyOwner {
                         meerkat_core::protected_section::note_effect("original.callback_grant");
                         crate::no_wait::wait_at("class_callbacks.issue_root", || {
                             context.grants.issue_root(
+                                &meerkat_core::AdmissionGuard::none(),
                                 &context.operator,
                                 id,
                                 context.application.clone(),

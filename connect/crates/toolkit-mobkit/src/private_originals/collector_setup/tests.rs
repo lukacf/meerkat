@@ -221,6 +221,7 @@ pub(crate) fn record(owner: &ToolkitOriginalOwner, grantee: &PrincipalRef) -> Co
     let grant = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             EvidenceId::new("collector-grant").unwrap(),
             grantee.clone(),
@@ -312,6 +313,7 @@ fn agent_parent_cannot_be_reinterpreted_as_collector_authority() {
     let child = owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("agent"),
             &parent,
             EvidenceId::new("collector-child").unwrap(),
@@ -345,6 +347,7 @@ fn same_grantee_child_retains_the_exact_read_only_grant() {
     let child = owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("collector"),
             &record.lineage[0],
             EvidenceId::new("collector-child").unwrap(),
@@ -527,6 +530,7 @@ async fn durable_enrollment_reopens_without_setup_session_and_revoked_id_never_r
         ToolkitOriginalOwner::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 &grant_path,
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
             ingress,

@@ -803,6 +803,7 @@ pub(super) fn binding_grant_failure(stage: &'static str, error: &GrantRefusal) {
             GrantRefusal::Duplicate => "GrantRefusal::Duplicate",
             GrantRefusal::ControllerInUse => "GrantRefusal::ControllerInUse",
             GrantRefusal::Unavailable => "GrantRefusal::Unavailable",
+            GrantRefusal::AdmissionFence => "GrantRefusal::AdmissionFence",
         },
     );
 }

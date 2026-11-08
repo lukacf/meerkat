@@ -114,7 +114,12 @@ impl PrivateOriginals {
             .map_err(|_| HostLifetimeError::Unavailable)?;
         context
             .grants
-            .revoke(&context.operator, &root, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &context.operator,
+                &root,
+                &mut custody,
+            )
             .map_err(|_| HostLifetimeError::Unavailable)
     }
 

@@ -331,6 +331,7 @@ async fn explicit_workflow_public_target_reaches_native_grant_policy_and_revokes
                     .source
                     .grants()
                     .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
                         &fixture.installed.application.native.grant_administrator,
                         &public_lineage[1],
                         &mut custody,

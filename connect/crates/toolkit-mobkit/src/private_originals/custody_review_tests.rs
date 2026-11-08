@@ -60,6 +60,9 @@ impl WorkAuthorization for ProbePolicy {
     }
 }
 impl PreparedOperationAuthorization for ProbeDecision {
+    fn spend_at_entry(&self) -> Result<(), OperationAuthorizationError> {
+        Ok(())
+    }
     fn review_tier(&self) -> OperationReviewTier {
         OperationReviewTier::R3
     }

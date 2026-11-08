@@ -229,6 +229,7 @@ impl InstalledWorkflowPlanning {
                             Some(leaf) => leaf,
                             None => grants
                                 .issue_child(
+                                    &meerkat_core::AdmissionGuard::none(),
                                     &a.logical_executor,
                                     parent.last().ok_or(OriginalWriterError::Conflict)?,
                                     id,
@@ -481,7 +482,12 @@ impl InstalledWorkflowPlanning {
                 return Err(PrivateOriginalError::Conflict);
             }
             grants
-                .revoke(&a.logical_executor, &leaf, &mut custody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &a.logical_executor,
+                    &leaf,
+                    &mut custody,
+                )
                 .map_err(|_| PrivateOriginalError::Unavailable)?;
         }
         Ok(())

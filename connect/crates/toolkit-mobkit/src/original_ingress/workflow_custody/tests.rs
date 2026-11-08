@@ -50,6 +50,7 @@ impl Fixture {
         let root = owner
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("base"),
                 principal("admin"),
@@ -102,6 +103,7 @@ impl Fixture {
             let child = owner
                 .grants
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &original.association.candidate().logical_executor,
                     parent.last().unwrap(),
                     id(label),
@@ -569,6 +571,7 @@ fn original_grant_wrong_executor_and_foreign_source_cannot_become_a_to_g_delegat
         .owner
         .grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("waiter-a"),
             parent.last().unwrap(),
             id("a-other"),
@@ -968,6 +971,7 @@ fn revoking_a_after_preparation_invalidates_its_publication_while_b_remains_usab
     f.owner
         .grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("waiter-a"),
             f.a_child.last().unwrap(),
             &mut custody,
@@ -1048,6 +1052,7 @@ fn delegation_requires_its_own_connector_record_and_actual_g_audience() {
             .owner
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id(&format!("{label}-root")),
                 principal("waiter-a"),
@@ -1059,6 +1064,7 @@ fn delegation_requires_its_own_connector_record_and_actual_g_audience() {
             .owner
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("waiter-a"),
                 &parent,
                 id(&format!("{label}-to-g")),

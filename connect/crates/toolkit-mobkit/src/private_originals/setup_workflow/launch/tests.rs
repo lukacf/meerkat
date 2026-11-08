@@ -166,6 +166,7 @@ async fn prepare_with_waiter_options(f: &FirstFixture, lifecycle: Option<(u64, b
     .unwrap();
     let root = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &root_authority,
             EvidenceId::new("planning-operation-parent").unwrap(),
             native.grant_administrator.clone(),
@@ -181,6 +182,7 @@ async fn prepare_with_waiter_options(f: &FirstFixture, lifecycle: Option<(u64, b
         .unwrap();
     let leaf = grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &native.grant_administrator,
             &root,
             EvidenceId::new("planning-operation-leaf").unwrap(),
@@ -1604,6 +1606,7 @@ async fn planning_binding_refuses_distinct_issued_root_without_source_or_native_
             .clone();
         let other_root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &c.planning.lineage[0].root_authority,
                 EvidenceId::new("different-planning-root").unwrap(),
                 native.grant_administrator.clone(),
@@ -1819,7 +1822,12 @@ async fn planning_binding_preserves_native_unavailability_and_denial() {
         *c.planning.binding_observed_for_test.lock().unwrap() = Some(Box::new(move || {
             let mut custody = machine.try_controller_grant_mutation().unwrap();
             revoke_grants
-                .revoke(&administrator, &lineage, &mut custody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &administrator,
+                    &lineage,
+                    &mut custody,
+                )
                 .unwrap();
         }));
         assert!(matches!(

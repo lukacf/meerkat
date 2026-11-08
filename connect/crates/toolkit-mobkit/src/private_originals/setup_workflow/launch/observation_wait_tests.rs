@@ -147,7 +147,14 @@ async fn workflow_wait_reobserves_real_revocation_without_retaining_selection() 
         let machine = f.machine.clone();
         *c.planning.binding_observed_for_test.lock().unwrap() = Some(Box::new(move || {
             let mut custody = machine.try_controller_grant_mutation().unwrap();
-            grants.revoke(&administrator, &leaf, &mut custody).unwrap();
+            grants
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &administrator,
+                    &leaf,
+                    &mut custody,
+                )
+                .unwrap();
         }));
         drop(change);
         assert!(matches!(

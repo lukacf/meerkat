@@ -9,9 +9,12 @@
 //! driver reads durably only while the live read cannot answer: its own admission write is in
 //! flight (the dispatch's call returned the retryable refusal of a write past its commit outcome
 //! deadline, and the session degraded until it reloads), or the session is not live on this
-//! machine. A durable read that is not final owes a live read. A held claim on a live session
-//! with no write in flight is therefore settled by the live read, never by a loop of durable
-//! reads.
+//! machine: then it never wakes the session to read (lazy loading). After a restart, until this
+//! process dispatches the record (which loads the session), every recorded dispatch is an ended
+//! process's, so the durable read finds what the live read would; on a session closed or
+//! retired within the process it counts less (never a lost dispatch of this process). A durable
+//! read that is not final owes a live read. A held claim on a live session with no write in
+//! flight is therefore settled by the live read, never by a loop of durable reads.
 //!
 //! The input carries the record's revision from when the read started, so the owner refuses a
 //! read whose record changed under it (a later lost answer included): the stale read is
@@ -64,7 +67,8 @@ pub enum LiveReadState {
     /// An admission write of this process is in flight after its call returned: the session is
     /// degraded until it reloads, and the live read answers Unavailable meanwhile.
     WriteInFlight,
-    /// The session is not live on this machine (after a restart, before it loads).
+    /// The session is not live on this machine (after a restart, before it loads, or closed or
+    /// retired within the process): the driver reads durably and never wakes it to read.
     NotLive,
 }
 

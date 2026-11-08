@@ -715,7 +715,15 @@ def build_model(root, output):
     # reads Core's durable read instead, which takes no gate: it can answer Absent while that
     # write is still in flight, and a durable read that is not final owes a live read. So a
     # held claim with no write in flight is settled by the live read and never loops on durable
-    # reads (the durable-read-anytime mutant reads durably at any time).
+    # reads (the durable-read-anytime mutant reads durably at any time). A session not live on
+    # this machine is outside the model's state: the driver reads it durably and never wakes it
+    # to read. After a restart, before the session loads, the model's read stands for it, and
+    # the owner decides the same for either read: until this process dispatches the record
+    # (which loads the session), every recorded dispatch is an ended process's, whose writes
+    # ended with it, so both reads find the same admission, and an absence is final for neither
+    # (no dispatch of this process yet). Within the process (the session closed or retired) the
+    # durable read counts less than a live read (never a lost dispatch of this process): it
+    # records no evidence the model's live read would not.
     for name, kind, guards in [('B_ReadCore', 'IF Fault = "live-read-as-durable" THEN "Durable" ELSE "Live"',
                                 ['WritesInFlight(OInc(i)) = {}']),
                                ('B_ReadDurable', '"Durable"',
@@ -1612,11 +1620,18 @@ def build_model(root, output):
         '\\* the entry fence in the same section; the answer fed to the owner after Meta returns. Held\n'
         '\\* and the peer deadline end only the caller\'s wait. The driver reads by key (Core\'s live\n'
         '\\* read, ordered after an admission write still in flight; with late landings also its\n'
-        '\\* durable read), one crash and restart with its scan, admission closure with the close\'s\n'
-        '\\* join (its unresolved records scoped to the closing process), a stop after the close and\n'
-        '\\* the restart into the next lifetime, the fail-stop on a poisoned publication (the crash\'s\n'
-        '\\* path, during the close too), the declared composition mode. Core\'s commit and dedup by\n'
-        '\\* qualified key are assumptions. Liveness: LiveSpec, under the declared fairness and\n'
+        '\\* durable read, only while such a write is in flight), one crash and restart with its scan,\n'
+        '\\* admission closure with the close\'s join (its unresolved records scoped to the closing\n'
+        '\\* process), a stop after the close and the restart into the next lifetime, the fail-stop on\n'
+        '\\* a poisoned publication (the crash\'s path, during the close too), the declared composition\n'
+        '\\* mode. Core\'s commit and dedup by qualified key are assumptions. A premise: a session not\n'
+        '\\* live on this machine, which the driver reads durably without waking it, is outside the\n'
+        '\\* model\'s state. After a restart, before the session loads, the model\'s read stands for it:\n'
+        '\\* until this process dispatches the record every recorded dispatch is an ended process\'s,\n'
+        '\\* whose writes ended with it, so both reads find the same admission and an absence is final\n'
+        '\\* for neither. Within the process (the session closed or retired) the durable read counts\n'
+        '\\* less than a live read (never a lost dispatch of this process): it records no evidence the\n'
+        '\\* model\'s live read would not. Liveness: LiveSpec, under the declared fairness and\n'
         '\\* environment assumptions (below).',
         'CONSTANTS ' + ', '.join(constants) + ',\n    Fault, StageValues, DoorValues, InitialValues, MaxAttempts, '
                                               'Interrupts, ModeValues,\n    ProcBound, SendBound, UnavailBound, '

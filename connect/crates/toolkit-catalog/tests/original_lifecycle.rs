@@ -732,6 +732,44 @@ fn core_answers_that_are_never_an_absence_are_no_owner_input() {
 }
 
 #[test]
+fn after_a_restart_before_the_session_loads_the_owed_read_is_durable_and_wakes_nothing() {
+    // The ended process's lost dispatch; this process has not dispatched the record yet, so its
+    // session is not live on this machine.
+    let lost = || {
+        let mut owner = sent_offer();
+        let first = start(&mut owner, 1);
+        owner
+            .apply(answer(&owner, first, ToolkitDispatchAnswer::Unresolved, ""))
+            .unwrap();
+        owner
+    };
+    let mut core = CountingCore {
+        durable: vec![
+            DurableReadAnswer::NotAdmitted,
+            DurableReadAnswer::Admitted {
+                receipt_ref: "found".into(),
+            },
+        ],
+        ..CountingCore::default()
+    };
+    // Absent: not final for either read until this process dispatches the record.
+    let mut absent = lost();
+    let read = owed_read(&mut core, LiveReadState::NotLive, absent.state(), 2)
+        .expect("the durable read's absence is an owner input");
+    let before = absent.state().clone();
+    assert!(absent.apply(read).is_err());
+    assert_eq!(absent.state(), &before);
+    // Found: the durable read settles it, the session never woken.
+    let mut found = lost();
+    let read = owed_read(&mut core, LiveReadState::NotLive, found.state(), 2)
+        .expect("the durable read's admission is an owner input");
+    found.apply(read).unwrap();
+    assert_eq!(found.state().receipt_kind, ToolkitReceiptKind::Found);
+    // No live read: it needs the session loaded on this machine.
+    assert_eq!((core.live_calls, core.durable_calls), (0, 2));
+}
+
+#[test]
 fn a_read_started_before_a_later_lost_answer_is_refused_by_the_revision() {
     let mut owner = sent_offer();
     let first = start(&mut owner, 1);

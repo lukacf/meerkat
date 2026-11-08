@@ -1343,7 +1343,7 @@ mod operator_connections {
         persistent_router, principal, realm_bundle, result, router_over, stored_row,
         subject_digest, wait_past,
     };
-    use crate::handlers::decision::operator::DecisionOperator;
+    use crate::handlers::decision::operator::{DecisionOperator, OpeningPresentations};
     use crate::protocol::{RpcId, RpcResponse};
     use crate::server::AcknowledgedNotification;
     use crate::session_runtime::SessionRuntime;
@@ -1503,8 +1503,9 @@ mod operator_connections {
         );
         assert!(other.notices().is_empty(), "{:?}", other.notices());
 
-        // Held after the list, this one was never presented on the
-        // presenting connection either.
+        // Held after the list and never shown on the presenting connection
+        // (no server loop runs here to present its opening), this one is
+        // not decidable there either.
         let unshown = decisions
             .hold(hold_request("release", "build-2", "operator"), false)
             .expect("hold");
@@ -1519,6 +1520,200 @@ mod operator_connections {
             result(&decided)["decision"]["phase"],
             "approved",
             "{decided:?}"
+        );
+    }
+
+    /// A decision is presented to the operator once per connection,
+    /// whichever presents it first: its opening or a list. An opening that
+    /// arrives after a list presented the decision writes no second notice,
+    /// a list after an opening presented it writes none either, and the
+    /// operator decides the decision its opening presented. An opening the
+    /// operator does not act for is not presented.
+    #[tokio::test]
+    async fn an_opening_is_presented_once_whatever_presents_it_first() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let connection = Connection::open("stdio:operator:openings");
+
+        let listed_first = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        connection.list(&runtime).await;
+        assert_eq!(connection.notices().len(), 1, "{:?}", connection.notices());
+        assert!(
+            connection
+                .operator
+                .present_opened(&listed_first, &runtime)
+                .await
+        );
+        assert_eq!(connection.notices().len(), 1, "{:?}", connection.notices());
+
+        let opened_first = decisions
+            .hold(hold_request("release", "build-2", "operator"), false)
+            .expect("hold");
+        assert!(
+            connection
+                .operator
+                .present_opened(&opened_first, &runtime)
+                .await
+        );
+        let notices = connection.notices();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert_eq!(
+            notices[1]["decision_id"],
+            opened_first.decision_id.to_string()
+        );
+        let presented = decisions.get(&opened_first.decision_id).expect("read");
+        assert_eq!(
+            presented.presentations[0].message_ref.as_str(),
+            notices[1]["notice_id"]
+        );
+        connection.list(&runtime).await;
+        assert_eq!(connection.notices().len(), 2, "{:?}", connection.notices());
+        let decided = connection.decide(&runtime, &opened_first.decision_id).await;
+        assert_eq!(
+            result(&decided)["decision"]["phase"],
+            "approved",
+            "{decided:?}"
+        );
+
+        let owners = decisions
+            .hold(hold_request("release", "build-3", "team:owners"), false)
+            .expect("hold");
+        assert!(connection.operator.present_opened(&owners, &runtime).await);
+        assert_eq!(connection.notices().len(), 2, "{:?}", connection.notices());
+        assert!(
+            decisions
+                .get(&owners.decision_id)
+                .expect("read")
+                .presentations
+                .is_empty()
+        );
+    }
+
+    /// An opening is presented as its decision stands when the connection
+    /// reaches it: an opening whose decision was decided in the meantime
+    /// (here by another connection's operator) shows nothing and records
+    /// nothing.
+    #[tokio::test]
+    async fn an_opening_whose_decision_was_decided_since_is_not_presented() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let opening = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let deciding = Connection::open("stdio:operator:deciding");
+        deciding.list(&runtime).await;
+        let decided = deciding.decide(&runtime, &opening.decision_id).await;
+        assert_eq!(
+            result(&decided)["decision"]["phase"],
+            "approved",
+            "{decided:?}"
+        );
+        let before = decisions.get(&opening.decision_id).expect("read");
+
+        let late = Connection::open("stdio:operator:late");
+        assert!(late.operator.present_opened(&opening, &runtime).await);
+        assert!(late.notices().is_empty(), "{:?}", late.notices());
+        assert_eq!(decisions.get(&opening.decision_id).expect("read"), before);
+    }
+
+    /// Dropping the handle of a connection's presentations stops them,
+    /// however the connection stopped being served: a decision that opens
+    /// afterwards is presented on a connection whose handle is kept, and not
+    /// on the one whose handle was dropped.
+    #[tokio::test]
+    async fn a_dropped_presentations_handle_presents_nothing_more() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let Connection {
+            operator: kept_operator,
+            written: kept,
+        } = Connection::open("stdio:operator:kept");
+        let Connection {
+            operator: dropped_operator,
+            written: dropped,
+        } = Connection::open("stdio:operator:dropped");
+        let _kept_presentations = OpeningPresentations::spawn(
+            Arc::new(kept_operator),
+            decisions.subscribe_openings(),
+            Arc::clone(&runtime),
+        );
+        drop(OpeningPresentations::spawn(
+            Arc::new(dropped_operator),
+            decisions.subscribe_openings(),
+            Arc::clone(&runtime),
+        ));
+
+        decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while kept.lock().expect("notices").is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the kept connection presents the opening"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            dropped.lock().expect("notices").is_empty(),
+            "a dropped handle presented: {:?}",
+            dropped.lock().expect("notices")
+        );
+    }
+
+    /// An operator connection whose subscription fell behind still presents
+    /// every decision its operator acts for that opened while it was open.
+    /// More decisions open than the subscription holds, and more than one
+    /// page of the owner's list, before the connection reads any of them, so
+    /// the connection catches up over two pages; nothing tells the client to
+    /// list.
+    #[tokio::test]
+    async fn a_connection_that_falls_behind_presents_every_opening() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let Connection { operator, written } = Connection::open("stdio:operator:behind");
+        let operator = Arc::new(operator);
+        let openings = decisions.subscribe_openings();
+        // More than one page of the owner's list: 700 at a page of 500.
+        let total = meerkat_core::approval::decision::DECISION_PAGE_MAX + 200;
+        for index in 0..total {
+            decisions
+                .hold(
+                    hold_request("release", &format!("build-{index}"), "operator"),
+                    false,
+                )
+                .expect("hold");
+        }
+        let presenting =
+            tokio::spawn(Arc::clone(&operator).present_openings(openings, Arc::clone(&runtime)));
+        // Wait until the connection has presented nothing new for 2 s.
+        let mut shown = 0;
+        let mut quiet = 0;
+        for _ in 0..600 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let now = written.lock().expect("notices").len();
+            if now == shown {
+                quiet += 1;
+                if quiet >= 20 {
+                    break;
+                }
+            } else {
+                shown = now;
+                quiet = 0;
+            }
+        }
+        presenting.abort();
+        let _ = presenting.await;
+        assert_eq!(
+            shown, total,
+            "every decision the operator acts for that opened while the connection was open is presented"
         );
     }
 

@@ -3061,8 +3061,10 @@ class MeerkatClient:
         answers, the server shows the connection's operator each decision of
         the page that is open, waits for a human and is held for an approver
         id the operator acts for (once per connection), and records each
-        presentation. It writes a ``decision/notice`` for each decision it
-        shows; this client drops those notices.
+        presentation. Such a decision that opens while the connection is open
+        is shown at once, without a list. The server writes a
+        ``decision/notice`` for each decision it shows; this client drops
+        those notices.
         """
         params: dict[str, Any] = {}
         if kind is not None:

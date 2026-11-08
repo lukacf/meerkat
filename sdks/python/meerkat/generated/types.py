@@ -2841,14 +2841,15 @@ the whole rendering)."""
 @dataclass
 class WireDecisionNotice:
     """`decision/notice` parameters: what an `rkat-rpc` stdio connection showed
-its operator about one durable decision. When its client lists
-(`decision/list`), the connection presents each open decision of the
-returned page that is addressed to an approver id its operator acts for
-and that it has not presented yet: it writes a `presented` notice
-carrying the whole rendering, then records that presentation (to the
-approver, with this notice's id as its message reference) before it
-answers the list. A notice grants nothing: the operator decides with
-`decision/decide` on the same connection."""
+its operator about one durable decision. The connection presents each
+open decision addressed to an approver id its operator acts for that it
+has not presented yet: when the decision opens while the connection is
+open, and when its client lists (`decision/list`) a page that holds it.
+It writes a `presented` notice carrying the whole rendering, then records
+that presentation (to the approver, with this notice's id as its message
+reference); a listed page's notices precede the list's answer. A notice
+grants nothing: the operator decides with `decision/decide` on the same
+connection."""
     approver_id: str
     decision_id: str
     event: WireDecisionNoticeEvent

@@ -1413,7 +1413,7 @@ pub fn rpc_notification_catalog(
     if options.decision_notices_enabled {
         notifications.push(RpcNotificationDescriptor::basic(
             crate::wire::DECISION_NOTICE_NOTIFICATION,
-            "One durable decision this stdio connection presented to its operator, with the whole rendering, written before the decision/list answer that caused it",
+            "One durable decision this stdio connection presented to its operator, with the whole rendering: when the decision opened while the connection was open, or before the decision/list answer that caused it",
         ));
     }
 

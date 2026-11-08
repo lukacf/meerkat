@@ -32,11 +32,12 @@ use super::dsl::{
     DecisionDigest, DurableDecisionEffect, DurableDecisionInput, DurableDecisionMachineAuthority,
     DurableDecisionMachineMutator, DurableDecisionMachineState, DurableDecisionPhase,
 };
-use super::service::{issued_permit, machine_state};
+use super::service::{DECISION_OPENINGS_CAPACITY, issued_permit, machine_state};
 use super::wire::{presentation_from_wire, wire_decision};
 use super::{
     APPROVER_NOT_CURRENT_REFUSAL, DecisionClock, DecisionClockError, DecisionError,
-    DecisionRefusal, DecisionWithdrawer, DecisionWriteMode, DurableDecisionService,
+    DecisionOpening, DecisionOpenings, DecisionRefusal, DecisionWithdrawer, DecisionWriteMode,
+    DurableDecisionService,
 };
 
 mod executor_rows;
@@ -57,6 +58,18 @@ struct CountingStore {
     inner: InMemoryDecisionStore,
     calls: Mutex<Vec<&'static str>>,
     conflicts: AtomicUsize,
+    /// How the next insert fails, once.
+    insert_fault: Mutex<Option<InsertFault>>,
+}
+
+/// How [`CountingStore`] fails an insert.
+#[derive(Debug, Clone, Copy)]
+enum InsertFault {
+    /// Nothing is written: the write did not commit.
+    Refused,
+    /// Another owner wrote the same row first: the row is stored, and this
+    /// insert conflicts with it.
+    LostRace,
 }
 
 impl CountingStore {
@@ -76,6 +89,10 @@ impl CountingStore {
         self.conflicts.store(count, Ordering::SeqCst);
     }
 
+    fn fail_next_insert(&self, fault: InsertFault) {
+        *self.insert_fault.lock().expect("insert fault") = Some(fault);
+    }
+
     fn stored(&self, decision_id: &DecisionId) -> StoredDecision {
         match self.inner.get(decision_id).expect("read the stored row") {
             Some(DecisionRow::Readable(row)) => *row,
@@ -92,7 +109,17 @@ impl DecisionStore for CountingStore {
 
     fn insert_if_absent(&self, row: &StoredDecision) -> Result<(), ApprovalStoreError> {
         self.record("insert_if_absent");
-        self.inner.insert_if_absent(row)
+        let fault = self.insert_fault.lock().expect("insert fault").take();
+        match fault {
+            None => self.inner.insert_if_absent(row),
+            Some(InsertFault::Refused) => Err(ApprovalStoreError::NotCommitted(
+                "the store refused the write".to_owned(),
+            )),
+            Some(InsertFault::LostRace) => {
+                self.inner.insert_if_absent(row)?;
+                Err(ApprovalStoreError::Conflict)
+            }
+        }
     }
 
     fn replace_if_revision(
@@ -2663,4 +2690,156 @@ fn store_due_and_owed_predicates_agree_with_the_machine() {
             );
         }
     }
+}
+
+/// The opening `openings` holds now, without waiting; `None` when it holds
+/// none.
+fn ready(openings: &mut DecisionOpenings) -> Option<DecisionOpening> {
+    futures::FutureExt::now_or_never(openings.next()).flatten()
+}
+
+/// The decision `openings` holds now, which must be an opening.
+fn opened(openings: &mut DecisionOpenings) -> Arc<StoredDecision> {
+    match ready(openings) {
+        Some(DecisionOpening::Opened(row)) => row,
+        other => panic!("expected an opened decision, got {other:?}"),
+    }
+}
+
+/// A hold that opens a decision announces the row it wrote, once, to every
+/// subscriber of the owner, a clone's included. A replayed hold, a hold that
+/// conflicts and a hold whose window is closed announce nothing, and a
+/// subscription made after a hold sees nothing of it.
+#[test]
+fn a_hold_that_opens_a_decision_announces_its_row_to_every_subscriber() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let mut first = service.subscribe_openings();
+    let mut second = service.clone().subscribe_openings();
+
+    let held = service.hold(hold_request(&rendering), true).expect("hold");
+    for openings in [&mut first, &mut second] {
+        assert_eq!(*opened(openings), held);
+        let next = ready(openings);
+        assert!(next.is_none(), "one announcement per opening: {next:?}");
+    }
+
+    let mut late = service.subscribe_openings();
+    let replayed = service
+        .hold(hold_request(&rendering), true)
+        .expect("a replay");
+    assert_eq!(replayed.decision_id, held.decision_id);
+    let conflict = service
+        .hold(
+            hold_of(
+                "artifact:build-7",
+                requester(),
+                None,
+                &rendering,
+                DEADLINE + 1,
+            ),
+            true,
+        )
+        .expect_err("another deadline conflicts");
+    assert_eq!(refusal(&conflict), DecisionRefusal::HoldConflict);
+    let closed = service
+        .hold(
+            hold_of("artifact:build-8", requester(), None, &rendering, HELD_AT),
+            true,
+        )
+        .expect_err("a closed window");
+    assert_eq!(refusal(&closed), DecisionRefusal::InvalidWindow);
+    for openings in [&mut first, &mut second, &mut late] {
+        let next = ready(openings);
+        assert!(next.is_none(), "nothing opened: {next:?}");
+    }
+
+    let next = service
+        .hold(
+            hold_of("artifact:build-9", requester(), None, &rendering, DEADLINE),
+            true,
+        )
+        .expect("hold");
+    for openings in [&mut first, &mut second, &mut late] {
+        assert_eq!(*opened(openings), next);
+    }
+}
+
+/// A hold announces only a row it wrote itself. A hold whose write the store
+/// refused answers unavailable and announces nothing; made again, it opens
+/// the decision and announces it once. A hold whose row another owner wrote
+/// first answers as a replay of that row and announces nothing.
+#[test]
+fn a_hold_that_does_not_write_its_row_announces_nothing() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let mut openings = service.subscribe_openings();
+
+    store.fail_next_insert(InsertFault::Refused);
+    let refused = service
+        .hold(hold_request(&rendering), true)
+        .expect_err("the store refused the write");
+    assert!(
+        matches!(refused, DecisionError::Unavailable(_)),
+        "{refused:?}"
+    );
+    let next = ready(&mut openings);
+    assert!(next.is_none(), "a refused write announced: {next:?}");
+    let held = service
+        .hold(hold_request(&rendering), true)
+        .expect("the hold made again");
+    assert_eq!(*opened(&mut openings), held);
+    let next = ready(&mut openings);
+    assert!(next.is_none(), "one announcement per opening: {next:?}");
+
+    store.fail_next_insert(InsertFault::LostRace);
+    let replayed = service
+        .hold(
+            hold_of("artifact:build-9", requester(), None, &rendering, DEADLINE),
+            true,
+        )
+        .expect("a replay of the row the other owner wrote");
+    assert_eq!(replayed, store.stored(&replayed.decision_id));
+    let next = ready(&mut openings);
+    assert!(
+        next.is_none(),
+        "a hold that lost the race announced: {next:?}"
+    );
+}
+
+/// A subscriber that falls more than the subscription's capacity behind
+/// reads how many openings it missed, then the openings still held, in the
+/// order they opened.
+#[test]
+fn a_subscriber_that_falls_behind_reads_how_many_openings_it_missed() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let mut openings = service.subscribe_openings();
+    let missed = 3;
+    let subjects: Vec<String> = (0..DECISION_OPENINGS_CAPACITY + missed)
+        .map(|index| format!("artifact:build-{index}"))
+        .collect();
+    for subject in &subjects {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold");
+    }
+
+    match ready(&mut openings) {
+        Some(DecisionOpening::Missed { missed: count }) => {
+            assert_eq!(count, u64::try_from(missed).expect("a count"));
+        }
+        other => panic!("expected the missed openings, got {other:?}"),
+    }
+    for subject in &subjects[missed..] {
+        assert_eq!(
+            opened(&mut openings).descriptor.subject_key.as_str(),
+            subject
+        );
+    }
+    let next = ready(&mut openings);
+    assert!(next.is_none(), "{next:?}");
 }

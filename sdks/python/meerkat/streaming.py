@@ -28,6 +28,10 @@ if TYPE_CHECKING:
     from .types import RunResult
 
 RPC_STDOUT_LIMIT_BYTES = 64 * 1024 * 1024
+# The notification a stdio connection shows its operator a durable decision
+# with. It names no session and this client has no handler for it: it is
+# dropped, never buffered as a session event.
+_DECISION_NOTICE_NOTIFICATION = "decision/notice"
 
 # Bytes of the child's most recent stderr kept for the CONNECTION_CLOSED error.
 STDERR_TAIL_LIMIT_BYTES = 16 * 1024
@@ -356,6 +360,8 @@ class _StdoutDispatcher:
                 if method == CONSENT_NOTICE_NOTIFICATION:
                     if self._consent_notice_sink is not None:
                         self._consent_notice_sink(params)
+                    continue
+                if method == _DECISION_NOTICE_NOTIFICATION:
                     continue
                 if method in {"session/stream_event", "mob/stream_event"}:
                     stream_id = str(params.get("stream_id", ""))

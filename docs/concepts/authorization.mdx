@@ -347,16 +347,20 @@ shows them. The RPC server reads, presents and withdraws them with the
 keeps none answers them capability unavailable (`-32020`). No request body
 names who decides one: a host's trusted adapter decides through
 `MethodRouter::dispatch_with_decision_event`, with the
-`AuthenticatedDecisionEvent` it built from the event it authenticated. The
+`AuthenticatedDecisionEvent` it built from the event it authenticated, and
+learns that a decision opened from the owner's subscription
+(`DurableDecisionService::subscribe_openings`) instead of polling. The
 operator of an `rkat-rpc` stdio connection (Unix builds with local
 authorization) decides with `decision/decide` on that connection, which builds
 the event itself: the operator, device trusted in the connection's own scope.
-When its client lists, the connection presents each listed decision held for
-an approver id `[governance.decisions] operator_approver_ids` names, writing a
+When such a decision opens while the connection is open, and when its client
+lists, the connection presents each decision held for an approver id
+`[governance.decisions] operator_approver_ids` names, writing a
 `decision/notice` before it records the presentation, and only a decision it
 presented, whose approver id is still listed, is eligible
 ([the operator of a stdio connection](/api/rpc#the-operator-of-a-stdio-connection)).
-Elsewhere `decision/decide` is method not found. A host
+Elsewhere no connection is told that a decision opened, and `decision/decide`
+is method not found. A host
 builds its other decision surfaces on the Rust owner,
 `meerkat_runtime::decision::DurableDecisionService`,
 and executes them with `meerkat_runtime::decision::DecisionExecutorLoop`.

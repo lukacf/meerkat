@@ -1993,8 +1993,9 @@ impl MethodRouter {
     }
 
     /// Give this router's stdio connection its operator for durable
-    /// decisions: `decision/list` presents the decisions of each page the
-    /// operator acts for, and `decision/decide` decides as the operator.
+    /// decisions: the connection presents to it each decision it acts for
+    /// when the decision opens and when its client lists it, and
+    /// `decision/decide` decides as the operator.
     #[cfg(all(unix, feature = "local-authorization"))]
     pub(crate) fn with_decision_operator(
         mut self,
@@ -2011,6 +2012,33 @@ impl MethodRouter {
         if let Some(operator) = &self.decision_operator {
             operator.close();
         }
+    }
+
+    /// Present to this router's connection operator, when it has one (the
+    /// stdio connection's operator, or the governed pipe's), each durable
+    /// decision the runtime's decision owner opens from now on. A connection
+    /// without an operator is told nothing. The task runs until its caller
+    /// aborts it or drops its handle, when the connection ends, or until the
+    /// connection can show nothing more.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn spawn_decision_presentations(
+        &self,
+    ) -> Option<handlers::decision::operator::OpeningPresentations> {
+        let operator = self.decision_operator.clone().or_else(|| {
+            self.governed_connection
+                .as_ref()
+                .and_then(|connection| connection.presenting_operator())
+        })?;
+        let owner = self.runtime.decision_service();
+        if !owner.is_available() {
+            return None;
+        }
+        let openings = owner.subscribe_openings();
+        Some(handlers::decision::operator::OpeningPresentations::spawn(
+            operator,
+            openings,
+            Arc::clone(&self.runtime),
+        ))
     }
 
     fn attach_live_host(&mut self, host: Arc<meerkat_live::LiveAdapterHost>) {

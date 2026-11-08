@@ -53,6 +53,12 @@ use incident_command_center::{
 /// means concurrently running tests must not share a supervisor route.
 static NEXT_TEST_MOB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The bound on each wait for a member turn, its identity acknowledgement,
+/// a rejection or a turn event. A scripted turn takes milliseconds, but a
+/// loaded runner stalls one for seconds (a 2 s bound expired on CI), so the
+/// bound only catches a turn that never ends.
+const TURN_BOUND: Duration = Duration::from_secs(30);
+
 /// The shipped example pack pins `id = "incident-command-center"`, so tests
 /// that build the stock bundle share ONE supervisor route name. Serialize
 /// them and stand each runtime down (terminal shutdown releases the route)
@@ -746,21 +752,19 @@ comms = true
             .unwrap_or_else(|error| {
                 panic!("{constructor_name} must admit {provider:?}:{model}: {error}")
             });
-        let applied_identity = tokio::time::timeout(
-            Duration::from_secs(2),
-            admission.turn.wait_for_applied_llm_identity(),
-        )
-        .await
-        .unwrap_or_else(|error| {
-            panic!("{constructor_name} identity acknowledgement timed out: {error}")
-        })
-        .unwrap_or_else(|error| {
-            panic!("{constructor_name} failed to apply {provider:?}:{model}: {error}")
-        })
-        .unwrap_or_else(|| panic!("{constructor_name} dropped the requested identity"));
+        let applied_identity =
+            tokio::time::timeout(TURN_BOUND, admission.turn.wait_for_applied_llm_identity())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{constructor_name} identity acknowledgement timed out: {error}")
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{constructor_name} failed to apply {provider:?}:{model}: {error}")
+                })
+                .unwrap_or_else(|| panic!("{constructor_name} dropped the requested identity"));
         assert_eq!(applied_identity.model, model);
         assert_eq!(applied_identity.provider, provider);
-        tokio::time::timeout(Duration::from_secs(2), admission.turn.wait())
+        tokio::time::timeout(TURN_BOUND, admission.turn.wait())
             .await
             .unwrap_or_else(|error| panic!("{constructor_name} turn timed out: {error}"))
             .unwrap_or_else(|error| panic!("{constructor_name} turn failed: {error}"));
@@ -787,13 +791,10 @@ comms = true
         .unwrap_or_else(|error| {
             panic!("{constructor_name} should represent the rejected turn admission: {error}")
         });
-    let rejection = tokio::time::timeout(
-        Duration::from_secs(2),
-        rejected.turn.wait_for_applied_llm_identity(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{constructor_name} rejection timed out: {error}"))
-    .expect_err("provider/model mismatch must fail closed at the installed host");
+    let rejection = tokio::time::timeout(TURN_BOUND, rejected.turn.wait_for_applied_llm_identity())
+        .await
+        .unwrap_or_else(|error| panic!("{constructor_name} rejection timed out: {error}"))
+        .expect_err("provider/model mismatch must fail closed at the installed host");
     assert!(
         rejection.to_string().contains("provider") || rejection.to_string().contains("model"),
         "rejection must explain the invalid provider/model identity, got {rejection}"
@@ -874,18 +875,16 @@ comms = true
         Some(admission.session_id.clone()),
         "the wrapper must expose the exact bridge session captured by admission"
     );
-    let applied_identity = tokio::time::timeout(
-        Duration::from_secs(2),
-        admission.turn.wait_for_applied_llm_identity(),
-    )
-    .await
-    .expect("applied identity acknowledgement should resolve")
-    .expect("stock runtime should apply the requested identity")
-    .expect("turn requested a non-default identity");
+    let applied_identity =
+        tokio::time::timeout(TURN_BOUND, admission.turn.wait_for_applied_llm_identity())
+            .await
+            .expect("applied identity acknowledgement should resolve")
+            .expect("stock runtime should apply the requested identity")
+            .expect("turn requested a non-default identity");
     assert_eq!(applied_identity.model, "gpt-5.6");
     assert_eq!(applied_identity.provider, Provider::OpenAI);
 
-    let receipt = tokio::time::timeout(Duration::from_secs(2), admission.turn.wait())
+    let receipt = tokio::time::timeout(TURN_BOUND, admission.turn.wait())
         .await
         .expect("turn completion should resolve")
         .expect("turn should commit successfully");
@@ -895,7 +894,7 @@ comms = true
     let mut observed_committed_completion = false;
     let mut observed_events = Vec::new();
     while !observed_committed_completion {
-        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        let event = tokio::time::timeout(TURN_BOUND, event_rx.recv())
             .await
             .expect("live member-turn event should arrive")
             .expect("member-turn event channel should remain open through completion");
@@ -1076,7 +1075,7 @@ comms = true
         )
         .await
         .expect("admit profile-inferred self-hosted member turn");
-    tokio::time::timeout(Duration::from_secs(2), inferred_admission.turn.wait())
+    tokio::time::timeout(TURN_BOUND, inferred_admission.turn.wait())
         .await
         .expect("profile-inferred turn completion should resolve")
         .expect("profile-inferred turn should commit successfully");
@@ -1104,14 +1103,12 @@ comms = true
         )
         .await
         .expect("admit exact self-hosted member turn");
-    let applied_identity = tokio::time::timeout(
-        Duration::from_secs(2),
-        admission.turn.wait_for_applied_llm_identity(),
-    )
-    .await
-    .expect("executor-boundary identity acknowledgement should resolve")
-    .expect("the installed runtime host should apply the requested identity")
-    .expect("the turn requested an explicit identity");
+    let applied_identity =
+        tokio::time::timeout(TURN_BOUND, admission.turn.wait_for_applied_llm_identity())
+            .await
+            .expect("executor-boundary identity acknowledgement should resolve")
+            .expect("the installed runtime host should apply the requested identity")
+            .expect("the turn requested an explicit identity");
     assert_eq!(applied_identity.model, PINNED_MODEL);
     assert_eq!(applied_identity.provider, Provider::SelfHosted);
     assert_eq!(
@@ -1120,7 +1117,7 @@ comms = true
         "the exact host route must survive UnifiedRuntime admission, member-turn metadata, and the serialized executor boundary"
     );
 
-    tokio::time::timeout(Duration::from_secs(2), admission.turn.wait())
+    tokio::time::timeout(TURN_BOUND, admission.turn.wait())
         .await
         .expect("self-hosted route turn completion should resolve")
         .expect("self-hosted route turn should commit successfully");
@@ -1148,13 +1145,11 @@ comms = true
         )
         .await
         .expect("represent the rejected mismatched route as an admitted turn");
-    let mismatch = tokio::time::timeout(
-        Duration::from_secs(2),
-        mismatched.turn.wait_for_applied_llm_identity(),
-    )
-    .await
-    .expect("mismatched route validation should resolve")
-    .expect_err("model-inferred local-a plus explicit local-b must fail closed");
+    let mismatch =
+        tokio::time::timeout(TURN_BOUND, mismatched.turn.wait_for_applied_llm_identity())
+            .await
+            .expect("mismatched route validation should resolve")
+            .expect_err("model-inferred local-a plus explicit local-b must fail closed");
     let mismatch = mismatch.to_string();
     assert!(
         mismatch.contains(INFERRED_MODEL)

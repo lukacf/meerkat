@@ -1665,6 +1665,254 @@ async fn the_final_release_ends_the_store_for_a_value_clone() {
     SqliteStore::open_existing(&path).expect("the same database opens again at once");
 }
 
+/// A lifetime with both native custodies bound, and a reference to the bound
+/// grant owner and store that outlives the host's own, as work the host
+/// admitted keeps one.
+struct BoundCustody {
+    f: Fixture,
+    grants: Arc<LocalGrantAuthority>,
+    store: Arc<toolkit_store::SqliteStore>,
+    kept: meerkat_authorization_contracts::grant::GrantLineageRef,
+    application: PrincipalRef,
+}
+
+impl BoundCustody {
+    async fn new() -> Self {
+        use meerkat_authorization::{
+            clock::HostAuthorizationClock,
+            grants::{FileGrantOwnerStore, LocalGrantConfiguration},
+        };
+        let mut f = Fixture::new();
+        let publication = LocalAuthorizationPublication::new();
+        let root = principal(PrincipalKind::Human, "operator");
+        let application = principal(PrincipalKind::ServiceAccount, "application");
+        let grants = Arc::new(
+            LocalGrantAuthority::new_durable(
+                LocalGrantConfiguration {
+                    root: root.clone(),
+                    namespace: id("bound-custody"),
+                    generation: 1,
+                },
+                Arc::new(FileGrantOwnerStore::new(
+                    f._directory.path().join("bound-grants"),
+                )),
+                publication.clone(),
+                Arc::new(HostAuthorizationClock),
+            )
+            .unwrap(),
+        );
+        let kept = grants
+            .issue_root(
+                &root,
+                id("kept"),
+                application.clone(),
+                None,
+                ExecutionRestrictions::unrestricted(),
+            )
+            .unwrap();
+        let store = Arc::new(
+            store_custody::published(&f._directory.path().join("bound-originals.sqlite3")).await,
+        );
+        {
+            let owner = Arc::get_mut(&mut f.owner).unwrap();
+            owner
+                .bind_native_authorization_publication(publication)
+                .unwrap();
+            owner.bind_native_grant_custody(&grants).unwrap();
+            owner.bind_native_store_custody(&store).unwrap();
+        }
+        f.open();
+        Self {
+            f,
+            grants,
+            store,
+            kept,
+            application,
+        }
+    }
+
+    /// Both custodies hold: the owner resolves and the store reads.
+    async fn held(&self) -> bool {
+        use toolkit_store::ToolkitStore;
+        self.grants
+            .resolve_lineage(std::slice::from_ref(&self.kept), &self.application, None)
+            .is_ok()
+            && matches!(self.store.get(&store_custody::key()).await, Ok(Some(_)))
+    }
+
+    /// Both custodies ended: the owner and the store refuse as unavailable.
+    async fn released(&self) -> bool {
+        use meerkat_authorization::grants::GrantRefusal;
+        use toolkit_store::{StoreError, ToolkitStore};
+        matches!(
+            self.grants
+                .resolve_lineage(std::slice::from_ref(&self.kept), &self.application, None),
+            Err(GrantRefusal::Unavailable)
+        ) && matches!(
+            self.store.get(&store_custody::key()).await,
+            Err(StoreError::OwnerUnavailable)
+        )
+    }
+}
+
+/// A join or a final release before the close began, and a join with another
+/// owner's handle, end neither custody: only this host's own settled close
+/// lets the final release end them, and a second release changes nothing.
+#[tokio::test]
+async fn an_unbegun_or_foreign_close_ends_neither_custody() {
+    let c = BoundCustody::new().await;
+    let unbegun = HostCloseHandle {
+        incarnation: c.f.owner.incarnation,
+        close_id: Uuid::new_v4(),
+        scope: HostCloseScope::Activation,
+    };
+    assert_eq!(
+        c.f.owner.join_close(&unbegun).await,
+        Err(HostLifetimeError::NotSettled)
+    );
+    assert_eq!(
+        c.f.owner.release_native_custody().await,
+        Err(HostLifetimeError::NotSettled)
+    );
+    assert!(
+        c.held().await,
+        "nothing ends the custody before a close began"
+    );
+
+    let other = NativeHostLifetime::bootstrap(c.f.selection.clone()).unwrap();
+    let foreign = other
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
+    assert_eq!(
+        other.join_close(&foreign.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+    assert_eq!(
+        c.f.owner.join_close(&foreign.handle).await,
+        Err(HostLifetimeError::WrongOwner)
+    );
+    assert!(
+        c.held().await,
+        "another owner's settled close ends neither custody"
+    );
+
+    let closing =
+        c.f.owner
+            .begin_close_activation(HostCloseReason::Shutdown)
+            .unwrap();
+    assert_eq!(
+        c.f.owner.join_close(&foreign.handle).await,
+        Err(HostLifetimeError::WrongOwner)
+    );
+    assert_eq!(
+        c.f.owner.release_native_custody().await,
+        Err(HostLifetimeError::NotSettled)
+    );
+    assert!(
+        c.held().await,
+        "a begun close that has not settled ends neither custody"
+    );
+    assert_eq!(
+        c.f.owner.join_close(&closing.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+    assert!(c.held().await, "the settled join ends neither custody");
+    c.f.owner.release_native_custody().await.unwrap();
+    assert!(c.released().await, "the final release ends both custodies");
+    assert_eq!(
+        c.f.owner.release_native_custody().await,
+        Ok(()),
+        "a second release changes nothing"
+    );
+}
+
+/// A close joined while an entered physical guard is held waits for it, and
+/// both custodies hold meanwhile: the final release is refused until the
+/// close settles, and the settled join itself ends neither.
+#[tokio::test]
+async fn an_entered_guard_keeps_both_custodies_until_the_close_settles() {
+    let c = BoundCustody::new().await;
+    let component = Id::new("slack-extension").unwrap();
+    let (entered, _) =
+        c.f.owner
+            .component(&component)
+            .unwrap()
+            .retain(c.f.owner.incarnation, None)
+            .unwrap();
+    let closing =
+        c.f.owner
+            .begin_close_activation(HostCloseReason::Shutdown)
+            .unwrap();
+    let owner = c.f.owner.clone();
+    let handle = closing.handle.clone();
+    let mut joining = tokio::spawn(async move { owner.join_close(&handle).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut joining)
+            .await
+            .is_err(),
+        "the close waits for the entered guard"
+    );
+    assert_eq!(
+        c.f.owner.release_native_custody().await,
+        Err(HostLifetimeError::NotSettled)
+    );
+    assert!(
+        c.held().await,
+        "both custodies hold while the close waits for the entered guard"
+    );
+    drop(entered);
+    assert_eq!(
+        joining.await.unwrap().unwrap().state,
+        HostCloseState::Settled
+    );
+    assert!(c.held().await, "the settled join ends neither custody");
+    c.f.owner.release_native_custody().await.unwrap();
+    assert!(c.released().await, "the final release ends both custodies");
+}
+
+/// A close begun while an entered synchronous callback holds the
+/// activation's entry waits for the callback to return; until then the close
+/// has not even begun, the final release is refused, and both custodies hold.
+#[tokio::test]
+async fn an_entered_callback_keeps_both_custodies_until_it_returns() {
+    use std::sync::mpsc::sync_channel;
+    let c = BoundCustody::new().await;
+    let (entered, observed) = sync_channel(1);
+    let (resume, resumed) = sync_channel::<()>(1);
+    let setup_owner = c.f.owner.clone();
+    let setup = std::thread::spawn(move || {
+        setup_owner.with_current_setup(|| {
+            entered.send(()).unwrap();
+            resumed.recv().unwrap();
+            Ok(())
+        })
+    });
+    observed.recv_timeout(Duration::from_secs(2)).unwrap();
+    let close_owner = c.f.owner.clone();
+    let closing =
+        std::thread::spawn(move || close_owner.begin_close_activation(HostCloseReason::Shutdown));
+    std::thread::sleep(Duration::from_millis(30));
+    let waited = !closing.is_finished();
+    let refused = c.f.owner.release_native_custody().await;
+    let held = c.held().await;
+    resume.send(()).unwrap();
+    setup.join().unwrap().unwrap();
+    let closing = closing.join().unwrap().unwrap();
+    assert!(waited, "the close waits for the entered callback");
+    assert_eq!(refused, Err(HostLifetimeError::NotSettled));
+    assert!(
+        held,
+        "both custodies hold while an entered callback holds the entry"
+    );
+    assert_eq!(
+        c.f.owner.join_close(&closing.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+    assert!(c.held().await, "the settled join ends neither custody");
+    c.f.owner.release_native_custody().await.unwrap();
+    assert!(c.released().await, "the final release ends both custodies");
+}
+
 #[tokio::test]
 async fn bound_store_custody_is_never_replaced() {
     let mut f = Fixture::new();

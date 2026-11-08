@@ -11957,7 +11957,12 @@ impl MobBuilder {
                 });
             }
             // The operator-instruction delivery owner: delivers every owed
-            // member's snapshot for the actor's lifetime.
+            // member's snapshot for the actor's lifetime. A non-authoritative
+            // composition (a host's candidate launch over the shared mob
+            // store) may not act on that store, so it delivers nothing: its
+            // owed members stay owed for the authoritative launch.
+            if actor.dsl_authority.state().composition_authority
+                == mob_dsl::CompositionAuthorityKind::Authoritative
             {
                 let delivery_task =
                     super::operator_instruction_delivery::OperatorInstructionDeliveryReconciler::run_owned(

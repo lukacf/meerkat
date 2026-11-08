@@ -102,6 +102,26 @@ class ExportSetupStarterTests(unittest.TestCase):
             M.export(self.destination)
         self.assertFalse(self.destination.exists())
 
+    def test_missing_default_selection_refuses_before_output(self):
+        original_pointer = self.selector.read_bytes()
+        for missing in (self.selector, self.manifest):
+            with self.subTest(missing=missing.name):
+                self.selector.write_bytes(original_pointer)
+                missing.unlink()
+                with self.assertRaisesRegex(M.ExportError,
+                        "current distribution selection unavailable; use trusted --manifest and --manifest-sha256"):
+                    M.export(self.destination)
+                self.assertFalse(self.destination.exists())
+
+    def test_explicit_manifest_export_does_not_require_default_selection(self):
+        self.selector.unlink()
+        manifest_raw = self.manifest.read_bytes()
+        digest = hashlib.sha256(manifest_raw).hexdigest()
+        result = M.export(self.destination, manifest=self.manifest, manifest_sha256=digest)
+        self.assertEqual(result["manifest_sha256"], digest)
+        self.assertEqual((self.destination / "release-manifest.json").read_bytes(), manifest_raw)
+        self.assertFalse(self.selector.exists())
+
     def test_occupied_destination_is_preserved(self):
         self.destination.mkdir()
         marker = self.destination / "keep"
@@ -170,7 +190,8 @@ class ExportSetupStarterTests(unittest.TestCase):
 
     def test_real_export_runs_help_outside_checkout_without_archive(self):
         with patch.object(M, "ROOT", ROOT):
-            result = M.export(self.destination)
+            result = M.export(self.destination, manifest=self.manifest,
+                              manifest_sha256=hashlib.sha256(self.manifest.read_bytes()).hexdigest())
         self.assertEqual(result["status"], "exported")
         completed = subprocess.run([sys.executable, "-I", "-B", str(self.destination / "start.py"), "--help"],
                                    cwd=self.destination, env={"PATH": os.defpath},

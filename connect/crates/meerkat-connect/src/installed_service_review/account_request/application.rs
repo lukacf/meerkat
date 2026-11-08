@@ -13,11 +13,12 @@ use toolkit_mobkit::private_originals::{
 
 pub(super) struct ApplicationRequestOwner {
     policy: ServicePolicySource,
-    auth: Arc<ConnectorAuth>,
+    auth: Option<Arc<ConnectorAuth>>,
     approvals: Arc<LocalApprovals>,
     checked: Arc<CheckedInstalls>,
 }
-enum ServicePolicySource {
+#[derive(Clone)]
+pub(crate) enum ServicePolicySource {
     Installed(Arc<InstalledApplicationServicePolicy>),
     #[cfg(all(unix, feature = "console"))]
     Selected(Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>),
@@ -57,7 +58,7 @@ impl ApplicationRequestOwner {
     ) -> Arc<Self> {
         Arc::new(Self {
             policy: ServicePolicySource::Selected(selected),
-            auth: review.auth.clone(),
+            auth: Some(review.auth.clone()),
             approvals: review.approvals.clone(),
             checked: review.checked.clone(),
         })
@@ -94,7 +95,7 @@ pub(crate) fn compose_application_policy_requests(
         .map_err(|_| refused("The selected application setup router could not be bound"))?;
     let application = Arc::new(ApplicationRequestOwner {
         policy: ServicePolicySource::Installed(policy),
-        auth,
+        auth: Some(auth),
         approvals,
         checked: checked.clone(),
     });
@@ -114,6 +115,44 @@ pub(crate) fn compose_application_policy_requests(
     ));
     Ok(Arc::new(DynamicToolComposite::new(vec![
         checked, registered,
+    ])))
+}
+
+/// Public-only shared composition. The same checked owner supplies package
+/// observations and setup effects; this path has no connector auth owner.
+#[cfg(unix)]
+pub(crate) fn compose_shared_public_requests(
+    checked: Arc<CheckedInstalls>,
+    realm: RealmLocator,
+    session: SessionId,
+    approvals: Arc<LocalApprovals>,
+    tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
+    policy: Arc<ServicePolicySource>,
+) -> Result<Arc<dyn AgentToolDispatcher>, ConnectError> {
+    approvals.check_session(&session)?;
+    let application = Arc::new(ApplicationRequestOwner {
+        policy: (*policy).clone(),
+        auth: None,
+        approvals,
+        checked: checked.clone(),
+    });
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(RequestTool {
+        checked: checked.clone(),
+        realm,
+        session,
+        requests: None,
+        public_requests: None,
+        credential_requests: None,
+        tasks: Some(tasks.clone()),
+        application: Some(application),
+    });
+    let registered: Arc<dyn AgentToolDispatcher> = Arc::new(RegisteredToolBundleDispatcher::new(
+        SETUP_ACCOUNTS_BUNDLE,
+        tools,
+    ));
+    Ok(Arc::new(DynamicToolComposite::new(vec![
+        tasks.with_workflow_calls(checked),
+        tasks.with_workflow_calls(registered),
     ])))
 }
 
@@ -139,7 +178,7 @@ pub(crate) fn compose_selected_policy_requests(
         .map_err(|_| refused("The selected setup router could not be bound"))?;
     let application = Arc::new(ApplicationRequestOwner {
         policy: ServicePolicySource::Selected(selected),
-        auth,
+        auth: Some(auth),
         approvals,
         checked: checked.clone(),
     });
@@ -222,11 +261,13 @@ pub(super) async fn public(
     expires_in_ms: Option<u64>,
     tool_policy: Option<ServiceToolPolicySelection>,
 ) -> Result<Option<ToolDispatchOutcome>, ToolError> {
-    application
-        .approvals
-        .check_session(&owner.session)
+    application.approvals.check_session(&owner.session)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.session"}}"#))
         .map_err(|_| unavailable())?;
     if selected.public_configuration(operations).ok().as_ref() != Some(config) {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.configuration"}}"#
+        );
         return Err(unavailable());
     }
     let human = owner
@@ -234,21 +275,20 @@ pub(super) async fn public(
         .as_ref()
         .is_some_and(|sender| !sender.is_closed())
         && task.console_login().is_some();
-    let Some(policy) = application.policy.resolve(call.name)? else {
+    let Some(policy) = application.policy.resolve(call.name).inspect_err(|_| {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.policy"}}"#
+        )
+    })?
+    else {
         return human_action(call, "human_service_access_review", human);
     };
-    let prepared = prepare_public(
-        &application,
-        task,
-        policy,
-        config,
-        ids(operations.iter().cloned(), call.name)?,
-        expires_in_ms,
-        tool_policy,
-        call.name,
-    )
-    .await?;
-    context.check_tool_authorization(call, plan)?;
+    let prepared = prepare_public(&application, task, policy, config,
+        ids(operations.iter().cloned(), call.name)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.operations"}}"#))?,
+        expires_in_ms, tool_policy, call.name).await?;
+    context.check_tool_authorization(call, plan)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.prepared_authorization"}}"#))?;
     let Some(prepared) = prepared else {
         return human_action(call, "human_service_access_review", human);
     };
@@ -259,6 +299,11 @@ pub(super) async fn public(
             && selected.public_configuration(&operations).ok().as_ref() == Some(&config)
     })
     .await
+    .inspect_err(|_| {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.apply"}}"#
+        )
+    })
     .map(Some)
 }
 
@@ -288,7 +333,11 @@ pub(super) async fn connector(
     let Some(policy) = application.policy.resolve(call.name)? else {
         return human_action(call, "human_service_access_review", human);
     };
-    let account = application.auth.facade.connector_status(&target.slot).await;
+    let auth = application
+        .auth
+        .as_ref()
+        .ok_or_else(|| ToolError::access_denied(call.name))?;
+    let account = auth.facade.connector_status(&target.slot).await;
     context.check_tool_authorization(call, plan)?;
     task.check_setup_current()
         .await
@@ -337,8 +386,7 @@ pub(super) async fn connector(
     };
     // Re-observe the same native account after policy evaluation. Live attach
     // and operation use continue to enforce the native account and lineage.
-    let latest = application
-        .auth
+    let latest = auth
         .facade
         .connector_status(&target.slot)
         .await
@@ -390,35 +438,18 @@ async fn prepare_public(
     name: &str,
 ) -> Result<Option<PreparedAction>, ToolError> {
     #[cfg(all(unix, feature = "console"))]
-    if let Some(endpoint) = application.policy.operation_endpoint(name)? {
-        let operation = task
-            .clone()
-            .begin_application_no_connector_with_tool_policy(
-                policy,
-                config.clone(),
-                operations,
-                expires,
-                tool_policy,
-            )
+    if let Some(endpoint) = application.policy.operation_endpoint(name)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.endpoint"}}"#))? {
+        let operation = task.clone().begin_application_no_connector_with_tool_policy(policy, config.clone(), operations, expires, tool_policy)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.begin"}}"#))
             .map_err(|error| failure(name, error))?;
         return prepare_owned(endpoint, operation, name).await;
     }
-    match task
-        .clone()
-        .prepare_application_no_connector_with_tool_policy(
-            &policy,
-            config,
-            operations,
-            expires,
-            tool_policy,
-        )
-        .await
-        .map_err(|error| failure(name, error))?
-    {
+    match task.clone().prepare_application_no_connector_with_tool_policy(&policy, config, operations, expires, tool_policy).await
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application.configured_preparation"}}"#))
+        .map_err(|error| failure(name, error))? {
         ApplicationServicePreparation::RequiresHuman => Ok(None),
-        ApplicationServicePreparation::Prepared(prepared) => {
-            Ok(Some(PreparedAction::Configured(prepared)))
-        }
+        ApplicationServicePreparation::Prepared(prepared) => Ok(Some(PreparedAction::Configured(prepared))),
     }
 }
 async fn prepare_connector(
@@ -473,6 +504,9 @@ async fn prepare_owned(
     let control = match endpoint.adopt(operation) {
         Ok(control) => OwnedOperation(control),
         Err(mut operation) => {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.owned.adopt"}}"#
+            );
             operation.retire().await;
             return Err(unavailable());
         }
@@ -486,6 +520,9 @@ async fn prepare_owned(
             Ok(None)
         }
         Err(error) => {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.owned.prepared"}}"#
+            );
             control.0.retire().await;
             Err(failure(name, error))
         }
@@ -506,59 +543,60 @@ async fn enter_and_apply(
     prepared: PreparedAction,
     current: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Result<ToolDispatchOutcome, ToolError> {
-    context.check_tool_authorization(call, plan)?;
-    let ticket = context.reviewed_entry_ticket(call, plan)?;
+    context.check_tool_authorization(call, plan)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.authorization"}}"#))?;
+    let ticket = context.reviewed_entry_ticket(call, plan)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.entry_ticket"}}"#))?;
     let invocation = InvocationOpen(Arc::new(AtomicBool::new(true)));
     let open = invocation.0.clone();
     if !current() {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.current"}}"#
+        );
         return Err(ToolError::access_denied(call.name));
     }
     // Keep the direct future under its native caller. The callback retains
     // actual entry custody in the existing blocking issuance worker if this
     // future is dropped. It never locks/reenters native phase publication.
     // Cancellation does not roll back an already-entered grant or source write.
-    let custody = Arc::new(std::sync::Mutex::new(
-        ticket
-            .enter()
-            .map_err(|_| ToolError::access_denied(call.name))?,
-    ));
+    let custody = Arc::new(std::sync::Mutex::new(ticket.enter()
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.entry"}}"#))
+        .map_err(|_| ToolError::access_denied(call.name))?));
     let current = move || {
         let _custody = &custody;
         open.load(Ordering::SeqCst) && current()
     };
     let retained = match prepared {
-        PreparedAction::Configured(prepared) => prepared
-            .apply(current)
-            .await
+        PreparedAction::Configured(prepared) => prepared.apply(current).await
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.configured"}}"#))
             .map_err(|error| failure(call.name, error))?,
         #[cfg(all(unix, feature = "console"))]
         PreparedAction::Owned(operation) => {
-            use toolkit_mobkit::private_originals::{
-                ServiceParentOperationOutcome, ServiceParentOperationReason,
-            };
+            use toolkit_mobkit::private_originals::{ServiceParentOperationOutcome, ServiceParentOperationReason};
             // The actor already owns this exact operation. Only this original
             // native caller can supply its entered custody and currentness.
-            operation
-                .0
-                .enter(current)
+            operation.0.enter(current)
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.owned_entry"}}"#))
                 .map_err(|error| failure(call.name, error))?;
             let observed = operation.0.result().await;
             match observed.outcome {
                 Some(ServiceParentOperationOutcome::Succeeded) => observed.source.is_some(),
-                Some(ServiceParentOperationOutcome::Uncertain) => return Err(unavailable()),
+                Some(ServiceParentOperationOutcome::Uncertain) => {
+                    eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.owned_uncertain"}}"#);
+                    return Err(unavailable());
+                }
                 _ => {
+                    eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.owned_outcome"}}"#);
                     return Err(match observed.reason {
-                        Some(
-                            ServiceParentOperationReason::Unavailable
-                            | ServiceParentOperationReason::NotSettled,
-                        ) => unavailable(),
+                        Some(ServiceParentOperationReason::Unavailable | ServiceParentOperationReason::NotSettled) => unavailable(),
                         _ => ToolError::access_denied(call.name),
                     });
                 }
             }
         }
     };
-    context.check_tool_authorization(call, plan)?;
+    context.check_tool_authorization(call, plan)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"application.apply.final_authorization"}}"#))?;
     reply(
         call,
         json!({"state":"authorized","grant_issued":retained,

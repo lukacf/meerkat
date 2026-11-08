@@ -59,7 +59,7 @@ impl fmt::Debug for HookSourceDigest {
 }
 
 /// A hook source file as the factory read it: where, and the digest of the
-/// bytes it parsed its hooks from.
+/// bytes it parsed its hooks from. [`HookSource::new`] builds one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HookSource<'a> {
@@ -68,6 +68,52 @@ pub struct HookSource<'a> {
     pub path: &'a Path,
     /// The SHA-256 of the bytes read.
     pub sha256: HookSourceDigest,
+}
+
+impl<'a> HookSource<'a> {
+    /// The source at `path` whose bytes have the digest `sha256`.
+    ///
+    /// The factory asks about `HookSource::new(path, HookSourceDigest::of(bytes))`
+    /// for the bytes it reads at a convention path. A host puts the same
+    /// question to its [`HookSourceTrust`] without a build, as its own tests
+    /// of `decide` do:
+    ///
+    /// ```
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// use meerkat::{HookSource, HookSourceDecision, HookSourceDigest, HookSourceTrust};
+    ///
+    /// /// Trusts a file only with the content the host approved.
+    /// struct Approved(Vec<(PathBuf, HookSourceDigest)>);
+    ///
+    /// impl HookSourceTrust for Approved {
+    ///     fn decide(&self, source: HookSource<'_>) -> HookSourceDecision {
+    ///         let approved = self
+    ///             .0
+    ///             .iter()
+    ///             .any(|(path, sha256)| path == source.path && *sha256 == source.sha256);
+    ///         if approved {
+    ///             HookSourceDecision::Trusted
+    ///         } else {
+    ///             HookSourceDecision::Untrusted
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let path = Path::new("/srv/project/.rkat/config.toml");
+    /// let content = b"[hooks]\n";
+    /// let trust = Approved(vec![(path.to_path_buf(), HookSourceDigest::of(content))]);
+    ///
+    /// let read = HookSource::new(path, HookSourceDigest::of(content));
+    /// assert_eq!(trust.decide(read), HookSourceDecision::Trusted);
+    ///
+    /// let changed = HookSource::new(path, HookSourceDigest::of(b"[hooks]\n# changed\n"));
+    /// assert_eq!(trust.decide(changed), HookSourceDecision::Untrusted);
+    /// ```
+    #[must_use]
+    pub fn new(path: &'a Path, sha256: HookSourceDigest) -> Self {
+        Self { path, sha256 }
+    }
 }
 
 /// The host's decision over a [`HookSource`].

@@ -6,6 +6,12 @@
 //! cannot execute this path, and context-free calls are denied. Handoff
 //! observations do not establish installation, readiness or original-task completion.
 
+// The native dispatch future retains nested workflow and SQLite custody.
+// Its finite generated layout exceeds rustc's default query-depth budget.
+#![recursion_limit = "256"]
+
+mod admission_progress;
+pub mod current_check;
 pub mod discovery;
 #[cfg(all(feature = "native-host", unix))]
 pub mod host_gateway;
@@ -17,6 +23,9 @@ pub mod original_ingress;
 pub mod private_host;
 #[cfg(all(feature = "native-host", unix))]
 pub mod private_originals;
+mod review_custody;
+
+use admission_progress::{AdmissionProgress, AdmissionStage};
 
 use async_trait::async_trait;
 use meerkat_core::{
@@ -149,6 +158,14 @@ pub(crate) struct AdmissionDependencies {
     host: Arc<dyn SetupToolHost>,
     references: Arc<dyn ContextReferenceOwner>,
 }
+// Production callers supply the capability from this invocation's single
+// entry. The protocol fixture below never authorizes a native worker.
+enum FindEntry {
+    Entered(meerkat_core::EnteredDispatchOperation),
+    #[cfg(test)]
+    ProtocolFixture,
+}
+
 struct AdmissionOwner {
     dependencies: AdmissionDependencies,
     #[cfg(all(feature = "native-host", unix))]
@@ -214,7 +231,6 @@ impl FindAndInstallTool {
             #[cfg(all(feature = "native-host", unix))]
             FindAndInstallAdmission::Installed(binding) => {
                 let owner = binding.owner().ok_or_else(|| {
-                    #[cfg(test)]
                     aa1_failure("leaf.installed_owner", "Unavailable");
                     unavailable()
                 })?;
@@ -231,7 +247,6 @@ impl FindAndInstallTool {
         #[cfg(all(feature = "native-host", unix))]
         if let Some(acquisition) = &owner.acquisition {
             acquisition.require_native_runtime().map_err(|error| {
-                #[cfg(test)]
                 aa1_failure(
                     "leaf.native_runtime",
                     match error {
@@ -253,26 +268,19 @@ impl FindAndInstallTool {
         }
         // Standalone dependencies never select the installed native owner.
         let _ = owner;
-        #[cfg(test)]
         aa1_failure("leaf.direct_owner", "Unavailable");
         Err(unavailable())
     }
 
-    async fn admit(
-        &self,
+    fn parse_request(
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
-        owner: AdmissionOwner,
-    ) -> Result<ToolDispatchOutcome, ToolError> {
+    ) -> Result<FindAndInstallRequest, ToolError> {
         if call.name != FIND_AND_INSTALL {
             return Err(ToolError::NotFound {
                 name: call.name.into(),
             });
         }
-        // The caller retained the exact installed owner before entering this
-        // protocol. Native context and canonical source checks still authorize
-        // this particular invocation; composition alone grants no work.
-        let dependencies = &owner.dependencies;
         // Transcript interaction lineage is optional in a native admitted
         // turn. The installed source owner below requires the exact retained
         // work, RuntimeInput scope and canonical source association instead.
@@ -281,25 +289,54 @@ impl FindAndInstallTool {
                 name: FIND_AND_INSTALL.into(),
             });
         }
-        let authorization =
-            context
-                .work_authorization()
-                .ok_or_else(|| ToolError::AccessDenied {
-                    name: FIND_AND_INSTALL.into(),
-                })?;
+        if context.work_authorization().is_none() {
+            return Err(ToolError::AccessDenied {
+                name: FIND_AND_INSTALL.into(),
+            });
+        }
         if call.id.is_empty()
             || call.id.len() > 512
             || call.args.get().len() > MAX_TOOL_ARGUMENT_BYTES
         {
             return Err(invalid_arguments());
         }
-        let request: FindAndInstallRequest = call.parse_args().map_err(|_| invalid_arguments())?;
+        call.parse_args().map_err(|_| invalid_arguments())
+    }
+
+    // Keep the entered operation and review custody explicit; progress only
+    // observes this invocation's wait and cannot replace either owner.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        owner: AdmissionOwner,
+        request: FindAndInstallRequest,
+        entry: FindEntry,
+        review: review_custody::ReviewCustody,
+        progress: &AdmissionProgress,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        // The installed owner and current native context still authorize this
+        // invocation. Review custody only retains the already entered effect.
+        #[cfg(all(test, feature = "native-host", unix))]
+        if matches!(&entry, FindEntry::ProtocolFixture) && owner.acquisition.is_some() {
+            return Err(ToolError::AccessDenied {
+                name: FIND_AND_INSTALL.into(),
+            });
+        }
+        let dependencies = &owner.dependencies;
+        let authorization =
+            context
+                .work_authorization()
+                .ok_or_else(|| ToolError::AccessDenied {
+                    name: FIND_AND_INSTALL.into(),
+                })?;
+        progress.enter(AdmissionStage::HostAdmission);
         let mut admission = dependencies
             .host
             .admit_invocation(call.id, context)
             .await
             .map_err(|error| {
-                #[cfg(test)]
                 aa1_admission_failure("leaf.host_admit", &error);
                 match error {
                     ToolAdmissionError::Denied => ToolError::AccessDenied {
@@ -314,11 +351,11 @@ impl FindAndInstallTool {
             None => SetupStore::new(dependencies.store.as_ref(), dependencies.scope.clone()),
         }
         .map_err(|error| {
-            #[cfg(test)]
             aa1_setup_failure("leaf.store", &error);
             let _ = error;
             unavailable()
         })?;
+        progress.enter(AdmissionStage::StoreAdmission);
         let first = store
             .admit_or_recover(
                 request.clone(),
@@ -336,12 +373,12 @@ impl FindAndInstallTool {
                 // receive different clock terms. Read the winning terms once
                 // through the same current installed owner. This retries no
                 // work/effect and never changes the canonical raw request.
+                progress.enter(AdmissionStage::HostReadback);
                 let recovered = dependencies
                     .host
                     .admit_invocation(call.id, context)
                     .await
                     .map_err(|error| {
-                        #[cfg(test)]
                         aa1_admission_failure("leaf.host_readback", &error);
                         match error {
                             ToolAdmissionError::Denied => ToolError::AccessDenied {
@@ -356,6 +393,7 @@ impl FindAndInstallTool {
                     )));
                 }
                 admission = recovered;
+                progress.enter(AdmissionStage::StoreRecovery);
                 store
                     .admit_or_recover(
                         request,
@@ -369,22 +407,28 @@ impl FindAndInstallTool {
             }
             result => result.map_err(setup_error)?,
         };
+        progress.bind_operation(&admitted.snapshot.key().id);
         #[cfg(all(feature = "native-host", unix))]
         let worker = if let Some(acquisition) = &owner.acquisition {
-            let operation = Id::new(admitted.snapshot.key().id.clone()).map_err(|_| {
+            #[allow(
+                clippy::infallible_destructuring_match,
+                reason = "the refused fixture arm exists only in test builds"
+            )]
+            let entered = match &entry {
+                FindEntry::Entered(entered) => entered,
                 #[cfg(test)]
+                FindEntry::ProtocolFixture => return Err(unavailable()),
+            };
+            let operation = Id::new(admitted.snapshot.key().id.clone()).map_err(|_| {
                 aa1_failure("leaf.operation_id", "IdError");
                 unavailable()
             })?;
+            progress.enter(AdmissionStage::Advance);
             Some(
                 acquisition
-                    .advance(&operation, call, context)
+                    .advance(&operation, call, context, entered, review.clone(), progress)
                     .await
-                    .map_err(|error| {
-                        #[cfg(test)]
-                        aa1_setup_failure("leaf.advance", &error);
-                        setup_error(error)
-                    })?,
+                    .map_err(setup_advance_error)?,
             )
         } else {
             None
@@ -400,10 +444,15 @@ impl FindAndInstallTool {
             worker,
         };
         let content = serde_json::to_string(&reply).map_err(|_| {
-            #[cfg(test)]
             aa1_failure("leaf.reply_encoding", "serde_json::Error");
             unavailable()
         })?;
+        drop(review);
+        match entry {
+            FindEntry::Entered(entered) => drop(entered),
+            #[cfg(test)]
+            FindEntry::ProtocolFixture => {}
+        }
         Ok(ToolResult::new(call.id.into(), content, false).into())
     }
 }
@@ -422,6 +471,7 @@ fn same_installed_admission(first: &HostToolAdmission, replay: &HostToolAdmissio
         && first.host.correlation == replay.host.correlation
         && first.host.parent_operation == replay.host.parent_operation
         && first.host.setup_helper == replay.host.setup_helper
+        && first.host.work_context == replay.host.work_context
         && first.host.continuation == replay.host.continuation
         && first.host.environment_revision == replay.host.environment_revision
         && first.host.limits.max_workers == replay.host.limits.max_workers
@@ -452,6 +502,17 @@ impl AgentToolDispatcher for FindAndInstallTool {
             ToolMutationClass::Unknown
         }
     }
+    fn review_entry_support(
+        &self,
+        name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
+        use meerkat_core::approval::review::ReviewEntrySupport;
+        if name == FIND_AND_INSTALL {
+            ReviewEntrySupport::ConsumesAtEntry
+        } else {
+            ReviewEntrySupport::Unsupported
+        }
+    }
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         if call.name != FIND_AND_INSTALL {
             return Err(ToolError::NotFound {
@@ -473,13 +534,53 @@ impl AgentToolDispatcher for FindAndInstallTool {
             });
         }
         let owner = self.execution_owner()?;
-        tokio::time::timeout(self.admission_timeout, self.admit(call, context, owner))
-            .await
-            .map_err(|_| {
-                #[cfg(test)]
-                aa1_failure("leaf.timeout", "Elapsed");
-                unavailable()
-            })?
+        let request = Self::parse_request(call, context)?;
+        #[cfg(test)]
+        find_entry_probe::observe(call.id);
+        // Spend the exact native review once before host admission can retain
+        // work. Actual entered handoffs keep clones if this caller is lost.
+        // The entry waits out an owner change of the work's owners that
+        // another actor is making (another original's admission or binding
+        // publishing on the shared publication), within this dispatch
+        // attempt's own owner-change bounds, and then stages again from the
+        // current owners. It never repeats the dispatch: the review is still
+        // spent once, after the staging that passed, and a refusal met before
+        // the effect stays certified not dispatched. At R2 a change met here
+        // supersedes the reviewed decision, so the entry settles as
+        // review_unsatisfied (context_changed) instead of entering, by
+        // design: no effect runs under a decision that was not reviewed.
+        let (entering, custody) = context
+            .enter_reviewed_effect_held_after_owner_change(call, None)
+            .await?;
+        let context = entering.as_ref().unwrap_or(context);
+        // Convert this exact refreshed dispatch and its single entry. A
+        // conversion refusal is post-entry; preserve Core's unknown outcome.
+        let entered = context.governed_operation(call)?.into_entered(custody)?;
+        let review = review_custody::ReviewCustody::entered_operation(&entered);
+        let progress = AdmissionProgress::new();
+        let result = tokio::time::timeout(
+            self.admission_timeout,
+            review.retain_io(self.admit(
+                call,
+                context,
+                owner,
+                request,
+                FindEntry::Entered(entered),
+                review.clone(),
+                &progress,
+            )),
+        )
+        .await
+        .map_err(|_| {
+            aa1_failure("leaf.timeout", "Elapsed");
+            progress.report_timeout();
+            unavailable()
+        })?;
+        if let Err(error) = &result {
+            progress.refused();
+            progress.report_returned(error);
+        }
+        result
     }
 }
 
@@ -495,8 +596,42 @@ fn request_error(error: RequestError) -> ToolError {
         },
     }
 }
+#[cfg(all(feature = "native-host", unix))]
+fn setup_advance_error(error: installed_host::acquisition::SetupAdvanceError) -> ToolError {
+    match error {
+        installed_host::acquisition::SetupAdvanceError::Setup(error) => {
+            aa1_setup_failure("leaf.advance", &error);
+            setup_error(error)
+        }
+        installed_host::acquisition::SetupAdvanceError::ObservationChanged => {
+            ToolError::AuthorizationRefused {
+                refusal: meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::ReprepareRequired,
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "native-host", unix))]
+#[test]
+fn workflow_stale_exhaustion_preserves_reprepare_without_nonentry_certificate() {
+    let error =
+        setup_advance_error(installed_host::acquisition::SetupAdvanceError::ObservationChanged);
+    let ToolError::AuthorizationRefused { refusal } = error else {
+        panic!("typed stale observation must survive the tool projection");
+    };
+    assert_eq!(
+        refusal.kind(),
+        meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
+    );
+    assert!(matches!(
+        refusal.dispatch(),
+        meerkat_core::authorization::RefusalDispatch::Unknown
+    ));
+}
+
 fn setup_error(error: SetupError) -> ToolError {
-    #[cfg(test)]
     aa1_setup_failure("leaf.setup_projection", &error);
     match error {
         SetupError::Request(error) => request_error(error),
@@ -510,13 +645,15 @@ fn setup_error(error: SetupError) -> ToolError {
 }
 // Failure-only diagnostics for the existing exact AA1 executor. Labels are
 // fixed variants: no error payload, request, source, grant or identity is logged.
-#[cfg(test)]
 fn aa1_failure(stage: &'static str, variant: &'static str) {
-    eprintln!("AA1 failure: stage={stage} variant={variant}");
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "AA1 failure: stage={stage} variant={variant}"
+    );
 }
 
-#[cfg(test)]
-fn aa1_admission_failure(stage: &'static str, error: &ToolAdmissionError) {
+pub(crate) fn aa1_admission_failure(stage: &'static str, error: &ToolAdmissionError) {
     aa1_failure(
         stage,
         match error {
@@ -526,9 +663,10 @@ fn aa1_admission_failure(stage: &'static str, error: &ToolAdmissionError) {
     );
 }
 
-#[cfg(test)]
-fn aa1_setup_failure(stage: &'static str, error: &SetupError) {
+pub(crate) fn aa1_setup_failure(stage: &'static str, error: &SetupError) {
     use meerkat_toolkit::work_admission::SetupWorkAdmissionError as WorkError;
+    #[cfg(test)]
+    use meerkat_toolkit::{authority::SetupContextError, request::RequestError};
     let variant = match error {
         SetupError::Store(error) => match error {
             StoreError::OwnerUnavailable => "Store::OwnerUnavailable",
@@ -560,6 +698,26 @@ fn aa1_setup_failure(stage: &'static str, error: &SetupError) {
             WorkError::Encoding(_) => "WorkAdmission::Encoding",
             WorkError::WorkGraph(_) => "WorkAdmission::WorkGraph",
         },
+        #[cfg(test)]
+        SetupError::Request(error) => match error {
+            RequestError::Authority(error) => match error {
+                SetupContextError::InvalidEncoding => "Request::Authority::InvalidEncoding",
+                SetupContextError::MigrationRequired => "Request::Authority::MigrationRequired",
+                SetupContextError::InvalidEvidence => "Request::Authority::InvalidEvidence",
+                SetupContextError::WrongContext => "Request::Authority::WrongContext",
+                SetupContextError::Expired => "Request::Authority::Expired",
+                SetupContextError::StalePolicy => "Request::Authority::StalePolicy",
+                SetupContextError::Denied => "Request::Authority::Denied",
+            },
+            RequestError::EmptyRequest => "Request::EmptyRequest",
+            RequestError::InputLimit => "Request::InputLimit",
+            RequestError::InvalidLimits => "Request::InvalidLimits",
+            RequestError::ContextUnavailable => "Request::ContextUnavailable",
+            RequestError::ChangedAuthority => "Request::ChangedAuthority",
+            RequestError::InvalidAudience => "Request::InvalidAudience",
+            RequestError::Encoding(_) => "Request::Encoding",
+        },
+        #[cfg(not(test))]
         SetupError::Request(_) => "SetupError::Request",
         SetupError::Binding(_) => "SetupError::Binding",
         SetupError::Continuation(_) => "SetupError::Continuation",
@@ -621,11 +779,181 @@ impl FindAndInstallTool {
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         let owner = self.admission_owner()?;
-        tokio::time::timeout(self.admission_timeout, self.admit(call, context, owner))
-            .await
-            .map_err(|_| unavailable())?
+        let request = Self::parse_request(call, context)?;
+        let progress = AdmissionProgress::new();
+        tokio::time::timeout(
+            self.admission_timeout,
+            self.admit(
+                call,
+                context,
+                owner,
+                request,
+                FindEntry::ProtocolFixture,
+                review_custody::ReviewCustody::default(),
+                &progress,
+            ),
+        )
+        .await
+        .map_err(|_| unavailable())?
     }
 }
 
 #[cfg(test)]
 mod protocol_tests;
+
+/// Test seam: observe a Find just before its own effect entry, by call ID. A
+/// control can begin an owner change on the shared publication there, as
+/// another original's first binding does.
+#[cfg(test)]
+pub(crate) mod find_entry_probe {
+    use std::sync::{Arc, Mutex};
+    type Probe = Arc<dyn Fn(&str) + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    // Only the native-host Find controls install a probe.
+    #[cfg(all(feature = "native-host", unix))]
+    pub(crate) fn install(probe: Probe) {
+        *PROBE.lock().unwrap() = Some(probe);
+    }
+    #[cfg(all(feature = "native-host", unix))]
+    pub(crate) fn clear() {
+        PROBE.lock().unwrap().take();
+    }
+    pub(crate) fn observe(call: &str) {
+        let probe = PROBE.lock().unwrap().clone();
+        if let Some(probe) = probe {
+            probe(call);
+        }
+    }
+}
+
+/// Test seam: observe a Find just before its live-replay helper observation
+/// (`advance.observe_helper`), by call ID. A control of a host's shared case
+/// can begin an owner change on the shared publication there, as another
+/// original's first binding does.
+#[cfg(any(test, feature = "test-support"))]
+pub mod observe_helper_probe {
+    use std::sync::{Arc, Mutex, PoisonError};
+    /// A control's action at the step, given the Find's call ID.
+    pub type Probe = Arc<dyn Fn(&str) + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    /// Install the control's probe, replacing any earlier one.
+    pub fn install(probe: Probe) {
+        *PROBE.lock().unwrap_or_else(PoisonError::into_inner) = Some(probe);
+    }
+    /// Remove the control's probe.
+    pub fn clear() {
+        PROBE.lock().unwrap_or_else(PoisonError::into_inner).take();
+    }
+    pub(crate) fn observe(call: &str) {
+        let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(probe) = probe {
+            probe(call);
+        }
+    }
+}
+
+/// Test seam: a step of a Find's helper work at which a control can have the
+/// owner's originals collection held on a thread of its own, inside an owner
+/// change on the owner's publication or without one, as another helper's
+/// first binding write holds them (at
+/// [`source_hold_probe::Site::IntentsWriter`], the owner's source writer
+/// instead, as another writer holds it across its durable write). Each site
+/// is named by its [`source_hold_probe::Site`] and a key: the Find's call ID
+/// where the step has it, else the helper's work item, its work admission
+/// key, a source row's ID or an original work.
+#[cfg(any(test, feature = "test-support"))]
+pub mod source_hold_probe {
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+    /// What a control holds from the step on, for `duration`: the owner's
+    /// originals collection, inside an owner change on the owner's
+    /// publication when `owner_change`.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Hold {
+        pub owner_change: bool,
+        pub duration: Duration,
+    }
+    /// Where the hold begins.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Site {
+        /// The work step just before its helper publication-source read
+        /// (`complete.publication_source`); keyed by call ID.
+        PublicationSource,
+        /// The retention of a helper source just before its issued lineage
+        /// is resolved (the work step's retain, and the recovery's own
+        /// retain); keyed by work item.
+        Resolve,
+        /// A helper source's first binding write just done, before its
+        /// contributors' check and its publication; keyed by work item.
+        Retain,
+        /// A bound helper source's exact replay (nothing written), before
+        /// its contributors' check and its publication (the Find's
+        /// `advance.recover_helper`); keyed by work item.
+        Recover,
+        /// The Find's live-replay helper observation
+        /// (`advance.observe_helper`), once the call's acquisition original
+        /// is read, just before the observation's first fenced access; keyed
+        /// by the helper's work admission key.
+        Observe,
+        /// A fenced helper admission or observation (the work step's create,
+        /// then the Find's live-replay observation), its create or read just
+        /// done, before its check of the helper's sources under the source
+        /// writer; keyed by the helper's work admission key.
+        FencedAfter,
+        /// A helper's grant issuance just before its intent write takes the
+        /// source writer; the hold is of the source writer itself, not the
+        /// collection; keyed by work item.
+        IntentsWriter,
+        /// A helper's grant issuance with the source writer taken, before
+        /// its source check and its intent write; keyed by work item.
+        Intents,
+        /// A helper's grant issuance, its intent write just done, before its
+        /// source check; keyed by work item.
+        IntentsWritten,
+        /// A helper source's first binding write, just before it begins its
+        /// owner change (`retain_first_binding_write`); the hold lasts into
+        /// that change, where the write tries the collection; keyed by the
+        /// source row's ID.
+        FirstWrite,
+        /// A helper preparation's capture binder, inside Core's governed
+        /// bind, before its source check; keyed by work item.
+        PrepareBind,
+        /// A helper submission (`advance.submit_helper`) before its source
+        /// check; keyed by work item.
+        Submit,
+        /// A helper submission's rebind, its wait settled, before its source
+        /// check; keyed by work item.
+        RebindStop,
+        /// A named-only contributor's admitted basis read (a Find's
+        /// acquisition original, a result source), just before it takes the
+        /// collection; keyed by the contributor's original work.
+        BasisRead,
+    }
+    /// A control's answer at a site, given its key.
+    pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;
+    static PROBE: Mutex<Option<Probe>> = Mutex::new(None);
+    static HOLDS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+    /// Install the control's probe, replacing any earlier one.
+    pub fn install(probe: Probe) {
+        *PROBE.lock().unwrap_or_else(PoisonError::into_inner) = Some(probe);
+    }
+    /// Remove the control's probe, once every hold it made ended.
+    pub fn clear() {
+        PROBE.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let holds = std::mem::take(&mut *HOLDS.lock().unwrap_or_else(PoisonError::into_inner));
+        for hold in holds {
+            let _ = hold.join();
+        }
+    }
+    pub(crate) fn observe(site: Site, key: &str) -> Option<Hold> {
+        let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        probe.and_then(|probe| probe(site, key))
+    }
+    pub(crate) fn retain(hold: JoinHandle<()>) {
+        HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(hold);
+    }
+}

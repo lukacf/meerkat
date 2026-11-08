@@ -109,6 +109,7 @@ impl Host {
         HostToolAdmission {
             host: HostSetupRequest {
                 setup_helper: None,
+                work_context: None,
                 target: self.target.clone(),
                 correlation: id(&correlation),
                 parent_operation: Some(id("original-task")),

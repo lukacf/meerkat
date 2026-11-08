@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import hmac
@@ -23,6 +24,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import runpy
 import select
 import signal
 import socket
@@ -1459,19 +1461,42 @@ def installed_candidate(args):
     build_path = selected.parent / "build-record.json"
     build_raw = exact_bytes(build_path, staging["build_record_sha256"])
     build = unique_json(build_raw)
+    built, derivation = candidate["binary"], {}
+    if "derived_binary" in staging:
+        # The staged gateway is the reviewed strip-debug derivation of the cargo artifact that the native build
+        # record still names. The assembler joined original, transformation and derived bytes before staging.
+        derived_path = selected.parent / "derived-binary-record.json"
+        derived_raw = exact_bytes(derived_path, staging["derived_binary"]["record_sha256"])
+        derived = unique_json(derived_raw)
+        require(derived["schema_version"] == 1 and derived["kind"] == "meerkat_connect_derived_gateway"
+                and derived["derivation"] == "strip_debug" and derived["binary_kind"] == "toolkit_gateway"
+                and {key: derived["derived"][key] for key in ("sha256", "size")} == candidate["binary"],
+                "staged derived gateway differs from the candidate")
+        built = {key: derived["original"][key] for key in ("sha256", "size")}
+        derivation["derived_binary"] = bytes_pin(derived_path, derived_raw)
     resources_path = selected.parent / "resource-build-record.json"
     resource_build_raw = exact_bytes(resources_path, staging["resource_build_record_sha256"])
     resource_build = unique_json(resource_build_raw)
     require(build["schema_version"] == 1 and build["target"] == target
             and build["binary_kind"] == "toolkit_gateway"
-            and {key: build["binary"][key] for key in ("sha256", "size")} == candidate["binary"]
+            and {key: build["binary"][key] for key in ("sha256", "size")} == built
             and build["resources_sha256"] == candidate["resources_sha256"]
             and build["resource_build_record_sha256"] == staging["resource_build_record_sha256"],
             "selected native build differs from staged candidate")
     cargo = build["cargo"]
-    require(cargo["exit_code"] == 0 and cargo["env"]["MEERKAT_CONNECT_RESOURCES_SHA256"]
-            == candidate["resources_sha256"] and cargo["argv"].count("--bin") == 1
-            and cargo["argv"][cargo["argv"].index("--bin") + 1] == "toolkit_gateway",
+    argv = cargo["argv"]
+    require(cargo["exit_code"] == 0 and isinstance(argv, list) and argv
+            and all(isinstance(argument, str) for argument in argv)
+            and cargo["env"]["MEERKAT_CONNECT_RESOURCES_SHA256"] == candidate["resources_sha256"],
+            "gateway resource-bound build record required")
+    # Preserve the truthful combined build command while selecting only the
+    # gateway artifact already bound to this candidate by kind, size and digest.
+    positions = [index for index, argument in enumerate(argv) if argument == "--bin"]
+    binaries = [argv[index + 1] for index in positions if index + 1 < len(argv)]
+    require(len(binaries) == len(positions)
+            and all(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name) for name in binaries)
+            and not any(argument.startswith("--bin=") for argument in argv)
+            and len(binaries) == len(set(binaries)) and "toolkit_gateway" in binaries,
             "gateway resource-bound build record required")
     source = build["source_manifest"]
     source_raw = exact_bytes(Path(source["path"]), source["sha256"], limit=32 * 1024 * 1024)
@@ -1480,6 +1505,17 @@ def installed_candidate(args):
             and resource_build["resources_sha256"] == candidate["resources_sha256"]
             and resource_build["archive_sha256"] == staging["resource_component_sha256"],
             "resource/source identity mismatch")
+    if staging.get("release_version") is not None:
+        # A release prefix is verified from the same clean checkout it was staged and is assembled in:
+        # the in-tree identity owner re-derives the source manifest from this checkout's full commit.
+        identity = runpy.run_path(str(Path(__file__).resolve().with_name("connect-source-identity.py")))
+        checked = identity["checked_source"](Path(source["path"]), source["sha256"])
+        manifests = [argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--manifest-path"]
+        require(staging.get("source") == {"repository": checked["repository"], "revision": checked["revision"],
+                                          "tree": checked["tree"], "source_manifest_sha256": source["sha256"]}
+                and manifests == [str(identity["WORKSPACE"] / "Cargo.toml")] and "--locked" in argv
+                and not any(argument.startswith("--manifest-path=") for argument in argv),
+                "release verification source differs from this checkout")
     resource_raw = exact_bytes(resources / "resources.json", candidate["resources_sha256"], limit=32 * 1024 * 1024)
     manifest = unique_json(resource_raw)
     require(manifest["kind"] == "meerkat_connect_resources" and manifest["target"] == target
@@ -1489,7 +1525,7 @@ def installed_candidate(args):
     evidence = {"staging": bytes_pin(selected, raw), "native_build": bytes_pin(build_path, build_raw),
                 "resource_build": bytes_pin(resources_path, resource_build_raw),
                 "source_manifest": bytes_pin(Path(source["path"]), source_raw),
-                "resource_manifest": bytes_pin(resources / "resources.json", resource_raw)}
+                "resource_manifest": bytes_pin(resources / "resources.json", resource_raw), **derivation}
     return candidate, package, manifest, evidence
 
 
@@ -1571,6 +1607,19 @@ def require_descendants_gone(report, observed_children):
     require(all(gone_observations), "observed native descendant survives shutdown")
 
 
+def require_helperless_completed(setup, original, output):
+    absent = ("helper", "helper_tools", "helper_profile", "source_helper_member",
+              "source_helper_roster", "helper_source_surface", "server", "resources")
+    require(not any(key in setup for key in absent)
+            and not any(key in original for key in ("helper", "helper_tools", "helper_profile"))
+            and original["roster"] == original["members"] == setup["native_members"] == []
+            and original["tool_policy"]["members"] == []
+            and original["member_classes"]
+            and setup["native_owner"]["native_host"]["member_classes"] == original["member_classes"]
+            and setup["artifact_directory"] == str(output),
+            "helperless completion changed the empty application or introduced a helper/resource")
+
+
 class InstalledFixtureFinalizer:
     """One real native artifact transaction; no mocked policy or member outputs."""
     def __init__(self, gateway, directory, plan, plan_pin, source_pin, env, events, observe):
@@ -1647,8 +1696,15 @@ class InstalledFixtureFinalizer:
         original = self.plan["application"]
         require(setup["schema"] == 4 and "helper_source_surface" not in setup
                 and setup["realm"] == original["realm"]
-                and setup["definition_source"] == original["definition"]
-                and setup["source_helper_member"] == original["helper"]["member"]
+                and setup["definition_source"] == original["definition"],
+                "completed setup differs from this original preparation")
+        helperless = "helper" not in original
+        if helperless:
+            require_helperless_completed(setup, original, expected_manifest.parent)
+            require("acquisition" not in self.plan and self.plan["authorities"] == {},
+                    "empty helperless preparation retained acquisition or authority requests")
+        else:
+            require(setup["source_helper_member"] == original["helper"]["member"]
                 and all(setup["source_helper_roster"].get(key) == original["roster"][0][key]
                         for key in ("identity", "profile", "runtime_mode_override"))
                 and setup["helper_tools"] == original["helper_tools"]
@@ -1663,6 +1719,9 @@ class InstalledFixtureFinalizer:
         for key in ("grant_administrator", "remote_operator", "ingress_domain"):
             require(owner["native_host"][key] == self.plan["owner"]["native_host"][key],
                     "native owner changed selected " + key)
+        for key in ("authentication_domain", "event_domain"):
+            require(owner["native_host"].get(key) == self.plan["owner"]["native_host"].get(key),
+                    "native owner changed selected " + key)
         require(owner["native_host"].get("service_parent_administration")
                 == self.plan["owner"]["native_host"].get("service_parent_administration"),
                 "native owner changed selected administration rule")
@@ -1672,33 +1731,38 @@ class InstalledFixtureFinalizer:
             require({key: value for key, value in actual.items() if key != "controller_parent"}
                     == {key: value for key, value in expected.items() if key != "controller_parent"}
                     and actual["controller_parent"], "native completion changed source facts or omitted its controller")
-        helper = setup["helper"]
-        require(helper["controller_parent"] and helper["report_capability"]["parent"],
-                "native completion did not issue the selected fresh parents")
+        if not helperless:
+            helper = setup["helper"]
+            require(helper["controller_parent"] and helper["report_capability"]["parent"],
+                    "native completion did not issue the selected fresh parents")
         policy_ref = setup["application_tool_policy"]
         require(policy_ref["name"] in files and hashlib.sha256(files[policy_ref["name"]]).hexdigest()
                 == policy_ref["sha256"], "returned tool policy mismatch")
         self.application_tool_policy = files[policy_ref["name"]]
+        if helperless:
+            require(set(files) == {"application-setup.json", policy_ref["name"]},
+                    "empty helperless completion emitted an unselected resource or member artifact")
         for member in setup["native_members"]:
             ref = member["initial_surface"]
             require(ref["name"] in files and hashlib.sha256(files[ref["name"]]).hexdigest()
                     == ref["sha256"], "returned native surface mismatch")
-        handoff_pin = setup["resources"]["handoff"]
-        resource_dir = Path(setup["resources"]["artifact_directory"])
-        require(resource_dir.is_absolute() and Path(handoff_pin["path"]) == resource_dir / "prepare.stdout",
-                "preparer handoff owner mismatch")
-        handoff_raw = exact_bytes(Path(handoff_pin["path"]), handoff_pin["sha256"])
-        handoff = unique_json(handoff_raw)
-        require(set(handoff) == {"mcpServers"} and set(handoff["mcpServers"]) == {"toolkit-setup"},
-                "actual preparer did not return the selected setup descriptor")
-        retained[Path(handoff_pin["path"])] = handoff_raw
         self.evidence.update(completed_manifest=dataclasses.asdict(manifest_pin),
             completed_setup={"path": str(expected_manifest.parent / "application-setup.json"),
-                             "sha256": hashlib.sha256(files["application-setup.json"]).hexdigest()},
-            preparer_handoff=handoff_pin, completed_server=setup["server"],
-            controller_authority={"request": self.plan["authorities"]["controllers"][0],
-                "parent": helper["controller_parent"],
-                "basis": "packaged Driver joins the actual held controller report before issuing this parent"})
+                             "sha256": hashlib.sha256(files["application-setup.json"]).hexdigest()})
+        if not helperless:
+            handoff_pin = setup["resources"]["handoff"]
+            resource_dir = Path(setup["resources"]["artifact_directory"])
+            require(resource_dir.is_absolute() and Path(handoff_pin["path"]) == resource_dir / "prepare.stdout",
+                    "preparer handoff owner mismatch")
+            handoff_raw = exact_bytes(Path(handoff_pin["path"]), handoff_pin["sha256"])
+            handoff = unique_json(handoff_raw)
+            require(set(handoff) == {"mcpServers"} and set(handoff["mcpServers"]) == {"toolkit-setup"},
+                    "actual preparer did not return the selected setup descriptor")
+            retained[Path(handoff_pin["path"])] = handoff_raw
+            self.evidence.update(preparer_handoff=handoff_pin, completed_server=setup["server"],
+                controller_authority={"request": self.plan["authorities"]["controllers"][0],
+                    "parent": helper["controller_parent"],
+                    "basis": "packaged Driver joins the actual held controller report before issuing this parent"})
         self.completed_setup = setup
         # Native prepare_application_policy independently validates the real
         # setup-to-handoff descriptor equality. This projection never supplies a
@@ -1709,7 +1773,8 @@ class InstalledFixtureFinalizer:
         for name, raw in files.items():
             new_artifact(artifacts / name, raw)
         setup_ref = {"name": "application-setup.json", "sha256": hashlib.sha256(files["application-setup.json"]).hexdigest()}
-        acquisition_raw = canonical({"schema": 1, **self.plan["acquisition"], "prepared_application_setup": setup_ref})
+        acquisition_raw = canonical({"schema": 2, "prepared_application_setup": setup_ref} if helperless else
+                                    {"schema": 1, **self.plan["acquisition"], "prepared_application_setup": setup_ref})
         acquisition_pin = new_artifact(artifacts / "native-setup.json", acquisition_raw)
         policy = {"schema": 7, "deployment": owner["deployment"],
             "source_policy_sha256": self.source_pin["sha256"],
@@ -2050,6 +2115,8 @@ class InstalledAcquisitionProvider:
     request_text = ACQUISITION_REQUEST
     operation = ACQUISITION_OPERATION
     profile = "hackernews"
+    family = "agno"
+    package_operations = None
     selection_values = {"timeout": 7}
     access_tool = "toolkit_request_public_service"
     access_call_id = "public-task-access"
@@ -2110,7 +2177,9 @@ class InstalledAcquisitionProvider:
                         owner.errors.append(owner.error_observation(error))
                     self.send_error(500, "controlled acquisition schedule refused")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        # An explicit cold fixture may reopen its exact prior loopback endpoint.
+        # The default remains a fresh ephemeral listener; busy selection refuses.
+        self.server = ThreadingHTTPServer(("127.0.0.1", getattr(self, "listen_port", 0)), Handler)
         self.server.daemon_threads = False
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, name="installed-model", daemon=False)
@@ -2305,8 +2374,8 @@ class InstalledAcquisitionProvider:
                 require(fresh in self.issued
                         and list(results).index(fresh) > list(results).index(refused),
                         "fresh helper search result is unissued or precedes its refusal")
-        selected = {"family": "agno", "profile": self.profile,
-                    "operations": [self.operation], "values": self.selection_values}
+        selected = {"family": self.family, "profile": self.profile,
+                    "operations": self.package_operations or [self.operation], "values": self.selection_values}
         phase = len(self.requests)
         searches = [value for identifier, value in results.items()
                     if identifier.startswith("helper-catalog-search-") and identifier not in refused_searches]
@@ -2370,12 +2439,12 @@ class InstalledAcquisitionProvider:
         if "prepare-family" not in results:
             require(searches and loads,
                     "fixture did not observe actual deferred catalog search and load")
-            return call("prepare-family", "setup_prepare", {"family": "agno"})
+            return call("prepare-family", "setup_prepare", {"family": self.family})
         _, pending = pending_job(results["prepare-family"], "prepare")
         if pending is not None:
             return pending
         if "profile-help" not in results:
-            return call("profile-help", "setup_help", {"family": "agno", "profile": self.profile})
+            return call("profile-help", "setup_help", {"family": self.family, "profile": self.profile})
         require(any(row["id"] == self.operation for row in results["profile-help"]["operations"]),
                 "actual publisher did not expose requested operation")
         if "checked-install" not in results:
@@ -2396,7 +2465,7 @@ class InstalledAcquisitionProvider:
         require(observation["job_id"] == job_id and observation["status"] == "matched",
                 "actual installed job did not reconcile")
         if "current-operation-names" not in results:
-            return call("current-operation-names", "setup_help", {"family": "agno", "profile": self.profile})
+            return call("current-operation-names", "setup_help", {"family": self.family, "profile": self.profile})
         metadata = results["current-operation-names"]
         self.check_authentication_metadata(metadata)
         raw = [row["tool"] for row in metadata["operations"] if row["id"] == self.operation]
@@ -2711,9 +2780,11 @@ class InstalledFixtureRule:
         self.events.add("fixture_rule_released_before_sdk_transfer")
 
 
-async def observe_installed_service_reply(observe, provider, process, deadline):
+async def observe_installed_service_reply(observe, provider, process, deadline, *, failure_observer=None):
     """Observe one retained SDK exchange; a timeout never resubmits its command."""
     while True:
+        if failure_observer is not None:
+            failure_observer.require_alive()
         with provider.lock:
             errors = list(provider.errors)
         require(not errors, "controlled model schedule failed: " + repr(errors))
@@ -2723,9 +2794,14 @@ async def observe_installed_service_reply(observe, provider, process, deadline):
         try:
             # The public SDK retains Next/result correlation across timeout.
             # Complete each observer before inspecting failure or shutting down.
-            return await asyncio.to_thread(observe, timeout=min(0.25, remaining))
+            result = await asyncio.to_thread(observe, timeout=min(0.25, remaining))
         except TimeoutError:
+            if failure_observer is not None:
+                failure_observer.require_alive()
             continue
+        if failure_observer is not None:
+            failure_observer.require_alive()
+        return result
 
 
 async def run_installed_acquisition(private, finalizer, provider, directory, events, process):
@@ -2976,7 +3052,12 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
     empty_path.mkdir(mode=0o700)
     environment["PATH"] = str(empty_path)
     stderr = directory / "gateway.stderr"
-    environment["META_GATEWAY_STDERR_FILE"] = str(stderr)
+    # An authenticated case may discard native diagnostics rather than retain
+    # potentially secret-bearing child output. Other cases keep exact stderr.
+    discard_stderr = console is not None and getattr(console, "discard_native_stderr", False)
+    environment["META_GATEWAY_STDERR_FILE"] = os.devnull if discard_stderr else str(stderr)
+    if discard_stderr:
+        report["native_diagnostics"] = "discarded at process sink; no retained stderr evidence"
     gateway = args.toolkit_gateway
     runtime = transport = process = private = public_reader = private_reader = finalizer = None
     outgoing, responses, settlements, observed_children = [], [], [], {}
@@ -3011,7 +3092,9 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
         config_source = config_text(provider.port, acquisition=not corrupt)
         report["model_configuration"] = new_artifact(config_path, config_source.encode())
         specs = [META_IDENTITY.DurableAgentSpec(identity="helper", profile="research", runtime_mode_override="turn_driven")]
-        if not corrupt:
+        if console is not None and getattr(console, "helperless_restore", False):
+            specs = []
+        elif not corrupt:
             specs.append(META_IDENTITY.DurableAgentSpec(identity="original", profile="original", runtime_mode_override="turn_driven"))
         plan, plan_pin, source_pin = installed_plan(directory, [spec.to_dict() for spec in specs], acquisition=not corrupt, console=console,
             catalog_policy=console is None and not corrupt)
@@ -3046,10 +3129,10 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
         finalizer = InstalledFixtureFinalizer(gateway, finalizer_directory, plan, plan_pin,
                                              source_pin, environment, events, observe)
 
-        class ObservedApplication(APP_RUNTIME.ToolkitApplicationRuntime):
+        class ObservedTransport:
             def _make_gateway_transport(self):
                 nonlocal transport, process, private, public_reader, private_reader
-                # Invoke the actual one-shot application transport constructor.
+                # Invoke the selected SDK's actual transport constructor.
                 transport = super()._make_gateway_transport()
                 # Parent's constructor merges env; replace it with the complete
                 # isolated fixture env before its single Popen, as existing scope does.
@@ -3085,11 +3168,21 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
                         public_reader = transport._reader_thread
                         private_reader = private._reader if private is not None else None
                         if process is not None:
-                            events.add("main_gateway_started", pid=process.pid, binary=str(gateway))
+                            events.add("main_gateway_started", pid=process.pid, binary=str(gateway),
+                                       argv=process.args)
+                            if console is not None and getattr(console, "restore_after_shutdown", False):
+                                require("--operator-terminal-fd" not in process.args,
+                                        "Console reopen must not select an operator terminal")
 
                 transport._write_line, transport._send_sync_running = observed_write, observed_send
                 transport._deliver_init_event, transport.start = observed_deliver, observed_start
                 return transport
+
+        class ObservedApplication(ObservedTransport, APP_RUNTIME.ToolkitApplicationRuntime):
+            pass
+
+        class ObservedRestore(ObservedTransport, SDK.ToolkitMobKitRuntime):
+            pass
 
         providers = Providers()
         # Fresh Connect prepares its resources before native init can be accepted.
@@ -3102,7 +3195,11 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
         if console is not None:
             console.configure_runtime(config, directory)
         preparation = SDK.ApplicationPreparation(SDK.SelectedHostArtifact(**plan_pin), timeout=INSTALLED_LIMIT)
-        runtime = ObservedApplication(config, preparation, finalizer)
+        runtime_options = (console.application_runtime_options()
+            if console is not None and hasattr(console, "application_runtime_options") else {})
+        runtime = ObservedApplication(config, preparation, finalizer, **runtime_options)
+        if console is not None and hasattr(console, "observe_runtime"):
+            console.observe_runtime(runtime)
         # Native transport has no cwd override; these sequential cases launch
         # outside the checkout and without an ambient Python/Node fallback.
         os.chdir(directory)
@@ -3139,6 +3236,8 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
                      and row["params"].get("init_id") == init[0]["params"]["init_id"]
                      and row["params"].get("outcome") == "ready"]
             require(len(ready) == 1, "missing actual correlated native Ready settlement")
+            if console is not None and hasattr(console, "observe_native_ready"):
+                console.observe_native_ready(ready[0]["params"])
             with events.lock:
                 published = next(i for i, row in enumerate(events.rows) if row["event"] == "fixture_published")
                 settled = next(i for i, row in enumerate(events.rows) if row["event"] == "sdk_init_event"
@@ -3168,57 +3267,127 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
                 if hasattr(console, "observe_completed_setup"):
                     console.observe_completed_setup(
                         finalizer.completed_setup, finalizer.evidence["completed_setup"])
+                callbacks_before = len(callbacks)
                 report["console_journey"] = await console.run(
                     private, provider, directory, events, process, runtime.rust_http_base_url)
+                if getattr(console, "restore_after_shutdown", False):
+                    require(len(callbacks) == callbacks_before, "panel reopen reentered the application roster/topology")
             observe()
-        # Runtime owns its exact existing stop. Never repair by starting another
-        # gateway or signal a process group to manufacture successful cleanup.
-        try:
-            await runtime.shutdown()
-        except BaseException as error:
-            report["shutdown_error"] = {"type": type(error).__name__, "message": str(error)}
+        async def shutdown_checked():
+            # Runtime owns its exact existing stop. Never repair by starting another
+            # gateway or signal a process group to manufacture successful cleanup.
+            try:
+                await runtime.shutdown()
+            except BaseException as error:
+                report["shutdown_error"] = {"type": type(error).__name__, "message": str(error)}
+                if not corrupt:
+                    raise
+            termination = runtime.last_gateway_termination
+            require(termination is not None and termination.state == "exited"
+                    and termination.signal is None and termination.escalation == "none",
+                    "native child cleanup did not settle without signals")
+            require(process is not None and process.returncode is not None, "main child not reaped")
             if not corrupt:
-                raise
-        termination = runtime.last_gateway_termination
-        require(termination is not None and termination.state == "exited"
-                and termination.signal is None and termination.escalation == "none",
-                "native child cleanup did not settle without signals")
-        require(process is not None and process.returncode is not None, "main child not reaped")
-        if not corrupt:
-            require(termination.exit_code == 0 and process.returncode == 0,
-                    "positive gateway did not exit normally")
-            shutdown = [value for value in outgoing if value.get("method") == "meta/shutdown"]
-            require(len(shutdown) == 1, "expected one actual shutdown request")
-            replies = [value for value in responses if str(value.get("id")) == str(shutdown[0]["id"])]
-            require(len(replies) == 1 and "error" not in replies[0], "shutdown response correlation missing")
-            require(all(replies[0].get("result", {}).get(key) is True for key in
-                        ("shutdown", "runtime_cleanup_completed", "host_cleanup_completed")),
-                    "shutdown did not attest runtime and host cleanup")
-            report["shutdown_response"] = replies[0]
-            with socket.socket() as probe:
-                probe.settimeout(0.25)
-                require(probe.connect_ex(("127.0.0.1", http_port)) != 0, "gateway listener remains open")
-            report["http_listener_closed"] = True
-        for reader in (public_reader, private_reader):
-            require(reader is not None and not reader.is_alive(), "SDK reader not joined")
-        require(transport._process is None and not transport._pending and not transport._results,
-                "transport retained active process/pending responses")
-        require_descendants_gone(report, observed_children)
-        if corrupt:
-            # Observe again only after the native child and both SDK readers
-            # have joined, before retaining a successful negative result.
-            require_installed_resource_refusal(finalizer, plan, report["resource_corruption"], settlements)
+                require(termination.exit_code == 0 and process.returncode == 0,
+                        "positive gateway did not exit normally")
+                shutdown = [value for value in outgoing if value.get("method") == "meta/shutdown"]
+                require(len(shutdown) == 1, "expected one actual shutdown request")
+                replies = [value for value in responses if str(value.get("id")) == str(shutdown[0]["id"])]
+                require(len(replies) == 1 and "error" not in replies[0], "shutdown response correlation missing")
+                require(all(replies[0].get("result", {}).get(key) is True for key in
+                            ("shutdown", "runtime_cleanup_completed", "host_cleanup_completed")),
+                        "shutdown did not attest runtime and host cleanup")
+                report["shutdown_response"] = replies[0]
+                with socket.socket() as probe:
+                    probe.settimeout(0.25)
+                    require(probe.connect_ex(("127.0.0.1", http_port)) != 0, "gateway listener remains open")
+                report["http_listener_closed"] = True
+            for reader in (public_reader, private_reader):
+                require(reader is not None and not reader.is_alive(), "SDK reader not joined")
+            require(transport._process is None and not transport._pending and not transport._results,
+                    "transport retained active process/pending responses")
+            require_descendants_gone(report, observed_children)
+            if corrupt:
+                # Observe again only after the native child and both SDK readers
+                # have joined, before retaining a successful negative result.
+                require_installed_resource_refusal(finalizer, plan, report["resource_corruption"], settlements)
+            return termination
+
+        termination = await shutdown_checked()
+        if console is not None and getattr(console, "restore_after_shutdown", False):
+            report["prepared_gateway"] = {"pid": process.pid, "termination": dataclasses.asdict(termination),
+                "shutdown_response": report["shutdown_response"], "sdk_readers_joined": True,
+                "http_listener_closed": True, "observed_children_gone": True,
+                "observed_children": report["observed_children"],
+                "descendant_shutdown_checks": report["descendant_shutdown_checks"]}
+            selected = attempt.selection
+            require(selected is not None and dataclasses.asdict(selected) == finalizer.selection,
+                    "Restore lost the actual finalizer selection")
+            # Restore authenticates the completed application carrier on every
+            # init. Use the original native output, not the preparation plan,
+            # a reconstructed definition, fresh owner flag or operator terminal.
+            completed = finalizer.evidence["completed_setup"]
+            completed_raw = exact_bytes(Path(completed["path"]), completed["sha256"])
+            restore_config = dataclasses.replace(config, prepared_application_bundle=completed_raw,
+                prepared_application_digest=completed["sha256"])
+            outgoing.clear()
+            responses.clear()
+            settlements.clear()
+            observed_children.clear()
+            console.phase = "restored"
+            if hasattr(console, "configure_error_observer"):
+                console.configure_error_observer(restore_config)
+            restore_options = (console.restore_runtime_options()
+                if hasattr(console, "restore_runtime_options") else {})
+            runtime = ObservedRestore(restore_config, selected, **restore_options)
+            if hasattr(console, "observe_runtime"):
+                console.observe_runtime(runtime)
+            await runtime.connect()
+            require(process is not None and process.poll() is None and runtime.is_running,
+                    "selected native Restore did not become live")
+            initialized = [row for row in outgoing if row.get("method") == "meta/init"]
+            require(len(initialized) == 1 and "mob_config" not in initialized[0]["params"]
+                    and "application_tool_policies" not in initialized[0]["params"]
+                    and initialized[0]["params"].get("prepared_application") == {
+                        "bundle_base64": base64.b64encode(completed_raw).decode("ascii"),
+                        "digest": completed["sha256"]},
+                    "Restore did not use the exact native completed application carrier")
+            ready = [row for row in settlements if row["method"] == "meta/init_settled"
+                     and row["params"].get("outcome") == "ready"]
+            require(len(ready) == 1 and ready[0]["params"].get("init_id")
+                    == initialized[0]["params"]["init_id"], "Restore Ready was not correlated to its init")
+            report["restore_ready"] = ready[0]
+            if hasattr(console, "observe_native_ready"):
+                console.observe_native_ready(ready[0]["params"])
+            require(dataclasses.asdict(selected) == finalizer.selection
+                    and len([row for row in events.rows if row.get("event") == "fixture_published"]) == 1,
+                    "Restore repeated preparation/publication")
+            report["restore_ready"] = ready[0]
+            report["restore_pid"] = process.pid
+            observe()
+            callbacks_before = len(callbacks)
+            report["console_restore"] = await console.run(
+                private, provider, directory, events, process, runtime.rust_http_base_url)
+            require(len(callbacks) == callbacks_before, "restored panel reopen reentered the application roster/topology")
+            for key in ("activation", "policy_manifest", "local_policy"):
+                pin = finalizer.selection[key]
+                exact_bytes(Path(pin["path"]), pin["sha256"])
+            observe()
+            termination = await shutdown_checked()
         report.update(status="passed", termination=dataclasses.asdict(termination),
             natural_gateway_reap=True, sdk_readers_joined=True,
             observed_children=list(observed_children.values()), observed_children_gone=True)
     except BaseException as error:
         report.update(status="failed", error=repr(error), traceback=traceback.format_exc())
     finally:
-        if runtime is not None and transport is not None and transport._process is not None:
+        if runtime is not None:
             try:
+                # Native stop can clear the process before private cleanup joins.
+                # Rejoin the same retained owner even when that handle is gone.
                 await runtime.shutdown()
             except BaseException as error:
                 report["cleanup_error"] = repr(error)
+                report["status"] = "failed"
         if transport is not None:
             record = transport.last_termination
             if record is not None:
@@ -3226,6 +3395,36 @@ async def _run_installed_product(args, candidate, package, resource_manifest, *,
                 if record.escalation != "none":
                     report["forced_cleanup"] = True
                     report["status"] = "failed"
+            # Failure evidence must distinguish a reaped native child from
+            # joined SDK readers and descendants; none implies the others.
+            cleanup = {
+                "process_observed": process is not None,
+                "process_reaped": process is not None and process.poll() is not None,
+                "transport_process_released": transport._process is None,
+                "public_reader_created": public_reader is not None,
+                "public_reader_joined": public_reader is not None and not public_reader.is_alive(),
+                "private_reader_created": private_reader is not None,
+                "private_reader_joined": private_reader is not None and not private_reader.is_alive(),
+                "pending_responses_empty": not transport._pending and not transport._results,
+                "observed_descendants_gone": False,
+            }
+            report["cleanup_observation"] = cleanup
+            try:
+                require_descendants_gone(report, observed_children)
+                cleanup["observed_descendants_gone"] = True
+            except BaseException as error:
+                report["descendant_cleanup_error"] = repr(error)
+                report["status"] = "failed"
+            try:
+                require(record is None or record.state != "unknown", "native cleanup remains unknown")
+                require(process is None or cleanup["process_reaped"], "native child remains unreaped")
+                require(cleanup["transport_process_released"] and cleanup["pending_responses_empty"],
+                        "transport cleanup remains pending")
+                require(all(reader is None or not reader.is_alive() for reader in (public_reader, private_reader)),
+                        "SDK reader cleanup remains unjoined")
+            except BaseException as error:
+                report["cleanup_observation_error"] = repr(error)
+                report["status"] = "failed"
         if finalizer is not None:
             report["finalization"] = finalizer.evidence
             if finalizer.evidence.get("forced_artifact_cleanup"):
@@ -3286,7 +3485,7 @@ def main():
     parser.add_argument("--toolkit-python", required=True, type=Path)
     parser.add_argument("--meta-python", "--mobkit-python", dest="mobkit_python", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--case", choices=("core", "all", "memory-cleanup", "shutdown-reader", "private-protocol", "installed-product", "installed-console", "installed-console-credentials", "installed-console-browser", "installed-console-warm", "installed-console-source-build", "installed-console-helper-reset"), default="core")
+    parser.add_argument("--case", choices=("core", "all", "memory-cleanup", "shutdown-reader", "private-protocol", "installed-product", "installed-console", "installed-console-credentials", "installed-console-browser", "installed-console-warm", "installed-console-source-build", "installed-console-helper-reset", "installed-console-reopen"), default="core")
     parser.add_argument("--installed-staging", type=Path)
     parser.add_argument("--installed-staging-sha256")
     parser.add_argument("--browser-forge-source", type=Path)
@@ -3308,7 +3507,7 @@ def main():
         parser.error("Forge Browser source inputs apply only to installed-console-browser")
     if sys.platform != "darwin" and not sys.platform.startswith("linux"):
         parser.error("verifier supports explicit macOS /dev/fd or Linux /proc/self/fd inventory only")
-    installed = args.case in ("installed-product", "installed-console", "installed-console-credentials", "installed-console-browser", "installed-console-warm", "installed-console-source-build", "installed-console-helper-reset")
+    installed = args.case in ("installed-product", "installed-console", "installed-console-credentials", "installed-console-browser", "installed-console-warm", "installed-console-source-build", "installed-console-helper-reset", "installed-console-reopen")
     if installed:
         if args.raw_gateway is not None or args.installed_staging is None or args.installed_staging_sha256 is None:
             parser.error("installed-product needs the exact staging path/hash and no unrelated raw gateway")
@@ -3372,7 +3571,7 @@ def main():
             report.update(installed_candidate=candidate, installed_inputs=inputs,
                 execution_claim="installed SDK acquisition and one public read; success requires exact native input completion; no live authentication or general service support claim")
             console = None
-            if args.case in ("installed-console", "installed-console-credentials", "installed-console-browser", "installed-console-warm", "installed-console-source-build", "installed-console-helper-reset"):
+            if args.case in ("installed-console", "installed-console-credentials", "installed-console-browser", "installed-console-warm", "installed-console-source-build", "installed-console-helper-reset", "installed-console-reopen"):
                 module_path = Path(__file__).with_name("verify_installed_console.py")
                 spec = importlib.util.spec_from_file_location("connect_installed_console", module_path)
                 module = importlib.util.module_from_spec(spec)
@@ -3407,6 +3606,7 @@ def main():
                     console = warm_module.create_scenario(sys.modules[__name__], module, module.loopback_origin())
                 else:
                     scenario = (module.TrelloConsoleScenario if args.case == "installed-console-credentials"
+                                else module.ReopenConsoleScenario if args.case == "installed-console-reopen"
                                 else module.ConsoleScenario)
                     console = (module.BrowserConsoleScenario(sys.modules[__name__], module.loopback_origin(),
                         args.browser_forge_source, args.browser_forge_source_sha256) if browser else

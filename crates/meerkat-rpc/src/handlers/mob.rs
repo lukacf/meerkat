@@ -1476,6 +1476,103 @@ pub async fn handle_append_system_context(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Operator instructions (host verbs; never agent tools)
+// ---------------------------------------------------------------------------
+
+/// The JSON-RPC answer of an operator-instruction failure: a typed refusal
+/// carries its closed code in `data.instruction_set_code`; a mob that cannot
+/// answer maps as every mob verb does.
+fn operator_instruction_error_response(
+    id: Option<RpcId>,
+    failure: &meerkat_mob::OperatorInstructionError,
+) -> RpcResponse {
+    match (failure, failure.code()) {
+        (meerkat_mob::OperatorInstructionError::Mob(error), _) => mob_call_error(id, error),
+        (_, Some(code)) => super::instruction_set_error_response(id, code, failure.to_string()),
+        (_, None) => RpcResponse::error(id, error::INTERNAL_ERROR, failure.to_string()),
+    }
+}
+
+pub async fn handle_set_instruction(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobSetInstructionParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let write = meerkat_mob::OperatorInstructionWrite {
+        slot: params.slot(),
+        revision: params.revision,
+        body: params.body,
+        content_sha256: params.content_sha256,
+        target: meerkat_mob::OperatorInstructionTarget::from_wire(params.target),
+    };
+    match state.mob_set_instruction(&mob_id, write).await {
+        Ok(receipt) => RpcResponse::success(id, receipt.to_wire()),
+        Err(failure) => operator_instruction_error_response(id, &failure),
+    }
+}
+
+pub async fn handle_revoke_instruction(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobRevokeInstructionParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    match state
+        .mob_revoke_instruction(&mob_id, params.slot(), params.revision)
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(id, receipt.to_wire()),
+        Err(failure) => operator_instruction_error_response(id, &failure),
+    }
+}
+
+pub async fn handle_instruction_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobInstructionStatusParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let query = meerkat_mob::OperatorInstructionStatusQuery {
+        namespace: params.namespace,
+        key: params.key,
+        agent_identity: params.agent_identity.map(AgentIdentity::from),
+        profile: params.profile.map(meerkat_mob::ProfileName::from),
+        offset: params
+            .offset
+            .map_or(0, |offset| usize::try_from(offset).unwrap_or(usize::MAX)),
+        limit: params
+            .limit
+            .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
+    };
+    match state.mob_instruction_status(&mob_id, query).await {
+        Ok(page) => RpcResponse::success(id, page.to_wire()),
+        Err(failure) => operator_instruction_error_response(id, &failure),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MobFlowsParams {
     pub mob_id: String,
@@ -3769,6 +3866,40 @@ mod tests {
         AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobStorage,
     };
     use std::sync::Arc;
+
+    /// A governed runtime's refusal of an operator-instruction write answers
+    /// like every other refusal: `INVALID_PARAMS` with its closed code in
+    /// `data.instruction_set_code`, so a client tells it from a transient
+    /// failure; a malformed instruction history is the server's fault
+    /// (`INTERNAL_ERROR`).
+    #[test]
+    fn prepared_authorization_required_answers_invalid_params_with_its_code() {
+        let response = operator_instruction_error_response(
+            Some(RpcId::Num(7)),
+            &meerkat_mob::OperatorInstructionError::Refused(
+                meerkat_core::InstructionWriteError::PreparedAuthorizationRequired,
+            ),
+        );
+        let refusal = response.error.expect("a typed refusal");
+        assert_eq!(refusal.code, error::INVALID_PARAMS);
+        assert_eq!(
+            refusal.data,
+            Some(serde_json::json!({
+                "instruction_set_code": "prepared_authorization_required"
+            }))
+        );
+        let malformed = super::super::instruction_set_rpc_error(
+            meerkat_core::InstructionSetErrorCode::MalformedInstructionHistory,
+            "malformed".to_string(),
+        );
+        assert_eq!(malformed.code, error::INTERNAL_ERROR);
+        assert_eq!(
+            malformed.data,
+            Some(serde_json::json!({
+                "instruction_set_code": "malformed_instruction_history"
+            }))
+        );
+    }
 
     /// A spawn's override profile keeps its durable worker flag across the
     /// wire form, both ways.

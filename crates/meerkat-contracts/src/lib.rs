@@ -713,3 +713,17 @@ pub use wire::{
 pub use wire::{
     CONSENT_NOTICE_NOTIFICATION, ConsentNoticeKind, ConsentNoticeParams, ConsentPresentationParams,
 };
+// Operator instructions: the mob and session verbs, their results and the
+// refusal data.
+pub use wire::{
+    InstructionSetErrorData, MobInstructionStatusParams, MobInstructionStatusResult,
+    MobInstructionWriteResult, MobRevokeInstructionParams, MobSetInstructionParams,
+    RevokeSessionInstructionParams, SessionInstructionStatusParams, SessionInstructionStatusResult,
+    SessionInstructionWriteResult, SetSessionInstructionParams, WireInstructionBlockReason,
+    WireInstructionEffectiveRead, WireInstructionEffectiveSlot, WireInstructionLowering,
+    WireInstructionPendingReason, WireInstructionRecord, WireInstructionResidency,
+    WireInstructionSlotState, WireInstructionSlotView, WireInstructionTarget,
+    WireInstructionTargetOwner, WireMemberInstructionDelivery, WireMemberInstructionDeliveryState,
+    WireMemberInstructionSlot, WireMemberInstructionStatus, WireMobInstructionDisposition,
+    WireSessionInstructionDisposition, WireSessionInstructionSlot,
+};

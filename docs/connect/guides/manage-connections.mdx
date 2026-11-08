@@ -25,6 +25,46 @@ Keep installation, saved credentials and task grants distinct; use
 [readiness](/connect/concepts/readiness) to interpret actual outcomes. A saved definition
 or accepted decision alone does not establish a usable connection.
 
+## Credential status, replacement and removal (unreleased)
+
+The development CLI can inspect stored credential presence, fill or replace
+selected slots, or remove them without starting an agent, installing the setup
+helper or adding setup grants. These commands are not included in the published
+0.9.0 binaries.
+
+```bash
+meerkat-connect --realm work credentials status
+meerkat-connect --realm work credentials set github --slot GITHUB_TOKEN
+meerkat-connect --realm work credentials remove github --slot GITHUB_TOKEN
+```
+
+Use the exact service identifier and declared slot names returned by `status`;
+`github` is an example. Repeat `--slot` to select multiple slots. If status returns
+a continuation cursor, pass it with `credentials status --after <cursor>`.
+Status reports presence, never credential values or successful provider access.
+
+Both changes present the current service and selected slots for protected
+terminal approval. `set` then asks for each value with terminal echo disabled.
+Enter values only at those prompts, never in command arguments or chat.
+The service must already be configured and declare the selected slots.
+These commands manage native secret slots for owned stdio services; they do
+not replace OAuth sign-in.
+
+These changes preserve other slots, the service configuration and grants.
+Cancellation can leave an already started save completed; an uncertain result
+does not mean that no value was saved. Check current presence before deciding
+what to do next, without treating it as proof about the earlier attempt.
+Existing running processes can retain old values. Storing a value
+does not prove provider acceptance. Removing a saved credential, revoking a task
+grant and revoking the token at its provider are separate operations.
+
+Select the realm that owns the service configuration. A hosted application's
+defining realm can differ from its agents' session realm. Use that host's state
+root and credential-store environment as well as its realm name. Place
+`--state-root`, `--context-root` and `--user-config-root`, when needed, before
+`credentials`. Model selection, host pairing and `--stdio` options do not
+apply to these direct management commands.
+
 ## Advanced library and archive workflows
 
 The current lower-level local setup tools can save exact requests, reopen them

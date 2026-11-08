@@ -1679,7 +1679,7 @@ mod tests {
                 "requires_scoped_override": false,
                 "provider_plan": {
                     "tool_name": "image_generation",
-                    "model": "gpt-image-2",
+                    "model": "gpt-image-2.6-sunburst",
                     "output": {
                         "size": "square1024",
                         "quality": "low",

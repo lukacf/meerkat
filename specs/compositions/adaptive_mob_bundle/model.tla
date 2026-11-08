@@ -54322,52 +54322,6 @@ control_mob_PrepareMemberInstructionDeliveryNotOwedStopped(arg_agent_identity) =
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_PrepareMemberInstructionDeliveryPlacedRunning(arg_agent_identity) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "control_mob"
-       /\ packet.variant = "PrepareMemberInstructionDelivery"
-       /\ packet.payload.agent_identity = arg_agent_identity
-       /\ ~HigherPriorityReady("control_mob_authority")
-       /\ control_mob_phase = "Running"
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE)
-       /\ control_mob_phase' = "Running"
-       /\ control_mob_member_instruction_owed' = MapRemove(control_mob_member_instruction_owed, packet.payload.agent_identity)
-       /\ control_mob_member_instruction_blocked' = MapSet(control_mob_member_instruction_blocked, packet.payload.agent_identity, "MemberHostUnsupported")
-       /\ UnchangedFrame_ec2dfc5591fa5ecd
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberInstructionTargetBlocked", payload |-> [agent_identity |-> packet.payload.agent_identity, block |-> "MemberHostUnsupported", generation |-> control_mob_operator_instruction_generation], effect_id |-> (model_step_count + 1), source_transition |-> "PrepareMemberInstructionDeliveryPlacedRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "PrepareMemberInstructionDeliveryPlacedRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
-       /\ UnchangedFrame_5c73fa0d7ecc522a
-       /\ model_step_count' = model_step_count + 1
-
-
-control_mob_PrepareMemberInstructionDeliveryPlacedStopped(arg_agent_identity) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "control_mob"
-       /\ packet.variant = "PrepareMemberInstructionDelivery"
-       /\ packet.payload.agent_identity = arg_agent_identity
-       /\ ~HigherPriorityReady("control_mob_authority")
-       /\ control_mob_phase = "Stopped"
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE)
-       /\ control_mob_phase' = "Stopped"
-       /\ control_mob_member_instruction_owed' = MapRemove(control_mob_member_instruction_owed, packet.payload.agent_identity)
-       /\ control_mob_member_instruction_blocked' = MapSet(control_mob_member_instruction_blocked, packet.payload.agent_identity, "MemberHostUnsupported")
-       /\ UnchangedFrame_ec2dfc5591fa5ecd
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "MemberInstructionTargetBlocked", payload |-> [agent_identity |-> packet.payload.agent_identity, block |-> "MemberHostUnsupported", generation |-> control_mob_operator_instruction_generation], effect_id |-> (model_step_count + 1), source_transition |-> "PrepareMemberInstructionDeliveryPlacedStopped"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "PrepareMemberInstructionDeliveryPlacedStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
-       /\ UnchangedFrame_5c73fa0d7ecc522a
-       /\ model_step_count' = model_step_count + 1
-
-
 control_mob_PrepareMemberInstructionDeliveryUnbornRunning(arg_agent_identity) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
@@ -54376,7 +54330,6 @@ control_mob_PrepareMemberInstructionDeliveryUnbornRunning(arg_agent_identity) ==
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = TRUE)
        /\ control_mob_phase' = "Running"
        /\ UnchangedFrame_2bfae8dfb3faccf4
@@ -54398,7 +54351,6 @@ control_mob_PrepareMemberInstructionDeliveryUnbornStopped(arg_agent_identity) ==
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = TRUE)
        /\ control_mob_phase' = "Stopped"
        /\ UnchangedFrame_2bfae8dfb3faccf4
@@ -54420,7 +54372,6 @@ control_mob_PrepareMemberInstructionDeliveryUnboundRunning(arg_agent_identity) =
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -54444,7 +54395,6 @@ control_mob_PrepareMemberInstructionDeliveryUnboundStopped(arg_agent_identity) =
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -54468,7 +54418,6 @@ control_mob_PrepareMemberInstructionDeliveryRetiringRunning(arg_agent_identity) 
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
        /\ control_mob_phase' = "Running"
@@ -54491,7 +54440,6 @@ control_mob_PrepareMemberInstructionDeliveryRetiringStopped(arg_agent_identity) 
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
        /\ control_mob_phase' = "Stopped"
@@ -54514,7 +54462,6 @@ control_mob_PrepareMemberInstructionDeliveryDeliverRunning(arg_agent_identity) =
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -54539,7 +54486,6 @@ control_mob_PrepareMemberInstructionDeliveryDeliverStopped(arg_agent_identity) =
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -54564,7 +54510,6 @@ control_mob_PrepareMemberInstructionDeliverySpawningRunning(arg_agent_identity) 
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -54589,7 +54534,6 @@ control_mob_PrepareMemberInstructionDeliverySpawningStopped(arg_agent_identity) 
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -109235,52 +109179,6 @@ layer_mob_PrepareMemberInstructionDeliveryNotOwedStopped(arg_agent_identity) ==
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_PrepareMemberInstructionDeliveryPlacedRunning(arg_agent_identity) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "layer_mob"
-       /\ packet.variant = "PrepareMemberInstructionDelivery"
-       /\ packet.payload.agent_identity = arg_agent_identity
-       /\ ~HigherPriorityReady("layer_mob_authority")
-       /\ layer_mob_phase = "Running"
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE)
-       /\ layer_mob_phase' = "Running"
-       /\ layer_mob_member_instruction_owed' = MapRemove(layer_mob_member_instruction_owed, packet.payload.agent_identity)
-       /\ layer_mob_member_instruction_blocked' = MapSet(layer_mob_member_instruction_blocked, packet.payload.agent_identity, "MemberHostUnsupported")
-       /\ UnchangedFrame_01ea2ebdfe4fdac3
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberInstructionTargetBlocked", payload |-> [agent_identity |-> packet.payload.agent_identity, block |-> "MemberHostUnsupported", generation |-> layer_mob_operator_instruction_generation], effect_id |-> (model_step_count + 1), source_transition |-> "PrepareMemberInstructionDeliveryPlacedRunning"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "PrepareMemberInstructionDeliveryPlacedRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
-       /\ UnchangedFrame_5c73fa0d7ecc522a
-       /\ model_step_count' = model_step_count + 1
-
-
-layer_mob_PrepareMemberInstructionDeliveryPlacedStopped(arg_agent_identity) ==
-    /\ \E packet \in SeqElements(pending_inputs) :
-       /\ packet.machine = "layer_mob"
-       /\ packet.variant = "PrepareMemberInstructionDelivery"
-       /\ packet.payload.agent_identity = arg_agent_identity
-       /\ ~HigherPriorityReady("layer_mob_authority")
-       /\ layer_mob_phase = "Stopped"
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE)
-       /\ layer_mob_phase' = "Stopped"
-       /\ layer_mob_member_instruction_owed' = MapRemove(layer_mob_member_instruction_owed, packet.payload.agent_identity)
-       /\ layer_mob_member_instruction_blocked' = MapSet(layer_mob_member_instruction_blocked, packet.payload.agent_identity, "MemberHostUnsupported")
-       /\ UnchangedFrame_01ea2ebdfe4fdac3
-       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
-       /\ observed_inputs' = observed_inputs
-       /\ pending_routes' = pending_routes
-       /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "MemberInstructionTargetBlocked", payload |-> [agent_identity |-> packet.payload.agent_identity, block |-> "MemberHostUnsupported", generation |-> layer_mob_operator_instruction_generation], effect_id |-> (model_step_count + 1), source_transition |-> "PrepareMemberInstructionDeliveryPlacedStopped"] }
-       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "PrepareMemberInstructionDeliveryPlacedStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
-       /\ UnchangedFrame_5c73fa0d7ecc522a
-       /\ model_step_count' = model_step_count + 1
-
-
 layer_mob_PrepareMemberInstructionDeliveryUnbornRunning(arg_agent_identity) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
@@ -109289,7 +109187,6 @@ layer_mob_PrepareMemberInstructionDeliveryUnbornRunning(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = TRUE)
        /\ layer_mob_phase' = "Running"
        /\ UnchangedFrame_454395c485a789a6
@@ -109311,7 +109208,6 @@ layer_mob_PrepareMemberInstructionDeliveryUnbornStopped(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = TRUE)
        /\ layer_mob_phase' = "Stopped"
        /\ UnchangedFrame_454395c485a789a6
@@ -109333,7 +109229,6 @@ layer_mob_PrepareMemberInstructionDeliveryUnboundRunning(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -109357,7 +109252,6 @@ layer_mob_PrepareMemberInstructionDeliveryUnboundStopped(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -109381,7 +109275,6 @@ layer_mob_PrepareMemberInstructionDeliveryRetiringRunning(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
        /\ layer_mob_phase' = "Running"
@@ -109404,7 +109297,6 @@ layer_mob_PrepareMemberInstructionDeliveryRetiringStopped(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
        /\ layer_mob_phase' = "Stopped"
@@ -109427,7 +109319,6 @@ layer_mob_PrepareMemberInstructionDeliveryDeliverRunning(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -109452,7 +109343,6 @@ layer_mob_PrepareMemberInstructionDeliveryDeliverStopped(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -109477,7 +109367,6 @@ layer_mob_PrepareMemberInstructionDeliverySpawningRunning(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -109502,7 +109391,6 @@ layer_mob_PrepareMemberInstructionDeliverySpawningStopped(arg_agent_identity) ==
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)
-       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)
        /\ ((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -113608,18 +113496,16 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "RecoverOperatorInstructionGenerationHighwater") /\ (control_mob_phase = "Running") /\ ((control_mob_identity_generation_highwater_sealed = FALSE)) /\ ((packet.payload.generation <= control_mob_operator_instruction_generation))
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = FALSE))
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = FALSE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = FALSE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = FALSE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = FALSE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = FALSE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in control_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_spawn_exec_phase) = TRUE))
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Completed")
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (control_mob_phase = "Destroyed")
     \/ /\ (packet.variant = "RecordMemberInstructionTarget") /\ (control_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_instruction_owed) = FALSE))
@@ -115890,18 +115776,16 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "RecoverOperatorInstructionGenerationHighwater") /\ (layer_mob_phase = "Running") /\ ((layer_mob_identity_generation_highwater_sealed = FALSE)) /\ ((packet.payload.generation <= layer_mob_operator_instruction_generation))
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = FALSE))
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = FALSE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = FALSE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = FALSE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = TRUE))
-    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = FALSE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = FALSE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = TRUE))
+    \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = TRUE)) /\ (((packet.payload.agent_identity \in layer_mob_member_seat_session_unborn) = FALSE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_spawn_exec_phase) = TRUE))
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Completed")
     \/ /\ (packet.variant = "PrepareMemberInstructionDelivery") /\ (layer_mob_phase = "Destroyed")
     \/ /\ (packet.variant = "RecordMemberInstructionTarget") /\ (layer_mob_phase = "Running") /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_instruction_owed) = FALSE))
@@ -117883,8 +117767,6 @@ CoreNext ==
     \/ \E arg_generation \in 0..2 : control_mob_RecoverOperatorInstructionGenerationHighwaterKept(arg_generation)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryNotOwedRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryNotOwedStopped(arg_agent_identity)
-    \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryPlacedRunning(arg_agent_identity)
-    \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryPlacedStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryUnbornRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryUnbornStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_PrepareMemberInstructionDeliveryUnboundRunning(arg_agent_identity)
@@ -119806,8 +119688,6 @@ CoreNext ==
     \/ \E arg_generation \in 0..2 : layer_mob_RecoverOperatorInstructionGenerationHighwaterKept(arg_generation)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryNotOwedRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryNotOwedStopped(arg_agent_identity)
-    \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryPlacedRunning(arg_agent_identity)
-    \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryPlacedStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryUnbornRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryUnbornStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_PrepareMemberInstructionDeliveryUnboundRunning(arg_agent_identity)

@@ -291,8 +291,12 @@ async fn prepare_entry_keeps_complete_outer_timeout_and_advance_absolute_timeout
             } else {
                 Duration::from_millis(20)
             };
-        let prepare =
-            source.prepare_setup_helper(Arc::new(admitted), "read my Gmail".into(), deadline);
+        let prepare = source.prepare_setup_helper(
+            Arc::new(admitted),
+            "read my Gmail".into(),
+            deadline,
+            crate::review_custody::ReviewCustody::default(),
+        );
         if complete {
             // This is the same timeout primitive as bounded(owner.complete).
             // Cancellation of its waiter must not withdraw the original guard.

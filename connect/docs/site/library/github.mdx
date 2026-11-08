@@ -26,7 +26,16 @@ The selected server runs over stdio with:
 stdio --read-only --gh-host https://github.com --tools get_me,list_commits,get_file_contents
 ```
 
-The host selects the executable and child environment. Keep unrelated GitHub, proxy and logging settings out of that environment. Retain the bundled notices alongside the executable.
+The host selects the absolute executable, child environment and exact working
+directory from the checked installation. The selected server reads configuration
+relative to that directory. In the unreleased native installation path, Connect
+preserves the emitted `cwd` through Core's validated stdio configuration and
+checks it on readback. Do not drop it, substitute the host's current directory or
+infer it from the executable name. This source support does not establish an
+authenticated Connect read against a real account.
+
+Keep unrelated GitHub, proxy and logging settings out of the child environment.
+Retain the bundled notices alongside the executable.
 
 After connection, inspect the tool list and apply the intended agent grants. For reproducible file reads, use a commit SHA. For commit lists, provide positive integer `page` and `perPage` values and consume returned pages explicitly.
 

@@ -21,12 +21,15 @@ function serviceReceipt(caseName) {
   let report = { status: "pending", input_id: "input-b", phase: "consumed", terminal: { outcome_type: "consumed" },
     last_run_id: "historical-run", attempt_count: 2 };
   if (caseName === "without") { delete report.phase; report.status = "terminal_without_receipt"; }
-  else if (["batch", "finalization_failure", "terminated", "numeric_payload"].includes(caseName)) {
+  else if (["batch", "finalization_failure", "terminated", "numeric_payload", "outcome_unknown"].includes(caseName)) {
     report = { status: "finalized", input_id: "input-b", terminal: { outcome_type: "consumed" }, attempt_count: 2,
       scope: { kind: "run", run_id: "run-b" }, run_id: "run-b", owner_input_id: "input-a",
       recipient_input_ids: ["input-a", "input-b"], outcome: { completion_type: "completed_without_result" } };
     if (caseName === "finalization_failure") report.outcome = { completion_type: "completed_with_finalization_failure", error: { fixture_payload: "preserved" } };
     if (caseName === "terminated") Object.assign(report, { scope: { kind: "runtime_termination" }, run_id: null, outcome: { completion_type: "cancelled" } });
+    // R5 4g is a runless receipt; the prior run belongs only to the outcome.
+    if (caseName === "outcome_unknown") Object.assign(report, { scope: { kind: "runtime_termination" }, run_id: null,
+      outcome: { completion_type: "outcome_unknown", run_id: "run-b" } });
     if (caseName === "numeric_payload") report.outcome = { completion_type: "callback_pending", tool_use_id: "call", tool_name: "read",
       args: { offset: -0.5, values: [1.25, -7], nested: { ratio: 0.125 } } };
   }
@@ -49,7 +52,7 @@ function receiptProtocolFixture(t, replyFor) {
   return { client, commands, send };
 }
 
-for (const caseName of ["unresolved", "absent", "pending", "without", "batch", "finalization_failure", "terminated", "numeric_payload"]) {
+for (const caseName of ["unresolved", "absent", "pending", "without", "batch", "finalization_failure", "terminated", "numeric_payload", "outcome_unknown"]) {
   test(`service receipt preserves ${caseName} without manufacturing completion`, async t => {
     const expected = serviceReceipt(caseName);
     const { client, commands } = receiptProtocolFixture(t, () => ({ kind: "service_input_receipt", original, observation: expected }));
@@ -59,14 +62,17 @@ for (const caseName of ["unresolved", "absent", "pending", "without", "batch", "
   });
 }
 
-for (const mutation of ["original", "input", "owner", "scope", "witness", "status", "extra", "count"]) {
-  test(`service receipt rejects ${mutation} mismatch`, async t => {
-    const observation = serviceReceipt("batch"), returned = structuredClone(original);
+for (const receiptCase of ["batch", "outcome_unknown"]) for (const mutation of ["original", "input", "owner", "scope", "witness", "status", "extra", "count"]) {
+  test(`service receipt rejects ${receiptCase === "batch" ? "" : "outcome_unknown "}${mutation} mismatch`, async t => {
+    const observation = serviceReceipt(receiptCase), returned = structuredClone(original);
     const report = observation.receipt.report;
     if (mutation === "original") returned.original = "another";
     if (mutation === "input") report.input_id = "another";
     if (mutation === "owner") report.owner_input_id = "input-b";
-    if (mutation === "scope") report.scope.run_id = "another";
+    if (mutation === "scope") {
+      if (receiptCase === "outcome_unknown") report.run_id = "another"; // RuntimeTermination requires null.
+      else report.scope.run_id = "another";
+    }
     if (mutation === "witness") observation.receipt.source = "model_text";
     if (mutation === "status") report.status = "completed";
     if (mutation === "extra") observation.success = true;
@@ -289,6 +295,16 @@ test("private bootstrap, exact source retention, and operation-only cancellation
   assert.deepEqual(commands()[0].command.selection, selection);
 });
 
+test("pending workflow cleanup remains a successful cancellation without client replay", async t => {
+  const { client, commands } = fixture(t, "cancel-cleanup-pending");
+  await client.bootstrap(selection);
+  assert.deepEqual(await client.cancelOriginalOperation(original), {
+    original, state: "operations_cancelled_cleanup_pending",
+  });
+  await delay(10);
+  assert.equal(commands().filter(value => value.command.kind === "cancel_original_operation").length, 1);
+});
+
 test("pre-bootstrap requests and removed authority fields are refused before writing", async t => {
   const { client, commands } = fixture(t);
   await assert.rejects(client.retainAuthenticatedEvent(event), HostControlError);
@@ -304,7 +320,53 @@ test("pre-bootstrap requests and removed authority fields are refused before wri
   await delay(10); assert.equal(commands().length, 1);
 });
 
-for (const code of ["source_conflict", "invalid_selection", "unavailable", "denied", "wrong_owner", "not_settled"]) {
+for (const [name, suffix] of [["LF", "\n"], ["CR", "\r"], ["CRLF", "\r\n"],
+  ["line separator", "\u2028"], ["paragraph separator", "\u2029"]]) {
+  test(`Toolkit Id, digest and UUID fields reject trailing ${name} before writing`, async t => {
+    const close = { incarnation: "12345678-1234-1234-1234-123456789abc",
+      close_id: "22345678-1234-1234-1234-123456789abc", scope: { kind: "activation" } };
+    const { client, commands } = receiptProtocolFixture(t, ({ command }) => {
+      if (command.kind === "open_component") return { kind: "component", observation: {
+        incarnation: close.incarnation, component: command.component, revision: 1, state: "open" } };
+      if (command.kind === "cancel_original_operation") return { kind: "original_operation_cancelled",
+        original: command.original, state: "operations_cancelled" };
+      if (command.kind === "observe_close") return { kind: "close", observation: {
+        handle: command.handle, state: "closing", failure: null } };
+      return { kind: "error", error: "invalid_selection" };
+    });
+    await assert.rejects(client.bootstrap({ ...selection, activation: { ...artifact, sha256: artifact.sha256 + suffix } }), HostControlError);
+    assert.deepEqual(commands, []);
+    await client.bootstrap(selection);
+    const invalid = "realm/selected" + suffix;
+    const badOriginal = { ...original, route: invalid };
+    for (const invoke of [
+      () => client.retainAuthenticatedEvent({ ...event, route: invalid }),
+      () => client.submitAuthenticatedOriginal(badOriginal, "untouched content", event.original_authentication),
+      () => client.cancelOriginalOperation(badOriginal),
+      () => client.openComponent(invalid),
+      () => client.beginCloseComponent(invalid, "operator_disable"),
+      () => client.observeClose({ incarnation: "12345678-1234-1234-1234-123456789abc",
+        close_id: "22345678-1234-1234-1234-123456789abc", scope: { kind: "component", component: invalid } }),
+      () => client.retainAuthenticatedEvent({ ...event, content_sha256: event.content_sha256 + suffix }),
+      () => client.cancelOriginalOperation({ ...original, event_sha256: original.event_sha256 + suffix }),
+      () => client.submitAuthenticatedOriginal(original, "untouched content", {
+        ...event.original_authentication, sha256: event.original_authentication.sha256 + suffix }),
+      () => client.observeClose({ ...close, incarnation: close.incarnation + suffix }),
+      () => client.joinClose({ ...close, close_id: close.close_id + suffix }),
+    ]) {
+      await assert.rejects(async () => invoke(), HostControlError);
+      assert.deepEqual(commands.map(row => row.command), [{ kind: "bootstrap", selection }]);
+    }
+    for (const component of ["realm/component:worker@host_1.2-3", "p".repeat(192)]) {
+      assert.equal((await client.openComponent(component)).component, component);
+    }
+    assert.deepEqual(await client.cancelOriginalOperation(original), { original, state: "operations_cancelled" });
+    assert.deepEqual(await client.observeClose(close), { handle: close, state: "closing", failure: null });
+    assert.deepEqual(commands.map(row => row.id), [1, 2, 3, 4, 5], "local refusal cannot consume request IDs");
+  });
+}
+
+for (const code of ["source_conflict", "invalid_selection", "unavailable", "denied", "wrong_owner", "not_settled", "observation_changed"]) {
   test(`typed native ${code} is an exact reply and keeps the private channel available`, async t => {
     const { client, commands } = fixture(t, `refused:${code}`); await client.bootstrap(selection);
     await assert.rejects(client.retainAuthenticatedEvent(event), error => {
@@ -458,7 +520,7 @@ test("concurrent original submissions keep distinct input identities when replie
 });
 
 
-for (const mode of ["legacy-cancel-state", "cancel-wrong-original", "cancel-cleanup-pending"]) {
+for (const mode of ["legacy-cancel-state", "cancel-wrong-original"]) {
   test(`${mode} cannot become durable original cancellation`, async t => {
     const { client, commands } = fixture(t, mode); await client.bootstrap(selection);
     await assert.rejects(client.cancelOriginalOperation(original), HostControlError);

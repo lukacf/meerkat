@@ -705,6 +705,9 @@ pub struct FailingOnceSessionService {
     fail_projection_drain: bool,
     projection_drain_failed_once: AtomicBool,
     recorded_creates: std::sync::Mutex<Vec<RecordedMemberCreate>>,
+    recorded_instruction_records: std::sync::Mutex<Vec<RecordedInstructionRecord>>,
+    instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    instruction_records_held: AtomicU64,
     keep_durable_tails: AtomicBool,
     withheld_durable_tails: std::sync::Mutex<Option<meerkat_core::service::DurableResumeHold>>,
     fail_durable_tail_settles: AtomicBool,
@@ -753,6 +756,9 @@ pub struct RecordedMemberCreate {
     pub prompt_context_fork_source: Option<meerkat_core::PromptContextForkSource>,
     /// The fork seed the create records on the child's session, as JSON.
     pub fork_seed: Option<serde_json::Value>,
+    /// The operator-instruction target the session the create mints is born
+    /// with: the target its build's session carrier holds, if any.
+    pub born_instruction_target: Option<meerkat_core::SessionInstructionState>,
 }
 
 impl RecordedMemberCreate {
@@ -768,8 +774,25 @@ impl RecordedMemberCreate {
                     .get(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY)
                     .cloned()
             }),
+            born_instruction_target: build
+                .and_then(|build| build.resume_session.as_ref())
+                .and_then(|session| {
+                    session
+                        .instruction_target_state()
+                        .expect("a build's session carrier reads its instruction target")
+                }),
         }
     }
+}
+
+/// One operator-instruction record a fixture host's session service
+/// received: the member session, the snapshot's generation, and what the
+/// session did with it (`None` when it refused it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedInstructionRecord {
+    pub session_id: meerkat_core::SessionId,
+    pub generation: u64,
+    pub disposition: Option<meerkat_core::InstructionRecordDisposition>,
 }
 
 impl FailingOnceSessionService {
@@ -794,6 +817,9 @@ impl FailingOnceSessionService {
             fail_projection_drain,
             projection_drain_failed_once: AtomicBool::new(false),
             recorded_creates: std::sync::Mutex::new(Vec::new()),
+            recorded_instruction_records: std::sync::Mutex::new(Vec::new()),
+            instruction_record_gate: std::sync::Mutex::new(None),
+            instruction_records_held: AtomicU64::new(0),
             keep_durable_tails: AtomicBool::new(false),
             withheld_durable_tails: std::sync::Mutex::new(None),
             fail_durable_tail_settles: AtomicBool::new(false),
@@ -862,6 +888,32 @@ impl FailingOnceSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(RecordedMemberCreate::of(req));
+    }
+
+    /// Every operator-instruction record received, in order, with what the
+    /// member session did with it.
+    pub fn recorded_instruction_records(&self) -> Vec<RecordedInstructionRecord> {
+        self.recorded_instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Hold every operator-instruction record at this service until the
+    /// returned gate has a permit for it ([`tokio::sync::Semaphore::add_permits`]).
+    pub fn hold_instruction_records(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// How many operator-instruction records reached the gate of
+    /// [`Self::hold_instruction_records`].
+    pub fn instruction_records_held(&self) -> u64 {
+        self.instruction_records_held.load(Ordering::SeqCst)
     }
 
     /// Keep every durable tail at a cold start: the settle answers as the
@@ -1097,6 +1149,69 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         session_id: &meerkat_core::SessionId,
     ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError> {
         self.inner.subscribe_session_activity(session_id).await
+    }
+
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: meerkat_mob::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session_id = delivery.session_id().clone();
+        let generation = delivery.generation();
+        let gate = self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let _permit = match gate {
+            Some(gate) => {
+                self.instruction_records_held.fetch_add(1, Ordering::SeqCst);
+                Some(
+                    gate.acquire_owned()
+                        .await
+                        .expect("the instruction record gate stays open"),
+                )
+            }
+            None => None,
+        };
+        let result = Arc::clone(&self.inner)
+            .record_member_instruction_target(delivery)
+            .await;
+        self.recorded_instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(RecordedInstructionRecord {
+                session_id,
+                generation,
+                disposition: result.as_ref().ok().map(|receipt| receipt.disposition),
+            });
+        result
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: meerkat_mob::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Arc::clone(&self.inner)
+            .release_member_instruction_target(release)
+            .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[meerkat_core::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        self.inner.read_member_instructions(session_ids).await
     }
 
     async fn commit_live_delegation_final_transcript(
@@ -2750,6 +2865,9 @@ pub struct ScriptedV7State {
     refuse_next_v7_materialize: bool,
     /// The `command` name of every request received, in order.
     command_kinds: Vec<String>,
+    /// The `command` name and the cause of every request this host refused,
+    /// in order.
+    rejections: Vec<(String, BridgeRejectionCause)>,
 }
 
 /// How a scripted host answers commands stamped above protocol V6.
@@ -3012,6 +3130,16 @@ impl ScriptedHostPeer {
     /// The `command` name of every request this host received, in order.
     pub fn received_command_kinds(&self) -> Vec<String> {
         self.v7_state().command_kinds.clone()
+    }
+
+    /// The causes this host refused requests of `command` with, in order.
+    pub fn rejection_causes(&self, command: &str) -> Vec<BridgeRejectionCause> {
+        self.v7_state()
+            .rejections
+            .iter()
+            .filter(|(kind, _)| kind == command)
+            .map(|(_, cause)| cause.clone())
+            .collect()
     }
 
     fn v7_state(&self) -> std::sync::MutexGuard<'_, ScriptedV7State> {
@@ -3554,16 +3682,16 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
 
                 // A command stamped above V6 gets the scripted V7
                 // answer before its payload is read.
+                let kind = params
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 let mut v7_answer = {
                     let stamped = params
                         .get("protocol_version")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or_default();
-                    let kind = params
-                        .get("command")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
                     let mut v7 = responder_v7
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3943,6 +4071,15 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                 let Some(reply_value) = reply_value else {
                     continue;
                 };
+                if let Ok(BridgeReply::Rejected { cause, .. }) =
+                    serde_json::from_value::<BridgeReply>(reply_value.clone())
+                {
+                    responder_v7
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .rejections
+                        .push((kind.clone(), cause));
+                }
 
                 let reply_route = candidate.ingress.route.clone().or_else(|| {
                     candidate
@@ -5431,6 +5568,7 @@ pub fn sample_materialize_payload(
         forked_participant_attachment: None,
         prompt_context_fork: None,
         report_adopted_first_turn: false,
+        instruction_target: None,
     })
 }
 

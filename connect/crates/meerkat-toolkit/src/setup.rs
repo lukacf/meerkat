@@ -13,7 +13,7 @@ pub const SETUP_PUBLIC_SERVICE_REQUEST: &str = "toolkit_request_public_service";
 
 mod continuation_executor;
 mod continuation_recovery;
-pub use continuation_recovery::ContinuationRecoveryPage;
+pub use continuation_recovery::{ContinuationRecoveryCandidate, ContinuationRecoveryPage};
 mod service_continuation;
 use service_continuation::ApprovedServiceReady;
 pub use service_continuation::{
@@ -28,8 +28,18 @@ pub use helper_result::{
 };
 mod installed_input;
 pub use installed_input::{SetupInvocationTerms, canonical_setup_input_reference};
+mod shared_preparation;
 mod work_executor;
 mod work_preparation;
+mod workflow;
+pub use shared_preparation::{
+    SetupWorkContext, SharedPreparationCompletion, SharedPreparationMember,
+    SharedPreparationSelection,
+};
+pub use workflow::{
+    SetupWorkflowJoin, SetupWorkflowRef, SetupWorkflowSnapshot, SetupWorkflowTerms,
+    SetupWorkflowWaiter,
+};
 
 pub use work_executor::{SetupWorkHost, WorkAdmissionStep, WorkAdmissionStepOptions};
 

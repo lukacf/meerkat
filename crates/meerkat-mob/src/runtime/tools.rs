@@ -2492,6 +2492,30 @@ mod structured_error_tests {
     }
 }
 
+/// Operator instructions are host verbs: no member operator tool, local or
+/// remote, and no agent mob tool reaches them.
+#[cfg(test)]
+mod operator_instruction_tool_tests {
+    use super::*;
+
+    #[test]
+    fn member_operator_tool_catalogs_carry_no_instruction_verb() {
+        let names = local_operator_tool_defs()
+            .into_iter()
+            .chain(super::super::member_upcall::remote_operator_tool_defs())
+            .map(|def| def.name.to_string())
+            .chain(AGENT_MOB_TOOL_NAMES.iter().map(|name| (*name).to_string()))
+            .collect::<Vec<_>>();
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(
+                !name.contains("instruction"),
+                "tool '{name}' reaches operator instructions, which are host verbs"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod application_target_tests {
     use super::*;

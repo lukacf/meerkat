@@ -1184,6 +1184,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         }
         AgentEvent::RunResumed { .. } => "run_resumed",
         AgentEvent::ToolResultsBoundedForRequest { .. } => "tool_results_bounded_for_request",
+        AgentEvent::OperatorInstructionsApplied { .. } => "operator_instructions_applied",
     }
 }
 
@@ -3197,6 +3198,41 @@ pub enum AgentEvent {
         /// The limit that set how much of each result the request kept.
         axis: ToolResultBoundAxis,
     },
+    /// An operator-instruction entry of this session was applied. It reports
+    /// the instructions now in effect for the live session, not their
+    /// durability: the delta entry a fresh run start appended is published
+    /// once the run whose start appended it starts, and the snapshot entry a
+    /// compaction folded the session's entry rows into once that compaction
+    /// commits (for a staged memory projection, when the runtime commits it,
+    /// right after its `CompactionCompleted`; a compaction rolled back before
+    /// its commit is never observed, and its entry sequence goes to the next
+    /// entry). A restart before the entry is durable (the run's first
+    /// checkpoint, or the projection's commit) applies the changes again at
+    /// the next fresh run start and publishes this event again.
+    ///
+    /// An observation only, projected from the entry row's typed identity:
+    /// the session's operator-instruction status read is the authority on
+    /// what is in effect. A run that never starts takes its entry back, so
+    /// the changes stay pending and a later run start applies them again.
+    ///
+    /// Appended after every released variant: declaration order is the
+    /// implicit discriminant (the xtask `released_enum_ordinals` test).
+    OperatorInstructionsApplied {
+        session_id: SessionId,
+        /// Strictly increasing per session, across deltas and snapshots.
+        entry_sequence: u64,
+        kind: crate::InstructionEntryKind,
+        /// The run whose start applied the entry; none for a snapshot of
+        /// what was already in effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<crate::lifecycle::RunId>,
+        /// The whole active set after the entry, sorted by slot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        active: Vec<crate::InstructionActiveRef>,
+        /// A delta's changes, sorted by slot; empty for a snapshot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<crate::InstructionChange>,
+    },
 }
 
 /// One tool result a model request carried shortened, as
@@ -3265,6 +3301,23 @@ pub struct BoundaryAppendsDiscarded {
 }
 
 impl AgentEvent {
+    /// The observation of an applied operator-instruction entry
+    /// ([`AgentEvent::OperatorInstructionsApplied`]), projected from the
+    /// entry row's typed identity.
+    pub(crate) fn operator_instructions_applied(
+        session_id: SessionId,
+        entry: &crate::InstructionEntryIdentity,
+    ) -> Self {
+        Self::OperatorInstructionsApplied {
+            session_id,
+            entry_sequence: entry.entry_sequence(),
+            kind: entry.kind(),
+            run_id: entry.run_id().cloned(),
+            active: entry.active().to_vec(),
+            changes: entry.changes().to_vec(),
+        }
+    }
+
     /// The assistant message this event belongs to or references, when the
     /// event carries one.
     ///
@@ -3808,6 +3861,68 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ToolResultBoundAxis::RequestBytes).unwrap(),
             "request_bytes"
+        );
+    }
+
+    /// The applied-instructions observation has its own wire name, carries
+    /// the entry's identity fields and reads back as itself; a snapshot with
+    /// nothing in effect omits its empty sets and run.
+    #[test]
+    fn operator_instructions_applied_has_its_own_wire_name_and_round_trips() {
+        let session_id = SessionId::new();
+        let run_id = crate::lifecycle::RunId::new();
+        let namespace = crate::InstructionNamespace::new("host").unwrap();
+        let key = crate::InstructionKey::new("tone").unwrap();
+        let revision = crate::InstructionRevision::new(2).unwrap();
+        let digest = crate::InstructionContentDigest::for_body("Be brief.");
+        let event = AgentEvent::OperatorInstructionsApplied {
+            session_id: session_id.clone(),
+            entry_sequence: 3,
+            kind: crate::InstructionEntryKind::Delta,
+            run_id: Some(run_id.clone()),
+            active: vec![crate::InstructionActiveRef {
+                namespace: namespace.clone(),
+                key: key.clone(),
+                revision,
+                content_sha256: digest.clone(),
+                body_bytes: 9,
+            }],
+            changes: vec![crate::InstructionChange::Activate {
+                namespace,
+                key,
+                revision,
+                supersedes: None,
+                content_sha256: digest,
+                body_bytes: 9,
+            }],
+        };
+        assert_eq!(agent_event_type(&event), "operator_instructions_applied");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "operator_instructions_applied");
+        assert_eq!(wire["entry_sequence"], 3);
+        assert_eq!(wire["kind"], "delta");
+        assert_eq!(wire["run_id"], serde_json::to_value(&run_id).unwrap());
+        assert_eq!(wire["changes"][0]["change"], "activate");
+        assert_eq!(wire["active"][0]["revision"], 2);
+        let parsed: AgentEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+
+        let empty_snapshot = AgentEvent::OperatorInstructionsApplied {
+            session_id: session_id.clone(),
+            entry_sequence: 4,
+            kind: crate::InstructionEntryKind::Snapshot,
+            run_id: None,
+            active: Vec::new(),
+            changes: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&empty_snapshot).unwrap(),
+            serde_json::json!({
+                "type": "operator_instructions_applied",
+                "session_id": session_id,
+                "entry_sequence": 4,
+                "kind": "snapshot",
+            })
         );
     }
 
@@ -5983,6 +6098,14 @@ mod tests {
                     total_bytes: 600_000,
                 }],
                 axis: ToolResultBoundAxis::RequestBytes,
+            },
+            AgentEvent::OperatorInstructionsApplied {
+                session_id: SessionId::new(),
+                entry_sequence: 1,
+                kind: crate::InstructionEntryKind::Snapshot,
+                run_id: None,
+                active: Vec::new(),
+                changes: Vec::new(),
             },
         ];
 

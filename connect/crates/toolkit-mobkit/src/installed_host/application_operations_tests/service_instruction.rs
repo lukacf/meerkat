@@ -52,6 +52,7 @@ async fn controller_only_a(f: &Fixture) -> InputAuthorityAssociation {
                 originals
                     .persist_binding(persist_reference, &association)
                     .await
+                    .map(Into::into)
             },
         )
         .await

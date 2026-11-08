@@ -41,6 +41,10 @@ MAX_FILE = 2 * 1024**3 - 1
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
+# Meta 0.9.6 requires Core 0.9.7, and Meta 0.9.7 requires Core 0.9.8.
+# Select supported pairs explicitly;
+# matching version numbers alone do not establish native compatibility.
+NATIVE_RELEASE_PAIRS = {("0.9.4", "0.9.4"), ("0.9.5", "0.9.5"), ("0.9.7", "0.9.6"), ("0.9.8", "0.9.7")}
 FORGE_READERS = {"installer/launchkit/runtime_selection.py",
                  "installer/launchkit/runtime_candidates.py",
                  "installer/launchkit/sdk_wheel_integrity.py",
@@ -160,9 +164,9 @@ def checked_native_releases(value):
         require(isinstance(selected, dict)
                 and set(selected) == {"repository", "version", "tag", "source_sha"}
                 and selected["repository"] == "lukacf/" + repository
-                and selected["version"] == "0.9.4"
+                and isinstance(selected["version"], str) and VERSION.fullmatch(selected["version"])
                 and isinstance(selected["source_sha"], str) and SHA.fullmatch(selected["source_sha"]),
-                "exact Core/Meta 0.9.4 commit selection required")
+                "exact Core/Meta commit selection required")
         tag = selected["tag"]
         # A conservative single-component Git tag name. Empty is an explicit
         # commit-only selection, not an unbound value or a mutable-ref fallback.
@@ -170,7 +174,64 @@ def checked_native_releases(value):
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", tag)
             and ".." not in tag and not tag.endswith((".", ".lock")))),
             "native tag must be empty or a safe single-component Git tag")
+    require((value["core"]["version"], value["meta"]["version"]) in NATIVE_RELEASE_PAIRS,
+            "supported Core/Meta release pair required")
     return value
+
+
+def checked_sdk_native_dependency(value, sdk):
+    selected = value["native_release"]["meta"]["version"]
+    require(value["sdks"]["meta"]["version"] == selected, "Meta application SDK must match native release")
+    require("meerkat-meta==" + selected in sdk.get("optional-dependencies", {}).get("native-host", []),
+            "selected Connect SDK must declare the matching native-host dependency")
+
+
+def checked_forge_reader_source(value, *, allow_legacy=False):
+    """Select reader code independently of the native and Meta SDK releases."""
+    pins = value.get("forge_reader_source_pins")
+    require(isinstance(pins, dict) and set(pins) == FORGE_READERS
+            and all(isinstance(pin, str) and HEX.fullmatch(pin) for pin in pins.values()),
+            "exact Forge reader source inventory required")
+    if allow_legacy and "forge_reader_source" not in value:
+        # Older attested inputs selected their reader from the exact Meta
+        # release. Preserve that selection, never infer a newer Forge reader.
+        selected = checked_native_releases(value["native_release"])["meta"]
+        return {key: selected[key] for key in ("repository", "source_sha", "tag")}
+    selected = value.get("forge_reader_source")
+    require(isinstance(selected, dict) and set(selected) == {"repository", "source_sha", "tag"}
+            and selected["repository"] == "lukacf/meerkat-meta"
+            and isinstance(selected["source_sha"], str) and SHA.fullmatch(selected["source_sha"]),
+            "explicit exact Forge reader source required")
+    tag = selected["tag"]
+    require(isinstance(tag, str) and (tag == "" or (
+        re.fullmatch(r"forge-v[A-Za-z0-9][A-Za-z0-9._-]{0,120}", tag)
+        and ".." not in tag and not tag.endswith((".", ".lock")))),
+        "Forge reader tag must be empty or a safe forge-v tag")
+    return selected
+
+
+def checked_forge_reader_files(reader, value):
+    for name, expected in value["forge_reader_source_pins"].items():
+        require(checked_file(reader / name)["sha256"] == expected,
+                "selected Forge reader source differs")
+
+
+def checked_native_family(families, value):
+    require({package["name"] for package in families} == set(value["native_family_packages"]),
+            "native family is not the complete selected graph")
+    for package in families:
+        domain = "meta" if package["name"] == "meerkat-meta" else "core"
+        release = value["native_release"][domain]
+        require(package["version"] == release["version"], "native family version differs from selection")
+        source = package["source"]
+        require(isinstance(source, str), "path-sourced native family package is not a selected registry/Git source")
+        if source == "registry+https://github.com/rust-lang/crates.io-index":
+            continue  # Cargo verifies the exact selected lock's registry checksum.
+        repository = "git+https://github.com/" + release["repository"]
+        # Cargo retains either exact repository spelling in its source ID.
+        require(source.startswith((repository + "?", repository + ".git?"))
+                and source.endswith("#" + release["source_sha"]),
+                "native Git source is not the selected commit")
 
 
 def preflight(*, native=False):
@@ -199,12 +260,8 @@ def preflight(*, native=False):
             and sdk["version"] == value["sdks"]["toolkit"]["version"], "Connect SDK metadata differs")
     require(value["rust_toolchain"] == "1.97.0", "unreviewed Rust toolchain")
     checked_native_releases(value["native_release"])
-    require(value["sdks"]["meta"]["version"] == "0.9.4", "Meta application SDK must match native release")
-    require("meerkat-meta==0.9.4" in sdk.get("optional-dependencies", {}).get("native-host", []),
-            "selected Connect SDK must declare the matching native-host dependency")
-    require(set(value["forge_reader_source_pins"]) == FORGE_READERS
-            and all(HEX.fullmatch(pin) for pin in value["forge_reader_source_pins"].values()),
-            "exact selected Meta reader source inventory required")
+    checked_sdk_native_dependency(value, sdk)
+    checked_forge_reader_source(value)
     files = value["files"]
     require(isinstance(files, dict) and 0 < len(files) <= 512, "bounded complete public file selection required")
     for name, row in files.items():
@@ -230,10 +287,92 @@ def preflight(*, native=False):
 
 
 class Recorder:
+    # Ordinary command deadlines are unchanged. Cleanup observes the same owned
+    # child in bounded slices, retaining it until reap after escalation.
+    TERM_GRACE_SECONDS = 15
+    CLEANUP_WAIT_SECONDS = 0.1
+
     def __init__(self, work):
         self.work = work
         self.records = work / "records"
         self.records.mkdir()
+
+    def _stop_owned(self, process, state):
+        """Reap the direct child and signal only its original new-session group.
+
+        A leader exit does not imply its descendants exited. After TERM grace,
+        send KILL to that group even if the leader was already reaped. KILL
+        delivery is not descendant reap; zombie group visibility is not a join
+        gate. No signal handler or process-wide signal disposition is changed.
+        """
+        def observed(error):
+            if state["error"] is None:
+                state["error"] = error
+            name = type(error).__name__
+            counts = state["errors"]
+            key = name if name in counts or len(counts) < 16 else "other"
+            counts[key] = counts.get(key, 0) + 1
+
+        def send(sig):
+            try:
+                os.killpg(process.pid, sig)
+                return "sent"
+            except ProcessLookupError:
+                return "absent"
+            except OSError as error:
+                observed(error)
+                return "unconfirmed"
+
+        while True:
+            try:
+                if state["deadline"] is None:
+                    state["deadline"] = time.monotonic() + self.TERM_GRACE_SECONDS
+                if state["term"] is None:
+                    state["term"] = send(signal.SIGTERM)
+                    if state["term"] == "absent":
+                        state["group"] = "absent"
+                if state["group"] is None:
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        state["group"] = "absent"
+                    except OSError as error:
+                        observed(error)  # Still attempt KILL after grace.
+                    if state["group"] is None and time.monotonic() >= state["deadline"]:
+                        result = send(signal.SIGKILL)
+                        if result != "unconfirmed":
+                            state["group"] = result
+                # poll() also permits recovery from an unexpected wait() error.
+                # Both methods reap through the same Popen owner, never waitpid
+                # on an unrelated process or an inferred cached PID.
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=self.CLEANUP_WAIT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if process.returncode is not None and state["group"] is not None:
+                    return
+                # A reaped leader with a live group must still receive its TERM
+                # grace without a busy loop; repeated interrupts do not restart it.
+                time.sleep(self.CLEANUP_WAIT_SECONDS)
+            except BaseException as error:
+                observed(error)
+                # Cleanup interruption must not abandon the child or replace the
+                # original exception. Persistent OS wait errors retain ownership.
+                try:
+                    time.sleep(self.CLEANUP_WAIT_SECONDS)
+                except BaseException as repeated:
+                    observed(repeated)
+
+    def _wait_owned(self, process, seconds):
+        # A direct guarded call after Popen assignment avoids an uncovered
+        # CPython nested-try entry NOP in the caller's ownership region.
+        try:
+            return process.wait(timeout=seconds), False, None, None
+        except subprocess.TimeoutExpired:
+            return None, True, None, None
+        except BaseException as error:
+            return None, False, error, error.__traceback__
 
     def run(self, name, argv, *, cwd=ROOT, env=None, seconds=600):
         argv = [str(item) for item in argv]
@@ -242,27 +381,79 @@ class Recorder:
         started = time.time()
         expired = False
         code = None
-        with log.open("xb") as stream:
+        failure = None
+        traceback = None
+        cleanup = {"deadline": None, "term": None, "group": None, "error": None, "errors": {}}
+        process = None
+        stream = log.open("xb")
+        try:
+            # Construction and all subsequent owned work share one guard. Once
+            # the handle is assigned, an interruption before wait still joins it.
             process = subprocess.Popen(argv, cwd=cwd, env=selected_env,
                                        stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+            code, expired, failure, traceback = self._wait_owned(process, seconds)
+            if expired or failure is not None:
+                self._stop_owned(process, cleanup)
+                code = process.returncode
+                if failure is None and cleanup["error"] is not None:
+                    failure = cleanup["error"]
+                    traceback = failure.__traceback__
+        except BaseException as error:
+            if failure is None:
+                failure, traceback = error, error.__traceback__
+            else:
+                failure.add_note("cleanup also failed: " + type(error).__name__)
+            # A failure inside Popen may have no accessible handle. Only the
+            # actual stored handle grants cleanup authority; the exception's
+            # location does not imply whether construction already returned.
+            if process is not None:
+                # Retry with the same state/deadline, including interruptions
+                # at cleanup entry. Never restart the TERM grace period.
+                while True:
+                    # Keep the guarded call on the try line: a standalone
+                    # nested try NOP is outside CPython's exception table.
+                    try: self._stop_owned(process, cleanup); code = process.returncode; break
+                    except BaseException as repeated:
+                        failure.add_note("cleanup also failed: " + type(repeated).__name__)
+        finally:
+            # The log can only be closed/bound after owned-child cleanup. The
+            # caller's original interruption remains primary over close failures.
             try:
-                code = process.wait(timeout=seconds)
-            except subprocess.TimeoutExpired:
-                expired = True
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    code = process.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    code = process.wait()
-        record_env = {key: selected_env[key] for key in (
-            "RUSTUP_TOOLCHAIN", "XDG_CACHE_HOME", "RUST_LANE_ID", "CARGO_INCREMENTAL",
-            "CARGO_TERM_COLOR", "CARGO_BUILD_JOBS", "MEERKAT_CONNECT_RESOURCES_SHA256", "TMPDIR", "OPENSSL_DIR",
-            "HOME", "PATH", "RUST_TEST_THREADS", "RUST_MIN_STACK")
-            if key in selected_env}
-        record = {"argv": argv, "cwd": str(cwd), "env": record_env, "exit_code": code,
-                  "timed_out": expired, "elapsed_seconds": time.time() - started, "log": binding(log)}
-        write_new(self.records / (name + ".json"), record)
+                stream.close()
+            except BaseException as close_error:
+                if failure is None:
+                    failure, traceback = close_error, close_error.__traceback__
+                else:
+                    failure.add_note("log close also failed: " + type(close_error).__name__)
+        if process is None:
+            # No returned handle, no inferred PID/group and no child-reap claim.
+            # Preserve the constructor failure, including any log-close note.
+            raise failure.with_traceback(traceback)
+        try:
+            record_env = {key: selected_env[key] for key in (
+                "RUSTUP_TOOLCHAIN", "XDG_CACHE_HOME", "RUST_LANE_ID", "CARGO_INCREMENTAL",
+                "CARGO_TERM_COLOR", "CARGO_BUILD_JOBS", "MEERKAT_CONNECT_RESOURCES_SHA256", "TMPDIR", "OPENSSL_DIR",
+                "HOME", "PATH", "RUST_TEST_THREADS", "RUST_MIN_STACK",
+                "PYTHONNOUSERSITE", "PYTHONDONTWRITEBYTECODE")
+                if key in selected_env}
+            record = {"argv": argv, "cwd": str(cwd), "env": record_env,
+                      "exit_code": code if failure is None else None,
+                      "timed_out": expired, "elapsed_seconds": time.time() - started, "log": binding(log)}
+            if expired or failure is not None:
+                record["cleanup"] = {"direct_child_reaped": process.returncode is not None,
+                    "group_term": cleanup["term"], "group_after_grace": cleanup["group"],
+                    "errors": cleanup["errors"], "descendant_reap_observed": False}
+            if failure is not None:
+                # Legacy exit_code == 0 consumers must refuse an interrupted
+                # command even if its process concurrently exited zero.
+                record.update(process_exit_code=code, failure=type(failure).__name__)
+            write_new(self.records / (name + ".json"), record)
+        except BaseException as record_error:
+            if failure is None:
+                raise
+            failure.add_note("command record also failed: " + type(record_error).__name__)
+        if failure is not None:
+            raise failure.with_traceback(traceback)
         require(code == 0 and not expired, "command did not succeed: " + name)
         return record, log
 
@@ -413,10 +604,8 @@ def build():
     releases = {}
     for domain in ("core", "meta"):
         releases[domain] = fetch_native_source(record, work, domain, value["native_release"][domain])
-    for name, expected in value["forge_reader_source_pins"].items():
-        path = releases["meta"] / name
-        require(path.is_file() and not path.is_symlink() and digest(path) == expected,
-                "selected Meta commit lacks the selected actual Forge reader")
+    reader = fetch_native_source(record, work, "forge-reader", checked_forge_reader_source(value))
+    checked_forge_reader_files(reader, value)
     # --no-index alone does not forbid direct URLs or included requirements.
     # The selected owner's existing reader validates the exact single-hash
     # grammar and each original wheel/RECORD before either pip installation.
@@ -435,7 +624,7 @@ def build():
             "pending=_read_selected_dependency_wheels(pin(selected['requirements']),"
             "tuple(pin(row) for row in selected['wheels'])); "
             "print(json.dumps({'status':'exact_batch_verified','wheels':len(pending)}))",
-            releases["meta"] / "installer", batch_selection], seconds=300)
+            reader / "installer", batch_selection], seconds=300)
     # Build the selected Connect SDK through its existing PEP 517 backend. The
     # scratch copy avoids source-checkout mutations; no prior Connect publication
     # is needed. The frontend/backend dependency wheels are explicit offline inputs.
@@ -549,19 +738,7 @@ def build():
                     "Connect-owned package is not the exact selected workspace member")
         elif name == "meerkat" or name.startswith("meerkat-"):
             families.append(package)
-    require({package["name"] for package in families} == set(value["native_family_packages"])
-            and all(package["version"] == "0.9.4" for package in families),
-            "native family is not the complete selected 0.9.4 graph")
-    for package in families:
-        source = package["source"]
-        require(isinstance(source, str), "path-sourced native family package is not a selected registry/Git source")
-        if source == "registry+https://github.com/rust-lang/crates.io-index":
-            continue  # Cargo verifies the exact selected lock's registry checksum.
-        domain = "meta" if package["name"] == "meerkat-meta" else "core"
-        release = value["native_release"][domain]
-        require(source.startswith("git+https://github.com/" + release["repository"] + ".git?")
-                and source.endswith("#" + release["source_sha"]),
-                "native Git source is not the selected commit")
+    checked_native_family(families, value)
     # Exact IDs distinguish registry versions from Git commit sources; the
     # registry checksums remain pinned by the unchanged selected lock bytes.
     source_files = []
@@ -647,7 +824,7 @@ def build():
         "dependency_wheels": [binding(artifacts / "dependencies" / Path(name).name) for name in dependency["wheels"]],
         "model_catalog": binding(artifacts / "model-catalog.json"), **expectations}
     write_new(artifacts / "RUNTIME-SELECTION.json", selection)
-    # Use the selected release's real reader, not a Connect-side reimplementation
+    # Use the selected Forge source's real reader, not a Connect-side reimplementation
     # of the installer acceptance contract. An absent/incompatible reader refuses.
     record.run("forge-reader", [python, "-I", "-c",
         "import json,sys; from pathlib import Path; "
@@ -658,7 +835,7 @@ def build():
         "observed=read_meta_toolkit_artifacts(target); "
         "assert observed.origin=='installed-gateway-assembly'; "
         "print(json.dumps({'origin':observed.origin,'status':'verified','published':False}))",
-        releases["meta"] / "installer", artifacts / "RUNTIME-SELECTION.json"], seconds=300)
+        reader / "installer", artifacts / "RUNTIME-SELECTION.json"], seconds=300)
     require(source_state() == (revision, tree), "selected source changed during production")
     for path in ("native-candidate/Cargo.toml", "native-candidate/Cargo.lock"):
         require(digest(ROOT / path) == value["source_pins"][path], "Cargo changed selected source")
@@ -951,7 +1128,7 @@ def fetch_built():
 
 # Publication consumes this producer's installed preview, never a rebuilt or
 # relabeled staging product. This local acceptance record is not a new runtime
-# selection: the original v1 document and Meta-owned reader remain authoritative.
+# selection: the original v1 document and Forge-owned reader remain authoritative.
 # Connect releases from the monorepo (lukacf/meerkat) on its own version line:
 # candidates build in connect-release.yml, and releases are connect-vX.Y.Z.
 # Releases up to 0.9.4 stay in lukacf/meerkat-connect.
@@ -1120,26 +1297,22 @@ def unpack_publication_candidate(archive_path, destination):
     return {row["path"]: row for row in inventory}
 
 
-def read_publication_product(root, meta, manifest, request, work, env):
+def read_publication_product(root, reader, manifest, request, work, env):
     inputs = read_json(root / "inputs-selection.json")
     require(digest(root / "inputs-selection.json") == request["inputs_sha256"]
             and inputs["native_release"] == manifest["native_release"]
             and inputs["connect_version"] == request["connect_version"]
             and inputs["target"] == request["target"], "original input selection differs")
     def git(*args):
-        return subprocess.check_output(["git", "-C", str(meta), *args], env=env, timeout=30, text=True).strip()
-    selected = checked_native_releases(manifest["native_release"])["meta"]
+        return subprocess.check_output(["git", "-C", str(reader), *args], env=env, timeout=30, text=True).strip()
+    selected = checked_forge_reader_source(inputs, allow_legacy=True)
     require(git("rev-parse", "--verify", "HEAD^{commit}") == selected["source_sha"]
             and (not selected["tag"] or git("rev-parse", "--verify",
                 "refs/tags/" + selected["tag"] + "^{commit}") == selected["source_sha"])
             and git("status", "--porcelain", "--untracked-files=all", "--ignored", "--", "installer") == "",
-            "reader is not the exact clean selected Meta checkout")
-    require(not any(meta.joinpath("installer").rglob("*.pyc")), "reader checkout contains cached Python code")
-    pins = inputs["forge_reader_source_pins"]
-    require(set(pins) == FORGE_READERS, "reader source inventory differs")
-    for name, hashed in pins.items():
-        require(HEX.fullmatch(hashed) and checked_file(meta / name)["sha256"] == hashed,
-                "actual Meta reader source differs")
+            "reader is not the exact clean selected Forge checkout")
+    require(not any(reader.joinpath("installer").rglob("*.pyc")), "reader checkout contains cached Python code")
+    checked_forge_reader_files(reader, inputs)
     document = root / "artifacts/RUNTIME-SELECTION.json"
     require(digest(document) == manifest["runtime_selection_sha256"], "original selection differs")
     selection = read_json(document)
@@ -1164,8 +1337,8 @@ def read_publication_product(root, meta, manifest, request, work, env):
         "assert observed.origin=='installed-gateway-assembly'; "
         "print(json.dumps({'origin':observed.origin,'evidence':[{'path':str(f.path.relative_to(root)),"
         "'size':f.size,'sha256':f.sha256} for f in observed.evidence]}))",
-        meta / "installer", document, layout, root], env=env)
-    require(output["origin"] == "installed-gateway-assembly" and output["evidence"], "Meta did not accept installed preview")
+        reader / "installer", document, layout, root], env=env)
+    require(output["origin"] == "installed-gateway-assembly" and output["evidence"], "Forge did not accept installed preview")
     assembly = read_json(root / paths["assembly"])
     require(assembly["scope"] == SCOPE and assembly["release_version"] == request["connect_version"],
             "assembly is not the selected installed preview")
@@ -1176,7 +1349,7 @@ def read_publication_product(root, meta, manifest, request, work, env):
     return selection, paths, evidence
 
 
-def accept_publication(request_path, candidate, meta, output):
+def accept_publication(request_path, candidate, reader, output):
     checked_file(request_path, MAX_METADATA)
     request = checked_publication_request(read_json(request_path))
     files = publication_files(request["target"])
@@ -1197,7 +1370,7 @@ def accept_publication(request_path, candidate, meta, output):
         write_new(output / (name + ".verification.json"), verified)
     root = output / "unpacked"
     inventory = unpack_publication_candidate(assets / subjects[0], root)
-    selection, paths, evidence = read_publication_product(root, meta, manifest, request, output, env)
+    selection, paths, evidence = read_publication_product(root, reader, manifest, request, output, env)
     require(0 < len(evidence) <= 512 and len({r["path"] for r in evidence}) == len(evidence),
             "bounded distinct owner evidence required")
     for row in evidence:
@@ -1282,6 +1455,188 @@ def copy_publication_input(path, output, maximum):
     return {"name": path.name, "size": size, "sha256": hashed.hexdigest()}
 
 
+def forge_public_selection(selection):
+    # Only physical locators are omitted. The original attested document stays
+    # unchanged; Forge inserts local locators before its native parser runs.
+    projected = json.loads(json.dumps(selection, allow_nan=False))
+    del projected["artifact_root"]
+    names = ("assembly", "meta_wheel", "toolkit_wheel", "dependency_requirements", "model_catalog")
+    if "source_manifest" in projected:
+        names += ("source_manifest",)
+    for name in names:
+        del projected[name]["path"]
+    for wheel in projected["dependency_wheels"]:
+        del wheel["path"]
+    return projected
+
+
+# Pure delivery predicates retained from the selected Forge fill helper. They
+# inspect data only; Connect never imports or runs the fill tool here.
+FORGE_HYGIENE_SOURCE_SHA256 = "73d9a50e5f7644aa5fa05008b47a25259543a079fde1f8232f95ca31846ec3a4"
+FORGE_HYGIENE_RULE = "forge-fill-030-f1-f1b-f2-v1"
+# Private names to refuse in delivered evidence (case-insensitive). They are
+# publication configuration, never public source: the publishing environment
+# supplies them as one regular expression in CONNECT_PUBLICATION_PRIVATE_NAMES.
+# Without it no name is refused here; the user-home and absolute-path checks
+# still apply.
+PRIVATE_NAMES_ENV = "CONNECT_PUBLICATION_PRIVATE_NAMES"
+
+
+def private_pattern(names=None):
+    """The supplied private-name pattern; an empty supply matches nothing."""
+    names = os.environ.get(PRIVATE_NAMES_ENV, "") if names is None else names
+    return re.compile(names or r"(?!)", re.I)
+
+
+PRIVATE = private_pattern()
+ABSOLUTE = re.compile(r"^(/|~[/\\]|[A-Za-z]:[\\/]|\\\\)")
+# A user's home directory. The generic hosted-runner accounts (/Users/runner/, /home/runner/) and the bare
+# /home/.cargo/ name no user; /Users/.cargo/ is not exempt.
+USER_HOME = re.compile(r"/(?:Users/(?!runner/)|home/(?!runner/)(?!\.cargo/))[^/\s\"'\\]+/")
+WHEELS, WHEEL_LISTS = ("meta", "toolkit"), ("files", "metadata", "source_payload")
+TEXT_SUFFIXES = (".json", ".jsonl", ".md", ".txt", ".sha256")
+
+
+
+def wheel_file_names(selection):
+    """F1: the exact file names listed in the selection's own wheel file lists."""
+    names = set()
+    for wheel in WHEELS:
+        value = selection.get(wheel) if isinstance(selection, dict) else None
+        for key in WHEEL_LISTS if isinstance(value, dict) else ():
+            for row in value.get(key) or ():
+                name = row[0] if isinstance(row, list) and row else row
+                if isinstance(name, str):
+                    names.add(name)
+    return names
+
+
+def hygiene(value, label, selection_at=None):
+    """Problems in value: absolute paths, /Users/ or /home/ anywhere, and private names outside the F1 lists.
+
+    selection_at is the number of path parts before a selection's own keys: 0 when value is a selection,
+    3 when value is a document (targets.<name>.selection). None exempts nothing."""
+    strings, problems = 0, []
+
+    def exempt(path):
+        # A wheel list row is [name, sha256, size] (exempt part 0) or a bare name string.
+        if selection_at is None or len(path) < selection_at:
+            return False
+        if selection_at == 3 and not (path[0] == "targets" and path[2] == "selection"):
+            return False
+        rest = path[selection_at:]
+        return (len(rest) in (3, 4) and rest[0] in WHEELS and rest[1] in WHEEL_LISTS
+                and isinstance(rest[2], int) and (len(rest) == 3 or rest[3] == 0))
+
+    def walk(item, path):
+        nonlocal strings
+        if isinstance(item, dict):
+            for key, child in item.items():
+                check(key, path + ("<key>",))
+                walk(child, path + (key,))
+        elif isinstance(item, list):
+            for index, child in enumerate(item):
+                walk(child, path + (index,))
+        elif isinstance(item, str):
+            check(item, path)
+
+    def check(text, path):
+        nonlocal strings
+        strings += 1
+        where = label + "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in path)
+        if ABSOLUTE.match(text):
+            problems.append(f"{where}: absolute path")
+        if "/Users/" in text or "/home/" in text:
+            problems.append(f"{where}: user home prefix")
+        if PRIVATE.search(text) and not exempt(path):
+            problems.append(f"{where}: private name")
+
+    walk(value, ())
+    return strings, problems
+
+
+def text_hits(name, text, wheel_names):
+    """(user home paths, private names) in one fetched text input.
+
+    JSON is decoded and every key and string value is checked, so an escaped path cannot evade the path
+    check. The F1 and F1b exact-entry exemptions apply to the private-name check only."""
+    if name.endswith(".json"):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            value = None
+        if value is not None:
+            source_manifest, homes, private = name.endswith("source-manifest.json"), 0, 0
+
+            def walk(item, path):
+                nonlocal homes, private
+                if isinstance(item, dict):
+                    for key, child in item.items():
+                        homes += len(USER_HOME.findall(key))
+                        private += len(PRIVATE.findall(key))
+                        walk(child, path + (key,))
+                elif isinstance(item, list):
+                    for index, child in enumerate(item):
+                        walk(child, path + (index,))
+                elif isinstance(item, str):
+                    homes += len(USER_HOME.findall(item))
+                    listed = (source_manifest and len(path) == 3 and path[0] == "files"
+                              and isinstance(path[1], int) and path[2] == "path")
+                    if item not in wheel_names and not listed:
+                        private += len(PRIVATE.findall(item))
+
+            walk(value, ())
+            return homes, private
+    remainder = text
+    for exempt in sorted(wheel_names, key=len, reverse=True):
+        remainder = remainder.replace(exempt, "")
+    return len(USER_HOME.findall(text)), len(PRIVATE.findall(remainder))
+
+
+def forge_public_files(accepted):
+    archive = accepted["assets"][0]
+    request = accepted["request"]
+    url = f"https://github.com/{PUBLICATION_REPO}/releases/download/{request['tag']}/{archive['name']}"
+    return {row["path"]: {"url": url, "archive_size": archive["size"], "archive_sha256": archive["sha256"],
+            "member": "connect-export/" + row["path"], "size": row["size"], "sha256": row["sha256"]}
+            for row in accepted["evidence"]}
+
+
+def checked_forge_delivery(directory, accepted, fragment):
+    # This is the entire Connect contribution to the fill document. Guide and
+    # ordinary gateway pins remain Forge-owned. Nothing is fetched or rewritten.
+    _, problems = hygiene({"targets": {accepted["request"]["target"]: fragment}}, "Connect fragment", 3)
+    require(not problems, "Forge fragment hygiene refused: " + "; ".join(problems[:20]))
+    evidence = accepted["evidence"]
+    require(isinstance(evidence, list) and 0 < len(evidence) <= 512
+            and len({row["path"] for row in evidence}) == len(evidence), "distinct accepted evidence required")
+    exempt = wheel_file_names(fragment["selection"])
+    observations = []
+    for expected in sorted(evidence, key=lambda row: row["path"]):
+        require(set(expected) == {"path", "size", "sha256"}, "invalid accepted evidence pin")
+        name = relative(expected["path"])
+        require(type(expected["size"]) is int and 0 < expected["size"] <= MAX_FILE
+                and isinstance(expected["sha256"], str) and HEX.fullmatch(expected["sha256"]),
+                "invalid accepted evidence bytes")
+        if not name.endswith(TEXT_SUFFIXES):
+            continue
+        # Original acceptance already tied this exact row to its attested
+        # archive. Re-read its unpacked copy once, verifying the retained bytes
+        # before scanning. Path substitution cannot change the selected content.
+        with io.BytesIO() as retained:
+            row = copy_publication_input(directory / "unpacked" / name, retained, MAX_METADATA)
+            require(row["size"] == expected["size"] and row["sha256"] == expected["sha256"],
+                    "accepted text evidence changed: " + name)
+            homes, private = text_hits(name, retained.getvalue().decode("utf-8", errors="replace"), exempt)
+        observations.append({**expected, "user_home_paths": homes, "private_names": private})
+    require(observations, "accepted pinned text evidence required")
+    require(not any(row["user_home_paths"] or row["private_names"] for row in observations),
+            "Forge pinned text hygiene refused: " + ", ".join(row["path"] for row in observations
+                if row["user_home_paths"] or row["private_names"]))
+    return {"rule": FORGE_HYGIENE_RULE, "helper_sha256": FORGE_HYGIENE_SOURCE_SHA256,
+            "text_files": observations}
+
+
 def publish_accepted(directory, expected_sha256, output):
     # This command deliberately has no extraction or Forge-reader call. The
     # independently selected acceptance hash is the handoff into write custody.
@@ -1296,6 +1651,9 @@ def publish_accepted(directory, expected_sha256, output):
             and accepted["schema_version"] == 1 and accepted["kind"] == "connect-publication-acceptance"
             and accepted["scope"] == SCOPE and accepted["publication"] == "not_performed", "invalid acceptance")
     request = checked_publication_request(accepted["request"])
+    # Project the already selected immutable acceptance before write custody.
+    # Neither this projection nor attribution grants publication permission.
+    projected_selection = forge_public_selection(accepted["selection"])
     files = publication_files(request["target"])
     subjects = files[:2]
     require(isinstance(accepted["assets"], list) and len(accepted["assets"]) == len(files)
@@ -1319,6 +1677,9 @@ def publish_accepted(directory, expected_sha256, output):
             (assets / name).chmod(0o400)
         require(checked_publication_candidate(assets, request)[1] == accepted["assets"],
                 "accepted allowlist bytes differ")
+        fragment = {"files": forge_public_files(accepted), "selection": projected_selection,
+                    "paths": accepted["paths"]}
+        report["forge_delivery"] = checked_forge_delivery(directory, accepted, fragment)
         verifier_env = read_only_environment(output)
         for name in subjects:
             verify_publication_subject(assets / name, assets / files[2], request, env=verifier_env)
@@ -1364,14 +1725,19 @@ def publish_accepted(directory, expected_sha256, output):
                 and all(final.get(n) == row for n, row in verified_rows.items())
                 and checked_publication_candidate(assets, request)[1] == accepted["assets"],
                 "publication changed during readback")
-        archive = next(row for row in accepted["assets"] if row["name"] == subjects[0])
-        url = f"https://github.com/{PUBLICATION_REPO}/releases/download/{request['tag']}/{archive['name']}"
-        files = {row["path"]: {"url": url, "archive_size": archive["size"], "archive_sha256": archive["sha256"],
-            "member": "connect-export/" + row["path"], "size": row["size"], "sha256": row["sha256"]}
-            for row in accepted["evidence"]}
+        files = fragment["files"]
+        fragment_path = output / "forge-fragment.json"
+        write_new(fragment_path, fragment)
+        attribution = {"schema_version": 1,
+            "rule": "original-selection-minus-physical-locators-v1",
+            "acceptance_sha256": expected_sha256,
+            "original_selection": files["artifacts/RUNTIME-SELECTION.json"],
+            "fragment": {"path": fragment_path.name, "size": fragment_path.stat().st_size,
+                         "sha256": digest(fragment_path)}}
+        write_new(output / "forge-fragment-attribution.json", attribution)
         report.update(status="verified_public_inventory", acceptance_sha256=expected_sha256,
-                      release_id=request["release_id"], tag=request["tag"], files=files,
-                      selection=accepted["selection"], paths=accepted["paths"])
+                      release_id=request["release_id"], tag=request["tag"], **fragment,
+                      selection_projection=attribution)
         return report
     finally:
         write_new(output / "publication.json", report)
@@ -1381,9 +1747,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("preflight", "build", "stage-cli", "assemble-cli", "fetch-built",
                                             "accept-publication", "publish-accepted", "privacy-scan"))
-    for name in ("request", "candidate", "meta-source", "accepted", "output", "candidate-work", "shutdown-review",
+    for name in ("request", "candidate", "accepted", "output", "candidate-work", "shutdown-review",
                  "rules", "exemptions", "accepted-findings"):
         parser.add_argument("--" + name, type=Path)
+    reader = parser.add_mutually_exclusive_group()
+    reader.add_argument("--forge-reader-source", type=Path, help="exact selected Forge reader checkout")
+    reader.add_argument("--meta-source", type=Path, help="legacy alias for --forge-reader-source; reader selection is still checked")
     parser.add_argument("--acceptance-sha256")
     parser.add_argument("--shutdown-review-sha256")
     parser.add_argument("payload", nargs="*", type=Path, help="privacy-scan only: the exact release payload files")
@@ -1409,8 +1778,9 @@ def main():
     elif command == "fetch-built":
         fetch_built()
     elif command == "accept-publication":
-        require(all((args.request, args.candidate, args.meta_source, args.output)), "acceptance paths required")
-        accept_publication(args.request, args.candidate, args.meta_source, args.output)
+        reader_source = args.forge_reader_source or args.meta_source
+        require(all((args.request, args.candidate, reader_source, args.output)), "acceptance paths required")
+        accept_publication(args.request, args.candidate, reader_source, args.output)
     else:
         require(all((args.accepted, args.acceptance_sha256, args.output)), "selected acceptance and output required")
         publish_accepted(args.accepted, args.acceptance_sha256, args.output)

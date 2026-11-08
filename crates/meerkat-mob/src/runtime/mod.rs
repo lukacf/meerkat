@@ -367,6 +367,10 @@ mod panic_capture;
 pub mod path;
 mod pending_spawn_lineage;
 mod placed_carrier_cleanup;
+// A placed member's operator-instruction record and release on its member
+// host (protocol 7): a `BridgeReply` consumer, listed in
+// BRIDGE_CLASSIFIER_FILES.
+pub(crate) mod placed_member_instruction;
 mod provision_guard;
 mod provisioner;
 pub mod reconcile;

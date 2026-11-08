@@ -6928,6 +6928,54 @@ impl MobMcpState {
         Ok((bridge_session_id, result))
     }
 
+    /// Write one operator instruction for the members `write.target` selects
+    /// (`mob/set_instruction`). The receipt returns once the record is in
+    /// the mob's journal; delivery to the members is asynchronous. A host
+    /// verb: the mob's actor gates it on `AdminHost`, and no agent tool
+    /// reaches it.
+    pub async fn mob_set_instruction(
+        &self,
+        mob_id: &MobId,
+        write: meerkat_mob::OperatorInstructionWrite,
+    ) -> Result<meerkat_mob::OperatorInstructionReceipt, meerkat_mob::OperatorInstructionError>
+    {
+        self.handle_for(mob_id)
+            .await?
+            .set_operator_instruction(write)
+            .await
+    }
+
+    /// Revoke one operator instruction of the mob at a higher revision
+    /// (`mob/revoke_instruction`); the record keeps its target. A host verb
+    /// (`AdminHost`).
+    pub async fn mob_revoke_instruction(
+        &self,
+        mob_id: &MobId,
+        slot: meerkat_core::InstructionSlot,
+        revision: meerkat_core::InstructionRevision,
+    ) -> Result<meerkat_mob::OperatorInstructionReceipt, meerkat_mob::OperatorInstructionError>
+    {
+        self.handle_for(mob_id)
+            .await?
+            .revoke_operator_instruction(slot, revision)
+            .await
+    }
+
+    /// The mob's operator-instruction status (`mob/instruction_status`):
+    /// its records and one page of members, read from committed state
+    /// without waking a member. A read verb (`ReadHistory`).
+    pub async fn mob_instruction_status(
+        &self,
+        mob_id: &MobId,
+        query: meerkat_mob::OperatorInstructionStatusQuery,
+    ) -> Result<meerkat_mob::OperatorInstructionStatusPage, meerkat_mob::OperatorInstructionError>
+    {
+        self.handle_for(mob_id)
+            .await?
+            .operator_instruction_status(query)
+            .await
+    }
+
     pub async fn mob_resolve_bridge_session_id(
         &self,
         mob_id: &MobId,

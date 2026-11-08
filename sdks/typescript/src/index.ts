@@ -395,6 +395,33 @@ export {
   authErrorReason,
 } from "./auth-errors.js";
 export type { WireAuthErrorDetail, WireAuthErrorReason } from "./generated/types.js";
+export { INSTRUCTION_SET_ERROR_CODES, instructionSetCode } from "./instructions.js";
+export type {
+  InstructionAdvisoryUnknown,
+  InstructionBlockReason,
+  InstructionEffectiveRead,
+  InstructionEffectiveSlot,
+  InstructionLowering,
+  InstructionPendingReason,
+  InstructionRecord,
+  InstructionResidency,
+  InstructionSlotState,
+  InstructionSlotView,
+  InstructionTarget,
+  InstructionTargetOwner,
+  InstructionWriteOptions,
+  MemberInstructionDelivery,
+  MemberInstructionDeliveryState,
+  MemberInstructionSlot,
+  MemberInstructionStatus,
+  MobInstructionStatus,
+  MobInstructionStatusOptions,
+  MobInstructionWriteResult,
+  SessionInstructionSlot,
+  SessionInstructionStatus,
+  SessionInstructionWriteResult,
+} from "./instructions.js";
+export type { InstructionSetErrorCode } from "./generated/types.js";
 export type {
   AttentionBindingRequest,
   AttentionBindingResult,

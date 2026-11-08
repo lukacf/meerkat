@@ -13793,6 +13793,54 @@ impl SessionRuntime {
             .map_err(instruction_activation_host_error_to_rpc)
     }
 
+    /// Record one session-owned operator-instruction write
+    /// (`session/set_instruction`, `session/revoke_instruction`) through the
+    /// session service's instruction extension: durable in the session
+    /// document when this answers, applied at the session's next fresh run
+    /// start. A staged session is not materialized yet and takes none.
+    pub async fn set_session_instruction(
+        &self,
+        session_id: &SessionId,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<meerkat_core::SessionInstructionReceipt, RpcError> {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+        self.refuse_staged_operator_instructions(session_id).await?;
+        Arc::clone(&self.service)
+            .set_session_instruction(session_id, write)
+            .await
+            .map_err(session_instruction_error_to_rpc)
+    }
+
+    /// Read a session's committed operator-instruction state
+    /// (`session/instruction_status`) without materializing it.
+    pub async fn read_session_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::service::SessionInstructionRead, RpcError> {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+        self.refuse_staged_operator_instructions(session_id).await?;
+        self.service
+            .read_session_instructions(session_id)
+            .await
+            .map_err(session_instruction_error_to_rpc)
+    }
+
+    async fn refuse_staged_operator_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; operator instructions are available only for materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
     /// Restore a retained transcript revision through typed service authority.
     pub async fn restore_session_transcript_revision(
         &self,
@@ -16019,6 +16067,28 @@ fn instruction_activation_host_error_to_rpc(
             code: error::INTERNAL_ERROR,
             message: format!("instruction activation owner failed: {message}"),
             data: None,
+        },
+    }
+}
+
+/// The JSON-RPC error of an operator-instruction failure: a typed refusal
+/// carries its closed code in `data.instruction_set_code`
+/// ([`crate::handlers::instruction_set_rpc_error`]); a session that cannot be
+/// found, read or written maps as every session error does.
+pub(crate) fn session_instruction_error_to_rpc(
+    failure: meerkat_core::service::SessionInstructionError,
+) -> RpcError {
+    match failure {
+        meerkat_core::service::SessionInstructionError::Session(session) => {
+            session_error_to_rpc(session)
+        }
+        refused => match refused.code() {
+            Some(code) => crate::handlers::instruction_set_rpc_error(code, refused.to_string()),
+            None => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: refused.to_string(),
+                data: None,
+            },
         },
     }
 }

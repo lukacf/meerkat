@@ -23,6 +23,15 @@ Quick start::
 # Core client and session
 from .client import MeerkatClient
 from .consent import CONSENT_NOTICE_NOTIFICATION, parse_consent_notice
+from .instructions import (
+    InstructionAdvisoryUnknown,
+    InstructionTarget,
+    MemberInstructionStatus,
+    MobInstructionStatus,
+    MobInstructionWriteResult,
+    SessionInstructionStatus,
+    SessionInstructionWriteResult,
+)
 from .live import LiveChannel, LiveNotification, parse_live_notification
 from .mob import (
     MemberDeliveryReceipt,
@@ -432,6 +441,9 @@ from .errors import (
     auth_error_reason,
     COMMS_SEND_ERROR_CODES,
     comms_send_error,
+    INSTRUCTION_SET_ERROR_CODES,
+    InstructionSetErrorCode,
+    instruction_set_code,
     mob_destroy_incomplete_report,
     MOB_QUARANTINED_KIND,
     MOB_QUARANTINE_CLASSES,
@@ -545,6 +557,14 @@ __all__ = [
     "MobMemberCustodyDeferral",
     "MobMemberCustodyUnknown",
     "MobMemberPreviewUnavailableUnknown",
+    # Operator instructions
+    "InstructionAdvisoryUnknown",
+    "InstructionTarget",
+    "MemberInstructionStatus",
+    "MobInstructionStatus",
+    "MobInstructionWriteResult",
+    "SessionInstructionStatus",
+    "SessionInstructionWriteResult",
     "MobKickoffMemberSnapshot",
     "MobReadyMemberSnapshot",
     "MobRespawnResult",
@@ -922,6 +942,9 @@ __all__ = [
     "auth_error_reason",
     "COMMS_SEND_ERROR_CODES",
     "comms_send_error",
+    "INSTRUCTION_SET_ERROR_CODES",
+    "InstructionSetErrorCode",
+    "instruction_set_code",
     "mob_destroy_incomplete_report",
     "MOB_QUARANTINED_KIND",
     "MOB_QUARANTINE_CLASSES",

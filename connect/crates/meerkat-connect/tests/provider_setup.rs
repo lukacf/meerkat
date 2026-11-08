@@ -952,6 +952,131 @@ async fn configured_model_mismatch_is_not_a_recoverable_choice() {
     pty.restored();
 }
 
+/// A realm whose GitHub Copilot account is configured once, by a `[copilot]`
+/// section, or by the explicit tables a token login writes. Either way the
+/// realm has the account's three routes, on the fixture's ready variable.
+fn copilot_account(root: &Path, section: bool) -> Vec<u8> {
+    let source = "{ kind = \"env\", env = \"CONNECT_PROVIDER_READY_KEY\" }";
+    let text = if section {
+        format!("[realm.work.copilot]\nsource = {source}\n")
+    } else {
+        ["openai", "anthropic", "gemini"]
+            .map(|provider| {
+                format!(
+                    r#"[realm.work.backend.copilot_{provider}]
+provider = "{provider}"
+backend_kind = "copilot"
+[realm.work.auth.copilot_{provider}]
+provider = "{provider}"
+auth_method = "github_copilot_token"
+source = {source}
+[realm.work.binding.copilot_{provider}]
+backend_profile = "copilot_{provider}"
+auth_profile = "copilot_{provider}"
+credential_account = "github_copilot"
+"#
+                )
+            })
+            .concat()
+    };
+    meerkat_core::Config::from_persisted_toml(&text)
+        .unwrap()
+        .0
+        .validate(meerkat_models::canonical())
+        .unwrap();
+    std::fs::create_dir_all(root.join("state/work")).unwrap();
+    std::fs::write(root.join("state/work/config.toml"), &text).unwrap();
+    text.into_bytes()
+}
+
+#[tokio::test]
+async fn listed_copilot_routes_are_the_routes_their_sessions_run_on() {
+    if !isolated("listed_copilot_routes_are_the_routes_their_sessions_run_on").await {
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+    // (configured by the section, requested model, the routes listed)
+    for (section, model, listed) in [
+        (false, Some("claude-opus-5-5"), &["copilot_anthropic"][..]),
+        (true, Some("claude-opus-5-5"), &["copilot_anthropic"][..]),
+        (
+            true,
+            None,
+            &["copilot_anthropic", "copilot_gemini", "copilot_openai"][..],
+        ),
+    ] {
+        let config = copilot_account(&root, section);
+        let selected = storage(&root, "work");
+        let effective = meerkat_connect::realm::read_config(&selected)
+            .await
+            .unwrap();
+        let route = |binding: &str| meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("work").unwrap(),
+            binding: meerkat_core::BindingId::parse(binding).unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let mut startup = SessionStartup::open(selected).await.unwrap();
+        let mut pty = Pty::new();
+        let mut output = Output::default();
+        let observed = output.clone();
+        let human = async {
+            waiting_for_input(&pty.observer).await;
+            let text = observed.text();
+            let offered: Vec<_> = text
+                .lines()
+                .filter_map(|line| line.split_once(". Owner realm: work; binding: "))
+                .map(|(_, binding)| binding)
+                .collect();
+            // Core's account affinity runs the account's route of the model's
+            // family. A listed route's session runs on that route itself.
+            for &binding in &offered {
+                let request = meerkat::CreateSessionModelResolutionRequest {
+                    model: model.map(str::to_owned),
+                    auth_binding: Some(route(binding)),
+                    ..Default::default()
+                };
+                let native = meerkat::resolve_create_session_model(&effective, request).unwrap();
+                assert_eq!(
+                    native.auth_binding,
+                    Some(route(binding)),
+                    "listed {binding} runs on another route"
+                );
+            }
+            assert_eq!(offered, listed);
+            assert!(!text.contains("No native model target is configured"));
+            assert_eq!(write(&pty.master, b"1\n").unwrap(), 2);
+        };
+        let (result, ()) = timeout(BOUND, async {
+            tokio::join!(
+                present_provider_setup(
+                    &mut startup,
+                    model.map(str::to_owned),
+                    true,
+                    &mut pty.input,
+                    &mut output,
+                    std::future::pending(),
+                ),
+                human
+            )
+        })
+        .await
+        .unwrap();
+        // The chosen route is the one shown, observed and kept.
+        let request = result.unwrap().expect("the ready listed route is selected");
+        assert_eq!(request.auth_binding, Some(route(listed[0])));
+        assert!(output.text().contains(&format!(
+            "owner realm: work; binding: {}; status: ready",
+            listed[0]
+        )));
+        let native = meerkat::resolve_create_session_model(&effective, request).unwrap();
+        assert_eq!(native.auth_binding, Some(route(listed[0])));
+        assert!(!output.text().contains(READY_KEY));
+        unchanged(&root, "work", &config);
+        pty.restored();
+    }
+}
+
 fn configured_browser(root: &Path, profile: BrowserProfile, origin: &str) -> Vec<u8> {
     let provider = profile.provider().as_str();
     let model = meerkat_models::default_model(profile.provider()).unwrap();

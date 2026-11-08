@@ -12,6 +12,8 @@ type Fixture = FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilde
 
 #[path = "custody_recovery_helper_tests.rs"]
 mod custody_recovery_helper_tests;
+#[path = "helper_wait_native_tests.rs"]
+mod helper_wait_native_tests;
 
 pub(super) fn enrolled_login() -> (
     tokio::sync::watch::Sender<bool>,
@@ -472,6 +474,343 @@ async fn entered_helper_keeps_same_login_until_native_settlement_is_observed() {
     Box::pin(exercise(DeliveryMode::HoldHelperAcceptedReply)).await;
 }
 
+/// Fence after the actual SubmitHelperBinder is retained, before its native
+/// bind. The entered A still receives feedback and completes; no D > 0 drain
+/// or host shutdown hook is exercised by this component control.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_fence_refuses_retained_helper_before_first_capture_and_completes_a() {
+    let script = acquisition_denial::Script::paused_for_helper_entry();
+    let fault = Arc::new(DeliveryFault::new(DeliveryMode::HoldHelperBeforeBind));
+    let (fixture, history) = Fixture::for_helper_entry(script.clone(), fault.clone()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT, async {
+        acquisition_approved::select_reviewed_setup(&fixture).await;
+        let first = fixture.submit().await;
+        let Ok(PrivateOriginalSubmission::Admitted {
+            session_id,
+            input_id,
+            turn_ticket: Some(_),
+            deduplicated: false,
+            source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+        }) = &first
+        else {
+            panic!(
+                "actual A admission required: {}",
+                submission_context(&first)
+            );
+        };
+        assert_eq!(session_id, &fixture.session.to_string());
+        script.first_response_waiting().await;
+        let binding = fixture.binding().await.unwrap().unwrap();
+        let helper =
+            AgentIdentity::parse(crate::installed_host::controller_first_input_fixture::HELPER)
+                .unwrap();
+        let helper_session = fault.helper_session.get().unwrap().clone();
+        assert_ne!(helper_session, fixture.session);
+        let helper_before = fixture.runtime.completion_cursor(&helper).await;
+        script.release_first_response();
+        fault.entered.notified().await;
+        assert_eq!(fault.helper_controller_lookups.load(Ordering::SeqCst), 3);
+        let held = {
+            let helpers = fixture.source.helper_sources.lock().unwrap();
+            assert_eq!(
+                helpers.len(),
+                1,
+                "the real helper source was issued and retained"
+            );
+            helpers[0].clone()
+        };
+        let helper_binding = held.original().association();
+        assert_eq!(
+            helper_binding.candidate().target.context.as_str(),
+            helper_session.to_string()
+        );
+        assert_eq!(
+            fixture
+                .source
+                .helper_policy_source(helper_binding)
+                .unwrap()
+                .unwrap()
+                .contributors,
+            vec![binding.clone()]
+        );
+        // Only submit_setup_helper binds this deadline, after its outer fence
+        // and before retaining SubmitHelperBinder. A preparation hold cannot pass.
+        let deadline_ms = fixture
+            .source
+            .helper_operation_deadline(helper_binding)
+            .unwrap()
+            .unwrap();
+        assert!(
+            deadline_ms
+                > SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+        );
+        let before = fixture
+            .store
+            .get(&held.source_record().key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&before, held.source_record().as_ref());
+        assert!(before.data.body.get("custody_attempt").is_none());
+        assert!(before.data.body.get("bound_input").is_none());
+        assert!(held.handoffs_for_test().is_empty());
+        assert!(
+            acquisition_approved::native_history(history.as_ref(), &helper_session)
+                .await
+                .is_empty()
+        );
+
+        fixture.source.stop_admitting_work().unwrap();
+        fault.release.add_permits(1);
+        fixture.finish(&first).await.unwrap();
+        let reply = tool_reply(&script);
+        assert_eq!(
+            reply["created"], true,
+            "the completed source publication remains retained"
+        );
+        assert_eq!(
+            reply["worker"]["state"], "native_outcome_unavailable",
+            "{reply}"
+        );
+        assert_eq!(fault.helper_controller_lookups.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            fault.helper_returns.load(Ordering::SeqCst),
+            0,
+            "no native helper delivery"
+        );
+        assert_eq!(fault.accepted.load(Ordering::SeqCst), 0);
+        assert!(fault.helper_input.lock().unwrap().is_none());
+        assert!(
+            acquisition_approved::native_history(history.as_ref(), &helper_session)
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.runtime.completion_cursor(&helper).await,
+            helper_before
+        );
+        // Removing the binder fence must not pass via the later enrollment
+        // refusal: that path would already persist the helper's first input.
+        assert_eq!(
+            fixture.store.get(&before.key).await.unwrap().unwrap(),
+            before
+        );
+        assert!(held.handoffs_for_test().is_empty());
+        assert_eq!(fixture.source.helper_sources.lock().unwrap().len(), 1);
+        assert_eq!(
+            fixture
+                .source
+                .helper_operation_deadline(helper_binding)
+                .unwrap(),
+            Some(deadline_ms)
+        );
+        let rows = acquisition_approved::native_history(history.as_ref(), &fixture.session).await;
+        assert_eq!(rows.len(), 1, "no replacement original input");
+        assert_eq!(rows[0].state.input_id.to_string(), *input_id);
+        let consumed = acquisition_approved::consumed_native_input(
+            history.as_ref(),
+            &fixture.session,
+            &binding,
+            Some(input_id),
+            tokio::time::Instant::now() + WAIT,
+        )
+        .await;
+        assert_eq!(consumed.state.input_id, rows[0].state.input_id);
+        assert_eq!(fixture.binding().await.unwrap(), Some(binding));
+        assert_eq!(
+            fixture.model_requests(),
+            2,
+            "only A's call and final answer"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    script.release_first_response();
+    fault.release.add_permits(1);
+    let cleanup = fixture.shutdown().await;
+    match checked {
+        Ok(Ok(())) => assert!(cleanup.is_ok(), "actual owner cleanup failed: {cleanup:?}"),
+        Ok(Err(_)) => panic!("retained-helper fence control timed out; cleanup: {cleanup:?}"),
+        Err(payload) => {
+            if cleanup.is_err() {
+                eprintln!("retained-helper fence cleanup failed: {cleanup:?}");
+            }
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+/// The source fence preserves A's entered turn but refuses fresh work through
+/// a retained original binder and the in-turn helper submission path. This
+/// component does not run Meta's nonzero shutdown drain or its gateway hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_fence_refuses_retained_original_and_returns_helper_feedback_to_same_turn() {
+    let script = acquisition_denial::Script::paused_for_helper_entry();
+    let (fixture, history) = Fixture::for_approved_acquisition(script.clone()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT, async {
+        acquisition_approved::select_reviewed_setup(&fixture).await;
+        let first = fixture.submit().await;
+        let Ok(PrivateOriginalSubmission::Admitted {
+            session_id,
+            input_id,
+            turn_ticket: Some(_),
+            deduplicated: false,
+            source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+        }) = &first
+        else {
+            panic!(
+                "actual A admission required: {}",
+                submission_context(&first)
+            );
+        };
+        assert_eq!(session_id, &fixture.session.to_string());
+        script.first_response_waiting().await;
+        let binding = fixture.binding().await.unwrap().unwrap();
+        let held = fixture
+            .source
+            .retained
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|held| held.reference == fixture.submission.original)
+            .cloned()
+            .expect("the actual admitted A remains retained");
+        assert_eq!(held.original.association(), &binding);
+        let before = fixture.cold_source_record().await;
+        // Retain the production binder with this exact existing source before
+        // fencing. Calling native directly below avoids the public submission
+        // wrapper's earlier check; no new authority or native receipt is made.
+        let route = fixture
+            .source
+            .route(&fixture.submission.original.route)
+            .unwrap();
+        let binder = Arc::new(OriginalBinder {
+            review_custody: crate::review_custody::ReviewCustody::default(),
+            source: fixture.source.clone(),
+            grant: None,
+            batch: None,
+            original: fixture.submission.original.clone(),
+            held: OnceLock::from(held),
+            pending: OnceLock::new(),
+            authentication: evidence(
+                &route.authentication_domain,
+                &fixture.submission.transport_authentication,
+            )
+            .unwrap(),
+            event_key: fixture
+                .source
+                .original_event_key(&fixture.submission.original)
+                .await
+                .unwrap(),
+            console: None,
+            approved_login: None,
+        });
+        fixture.source.stop_admitting_work().unwrap();
+        let refused = fixture
+            .runtime
+            .send_governed_with_turn_ticket(
+                &fixture.identity,
+                Some(MEMBER),
+                Input::Prompt(PromptInput::new(fixture.submission.content.clone(), None)),
+                binder,
+            )
+            .await;
+        assert!(
+            matches!(refused,
+            Err(meerkat_mobkit::identity_first::IdentityRuntimeError::GovernedInput(
+                meerkat_mobkit::identity_first::GovernedInputError::Bind(ref message)))
+                if message == "Toolkit source admission is stopped"),
+            "the actual retained binder must refuse before native admission"
+        );
+        assert_eq!(
+            fixture.cold_source_record().await,
+            before,
+            "refused fresh input cannot mutate the admitted source"
+        );
+        assert_eq!(fixture.inputs().await, Ok(1));
+        assert!(fixture.source.helper_sources.lock().unwrap().is_empty());
+
+        // Release only the actual model output for A's already-entered turn.
+        // Its governed setup call must return a typed refusal, not disappear.
+        // submit_setup_helper's outer fence refuses before its native binder.
+        script.release_first_response();
+        fixture.finish(&first).await.unwrap();
+        let (feedback, planned, entered) = script.observations();
+        assert_eq!(feedback.len(), 1, "one actual in-turn result: {feedback:?}");
+        assert!(feedback[0].is_error, "{feedback:?}");
+        assert!(planned > 0, "actual native setup-tool resolution");
+        assert_eq!(entered, 1, "one actual governed setup call");
+        let payload: serde_json::Value = serde_json::from_str(&feedback[0].text_content()).unwrap();
+        assert_eq!(
+            payload,
+            meerkat_core::ToolError::unavailable(
+                crate::FIND_AND_INSTALL,
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            )
+            .to_error_payload()
+        );
+        let rows = acquisition_approved::native_history(history.as_ref(), &fixture.session).await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the refused binder must not admit another input"
+        );
+        assert_eq!(rows[0].state.input_id.to_string(), *input_id);
+        let consumed = acquisition_approved::consumed_native_input(
+            history.as_ref(),
+            &fixture.session,
+            &binding,
+            Some(input_id),
+            tokio::time::Instant::now() + WAIT,
+        )
+        .await;
+        assert_eq!(consumed.state.input_id, rows[0].state.input_id);
+        let helper =
+            MemberIdentity::from(crate::installed_host::controller_first_input_fixture::HELPER);
+        let helper_session = fixture
+            .native
+            .mob_handle()
+            .get_member(&helper)
+            .await
+            .unwrap()
+            .unwrap()
+            .bridge_session_id()
+            .cloned()
+            .unwrap();
+        assert!(
+            acquisition_approved::native_history(history.as_ref(), &helper_session)
+                .await
+                .is_empty(),
+            "the refused helper submission must not admit an input"
+        );
+        assert_eq!(fixture.binding().await.unwrap(), Some(binding));
+        assert_eq!(
+            fixture.model_requests(),
+            2,
+            "only A's call and final answer"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    // Always release the existing physical gate and join the same native owner.
+    // Preserve the primary assertion/timeout along with any cleanup failure.
+    script.release_first_response();
+    let cleanup = fixture.shutdown().await;
+    match checked {
+        Ok(Ok(())) => assert!(cleanup.is_ok(), "actual owner cleanup failed: {cleanup:?}"),
+        Ok(Err(_)) => panic!("admission-fence control timed out; cleanup: {cleanup:?}"),
+        Err(payload) => {
+            if cleanup.is_err() {
+                eprintln!("admission-fence cleanup failed: {cleanup:?}");
+            }
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
 // Each control uses the existing reviewed Original and its one actual helper.
 // The fixture can invalidate a real admission observation or lose an accepted
 // reply; it cannot invent a native refusal, source, input or admission receipt.
@@ -589,7 +928,17 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
             }
             // Expiry refuses before the second dispatch. Retired-login custody
             // instead refuses inside the second real bridge at its final entry.
-            let attempts = if deadline_expired { 1 } else { 2 };
+            // Changes at every native call are refused once per call: the
+            // submission rebinds after each settled wait of its one churn,
+            // within its free rebuilds, and then stops at retry_safe.
+            let always = matches!(mode, DeliveryMode::HelperPolicyChangesAlways);
+            let attempts = if deadline_expired {
+                1
+            } else if always {
+                1 + usize::from(meerkat_core::authorization::OWNER_CHANGE_FREE_REBUILDS)
+            } else {
+                2
+            };
             let inputs = fault.helper_inputs.lock().unwrap().clone();
             assert_eq!(inputs.len(), attempts);
             assert_eq!(fault.helper_returns.load(Ordering::SeqCst), attempts);
@@ -597,9 +946,8 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
                 assert_eq!(input, &input_before[0],
                     "one actual Input ID, content, authority, timestamp and event key across re-entry");
             }
-            let always = matches!(mode, DeliveryMode::HelperPolicyChangesAlways);
-            assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), if always { 2 } else { 1 });
-            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), if always { 4 } else { 2 });
+            assert_eq!(fault.helper_policy_changed.load(Ordering::SeqCst), if always { attempts } else { 1 });
+            assert_eq!(fault.publication_changes.load(Ordering::SeqCst), if always { 2 * attempts } else { 2 });
             let accepted = matches!(mode,
                 DeliveryMode::HelperPolicyChangesOnce | DeliveryMode::HelperPolicyChangesThenUnresolved);
             assert_eq!(fault.accepted.load(Ordering::SeqCst), usize::from(accepted));
@@ -703,8 +1051,9 @@ const CATALOG_LOAD: &str = "reset-helper-load";
 
 /// Fixed physical responses only. The real dispatcher, application policy,
 /// source binding, grant owner and native input execute both catalog calls.
-pub(super) struct CatalogProbe {
+pub(in crate::private_originals) struct CatalogProbe {
     pub(super) successor: bool,
+    target_input: Option<&'static str>,
     pub(super) selected_helper:
         std::sync::OnceLock<crate::installed_host::acquisition::InstalledSetupSelection>,
     calls: AtomicUsize,
@@ -714,12 +1063,30 @@ impl CatalogProbe {
     fn new(successor: bool) -> Arc<Self> {
         Arc::new(Self {
             successor,
+            target_input: None,
             selected_helper: Default::default(),
             calls: AtomicUsize::new(0),
             feedback: Default::default(),
         })
     }
-    pub(super) fn provider(self: &Arc<Self>, inner: Arc<dyn LlmClient>) -> Arc<dyn LlmClient> {
+    pub(in crate::private_originals) fn for_workflow() -> Arc<Self> {
+        Arc::new(Self {
+            successor: false,
+            target_input: Some("dedicated planning request"),
+            selected_helper: Default::default(),
+            calls: AtomicUsize::new(0),
+            feedback: Default::default(),
+        })
+    }
+    pub(in crate::private_originals) fn observed(
+        &self,
+    ) -> BTreeMap<String, meerkat_core::ToolResult> {
+        self.feedback.lock().unwrap().clone()
+    }
+    pub(in crate::private_originals) fn provider(
+        self: &Arc<Self>,
+        inner: Arc<dyn LlmClient>,
+    ) -> Arc<dyn LlmClient> {
         Arc::new(CatalogResponse {
             inner,
             probe: self.clone(),
@@ -764,7 +1131,12 @@ impl LlmClient for CatalogResponse {
                 _ => None,
             });
         let stream = self.inner.stream_prepared(request);
-        if first_user.as_deref() == Some(PROMPT) {
+        if self
+            .probe
+            .target_input
+            .is_some_and(|selected| first_user.as_deref() != Some(selected))
+            || (self.probe.target_input.is_none() && first_user.as_deref() == Some(PROMPT))
+        {
             return stream;
         }
         assert!(

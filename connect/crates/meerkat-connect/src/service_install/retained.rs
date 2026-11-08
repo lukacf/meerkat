@@ -43,6 +43,7 @@ impl VerifiedRetained {
             no_credential_references: self.references.as_ref().is_some_and(Vec::is_empty),
             credential_references: self.references.clone(),
             owner: owner.clone(),
+            acquisition: None,
         }
     }
     pub(crate) fn selected_inputs(&self) -> Option<&SelectedServiceInputs> {
@@ -126,7 +127,12 @@ fn family_profile(value: &Value) -> Result<(&str, &str), ToolError> {
     if !matches!(family, "agno" | "services" | "activepieces")
         && !matches!(
             (family, profile),
-            ("selected-python", "python") | ("selected-node", "node")
+            ("selected-python", "python")
+                | ("selected-node", "node")
+                | (
+                    "official-github",
+                    "selected-reads" | "enterprise-selected-reads"
+                )
         )
     {
         return Err(unconfirmed());
@@ -353,7 +359,12 @@ impl CheckedInstalls {
         );
         let envelope = &response["metadata"];
         let (metadata, operations, references) = match envelope["kind"].as_str() {
-            Some("library") if matches!(family.as_str(), "agno" | "services" | "activepieces") => {
+            Some("library")
+                if matches!(
+                    family.as_str(),
+                    "agno" | "services" | "activepieces" | "official-github"
+                ) =>
+            {
                 if !exact_keys(
                     envelope,
                     &["kind", "selection", "help", "configuration_check"],
@@ -370,6 +381,9 @@ impl CheckedInstalls {
                     || help["profile"] != *profile
                 {
                     return Err(unconfirmed());
+                }
+                if family == "official-github" {
+                    checked_official_metadata(envelope)?;
                 }
                 let metadata = publisher_metadata(help)?.ok_or_else(unconfirmed)?;
                 let ids = selection["operations"]
@@ -499,6 +513,72 @@ impl CheckedInstalls {
         state.returning.bytes += bytes;
         Ok(result)
     }
+}
+
+// The original official profile fixes all three read tools. The enterprise
+// profile selects an ordered subset of its separate catalog. Package verification
+// binds the host and launch; retained metadata contains only the credential name.
+fn checked_official_metadata(envelope: &Value) -> Result<(), ToolError> {
+    if envelope["selection"]["profile"] == "enterprise-selected-reads" {
+        return checked_enterprise_metadata(envelope);
+    }
+    let expected = json!({"kind":"library",
+        "selection":{"family":"official-github","profile":"selected-reads",
+            "operations":["get_me","list_commits","get_file_contents"],
+            "values":{"token_env":"GITHUB_PERSONAL_ACCESS_TOKEN"}},
+        "help":{"family":"official-github","profile":"selected-reads",
+            "operations":[{"id":"get_me","tool":"get_me"},
+                {"id":"list_commits","tool":"list_commits"},
+                {"id":"get_file_contents","tool":"get_file_contents"}],
+            "fields":[{"name":"token_env","kind":"string","credential_reference":true}]},
+        "configuration_check":{"credential_environment_references":[{
+            "field_path":["config","token_env"],"environment_variable":"GITHUB_PERSONAL_ACCESS_TOKEN"}]}});
+    if envelope != &expected {
+        return Err(unconfirmed());
+    }
+    Ok(())
+}
+
+fn checked_enterprise_metadata(envelope: &Value) -> Result<(), ToolError> {
+    let current = super::read_only::TOOLS;
+    // Retained installations can still use the earlier immutable owner, whose
+    // exact eight-operation help remains valid. It cannot grant get_me.
+    let catalog = if envelope["help"]["operations"]
+        .as_array()
+        .is_some_and(|rows| rows.len() == 8)
+    {
+        &current[..8]
+    } else {
+        current.as_slice()
+    };
+    let operations = envelope["selection"]["operations"]
+        .as_array()
+        .filter(|rows| !rows.is_empty() && rows.len() <= catalog.len())
+        .ok_or_else(unconfirmed)?;
+    let mut previous = None;
+    for operation in operations {
+        let index = catalog
+            .iter()
+            .position(|name| operation.as_str() == Some(*name))
+            .ok_or_else(unconfirmed)?;
+        if previous.is_some_and(|before| index <= before) {
+            return Err(unconfirmed());
+        }
+        previous = Some(index);
+    }
+    let expected = json!({"kind":"library",
+        "selection":{"family":"official-github","profile":"enterprise-selected-reads",
+            "operations":operations,"values":{"token_env":"GITHUB_PERSONAL_ACCESS_TOKEN"}},
+        "help":{"family":"official-github","profile":"enterprise-selected-reads",
+            "operations":catalog.iter().map(|name|json!({"id":name,"tool":name})).collect::<Vec<_>>(),
+            "fields":[{"name":"token_env","kind":"string","credential_reference":true},
+                {"name":"github_host","kind":"string","credential_reference":false}]},
+        "configuration_check":{"credential_environment_references":[{
+            "field_path":["config","token_env"],"environment_variable":"GITHUB_PERSONAL_ACCESS_TOKEN"}]}});
+    if envelope != &expected {
+        return Err(unconfirmed());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

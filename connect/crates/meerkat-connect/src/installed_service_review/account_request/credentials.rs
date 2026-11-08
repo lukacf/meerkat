@@ -294,11 +294,19 @@ pub(super) async fn dispatch(
         current = refreshed;
     }
     let task = prepared
-        .map_err(|error| match error {
-            toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => unavailable(),
-            toolkit_mobkit::private_originals::PrivateOriginalError::Denied
-            | toolkit_mobkit::private_originals::PrivateOriginalError::Conflict => {
-                ToolError::access_denied(call.name)
+        .map_err(|error| {
+            use toolkit_mobkit::{
+                installed_host::acquisition::ServiceTaskError,
+                private_originals::PrivateOriginalError,
+            };
+            match error {
+                ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => unavailable(),
+                ServiceTaskError::Refused(
+                    PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
+                ) => ToolError::access_denied(call.name),
+                ServiceTaskError::ReprepareRequired(refusal) => {
+                    ServiceTaskError::reprepare_required(refusal)
+                }
             }
         })?
         .ok_or_else(|| ToolError::access_denied(call.name))?;
@@ -321,7 +329,7 @@ pub(super) async fn dispatch(
         selection.tool_policy.as_ref(),
     )?;
     let entry = current.reviewed_entry_ticket(call, plan)?;
-    let (checks, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
+    let (checks, requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
     let (response, receive) = oneshot::channel();
     owner
         .credential_requests
@@ -338,24 +346,46 @@ pub(super) async fn dispatch(
             response,
         })
         .map_err(|_| unavailable())?;
-    tokio::pin!(receive);
-    let response = loop {
-        tokio::select! { biased;
-            request = requests.recv() => {
-                let Some(request) = request else { break receive.await; };
-                match current.check_tool_authorization(call, plan) {
-                    Ok(refreshed) => { if let Some(refreshed) = refreshed { current = refreshed; } let _ = request.send(true); }
-                    Err(error) => { let _ = request.send(false); return Err(error); }
-                }
-            }
-            response = receive.as_mut() => break response,
+    let reply = receive_reply(requests, receive, || {
+        if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
+            current = refreshed;
         }
-    };
-    current.check_tool_authorization(call, plan)?;
-    let reply = response.map_err(|_| unavailable())?;
+        Ok(())
+    })
+    .await?;
     serde_json::to_string(&reply)
         .map(|body| ToolResult::new(call.id.into(), body, false).into())
         .map_err(|_| unavailable())
+}
+
+// Currentness gates each next effect inside the retained presenter. A failed
+// check cannot replace effects it has already joined with a retry-shaped error.
+// The reply contains outcomes only, never credentials or a new effect permit.
+#[cfg(feature = "console")]
+async fn receive_reply(
+    mut requests: mpsc::Receiver<oneshot::Sender<bool>>,
+    receive: oneshot::Receiver<CredentialReply>,
+    mut check: impl FnMut() -> Result<(), ToolError> + Send,
+) -> Result<CredentialReply, ToolError> {
+    tokio::pin!(receive);
+    loop {
+        tokio::select! { biased;
+            request = requests.recv() => {
+                let Some(request) = request else { return receive.await.map_err(|_| unavailable()); };
+                match check() {
+                    Ok(()) => { let _ = request.send(true); }
+                    Err(error) => {
+                        let _ = request.send(false);
+                        // Later checks must also refuse without parking the
+                        // owner while this dispatcher joins its actual result.
+                        drop(requests);
+                        return receive.await.map_err(|_| error);
+                    }
+                }
+            }
+            response = receive.as_mut() => return response.map_err(|_| unavailable()),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "console"))]

@@ -2186,6 +2186,61 @@ struct AutoWireParentMobToolsFactory {
     member_auth_binding_recorded: Option<meerkat_core::AuthBindingRef>,
     /// See [`AutoWireParentMobToolDispatcher::realm_profiles`].
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    /// Who each member of the runtime's mobs is private to, and the agent mob
+    /// tool state a member's session resolves in (held weakly: the state
+    /// holds this factory): each tool surface's caller (see
+    /// [`MobToolCaller`]).
+    private_owners: crate::private_owners::PrivateOwners,
+    state: std::sync::Weak<meerkat_mob_mcp::MobMcpState>,
+}
+
+/// The member whose agent a tool surface serves, by its session, and what
+/// tells who that member, and a member its tools name, is private to.
+#[derive(Clone)]
+struct MobToolCaller {
+    session_id: meerkat_core::types::SessionId,
+    private_owners: crate::private_owners::PrivateOwners,
+    state: std::sync::Weak<meerkat_mob_mcp::MobMcpState>,
+}
+
+/// The policy denial code of a council a member private to a person asks
+/// for.
+const PRIVATE_MEMBER_COUNCIL: &str = "private_member_council";
+
+impl MobToolCaller {
+    /// The person the calling member is private to, when it is private to
+    /// one. A caller whose member cannot be read is refused: whom it acts
+    /// for is unknown.
+    async fn owner(&self, tool: &str) -> Result<Option<String>, meerkat_core::ToolError> {
+        let Some(state) = self.state.upgrade() else {
+            return Err(meerkat_core::ToolError::execution_failed(format!(
+                "tool '{tool}': the mob tool state of its caller is gone"
+            )));
+        };
+        match state.member_for_bridge_session(&self.session_id).await {
+            Ok(Some((mob_id, member))) => Ok(self
+                .private_owners
+                .owner_of(mob_id.as_str(), member.as_str())),
+            Ok(None) => Ok(None),
+            Err(error) => Err(meerkat_core::ToolError::execution_failed(format!(
+                "tool '{tool}' could not read its caller: {error}"
+            ))),
+        }
+    }
+
+    /// Whether member `member` of mob `mob_id` is hidden from the caller:
+    /// private to a person the caller is not private to.
+    async fn hides(
+        &self,
+        tool: &str,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<bool, meerkat_core::ToolError> {
+        let Some(owner) = self.private_owners.owner_of(mob_id, member) else {
+            return Ok(false);
+        };
+        Ok(self.owner(tool).await?.as_deref() != Some(owner.as_str()))
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -2197,6 +2252,11 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
     ) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>>
     {
         let spawner_comms_name = args.comms_name.clone();
+        let caller = MobToolCaller {
+            session_id: args.session_id.clone(),
+            private_owners: self.private_owners.clone(),
+            state: self.state.clone(),
+        };
         let inner = self.inner.build_mob_tools(args).await?;
         Ok(Arc::new(AutoWireParentMobToolDispatcher {
             inner,
@@ -2210,6 +2270,7 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
             member_auth_binding: self.member_auth_binding.clone(),
             member_auth_binding_recorded: self.member_auth_binding_recorded.clone(),
             realm_profiles: self.realm_profiles.clone(),
+            caller: Some(caller),
         }))
     }
 }
@@ -2241,6 +2302,10 @@ struct AutoWireParentMobToolDispatcher {
     /// child-definition realm profile off the binding is refused typed too
     /// ([`crate::native_realm::agent_tool_realm_profile_refusal`]).
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    /// The member whose agent this surface serves: a member private to a
+    /// person convenes no council, and a member hidden from it is checked
+    /// as a name no member holds. `None` for a surface built for no member.
+    caller: Option<MobToolCaller>,
 }
 
 /// Meta's agent mob tool wrapper around `inner` (standing in for meerkat's
@@ -2262,6 +2327,7 @@ pub(crate) fn agent_mob_tool_wrapper_for_test(
         member_auth_binding: None,
         member_auth_binding_recorded: None,
         realm_profiles: None,
+        caller: None,
     })
 }
 
@@ -2275,8 +2341,25 @@ pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
     runtime: &MobRuntime,
     session: meerkat_core::types::SessionId,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
-    let _ = (runtime, session);
-    agent_mob_tool_wrapper_for_test(inner, overrides)
+    Arc::new(AutoWireParentMobToolDispatcher {
+        inner,
+        implicit_delegate_retirement_overrides: overrides,
+        console_spawn_sink: new_console_spawn_sink_slot(),
+        identity_runtime: Arc::new(std::sync::RwLock::new(None)),
+        protected_mob_id: String::new(),
+        spawner_comms_name: None,
+        member_auth_binding: None,
+        member_auth_binding_recorded: None,
+        realm_profiles: None,
+        caller: Some(MobToolCaller {
+            session_id: session,
+            private_owners: runtime.private_owners().clone(),
+            state: runtime
+                .agent_mob_mcp_state()
+                .as_ref()
+                .map_or_else(std::sync::Weak::new, Arc::downgrade),
+        }),
+    })
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -2331,6 +2414,41 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        // A member private to a person convenes no council: its participants
+        // would be forks of shared members carrying that person's question.
+        if call.name == "council"
+            && let Some(caller) = self.caller.as_ref()
+            && caller.owner(call.name).await?.is_some()
+        {
+            return Err(meerkat_core::ToolError::policy_denied(
+                meerkat_core::ToolConsequenceDenial::new(
+                    PRIVATE_MEMBER_COUNCIL,
+                    "a member private to a person cannot convene a council: its participants \
+                     would carry that person's conversation into forks of shared members",
+                ),
+            ));
+        }
+        // A member private to a person the caller is not private to is
+        // checked as a name no member holds: nothing tells the caller it
+        // exists.
+        if call.name == "mob_check_member"
+            && let Some(caller) = self.caller.as_ref()
+        {
+            let args = serde_json::from_str::<Value>(call.args.get()).map_err(|error| {
+                meerkat_core::ToolError::invalid_arguments(call.name, error.to_string())
+            })?;
+            if let (Some(mob_id), Some(member)) = (
+                args.get("mob_id").and_then(Value::as_str),
+                args.get("member_id").and_then(Value::as_str),
+            ) && caller.hides(call.name, mob_id, member).await?
+            {
+                return Err(meerkat_mob::MemberTargetAbsence::NotFound.to_tool_error(
+                    call.name,
+                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::AgentIdentity::from(member),
+                ));
+            }
+        }
         if matches!(
             call.name,
             "delegate"
@@ -2501,6 +2619,7 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             member_auth_binding: owned.member_auth_binding,
             member_auth_binding_recorded: owned.member_auth_binding_recorded,
             realm_profiles: owned.realm_profiles,
+            caller: owned.caller,
         });
         Ok(if was_bound {
             meerkat_core::agent::BindOutcome::Bound(dispatcher)
@@ -3505,6 +3624,8 @@ fn install_agent_mob_tools_with(
         member_auth_binding: child_policy.member_auth_binding,
         member_auth_binding_recorded: child_policy.member_auth_binding_recorded,
         realm_profiles: state.realm_profile_store().cloned(),
+        private_owners: private_owners.clone(),
+        state: Arc::downgrade(&state),
     });
     *slot
         .write()
@@ -13764,6 +13885,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         }
@@ -14622,6 +14744,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         };
@@ -14754,6 +14877,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         });
@@ -14826,6 +14950,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         };
@@ -23561,6 +23686,7 @@ image_generation = true
                 protected_mob_id: "test-mob".to_string(),
                 spawner_comms_name: Some("ops/orchestrator/ops-lead".to_string()),
                 realm_profiles: None,
+                caller: None,
                 member_auth_binding: None,
                 member_auth_binding_recorded: None,
             }

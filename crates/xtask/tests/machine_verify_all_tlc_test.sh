@@ -755,7 +755,7 @@ if [[ ! -x "${requester_batch_audit}" ]]; then
   echo "error: requester batch audit runner is missing from workspace runfiles: ${requester_batch_audit}" >&2
   exit 1
 fi
-if run_part audits-r; then
+if run_part audits-s; then
   echo "running bounded requester batch TLC audit"
   TLC_WORKERS="${tlc_workers}" "${requester_batch_audit}" "${REQUESTER_BATCH_AUDIT_MAX_STEPS:-14}" --mutants
 fi
@@ -1527,14 +1527,14 @@ run_machine_verify() {
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
 # 248-375 s, plus the retained-run settle audit with --mutants (0.9.11, not
-# yet measured on a hosted runner), the GrantAuthorityMachine custody end
+# yet measured on a hosted runner), and the GrantAuthorityMachine custody end
 # audit with --mutants (sixteen runs, not yet measured hosted; 17 s locally
-# with 4 TLC workers, about 40 s at 2.3x) and the requester batch audit with
-# --mutants (90 s locally with 4 workers at 14 steps, about 210 s at 2.3x):
-# about 380-625 s before the settle audit;
+# with 4 TLC workers, about 40 s at 2.3x): about 290-415 s before the settle audit;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
-# (158-233), which moved to audits-u, so about 479-489 s;
+# (158-233), which moved to audits-u, so about 479-489 s, plus the requester
+# batch audit with --mutants (0.9.11; 90 s locally with 4 workers at 14
+# steps, about 210 s at 2.3x), moved from audits-r: about 570-700 s;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
 # the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
 # (eleven runs, not yet measured hosted; the empty-resume residency audit's

@@ -555,6 +555,12 @@ async fn added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder()
         let reply_binding = reply_source.final_association.as_ref().unwrap().candidate();
         assert_eq!(reply_binding.requester, first_binding.candidate().requester);
         assert_eq!(reply_binding.ingress_actor, first_binding.candidate().logical_executor);
+        // Every offer of the reply carried its one typed origin. How many offers
+        // it took before its binding was admitted (each pending answer is one
+        // retry) is measured, not pinned.
+        let reply_origins = fixture.peer_observer.governed_origins(&sender);
+        assert!(!reply_origins.is_empty() && reply_origins.windows(2).all(|pair| pair[0] == pair[1]));
+        eprintln!("governed reply offers at the sender: {}", reply_origins.len());
         // The rest stays the receiving member's own: its executor, the subject it
         // acts for, and its own exact delivery targets.
         let sender_route = fixture.source.route(&reply_source.event.route).unwrap();

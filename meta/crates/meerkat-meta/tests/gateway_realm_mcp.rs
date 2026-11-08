@@ -500,10 +500,11 @@ fn without_a_named_store_a_secret_lands_in_the_default_store() {
 fn the_gateways_own_console_serves_no_realm_mcp_method() {
     let scratch = tempfile::tempdir().unwrap();
     let mut gateway = Gateway::start(scratch.path(), "info");
-    let init = gateway.init(
-        &scratch.path().join("state"),
-        with_credentials(scratch.path()),
-    );
+    // An open Console on the loopback listener: every request reaches its
+    // dispatcher, which is what the row judges.
+    let mut options = with_credentials(scratch.path());
+    options["console_require_app_auth"] = json!(false);
+    let init = gateway.init(&scratch.path().join("state"), options);
     let base = init["result"]["http_base_url"]
         .as_str()
         .unwrap_or_else(|| panic!("the gateway's listener: {init:#}"))

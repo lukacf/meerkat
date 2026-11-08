@@ -482,10 +482,9 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     approver_id: DecisionParty,
                     subject_digest: DecisionDigest
                 ) -> Option<u64> {
-                    if presented_at_ms != None
-                        || (audience == Some(approver_id)
+                    if audience == Some(approver_id)
                         && digest == Some(subject_digest)
-                        && presentation_complete(complete, link_served_digest, subject_digest))
+                        && presentation_complete(complete, link_served_digest, subject_digest)
                     {
                         presented_at_ms
                     } else {

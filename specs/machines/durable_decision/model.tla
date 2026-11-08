@@ -39,7 +39,7 @@ vars == << phase, model_step_count, decision_id, deadline_at_ms, subject_digest,
 presentation_complete(complete, link_served_digest, arg_subject_digest) == (IF complete THEN TRUE ELSE (link_served_digest = Some(arg_subject_digest)))
 earliest_presentation(first, presented) == (IF ((presented # None) /\ (IF (first = None) THEN TRUE ELSE ((IF "value" \in DOMAIN presented THEN presented["value"] ELSE None) < (IF "value" \in DOMAIN first THEN first["value"] ELSE None)))) THEN presented ELSE first)
 owed_if_due(arg_notice) == (IF (arg_notice = "NotDue") THEN "Owed" ELSE arg_notice)
-counted_carried_presentation(presented_at_ms, audience, digest, complete, link_served_digest, arg_approver_id, arg_subject_digest) == (IF (IF (presented_at_ms # None) THEN TRUE ELSE ((audience = Some(arg_approver_id)) /\ (digest = Some(arg_subject_digest)) /\ presentation_complete(complete, link_served_digest, arg_subject_digest))) THEN presented_at_ms ELSE None)
+counted_carried_presentation(presented_at_ms, audience, digest, complete, link_served_digest, arg_approver_id, arg_subject_digest) == (IF ((audience = Some(arg_approver_id)) /\ (digest = Some(arg_subject_digest)) /\ presentation_complete(complete, link_served_digest, arg_subject_digest)) THEN presented_at_ms ELSE None)
 
 Init ==
     /\ phase = "Unheld"

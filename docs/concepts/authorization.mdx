@@ -262,7 +262,11 @@ owner then executes the held request at most once.
   recorded or carried by the event) is refused as
   `decided_before_presentation`; one observed in the same millisecond is
   accepted. The decision's machine makes this check; with no presentation at
-  all, the decision stays `presentation_incomplete`. The two times come from
+  all, the decision stays `presentation_incomplete`. It also decides whether
+  a presentation the event carries counts: only a complete presentation of
+  the held subject to the approver does (as for a recorded one), any other
+  counts as none, and only a counted one is kept with the decision. The two
+  times come from
   different clocks: the observed time is the ingress's (a provider's message
   timestamp, for example), and a presentation's time is the host's. An
   ingress clock that truncates (to whole seconds, for example) or runs behind

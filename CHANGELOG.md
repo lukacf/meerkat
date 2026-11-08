@@ -149,6 +149,22 @@ them.
   served, so code that builds them literally must set it (`None` keeps the
   previous behaviour).
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  DurableDecisionMachine decides whether the presentation a human decision
+  carries counts (see Changed). `DurableDecisionInput::Decide`
+  (meerkat-runtime `decision::dsl` and meerkat-machine-schema
+  `catalog::dsl::durable_decision`) and the kernel
+  `generated::durable_decision::inputs::Decide` gain the public fields
+  `carried_audience: Option<DecisionParty>`, `carried_digest:
+  Option<DecisionDigest>`, `carried_complete: bool` and
+  `carried_link_served_digest: Option<DecisionDigest>`, the carried
+  presentation's facts (`None` and `false` when it carries none), so code that
+  builds them literally must set them. `DurableDecisionEffect::Approved` and
+  `DurableDecisionEffect::Rejected` (the same crates) and the kernel
+  `generated::durable_decision::effects::Approved` and `effects::Rejected`
+  gain the public field `carried_presentation_counted: bool`, so code that
+  builds them literally must set it.
+
 - `meerkat-mob`: an owned edge's `OwnedIdentityEdge::rule` is an
   `OwnedEdgeAdmission` (the admitting peer rule's id, `Rule`, or `Adopted`)
   in place of a `String`, and `OwnedIdentityEdge::new` takes one: build a
@@ -858,6 +874,16 @@ them.
   `BackendUnavailable` refusal, so an operator can act on it.
 
 ### Changed
+
+- `meerkat-runtime`: DurableDecisionMachine, not the decision service, decides
+  whether the presentation a human decision carries counts: the service passes
+  the carried presentation's facts in `Decide` (its audience, the subject
+  digest it showed, whether it showed every canonical part, the digest of the
+  rendering its link served), the machine counts it only when it is a complete
+  presentation of the held subject to the approver, as it counts a recorded
+  one, and the decided row keeps the carried presentation only when the
+  machine says it counted it (`carried_presentation_counted`). What counts is
+  unchanged.
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the

@@ -213,8 +213,9 @@ fn refused(refusal: Value, message: String) -> JsonRpcError {
     }
 }
 
-/// The document or the credential owner could not be held now, or the
-/// launch's credential store did not open. Nothing was written.
+/// The document, the credential owner or the realm's credential fence could
+/// not be held now, or the launch's credential store did not open. Nothing
+/// was written.
 fn unavailable(message: String) -> JsonRpcError {
     JsonRpcError {
         code: CAPABILITY_UNAVAILABLE_CODE,
@@ -296,7 +297,12 @@ fn secret_error(error: McpServiceSecretUpdateError) -> JsonRpcError {
             refused(json!({"kind": "still_current", "name": name}), message)
         }
         McpServiceSecretUpdateError::ConfigurationUnavailable(_)
-        | McpServiceSecretUpdateError::Ownership(_) => unavailable(message),
+        | McpServiceSecretUpdateError::Ownership(_)
+        // The realm's credential fence is held by an admission or another
+        // fenced operation, or could not be used: the update did not start
+        // and wrote nothing.
+        | McpServiceSecretUpdateError::AdmissionInProgress
+        | McpServiceSecretUpdateError::AdmissionFenceUnavailable(_) => unavailable(message),
         McpServiceSecretUpdateError::NotAdmitted(refusal) => not_admitted(&refusal),
         McpServiceSecretUpdateError::OutcomeUnknown(_) => outcome_unknown(message),
     }

@@ -639,7 +639,9 @@ impl HostConfinement {
     }
 
     /// The host's startup report: each launch kind's requested and effective
-    /// confinement, what keeps the host's own inputs from its confined
+    /// confinement (for a kind the backend cannot confine, its refusal and
+    /// any host setting the backend can tell it lacks, such as
+    /// `vm.memfd_noexec`), what keeps the host's own inputs from its confined
     /// processes (or that nothing does), and each convention source it does
     /// not trust. Empty for a host that confines nothing.
     #[must_use]
@@ -653,6 +655,9 @@ impl HostConfinement {
             return Vec::new();
         }
         let mut notices = Vec::new();
+        // What the backend can tell of the host settings it lacks, asked once
+        // and only for a kind it could not confine.
+        let mut unmet = None;
         for kind in ConfinementLaunchKind::ALL {
             let (warning, effective) = match self.slot(kind) {
                 None => (false, "trusted host".to_owned()),
@@ -665,13 +670,24 @@ impl HostConfinement {
                             backend_name(backend)
                         ),
                     ),
-                    Err(refusal) => (
-                        true,
-                        format!(
-                            "requested {}, cannot be enforced on this host ({refusal}): every launch of this kind is refused",
-                            launch.requested
-                        ),
-                    ),
+                    Err(refusal) => {
+                        let mut cause = refusal.to_string();
+                        if refusal == ConfinementRefusal::BackendUnavailable {
+                            let lacking: &[meerkat_sandbox::UnmetHostRequirement] =
+                                unmet.get_or_insert_with(meerkat_sandbox::unmet_host_requirements);
+                            for requirement in lacking {
+                                cause.push_str("; ");
+                                cause.push_str(&requirement.to_string());
+                            }
+                        }
+                        (
+                            true,
+                            format!(
+                                "requested {}, cannot be enforced on this host ({cause}): every launch of this kind is refused",
+                                launch.requested
+                            ),
+                        )
+                    }
                 },
             };
             notices.push(HostConfinementNotice {
@@ -1303,6 +1319,104 @@ mod tests {
                 .startup_report(&inputs, &[])
                 .is_empty()
         );
+    }
+
+    /// A host that refuses executable memory files (`vm.memfd_noexec` at 2)
+    /// cannot run the Linux backend's init, so it confines no launch kind:
+    /// the startup report names that setting beside the refusal, so an
+    /// operator can act on it. The resolving thread's seccomp filter refuses
+    /// `memfd_create` with `MFD_EXEC` as that setting does (EACCES). A host
+    /// that does not refuse them is never told to change the setting.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn a_host_refusing_executable_memory_files_names_vm_memfd_noexec() {
+        let (_temp, base) = tree();
+        let work = base.join("work");
+        let selection = ConfinementConfig::for_all(custom(&work, &[&work], &[]));
+        // A host that refuses them itself is rightly told to change it.
+        let host_refuses = std::fs::read_to_string("/proc/sys/vm/memfd_noexec")
+            .is_ok_and(|value| value.trim() == "2");
+        if !host_refuses {
+            let unrestricted = confined(&selection).startup_report(&[], &[]);
+            assert!(
+                !unrestricted
+                    .iter()
+                    .any(|notice| notice.text.contains("vm.memfd_noexec")),
+                "{unrestricted:?}"
+            );
+        }
+        let report = std::thread::spawn(move || {
+            refuse_executable_memory_files_on_this_thread();
+            confined(&selection).startup_report(&[], &[])
+        })
+        .join()
+        .unwrap();
+        assert!(
+            report.iter().any(|notice| notice.warning
+                && notice.text.contains("cannot be enforced")
+                && notice.text.contains("vm.memfd_noexec")),
+            "{report:?}"
+        );
+    }
+
+    /// Installs, on the calling thread only, a seccomp filter that refuses
+    /// `memfd_create` with `MFD_EXEC` with EACCES, as `vm.memfd_noexec = 2`
+    /// does. The filter reads the low word of the call's second argument.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn refuse_executable_memory_files_on_this_thread() {
+        use nix::libc;
+        const MFD_EXEC: u32 = 0x10;
+        #[cfg(target_arch = "x86_64")]
+        const ARCH: u32 = 0xc000_003e;
+        #[cfg(target_arch = "aarch64")]
+        const ARCH: u32 = 0xc000_00b7;
+        let statement = |code, k| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump = |code, k, jt, jf| libc::sock_filter { code, jt, jf, k };
+        let load = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+        let equal = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+        let bits = (libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16;
+        let ret = (libc::BPF_RET | libc::BPF_K) as u16;
+        let mut filter = [
+            statement(load, 4),
+            jump(equal, ARCH, 1, 0),
+            statement(ret, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            statement(load, 0),
+            jump(equal, libc::SYS_memfd_create as u32, 0, 3),
+            statement(load, 24),
+            jump(bits, MFD_EXEC, 0, 1),
+            statement(ret, libc::SECCOMP_RET_ERRNO | libc::EACCES as u32),
+            statement(ret, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len().try_into().unwrap(),
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: a plain prctl call with integer arguments.
+        #[allow(unsafe_code)]
+        let no_new_privileges = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        assert_eq!(no_new_privileges, 0);
+        // SAFETY: `program` points at `filter`, both alive for the call, which
+        // copies the filter into the kernel.
+        #[allow(unsafe_code)]
+        let installed = unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::addr_of!(program),
+            )
+        };
+        assert_eq!(installed, 0);
     }
 
     /// The file credential store is an administration input: a start whose

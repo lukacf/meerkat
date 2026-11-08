@@ -42,9 +42,10 @@ targets = [
 # If true, metadata will be collected with `--all-features`. Note that this can't
 # be toggled off if true, if you want to conditionally enable `--all-features` it
 # is recommended to pass `--all-features` on the cmd line instead
-# CI's audit job (cargo-deny-action) checks with `--all-features`; reading the
-# same graph here keeps `make audit` and CI on one answer, including the
-# crates only `openai-live` brings in.
+# The root `make audit` checks Meta's graph with this file (cargo-deny reads
+# the deny.toml beside meerkat-meta's manifest first): every Meta feature,
+# so the crates only `openai-live` brings in, which the gateways ship with
+# (meta-release.yml builds them with `--features openai-live`), are in it.
 all-features = true
 # If true, metadata will be collected with `--no-default-features`. The same
 # caveat with `all-features` applies
@@ -73,8 +74,10 @@ feature-depth = 1
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
 # RUSTSEC-2025-0141: bincode 1.3.3 unmaintained (team ceased development;
-# 1.3.3 declared complete/final by its authors). Transitive via
-# meerkat-memory -> hnsw_rs; no vulnerability, no safe upgrade exists.
+# 1.3.3 declared complete/final by its authors). Transitive and ONLY under
+# `openai-live`: bincode 1.3.3 <- dtls 0.13.0 <- webrtc 0.14.0 <- meerkat-live
+# (meerkat-memory's hnsw_rs no longer depends on it); no vulnerability, no
+# safe upgrade exists.
 # RUSTSEC-2026-0150: audiopus_sys 0.2.2 unmaintained. Transitive and ONLY
 # under `openai-live` (and therefore `experimental-gpt-live`):
 #     audiopus_sys 0.2.2 <- opus 0.3.1 <- meerkat-live <- meerkat <- meta
@@ -117,12 +120,31 @@ feature-depth = 1
 # REMOVE this ignore when meerkat-live moves to a webrtc release without
 # crypto-bigint 0.5 (0.20 or later today); the unused-ignored-advisory rule
 # below fails the check once it leaves the graph.
+# RUSTSEC-2026-0441: pin-utils 0.1.1 unmaintained (upstream repository
+# archived on 2026-10-01). Transitive and ONLY under `openai-live` (and
+# therefore `experimental-gpt-live`):
+#     pin-utils 0.1.1 <- nix 0.26.4 <- webrtc-util 0.12.0 <- webrtc 0.14.0
+#     <- meerkat-live
+# webrtc-util also reaches webrtc through the rest of its stack (dtls,
+# interceptor, rtcp, rtp, stun, turn, webrtc-data, webrtc-ice, webrtc-mdns,
+# webrtc-sctp, webrtc-srtp). A build without `openai-live` contains no webrtc
+# and no pin-utils.
+# The advisory is `informational = "unmaintained"` with `patched = []`, i.e. NO
+# vulnerability and no patched release; 0.1.1 is the final release.
+# NO DROP-IN UPGRADE: nix 0.26 enables pin-utils through its default `aio`
+# feature, and every published webrtc-util requires nix 0.26 with default
+# features, so webrtc 0.14 through 0.17 keep it. webrtc 0.20 and later do not
+# depend on webrtc-util; moving meerkat-live to them is the same WebRTC port
+# as for RUSTSEC-2026-0387 above.
+# REMOVE this ignore when the graph no longer contains pin-utils; the
+# unused-ignored-advisory rule below then fails the check on the stale ignore.
 # An ignore whose advisory no longer occurs in the graph fails the check.
 unused-ignored-advisory = "deny"
 ignore = [
     "RUSTSEC-2025-0141",
     "RUSTSEC-2026-0150",
     "RUSTSEC-2026-0387",
+    "RUSTSEC-2026-0441", # pin-utils 0.1.1 unmaintained, no patched release; only under openai-live (webrtc)
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -279,8 +301,9 @@ unknown-git = "warn"
 # List of URLs for allowed crate registries. Defaults to the crates.io index
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# List of URLs for allowed Git repositories
-allow-git = ["https://github.com/lukacf/meerkat"]
+# List of URLs for allowed Git repositories (none: every dependency of Meta's
+# graph comes from crates.io or the workspace's own paths)
+allow-git = []
 
 [sources.allow-org]
 # github.com organizations to allow git sources for

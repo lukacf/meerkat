@@ -82,10 +82,12 @@ name: CI
 #                     (scripts/pre-push-unit.sh) for the test scope
 #   closure-check   - cargo check --all-features (lib and bin targets) over
 #                     the reverse-dependency closure of the changed packages
-#   rustdoc         - (x2) cargo doc --workspace --no-deps with rustdoc's
-#                     lints denied (RUSTDOCFLAGS=-Dwarnings), one leg with
-#                     default features and one with --all-features: every
-#                     crate's documentation and its intra-doc links
+#   rustdoc         - (xN) cargo doc --no-deps with rustdoc's lints denied
+#                     (RUSTDOCFLAGS=-Dwarnings): Core's members in one leg
+#                     with default features and one with --all-features,
+#                     each product's packages the change reaches with
+#                     --all-features: every crate's documentation and its
+#                     intra-doc links
 #   feature-check   - (xN, two per clippy shard) compile-only checks of the
 #                     shard's packages under their Bazel feature sets (tests
 #                     included) and the `make test-minimal` /
@@ -390,7 +392,7 @@ jobs:
       feature_check_rest_matrix: ${{ steps.plan.outputs.feature_check_rest_matrix }}
       core_changed: ${{ steps.plan.outputs.core_changed }}
       core_paths_changed: ${{ steps.plan.outputs.core_paths_changed }}
-      rustdoc_flags: ${{ steps.plan.outputs.rustdoc_flags }}
+      rustdoc_matrix: ${{ steps.plan.outputs.rustdoc_matrix }}
       products_changed: ${{ steps.plan.outputs.products_changed }}
       floor_check_count: ${{ steps.plan.outputs.floor_check_count }}
       floor_check_matrix: ${{ steps.plan.outputs.floor_check_matrix }}
@@ -1789,6 +1791,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
+      # A row builds up to about 50 test binaries, each against the whole
+      # workspace, and three rows of the 40 push runs before 2026-11-07 ran
+      # the runner's root disk out of space ("No space left on device"; the
+      # runner died with the row's step unfinished). No step here uses these
+      # preinstalled toolchains; removing them takes the free root disk from
+      # 86 GB to 104 GB (Meta CI's jobs, which free it the same way).
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
 
@@ -1895,6 +1909,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # As in the first wave: the runner's root disk is the limit.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
@@ -2483,25 +2504,32 @@ jobs:
           retention-days: 3
 
   rustdoc:
-    name: Rustdoc (${{ matrix.features }} features)
+    name: Rustdoc (${{ matrix.name }}, ${{ matrix.features }} features)
     needs: changes
     # Push only, like the closure check: every crate documented with
-    # rustdoc's lints denied, in two parallel legs, default features and
-    # --all-features (feature-gated docs included). A broken, private or
-    # redundant intra-doc link, a bare URL or an unclosed HTML tag fails it.
-    # It documents the whole workspace, where Cargo unifies features across
-    # members, so an error that only a crate documented alone shows
-    # (`cargo doc -p <crate>`, the way docs.rs builds a published crate) is
-    # outside it. A pull request names it in deferred_to_push: it documents
-    # meerkat-mob and every crate built on it, which does not fit the
-    # pull-request budget.
+    # rustdoc's lints denied. A broken, private or redundant intra-doc link,
+    # a bare URL or an unclosed HTML tag fails it. The plan's rustdoc_rows:
+    # Core's members when the change reaches Core, in two parallel legs,
+    # default features and --all-features (feature-gated docs included), and
+    # each product's packages in the reverse-dependency closure, in the
+    # --all-features leg only and in as few rows of their own as hold no bin
+    # name twice (Cargo refuses to document two bins of one name at once),
+    # so a Core change that breaks a product's link into a Core item fails
+    # here. Each row documents its packages together, where Cargo unifies
+    # features across them, so an error that only a crate documented alone
+    # shows (`cargo doc -p <crate>`, the way docs.rs builds a published
+    # crate) is outside it. A pull request names it in deferred_to_push: it
+    # documents meerkat-mob and every crate built on it, which does not fit
+    # the pull-request budget.
     if: ${{ needs.changes.outputs.rustdoc == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A product's row compiles the product's whole dependency graph under
+    # its own features, as the closure check's part does (60 minutes).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        features: [default, all]
+      # One entry per row and leg (rustdoc_matrix in the plan's output).
+      matrix: ${{ fromJSON(needs.changes.outputs.rustdoc_matrix) }}
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2529,15 +2557,14 @@ jobs:
           cache-on-failure: true
 
       # --keep-going reports every crate that fails, not only the first.
-      # The plan's rustdoc_flags name what it documents: Core's members
-      # (`--workspace` without the products' packages) when the change
-      # reaches Core, the changed products' packages otherwise
-      # (scripts/ci-cargo-lanes.mjs).
-      - name: Document the plan's packages with rustdoc's lints denied (${{ matrix.features }} features)
+      # The row's flags name what it documents: Core's members
+      # (`--workspace` without the products' packages) or a product's
+      # packages, `-p` each (rustdoc_rows in scripts/ci-cargo-lanes.mjs).
+      - name: Document the row's packages with rustdoc's lints denied (${{ matrix.features }} features)
         env:
           RUSTDOCFLAGS: -Dwarnings
           FEATURES: ${{ matrix.features }}
-          RUSTDOC_FLAGS: ${{ needs.changes.outputs.rustdoc_flags }}
+          RUSTDOC_FLAGS: ${{ matrix.flags }}
         run: |
           set -euo pipefail
           if [[ -z "${RUSTDOC_FLAGS}" ]]; then echo "::error::the plan names no rustdoc packages"; exit 1; fi
@@ -2554,7 +2581,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-rustdoc-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-rustdoc-${{ matrix.key }}-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -3187,13 +3214,26 @@ jobs:
           PRODUCT: ${{ matrix.product }}
         run: echo "::warning title=Published floor::${PRODUCT} is not releasable against its published dependencies (advisory here; required on release/${PRODUCT}-* and at its release)."
 
+      # The floor compiles the product's published dependency graph in a
+      # scratch workspace whose objects only earlier floor runs cached: about
+      # 150 s when they did, 1529 to 2513 s when a new release or lock entry
+      # left them cold. The statistics name the hit rate of this run.
+      - name: Report the floor's sccache statistics
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        run: sccache --show-stats
+
       - name: Upload the floor report
         if: ${{ always() }}
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: published-floor-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/floor-${{ matrix.product }}/floor.json
+          path: |
+            ${{ runner.temp }}/floor-${{ matrix.product }}/floor.json
+            ${{ runner.temp }}/floor-${{ matrix.product }}/logs/
+            /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -3851,7 +3891,9 @@ jobs:
         # Run times belong to the job, so re-running only this gate cannot
         # launder an execution overrun. Terminals use per-attempt clocks: a
         # re-run lane gets a fresh clock, a carried-over lane keeps its own
-        # attempt's clock.
+        # attempt's clock and its own attempt's runner queue (a re-run
+        # attempt lists a carried-over job with the re-run's creation time,
+        # so its creation time is read from the attempt it ran in).
         #
         # One exception, on a pull request only: an exact-profile lane
         # (governed JSONL, MCP confinement positive) that the plan ran only
@@ -3982,16 +4024,25 @@ jobs:
               for n in range(1, attempt + 1):
                   page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
                   attempt_starts.append((n, ts(page["run_started_at"])))
-              jobs = [
-                  job
-                  for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30"
-                  )
-                  for job in page["jobs"]
-              ]
 
-              lanes = []
-              for job in jobs:
+              def attempt_jobs(n):
+                  return [
+                      job
+                      for page in api(
+                          f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=30"
+                      )
+                      for job in page["jobs"]
+                  ]
+
+              def ran_in(started):
+                  number, clock = attempt_starts[0]
+                  for n, begun in attempt_starts:
+                      if begun <= started:
+                          number, clock = n, begun
+                  return number, clock
+
+              completed_jobs = []
+              for job in attempt_jobs(attempt):
                   if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
                       continue
                   if not job["started_at"] or not job["completed_at"]:
@@ -3999,15 +4050,35 @@ jobs:
                   started, completed = ts(job["started_at"]), ts(job["completed_at"])
                   if completed < started:
                       continue
-                  created = ts(job["created_at"]) if job.get("created_at") else started
-                  ran_in, clock = attempt_starts[0]
-                  for n, begun in attempt_starts:
-                      if begun <= started:
-                          ran_in, clock = n, begun
+                  completed_jobs.append((job, started, completed))
+
+              # A re-run attempt lists the jobs it carried over from an
+              # earlier attempt with that attempt's start and completion
+              # times but with its own creation time, so their runner queue
+              # read as 0 and each looked created after the stagger job. A
+              # carried-over job's creation time comes from the listing of the
+              # attempt it ran in (matched by name and start); one that listing
+              # lacks keeps the re-run's.
+              own_created = {}
+              for job, started, _ in completed_jobs:
+                  ran, _ = ran_in(started)
+                  if ran < attempt and ran not in own_created:
+                      own_created[ran] = {
+                          (own["name"], own["started_at"]): own.get("created_at")
+                          for own in attempt_jobs(ran)
+                      }
+
+              lanes = []
+              for job, started, completed in completed_jobs:
+                  ran, clock = ran_in(started)
+                  created_at = job.get("created_at")
+                  if ran < attempt:
+                      created_at = own_created[ran].get((job["name"], job["started_at"])) or created_at
+                  created = ts(created_at) if created_at else started
                   lanes.append(
                       {
                           "name": job["name"],
-                          "attempt": ran_in,
+                          "attempt": ran,
                           "created": created,
                           "completed": completed,
                           "queued": max(0, int((started - created).total_seconds())),

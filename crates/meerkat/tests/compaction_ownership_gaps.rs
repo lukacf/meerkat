@@ -435,8 +435,9 @@ mod tests {
     }
 
     /// Recover the session on a fresh host through the runtime's recovery
-    /// lowering, then run N+1.
-    async fn recover_and_run(
+    /// lowering and subscribe to the recovered actor's events, without
+    /// running a turn.
+    async fn recover(
         root: &Path,
         client: &Arc<SummarizingClient>,
         id: &SessionId,
@@ -446,6 +447,17 @@ mod tests {
         host.materialize(durable.clone(), recovered_request(durable))
             .await;
         let log = host.record_events(id).await;
+        (host, log)
+    }
+
+    /// Recover the session as `recover` does, then run N+1.
+    async fn recover_and_run(
+        root: &Path,
+        client: &Arc<SummarizingClient>,
+        id: &SessionId,
+        durable: Session,
+    ) -> (Host, EventLog) {
+        let (host, log) = recover(root, client, id, durable).await;
         host.run_prompt(id, "turn after recovery").await;
         log.settle().await;
         (host, log)
@@ -456,8 +468,13 @@ mod tests {
     /// session's next run. Run N compacts and the runtime finalizes the
     /// memory projection at run N's boundary; the host then stands down and
     /// the session is recovered on a new host, which runs N+1. The
-    /// completion must be observed on run N's stream (before the actor goes)
-    /// or on the recovered actor's stream.
+    /// completion must be observed while the session is idle, before N+1
+    /// starts: on run N's stream (before the actor goes) or on the idle
+    /// recovered actor's stream, ahead of its first `RunStarted`. A fix that
+    /// only requeues the event until the next turn (the mechanism
+    /// `today_compaction_completed_waits_for_the_next_run_on_a_live_actor`
+    /// pins) does not pass: the recovered stream is inspected before N+1 is
+    /// started.
     #[tokio::test]
     #[ignore = "CompactionCompleted of a finalized durable projection is lost when the actor is replaced before its next run; see the PR"]
     async fn compaction_completed_is_observed_when_the_actor_is_recovered_before_the_next_run() {
@@ -466,17 +483,41 @@ mod tests {
         let (host, id, run_n_log) = compact_during_run_n(temp.path(), &client).await;
         let durable = host.authoritative(&id).await;
         host.stand_down().await;
-        let (host, recovered_log) = recover_and_run(temp.path(), &client, &id, durable).await;
-        let observed = run_n_log.completed() + recovered_log.completed();
-        host.stand_down().await;
+        let (host, recovered_log) = recover(temp.path(), &client, &id, durable).await;
+        recovered_log.settle().await;
         assert_eq!(
-            observed,
+            recovered_log.count(|event| matches!(event, AgentEvent::RunStarted { .. })),
+            0,
+            "setup: the recovered actor is idle (no run started yet)"
+        );
+        let observed_while_idle = run_n_log.completed() + recovered_log.completed();
+        assert_eq!(
+            observed_while_idle,
             1,
             "the compaction's CompactionCompleted must be observed exactly once on a session \
-             event stream (run N's actor: {}, recovered actor: {})",
+             event stream before the next run starts (run N's actor: {}, idle recovered \
+             actor: {})",
             run_n_log.completed(),
             recovered_log.completed()
         );
+
+        host.run_prompt(&id, "turn after recovery").await;
+        recovered_log.settle().await;
+        let (completed, run_starts) = recovered_log.completion_and_run_starts();
+        assert_eq!(run_starts.len(), 1, "setup: the recovered actor ran N+1");
+        if let Some(completed) = completed {
+            assert!(
+                completed < run_starts[0],
+                "a completion on the recovered stream precedes N+1's RunStarted \
+                 (completion at {completed}, run starts at {run_starts:?})"
+            );
+        }
+        assert_eq!(
+            run_n_log.completed() + recovered_log.completed(),
+            1,
+            "N+1 delivers no second CompactionCompleted"
+        );
+        host.stand_down().await;
     }
 
     /// TODAY (delete with the fix): the completion of the compaction above is
@@ -580,7 +621,28 @@ mod tests {
     #[tokio::test]
     #[ignore = "auto_compact_threshold_override is not recorded with the session; recovery lowers it to None; see the PR"]
     async fn recovered_session_keeps_its_compaction_threshold() {
-        let compactions = compactions_after_recovery(recovered_request, TURNS_AFTER_RECOVERY).await;
+        let lowered = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&lowered);
+        let compactions = compactions_after_recovery(
+            move |session| {
+                let request = recovered_request(session);
+                *observed.lock().expect("lowered threshold") = Some(
+                    request
+                        .build
+                        .as_ref()
+                        .map(|build| build.auto_compact_threshold_override),
+                );
+                request
+            },
+            TURNS_AFTER_RECOVERY,
+        )
+        .await;
+        assert_eq!(
+            *lowered.lock().expect("lowered threshold"),
+            Some(Some(std::num::NonZeroU64::new(1))),
+            "the recovery lowering must restore exactly the recorded threshold 1, not another \
+             low value or a one-shot force"
+        );
         assert!(
             compactions >= 1,
             "a session built with threshold 1 must still compact at 1 after recovery \

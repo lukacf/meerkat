@@ -725,20 +725,31 @@ them.
   - A settlement that did not commit, or whose tail repair left the run's
     tail standing, answers the registration's refusal, never `Settled`: a
     durability reload refusal when its write failed (the reload loses the
-    stop, so the host keeps its hold, reloads and settles again) or its tail
+    stop, so the host keeps its hold, reloads and settles again; on a host
+    store realm, a write the store refused or left unsettled poisons the
+    session's scopes instead, and the reload fails until the realm is opened
+    again) or its tail
     repair failed (the reloaded registration keeps no run), and the refusal
-    of a session that leaves the process when another writer took its store
-    fence, or when an unregister ended the run first (its inputs then end
+    of a session that leaves the process when its store realm lost its
+    fence (another writer took it, or the realm stopped itself:
+    `RuntimeDriverError::StaleAuthority` at every call on a host store realm,
+    which refuses that writer until it is opened again), or when an
+    unregister ended the run first (its inputs then end
     `Abandoned { Stopped }` when it keeps queued work, a mob Shutdown's
     default, whatever their state, and `Abandoned { Cancelled }` when it
     stops).
   A repeat that arrives while the settle is pending joins it. The mob verb
   never wakes a member, and answers typed refusals: `MemberNotFound`,
-  `MemberSessionNotLive` (not live in this process: dormant, gone, or leaving
-  through its unregister), `MemberReloadRequired` (its registration needs a
-  durability reload) and `UnsupportedForMode` (a placed member). The
+  `MemberSessionNotLive` (not live in this process: dormant, gone, leaving
+  through its unregister, or its store realm's fence lost),
+  `MemberReloadRequired` (its registration needs a durability reload),
+  `UnsupportedForMode` (a placed member) and the new
+  `MobError::MemberInputTerminalNotYetReadable` (the run is no longer kept,
+  but an input of it reads no committed terminal yet: settle again). The
   durable-runs guide has the Recover recipe: hold, wake, settle, release on
-  every path that leaves no open run.
+  every path that leaves no open run, count a member the mob no longer
+  holds or the hold never applied to as done, and end the recovery when the
+  mob is gone or its store realm lost its fence.
 - `meerkat-runtime`: `MeerkatMachine::session_work_state(&session_id)` reads
   cold whether one session holds the work a start wakes a member for,
   without loading its body or registering it, so a dormant mob member stays

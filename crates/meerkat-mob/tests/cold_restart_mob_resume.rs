@@ -13534,7 +13534,9 @@ async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
 /// `HostRecovery` staged for the member's session: once the member left the
 /// roster, the host can no longer release the hold through the mob, so the
 /// retire drops it, as it drops a mob Stop's `MobStop`, and a later
-/// registration of that session id is not held for it. RED before: the
+/// registration of that session id is not held for it. A settle and a
+/// release of the retired member then both answer `MemberNotFound`, the
+/// answer a host's Recover flow counts as that member's end. RED before: the
 /// retire dropped only `MobStop`.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
@@ -13587,6 +13589,28 @@ async fn a_retire_drops_the_departed_members_host_recovery_hold() {
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "no model request"
+    );
+    let settle = held.handle.settle_member_retained_run(&held.worker).await;
+    assert!(
+        matches!(
+            &settle,
+            Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &held.worker
+        ),
+        "a settle of the retired member answers MemberNotFound, not {settle:?}"
+    );
+    let release = held
+        .handle
+        .release_member_run_starts(
+            &held.worker,
+            meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        )
+        .await;
+    assert!(
+        matches!(
+            &release,
+            Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &held.worker
+        ),
+        "a release of the retired member's hold answers MemberNotFound, not {release:?}"
     );
     let _ = held.handle.shutdown().await;
 }

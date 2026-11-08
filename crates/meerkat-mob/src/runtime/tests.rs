@@ -92728,6 +92728,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "member_input_requeued_across_stop".to_string()
         }
         MobError::MemberInputRequeueExpired { .. } => "member_input_requeue_expired".to_string(),
+        MobError::MemberInputTerminalNotYetReadable { .. } => {
+            "member_input_terminal_not_yet_readable".to_string()
+        }
         MobError::MemberInputRefused { .. } => "member_input_refused".to_string(),
         MobError::GovernedInputUnbound { .. } => "governed_input_unbound".to_string(),
         MobError::InvalidTransition { from, to } => {

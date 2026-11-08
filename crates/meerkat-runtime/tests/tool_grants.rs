@@ -1550,7 +1550,6 @@ async fn a_build_reads_which_gated_servers_a_live_server_grant_covers() {
 /// predicate fails here until the two agree again.
 #[tokio::test]
 async fn the_server_predicate_answers_what_the_machine_admits() {
-    use meerkat_core::handles::ExternalToolSurfaceHandle;
     use meerkat_core::tool_grant::{GrantGatedTools, server_is_grant_gated};
 
     let subsets = || -> [BTreeSet<String>; 4] {

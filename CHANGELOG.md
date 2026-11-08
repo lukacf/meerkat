@@ -171,7 +171,10 @@ them.
     `ToolGrantCall` gains `server`. `meerkat_contracts::GrantToolResult` gains
     `applies` and `ListToolGrantsResult` gains `gate`.
     `meerkat_runtime::tool_grant::ToolGrantExpiryDriver` and
-    `WireToolGrantExpiryDriver` gain `Build`.
+    `WireToolGrantExpiryDriver` gain `Build`. Both wire enums keep `Unknown`
+    last, so its implicit discriminant moves (`WireToolGrantTarget::Unknown`
+    from 2 to 3, `WireToolGrantExpiryDriver::Unknown` from 5 to 6): code
+    that casts the variant to a number must follow.
   - `meerkat_core::tool_grant::SessionToolGrants::open_names` takes a
     `GatedToolView` (the gate as the machine records it after the boundary's
     extension, and the names each gated server provides now) instead of a
@@ -192,13 +195,28 @@ them.
     `stage_gated_add`.
   - MeerkatMachine: `ReplaceToolGrantGate` carries the gated servers, the
     unconfigured-servers mode, the ungated servers and the names a build
-    ignored as not mounted beside the gated names; the machine gains the
-    `ExtendToolGrantGate` and `SurfaceStageGatedAdd` inputs, four state
-    fields and the invariants `tool_grant_not_mounted_are_not_gated` and
-    `tool_grant_ungated_servers_are_not_gated` (the generated kernel types
-    change with them). `MeerkatMachineRuntimeInternalInput` gains
-    `ExtendToolGrantGate` and `SurfaceStageGatedAdd`, after every released
-    variant.
+    ignored as not mounted beside the gated names
+    (`MeerkatMachineInput::ReplaceToolGrantGate` of meerkat-machine-schema
+    and meerkat-runtime, and the kernel's `ReplaceToolGrantGate`, gain
+    `gated_servers`, `gates_unconfigured_servers`, `ungated_servers` and
+    `not_mounted_names`); the machine gains the `ExtendToolGrantGate` and
+    `SurfaceStageGatedAdd` inputs, four state fields (`MeerkatMachineState`
+    of meerkat-machine-schema and meerkat-runtime, and the kernel
+    `generated::meerkat::State`, gain `tool_grant_gated_servers`,
+    `tool_grant_gates_unconfigured_servers`, `tool_grant_ungated_servers` and
+    `tool_grant_not_mounted_names`; struct literals need them) and the
+    invariants `tool_grant_not_mounted_are_not_gated` and
+    `tool_grant_ungated_servers_are_not_gated`. The kernel
+    `generated::meerkat::TransitionId` gains `ExtendToolGrantGateChangedIdle`,
+    `ExtendToolGrantGateChangedAttached`, `ExtendToolGrantGateChangedRunning`,
+    `ExtendToolGrantGateChangedRetired`, `ExtendToolGrantGateChangedStopped`,
+    `ExtendToolGrantGateUnchangedIdle`, `ExtendToolGrantGateUnchangedAttached`,
+    `ExtendToolGrantGateUnchangedRunning`,
+    `ExtendToolGrantGateUnchangedRetired`,
+    `ExtendToolGrantGateUnchangedStopped`, `SurfaceStageGatedAddIdle`,
+    `SurfaceStageGatedAddAttached` and `SurfaceStageGatedAddRunning`, and
+    `MeerkatMachineRuntimeInternalInput` gains `ExtendToolGrantGate` and
+    `SurfaceStageGatedAdd`, each after every released variant.
   - `meerkat::resolve_grant_target` takes the servers the subject's build
     configures ungated; `meerkat_mob::MemberGrantGate` gains
     `ungated_servers`.

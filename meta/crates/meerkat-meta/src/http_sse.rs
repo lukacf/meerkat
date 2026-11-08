@@ -939,7 +939,7 @@ pub(crate) async fn project_structural_member(
     require_exact_authority: bool,
 ) -> ProjectedStructuralEvent {
     let envelope = projection.envelope;
-    let member = if let Some(identity) = envelope.agent_identity.as_deref() {
+    let mut member = if let Some(identity) = envelope.agent_identity.as_deref() {
         let exact = if let Some(authority) = projection.member_authority.as_ref() {
             crate::http_console::sse_member_authorization_projection(
                 handle,
@@ -984,7 +984,13 @@ pub(crate) async fn project_structural_member(
         .and_then(|run_id| run_id.parse::<meerkat_mob::RunId>().ok())
         && let Ok(Some(run)) = handle.flow_status(run_id).await
     {
-        endpoints.extend(crate::http_console::run_members(&run));
+        // The members of the run, from its role targets and the mob's
+        // per-target dispatch records. Who a run reached that cannot be read
+        // leaves the event unresolved: it is shown to no one.
+        match crate::run_members::run_members(runtime, handle, &run).await {
+            Ok(members) => endpoints.extend(members),
+            Err(_) => member = StructuralEventMember::Unresolved,
+        }
     }
     ProjectedStructuralEvent {
         envelope,

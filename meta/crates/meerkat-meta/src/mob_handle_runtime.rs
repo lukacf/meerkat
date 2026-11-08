@@ -10083,6 +10083,9 @@ pub struct MobRuntime {
     /// has read, shared by every clone (see
     /// [`crate::side_chat::SideChatLineageCache`]).
     side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
+    /// The members each flow run of this runtime's mob reached, shared by
+    /// every clone (see [`crate::run_members::RunMembersIndex`]).
+    run_members: Arc<crate::run_members::RunMembersIndex>,
     /// Who each member of this runtime's mob is private to, shared by every
     /// clone (see [`crate::private_owners::PrivateOwners`]).
     private_owners: crate::private_owners::PrivateOwners,
@@ -11057,6 +11060,7 @@ impl MobRuntime {
                 #[cfg(not(target_arch = "wasm32"))]
                 member_mcp_custody: spec.member_mcp_custody,
                 side_chat_lineages: Arc::default(),
+                run_members: Arc::default(),
                 private_owners: spec.private_owners,
                 console_schedules: crate::console_schedules::ConsoleSchedules::default(),
             },
@@ -11112,6 +11116,7 @@ impl MobRuntime {
             #[cfg(not(target_arch = "wasm32"))]
             member_mcp_custody: None,
             side_chat_lineages: Arc::default(),
+            run_members: Arc::default(),
             private_owners: crate::private_owners::PrivateOwners::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
         }
@@ -11128,6 +11133,12 @@ impl MobRuntime {
     /// [`crate::side_chat::SideChatLineageCache`]).
     pub(crate) fn side_chat_lineages(&self) -> &crate::side_chat::SideChatLineageCache {
         &self.side_chat_lineages
+    }
+
+    /// The members each flow run of this runtime's mob reached, read from
+    /// the mob's per-target dispatch records (see [`crate::run_members`]).
+    pub(crate) fn run_members(&self) -> &crate::run_members::RunMembersIndex {
+        &self.run_members
     }
 
     /// Who each member of this runtime's mobs is private to (see

@@ -15684,10 +15684,18 @@ async fn handle_console_runtime_rpc_with_visibility(
             // A run that reached a member hidden from the caller is answered
             // as a run that does not exist: the cancel is asked about a fresh
             // run id no run holds, and its answer names the caller's run id.
-            let hidden = matches!(
-                runtime.handle().flow_status(run_id.clone()).await,
-                Ok(Some(run)) if run_reaches_hidden_member(access_view, &run)
-            );
+            let hidden = match runtime.handle().flow_status(run_id.clone()).await {
+                Ok(Some(run)) => match run_reaches_hidden_member(runtime, access_view, &run).await {
+                    Ok(hidden) => hidden,
+                    Err(err) => {
+                        return internal_error(
+                            response_id,
+                            format!("cancel_flow failed: the run's members could not be read: {err}"),
+                        );
+                    }
+                },
+                _ => false,
+            };
             let asked = if hidden { meerkat_mob::RunId::new() } else { run_id };
             let asked_text = asked.to_string();
             let answer = match runtime.handle().cancel_flow(asked).await {
@@ -15717,14 +15725,20 @@ async fn handle_console_runtime_rpc_with_visibility(
             match runtime.handle().flow_status(run_id).await {
                 // A run that reached a member hidden from the caller is
                 // answered as a run that does not exist.
-                Ok(Some(mob_run)) if run_reaches_hidden_member(access_view, &mob_run) => {
-                    response_value(response_id, Some(Value::Null), None)
+                Ok(Some(mob_run)) => {
+                    match run_reaches_hidden_member(runtime, access_view, &mob_run).await {
+                        Ok(true) => response_value(response_id, Some(Value::Null), None),
+                        Ok(false) => response_value(
+                            response_id,
+                            Some(serde_json::to_value(&mob_run).unwrap_or(Value::Null)),
+                            None,
+                        ),
+                        Err(err) => internal_error(
+                            response_id,
+                            format!("flow_status failed: the run's members could not be read: {err}"),
+                        ),
+                    }
                 }
-                Ok(Some(mob_run)) => response_value(
-                    response_id,
-                    Some(serde_json::to_value(&mob_run).unwrap_or(Value::Null)),
-                    None,
-                ),
                 Ok(None) => response_value(response_id, Some(Value::Null), None),
                 Err(err) => internal_error(response_id, format!("flow_status failed: {err}")),
             }
@@ -15754,7 +15768,23 @@ async fn handle_console_runtime_rpc_with_visibility(
                 Ok(mut runs) => {
                     // A run that reached a member hidden from the caller is
                     // that member's audience's alone.
-                    runs.retain(|run| !run_reaches_hidden_member(access_view, run));
+                    if let Some(view) = access_view {
+                        let members = match runtime.run_members().read(&runtime.handle()).await {
+                            Ok(members) => members,
+                            Err(err) => {
+                                return internal_error(
+                                    response_id,
+                                    format!(
+                                        "list_runs failed: the runs' members could not be read: \
+                                         {err}"
+                                    ),
+                                );
+                            }
+                        };
+                        runs.retain(|run| {
+                            !members.of(run).iter().any(|member| view.hides_agent(member))
+                        });
+                    }
                     response_value(
                         response_id,
                         Some(serde_json::json!({
@@ -16465,30 +16495,21 @@ impl ConsoleVisibilityPolicy for AudienceVisibilityPolicy<'_> {
     }
 }
 
-/// Every member a flow run reached: the members its binding names and every
-/// member a step of it dispatched to.
-pub(crate) fn run_members(run: &meerkat_mob::MobRun) -> Vec<String> {
-    run.role_targets
-        .iter()
-        .flat_map(|targets| {
-            targets
-                .bound_roles()
-                .flat_map(|(_, members)| members.iter())
-        })
-        .chain(run.step_ledger.iter().map(|entry| &entry.agent_identity))
-        .map(ToString::to_string)
-        .collect()
-}
-
-/// Whether a flow run reached a member hidden from the caller
-/// ([`AccessView::hides_agent`]): the run is that member's audience's, and
-/// any other caller reads it as a run that does not exist.
-fn run_reaches_hidden_member(view: Option<&AccessView>, run: &meerkat_mob::MobRun) -> bool {
-    view.is_some_and(|view| {
-        run_members(run)
-            .iter()
-            .any(|member| view.hides_agent(member))
-    })
+/// Whether flow run `run` reached a member hidden from the caller
+/// ([`AccessView::hides_agent`]), its members read from its role targets and
+/// the mob's per-target dispatch records ([`crate::run_members`]): the run
+/// is that member's audience's, and any other caller reads it as a run that
+/// does not exist. An event log that cannot be read is an error.
+async fn run_reaches_hidden_member(
+    runtime: &MobRuntime,
+    view: Option<&AccessView>,
+    run: &meerkat_mob::MobRun,
+) -> Result<bool, meerkat_mob::MobError> {
+    let Some(view) = view else {
+        return Ok(false);
+    };
+    let members = crate::run_members::run_members(Some(runtime), &runtime.handle(), run).await?;
+    Ok(members.iter().any(|member| view.hides_agent(member)))
 }
 
 async fn reconcile_console_topology(

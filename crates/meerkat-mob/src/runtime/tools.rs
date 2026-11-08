@@ -1178,6 +1178,23 @@ pub(super) fn compose_external_tools_for_profile(
     Ok(Some(Arc::new(DynamicToolComposite::new(dispatchers))))
 }
 
+/// A host's rule for the members of a mob that another member's own mob
+/// operator tools may not know of, installed with
+/// [`MobBuilder::with_member_tool_audience`](crate::MobBuilder::with_member_tool_audience).
+///
+/// The per-member operator tools (`member_status`, `retire_member`,
+/// `force_cancel_member`) answer a member the audience hides from the calling
+/// member exactly as a member the mob does not hold, before any ownership or
+/// manage-scope admission: nothing tells the caller it exists, and nothing is
+/// done to it.
+pub trait MemberToolAudience: Send + Sync {
+    /// Whether member `target` of mob `mob_id` is hidden from `caller`, the
+    /// member bound to the session that made the call (`None` for a call no
+    /// member's session made).
+    fn hides(&self, mob_id: &MobId, caller: Option<&AgentIdentity>, target: &AgentIdentity)
+    -> bool;
+}
+
 pub(crate) struct MobOperatorToolDispatcher {
     handle: MobHandle,
     authority: OperatorAuthority,
@@ -1445,6 +1462,17 @@ impl MobOperatorToolDispatcher {
         authority: &MobToolAuthorityContext,
     ) -> Result<(), ToolError> {
         let validated = self.validated_caller(owner, tool_name).await?;
+        // A member the host's audience hides from the caller is answered as
+        // one the mob does not hold, whatever the caller's scope.
+        if let Some(audience) = self.handle.member_tool_audience.as_ref()
+            && audience.hides(&self.handle.definition().id, validated.as_ref(), target)
+        {
+            return Err(MemberTargetAbsence::NotFound.to_tool_error(
+                tool_name,
+                &self.handle.definition().id,
+                target,
+            ));
+        }
         let can_manage_mob = self.can_manage_current_mob(authority);
         let caller = if can_manage_mob { None } else { validated };
         // An invalid supplied origin (a session that is not a current

@@ -6551,6 +6551,9 @@ pub struct MobHandle {
     /// current grant that build nothing
     /// ([`super::MobBuilder::with_member_grant_mint`]).
     pub(super) member_grant_mint: Option<Arc<dyn super::MemberGrantMint>>,
+    /// The host's rule for the members a member's own operator tools may not
+    /// know of ([`super::MobBuilder::with_member_tool_audience`]).
+    pub(super) member_tool_audience: Option<Arc<dyn super::MemberToolAudience>>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)

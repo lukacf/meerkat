@@ -8351,6 +8351,19 @@ impl MobBuilder {
         self
     }
 
+    /// The host's rule for the members of this mob that another member's own
+    /// mob operator tools may not know of ([`super::MemberToolAudience`]):
+    /// `member_status`, `retire_member` and `force_cancel_member` answer a
+    /// member it hides from the calling member as a member the mob does not
+    /// hold. Without one, every member is known to every member's tools.
+    pub fn with_member_tool_audience(
+        mut self,
+        audience: Arc<dyn super::MemberToolAudience>,
+    ) -> Self {
+        self.member_residency.member_tool_audience = Some(audience);
+        self
+    }
+
     /// Bound on one member wake: the cold restore of a dormant member through
     /// its readiness and topology. Past it MobMachine resolves the attempt
     /// retryable (the member is Dormant again and the next delivery wakes it
@@ -9576,6 +9589,7 @@ impl MobBuilder {
                     .member_session_authorities()
                     .unwrap_or_default(),
                 member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
+                member_tool_audience: wiring.member_residency.member_tool_audience.clone(),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
@@ -11273,6 +11287,7 @@ impl MobBuilder {
                     .member_session_authorities()
                     .unwrap_or_default(),
                 member_grant_mint: member_residency.member_grant_mint.clone(),
+                member_tool_audience: member_residency.member_tool_audience.clone(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;

@@ -174,6 +174,15 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
+- `meerkat-mob`: `MobBuilder::with_member_tool_audience` takes a host's
+  `MemberToolAudience`, the host's rule for the members of the mob that
+  another member's own mob operator tools may not know of. The member tools
+  `member_status`, `retire_member` and `force_cancel_member` answer a member
+  it hides from the calling member exactly as a member the mob does not
+  hold (`member_not_found`), for a caller with manage scope too, and do
+  nothing to it. Without an audience every member is known to every
+  member's tools, as before.
+
 - Peers keep the original requester in process. A governed agent's comms
   send in process carries the origin of the governed work it was sent
   under: its requester, the sending agent, and every work it names. Core's

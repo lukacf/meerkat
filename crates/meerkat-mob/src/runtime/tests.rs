@@ -30052,6 +30052,107 @@ async fn owned_member_tools_report_absent_targets_as_typed_not_found() {
     }
 }
 
+/// A host's member tool audience hides one member from one caller.
+struct HideMemberFrom {
+    caller: AgentIdentity,
+    target: AgentIdentity,
+}
+
+impl MemberToolAudience for HideMemberFrom {
+    fn hides(
+        &self,
+        _mob_id: &MobId,
+        caller: Option<&AgentIdentity>,
+        target: &AgentIdentity,
+    ) -> bool {
+        caller == Some(&self.caller) && target == &self.target
+    }
+}
+
+/// A member the host's audience hides from the calling member
+/// (`MobBuilder::with_member_tool_audience`) is answered by the per-member
+/// operator tools exactly as a member the mob does not hold, for a caller
+/// with manage scope too, and nothing is done to it. A member it does not
+/// hide from a caller is admitted as before.
+#[tokio::test]
+async fn owned_member_tools_answer_a_member_hidden_from_the_caller_as_absent() {
+    let forker = AgentIdentity::from("audience-forker");
+    let bystander = AgentIdentity::from("audience-bystander");
+    let child = AgentIdentity::from("audience-child");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let handle = MobBuilder::new(sample_definition_with_mob_tools(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_member_tool_audience(Arc::new(HideMemberFrom {
+            caller: bystander.clone(),
+            target: child.clone(),
+        }))
+        .create()
+        .await
+        .expect("create mob");
+    let mob_id = handle.definition().id.to_string();
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    caller_turn_fork_child(&handle, &forker, &child, None)
+        .await
+        .outcome()
+        .await
+        .expect("child outcome");
+
+    let forker_tools = owned_member_tool_dispatcher(
+        &handle,
+        &forker,
+        generated_mob_operator_authority_with_spawn_profile(
+            &mob_id,
+            handle.live_incarnation(),
+            "worker",
+        ),
+    )
+    .await;
+    let bystander_tools = owned_member_tool_dispatcher(
+        &handle,
+        &bystander,
+        generated_mob_operator_authority_with_spawn_profile(
+            &mob_id,
+            handle.live_incarnation(),
+            "worker",
+        ),
+    )
+    .await;
+    let manager_tools = owned_member_tool_dispatcher(
+        &handle,
+        &bystander,
+        generated_mob_operator_authority_with_scope(&mob_id, handle.live_incarnation()),
+    )
+    .await;
+
+    for tool in ["member_status", "force_cancel_member", "retire_member"] {
+        for (tools, caller) in [
+            (&bystander_tools, "a caller"),
+            (&manager_tools, "a manage-scope caller"),
+        ] {
+            assert_member_absence_error(
+                dispatch_owned_member_tool(tools, tool, "audience-child").await,
+                "member_not_found",
+                &mob_id,
+                "audience-child",
+                &format!("{tool} by {caller} the child is hidden from"),
+            );
+        }
+    }
+    assert!(
+        handle.get_member(&child).await.unwrap().is_some(),
+        "nothing is done to the hidden member"
+    );
+    dispatch_owned_member_tool(&forker_tools, "member_status", "audience-child")
+        .await
+        .expect("the forker, which the child is not hidden from, checks it");
+    dispatch_owned_member_tool(&manager_tools, "member_status", "audience-forker")
+        .await
+        .expect("a member not hidden from the caller is admitted as before");
+}
+
 /// A force cancel reaches a fork child's run one of two typed ways. A run
 /// already current receives an exact boundary cancel (`boundary_cancelled`);
 /// a run still queued is abandoned at the cancel point, so its supervised run

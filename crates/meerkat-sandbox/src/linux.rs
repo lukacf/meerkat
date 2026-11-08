@@ -741,9 +741,11 @@ impl Target {
     }
 
     // In the command, between its clone and exec: enters the working
-    // directory inside the view, installs stdio and the custody gate,
-    // unblocks every signal as std's spawn leaves it, and executes the
-    // program. Returns only the failure. Allocation-free raw syscalls only.
+    // directory inside the view, installs stdio and the custody gate, sets
+    // every caught signal and SIGPIPE to its default action and unblocks
+    // every signal, as posix_spawn and std's spawn leave them, and executes
+    // the program. Returns only the failure. Allocation-free raw syscalls
+    // only.
     fn exec(&self) -> SetupFailure {
         match self.enter() {
             Err(failure) => failure,
@@ -761,6 +763,7 @@ impl Target {
             raw(unsafe { libc::dup2(gate, 3) }).map_err(SetupStep::Gate.failed())?;
             raw(unsafe { libc::fcntl(3, libc::F_SETFD, 0) }).map_err(SetupStep::Gate.failed())?;
         }
+        default_signal_actions().map_err(SetupStep::Exec.failed())?;
         let mut unblocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
         unsafe {
             libc::sigemptyset(unblocked.as_mut_ptr());
@@ -1021,6 +1024,35 @@ fn reap(pid: libc::pid_t, kill: bool) {
             break;
         }
     }
+}
+
+/// In the command, before it unblocks signals: every caught signal back to
+/// its default action, as posix_spawn does, since a signal that arrives
+/// before the exec would otherwise run a copy of a host handler where its
+/// default action ends the command before its program runs; and SIGPIPE,
+/// which the host ignores, at its default action, as std's spawn leaves it,
+/// so a pipeline behaves as outside the launch. Other ignored signals stay
+/// ignored, as across any exec. glibc's own two real-time signals answer
+/// EINVAL and keep theirs. Allocation-free.
+fn default_signal_actions() -> Result<(), i32> {
+    // Signals 1 to 64, Linux's SIGRTMAX.
+    for number in 1..=64 {
+        if number == libc::SIGKILL || number == libc::SIGSTOP {
+            continue;
+        }
+        let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+        if unsafe { libc::sigaction(number, std::ptr::null(), current.as_mut_ptr()) } == -1 {
+            continue;
+        }
+        let handler = unsafe { current.assume_init() }.sa_sigaction;
+        if handler == libc::SIG_DFL || (handler == libc::SIG_IGN && number != libc::SIGPIPE) {
+            continue;
+        }
+        let mut default = unsafe { std::mem::zeroed::<libc::sigaction>() };
+        default.sa_sigaction = libc::SIG_DFL;
+        raw(unsafe { libc::sigaction(number, &raw const default, std::ptr::null_mut()) })?;
+    }
+    Ok(())
 }
 
 /// The top of a stack in `region`, 16-byte aligned: stacks grow down.

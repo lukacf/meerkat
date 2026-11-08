@@ -2005,6 +2005,38 @@ async fn linux_init_reaps_orphans_while_the_command_runs() {
     );
 }
 
+/// The command starts with SIGPIPE at its default action, as std's spawn
+/// leaves it, although the host ignores it (as every Rust program does): a
+/// pipeline whose reader ends stops its writer, as outside the launch.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_command_starts_with_sigpipe_at_its_default_action() {
+    let pipe = 1_u64 << (nix::libc::SIGPIPE - 1);
+    let mask = |value: &str| u64::from_str_radix(value.trim(), 16).unwrap();
+    let host = mask(&host_status_field(std::process::id(), "SigIgn:")[0]);
+    assert_ne!(host & pipe, 0, "the host ignores SIGPIPE: SigIgn {host:x}");
+    let fixture = Fixture::new();
+    let output = fixture
+        .shell(fixture.spec(), "grep '^SigIgn:' /proc/self/status", &[])
+        .await;
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let command = mask(
+        stdout
+            .strip_prefix("SigIgn:")
+            .unwrap_or_else(|| panic!("{stdout}")),
+    );
+    assert_eq!(
+        command & pipe,
+        0,
+        "the command ignores SIGPIPE: SigIgn {command:x}"
+    );
+}
+
 /// The custody PID ends the way the command did: with its exit code, or
 /// by the signal that ended it. A process group's SIGTERM, the teardown
 /// signal of the shell tool and the MCP connection, reaches the command

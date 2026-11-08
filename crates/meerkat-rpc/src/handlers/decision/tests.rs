@@ -1269,7 +1269,7 @@ mod operator_connections {
         persistent_router, principal, realm_bundle, result, router_over, stored_row,
         subject_digest, wait_past,
     };
-    use crate::handlers::decision::operator::DecisionOperator;
+    use crate::handlers::decision::operator::{DecisionOperator, OpeningPresentations};
     use crate::protocol::{RpcId, RpcResponse};
     use crate::server::AcknowledgedNotification;
     use crate::session_runtime::SessionRuntime;
@@ -1515,6 +1515,81 @@ mod operator_connections {
                 .expect("read")
                 .presentations
                 .is_empty()
+        );
+    }
+
+    /// An opening is presented as its decision stands when the connection
+    /// reaches it: an opening whose decision was decided in the meantime
+    /// (here by another connection's operator) shows nothing and records
+    /// nothing.
+    #[tokio::test]
+    async fn an_opening_whose_decision_was_decided_since_is_not_presented() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let opening = decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let deciding = Connection::open("stdio:operator:deciding");
+        deciding.list(&runtime).await;
+        let decided = deciding.decide(&runtime, &opening.decision_id).await;
+        assert_eq!(
+            result(&decided)["decision"]["phase"],
+            "approved",
+            "{decided:?}"
+        );
+        let before = decisions.get(&opening.decision_id).expect("read");
+
+        let late = Connection::open("stdio:operator:late");
+        assert!(late.operator.present_opened(&opening, &runtime).await);
+        assert!(late.notices().is_empty(), "{:?}", late.notices());
+        assert_eq!(decisions.get(&opening.decision_id).expect("read"), before);
+    }
+
+    /// Dropping the handle of a connection's presentations stops them,
+    /// however the connection stopped being served: a decision that opens
+    /// afterwards is presented on a connection whose handle is kept, and not
+    /// on the one whose handle was dropped.
+    #[tokio::test]
+    async fn a_dropped_presentations_handle_presents_nothing_more() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_router, runtime) = persistent_router(root.path()).await;
+        let decisions = runtime.decision_service();
+        let Connection {
+            operator: kept_operator,
+            written: kept,
+        } = Connection::open("stdio:operator:kept");
+        let Connection {
+            operator: dropped_operator,
+            written: dropped,
+        } = Connection::open("stdio:operator:dropped");
+        let _kept_presentations = OpeningPresentations::spawn(
+            Arc::new(kept_operator),
+            decisions.subscribe_openings(),
+            Arc::clone(&runtime),
+        );
+        drop(OpeningPresentations::spawn(
+            Arc::new(dropped_operator),
+            decisions.subscribe_openings(),
+            Arc::clone(&runtime),
+        ));
+
+        decisions
+            .hold(hold_request("release", "build-1", "operator"), false)
+            .expect("hold");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while kept.lock().expect("notices").is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the kept connection presents the opening"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            dropped.lock().expect("notices").is_empty(),
+            "a dropped handle presented: {:?}",
+            dropped.lock().expect("notices")
         );
     }
 

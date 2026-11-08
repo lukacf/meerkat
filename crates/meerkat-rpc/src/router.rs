@@ -1862,10 +1862,12 @@ impl MethodRouter {
     /// stdio connection's operator, or the governed pipe's), each durable
     /// decision the runtime's decision owner opens from now on. A connection
     /// without an operator is told nothing. The task runs until its caller
-    /// aborts it, when the connection ends, or until the connection can show
-    /// nothing more.
+    /// aborts it or drops its handle, when the connection ends, or until the
+    /// connection can show nothing more.
     #[cfg(all(unix, feature = "local-authorization"))]
-    pub(crate) fn spawn_decision_presentations(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub(crate) fn spawn_decision_presentations(
+        &self,
+    ) -> Option<handlers::decision::operator::OpeningPresentations> {
         let operator = self.decision_operator.clone().or_else(|| {
             self.governed_connection
                 .as_ref()
@@ -1876,8 +1878,10 @@ impl MethodRouter {
             return None;
         }
         let openings = owner.subscribe_openings();
-        Some(tokio::spawn(
-            operator.present_openings(openings, Arc::clone(&self.runtime)),
+        Some(handlers::decision::operator::OpeningPresentations::spawn(
+            operator,
+            openings,
+            Arc::clone(&self.runtime),
         ))
     }
 

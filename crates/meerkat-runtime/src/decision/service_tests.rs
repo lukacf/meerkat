@@ -53,6 +53,18 @@ struct CountingStore {
     inner: InMemoryDecisionStore,
     calls: Mutex<Vec<&'static str>>,
     conflicts: AtomicUsize,
+    /// How the next insert fails, once.
+    insert_fault: Mutex<Option<InsertFault>>,
+}
+
+/// How [`CountingStore`] fails an insert.
+#[derive(Debug, Clone, Copy)]
+enum InsertFault {
+    /// Nothing is written: the write did not commit.
+    Refused,
+    /// Another owner wrote the same row first: the row is stored, and this
+    /// insert conflicts with it.
+    LostRace,
 }
 
 impl CountingStore {
@@ -72,6 +84,10 @@ impl CountingStore {
         self.conflicts.store(count, Ordering::SeqCst);
     }
 
+    fn fail_next_insert(&self, fault: InsertFault) {
+        *self.insert_fault.lock().expect("insert fault") = Some(fault);
+    }
+
     fn stored(&self, decision_id: &DecisionId) -> StoredDecision {
         match self.inner.get(decision_id).expect("read the stored row") {
             Some(DecisionRow::Readable(row)) => *row,
@@ -88,7 +104,17 @@ impl DecisionStore for CountingStore {
 
     fn insert_if_absent(&self, row: &StoredDecision) -> Result<(), ApprovalStoreError> {
         self.record("insert_if_absent");
-        self.inner.insert_if_absent(row)
+        let fault = self.insert_fault.lock().expect("insert fault").take();
+        match fault {
+            None => self.inner.insert_if_absent(row),
+            Some(InsertFault::Refused) => Err(ApprovalStoreError::NotCommitted(
+                "the store refused the write".to_owned(),
+            )),
+            Some(InsertFault::LostRace) => {
+                self.inner.insert_if_absent(row)?;
+                Err(ApprovalStoreError::Conflict)
+            }
+        }
     }
 
     fn replace_if_revision(
@@ -2459,6 +2485,48 @@ fn a_hold_that_opens_a_decision_announces_its_row_to_every_subscriber() {
     for openings in [&mut first, &mut second, &mut late] {
         assert_eq!(*opened(openings), next);
     }
+}
+
+/// A hold announces only a row it wrote itself. A hold whose write the store
+/// refused answers unavailable and announces nothing; made again, it opens
+/// the decision and announces it once. A hold whose row another owner wrote
+/// first answers as a replay of that row and announces nothing.
+#[test]
+fn a_hold_that_does_not_write_its_row_announces_nothing() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let mut openings = service.subscribe_openings();
+
+    store.fail_next_insert(InsertFault::Refused);
+    let refused = service
+        .hold(hold_request(&rendering), true)
+        .expect_err("the store refused the write");
+    assert!(
+        matches!(refused, DecisionError::Unavailable(_)),
+        "{refused:?}"
+    );
+    let next = ready(&mut openings);
+    assert!(next.is_none(), "a refused write announced: {next:?}");
+    let held = service
+        .hold(hold_request(&rendering), true)
+        .expect("the hold made again");
+    assert_eq!(*opened(&mut openings), held);
+    let next = ready(&mut openings);
+    assert!(next.is_none(), "one announcement per opening: {next:?}");
+
+    store.fail_next_insert(InsertFault::LostRace);
+    let replayed = service
+        .hold(
+            hold_of("artifact:build-9", requester(), None, &rendering, DEADLINE),
+            true,
+        )
+        .expect("a replay of the row the other owner wrote");
+    assert_eq!(replayed, store.stored(&replayed.decision_id));
+    let next = ready(&mut openings);
+    assert!(
+        next.is_none(),
+        "a hold that lost the race announced: {next:?}"
+    );
 }
 
 /// A subscriber that falls more than the subscription's capacity behind

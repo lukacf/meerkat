@@ -395,10 +395,12 @@ them.
   started it, device trusted, in an authentication scope of the
   connection's own. A decision that opens while the connection is open,
   waits for a human and is addressed to an approver id the operator acts
-  for is presented at once; when its client lists (`decision/list`), the
-  connection presents each decision of the returned page that is open,
-  waits for a human and is addressed to an approver id the operator acts
-  for, in page order. Each decision is presented once per connection: the
+  for is presented at once, as it stands then (a connection that falls
+  behind the openings catches up from the open decisions); when its client
+  lists (`decision/list`), the connection presents each decision of the
+  returned page that is open, waits for a human and is addressed to an
+  approver id the operator acts for, in page order. Each decision is
+  presented once per connection: the
   connection writes a `decision/notice` notification with the whole
   rendering, records the presentation once the notice is on the pipe, and
   answers a listed page as recorded. Starting a connection presents
@@ -431,10 +433,17 @@ them.
   `SessionRuntime::decision_service` or `PersistenceBundle::decision_owner`.
   Its trusted adapter shows the decision to the person and relays their
   authenticated answer through `MethodRouter::dispatch_with_decision_event`.
-  A decision another process holds in the same store is not announced. No
-  connection without an operator is told, so plain approval records and
-  unauthenticated connections are unchanged: a client polls
-  `approval/list`, `approval/get` or `decision/list`. (#2115, thanks @zond)
+  A decision another process holds in the same store is not announced, and
+  a decision held in its review stage is announced when it opens, not when
+  its review escalates it to the human stage. A host's hold,
+  read or decide made while a connection records a presentation can answer
+  store unavailable (`DecisionError::Unavailable`, `-32033`) with nothing
+  written; the host makes it again. No connection without an operator is
+  told, so plain approval records and unauthenticated connections are
+  unchanged: a client polls `approval/list`, `approval/get` or
+  `decision/list`. The Python and TypeScript SDKs drop `decision/notice`,
+  for which they offer no handler, instead of buffering it as a session
+  event. (#2115, thanks @zond)
 
 - Credential and configuration administration admissions settle a typed
   record to a recorder the host supplies. A host's `AdministrationEntry`

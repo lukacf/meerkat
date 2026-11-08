@@ -1338,6 +1338,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // A connection whose operator decides durable decisions presents to
         // it each decision the runtime opens from now on, before the first
         // request is read. A connection without an operator is told nothing.
+        // Dropping the handle (this future dropped included) stops the
+        // presentations.
         #[cfg(all(unix, feature = "local-authorization"))]
         let decision_presentations = self.router.spawn_decision_presentations();
 
@@ -1628,19 +1630,24 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // A presentation whose notice was not written records nothing, and
         // a list or a decide waiting for the presentation's pass goes on.
         #[cfg(all(unix, feature = "local-authorization"))]
-        if let Some(presentations) = decision_presentations {
+        if let Some(presentations) = &decision_presentations {
             presentations.abort();
-            let _ = presentations.await;
         }
         // A governed pipe's consent scope retires next, before anything
-        // drains, so no eligibility observed for the pipe stays current
-        // while the handlers and sessions below drain.
+        // waits or drains, so no eligibility observed for the pipe stays
+        // current while the presentations end and the handlers and sessions
+        // below drain.
         #[cfg(feature = "local-authorization")]
         self.router.close_governed_connection();
         // So does the connection's operator for durable decisions: a decide
         // on it that commits from here is not eligible.
         #[cfg(all(unix, feature = "local-authorization"))]
         self.router.close_decision_operator();
+        // Only then does the connection wait for the presentations to end.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(presentations) = decision_presentations {
+            presentations.finished().await;
+        }
 
         // EOF or any read/write failure closes the response queue before we
         // return. Dispatch tasks that finish later receive a send error and

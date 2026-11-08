@@ -2256,8 +2256,11 @@ carry a closed `data.kind`:
 Store faults carry no `data` and use the approval store codes: `-32033`
 store unavailable (nothing was written), `-32034` conflict (another owner
 changed the decision) and `-32035` commit unknown (the write may have
-committed). A request value this version cannot read is invalid params
-(`-32602`) with no `data`.
+committed). Each decision call opens its own store connection and never
+waits, so a call made while another one writes (a connection recording a
+presentation, for one) can answer `-32033`: the caller makes it again. A
+request value this version cannot read is invalid params (`-32602`) with no
+`data`.
 
 The refusal kinds are closed, because they bear authority: a client can
 match on every kind, and this version sends no other.
@@ -2311,9 +2314,14 @@ rendering to show. The adapter shows it to the person and relays their
 authenticated answer through `MethodRouter::dispatch_with_decision_event`. A
 subscriber that falls behind reads `DecisionOpening::Missed` and lists the
 open decisions to catch up, as it does when it starts; a decision another
-process holds in the same store is not announced. Only a connection whose
-operator decides a decision is told when it opens (below): a connection
-without an operator, a TCP connection among them, gets no `decision/notice`.
+process holds in the same store is not announced. A decision held in its
+review stage is announced when it opens; its later escalation to the human
+stage is not. A host's own hold, read or decide can
+answer store unavailable (`DecisionError::Unavailable`, `-32033` on the wire)
+while a connection records a presentation, with nothing written: the host
+makes it again. Only a connection whose operator decides a decision is told
+when it opens (below): a connection without an operator, a TCP connection
+among them, gets no `decision/notice`.
 
 ### The operator of a stdio connection
 
@@ -2328,7 +2336,11 @@ says otherwise.
 The connection presents decisions to its operator when they open and when its
 client lists them. A decision the runtime's decision owner opens while the
 connection is open, that waits for a human and is addressed to an approver id
-the operator acts for, is presented at once, without a request. Before it
+the operator acts for, is presented at once, without a request, as it stands
+when the connection reaches it: one decided in the meantime is not shown. A
+connection that falls behind the openings catches up: it presents, page by
+page, each open decision the operator acts for that it has not presented yet,
+one held before the connection started included. Before it
 answers a `decision/list`, the connection presents each decision of the
 returned page that is open, waits for a human, is addressed to an approver id
 the operator acts for and was not presented on this connection yet, in page

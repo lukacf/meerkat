@@ -264,7 +264,9 @@ pub enum DecisionOpening {
     /// The owner opened this decision: the row its hold wrote.
     Opened(Arc<StoredDecision>),
     /// The subscription fell behind and missed this many openings. The
-    /// subscriber lists the open decisions to catch up.
+    /// subscriber lists the open decisions to catch up; an `rkat-rpc`
+    /// connection whose operator decides decisions catches up so, presenting
+    /// each open decision it acts for and has not presented yet.
     Missed { missed: u64 },
 }
 
@@ -300,6 +302,12 @@ impl DecisionOpenings {
 /// Opened once per persistence, beside its approval issuer, and shared by
 /// every surface of that persistence. Cloning shares the store, and the
 /// subscribers of the decisions the owner opens.
+///
+/// A SQLite store opens a connection per call that never waits for another
+/// writer: a call made while another one writes (an `rkat-rpc` connection
+/// recording a presentation, for one) can answer
+/// [`DecisionError::Unavailable`] with nothing written, and the caller makes
+/// it again.
 #[derive(Clone)]
 pub struct DurableDecisionService {
     backing: Backing,
@@ -944,9 +952,10 @@ impl DurableDecisionService {
                     let row = StoredDecision::held(descriptor, stored_state(authority.state())?);
                     match store.insert_if_absent(&row) {
                         Ok(()) => {
-                            if opened {
-                                // Nobody may be subscribed: an announcement
-                                // nobody receives is dropped.
+                            // Nobody may be subscribed: the row is copied
+                            // for subscribers only, and an announcement
+                            // nobody receives is dropped.
+                            if opened && self.openings.receiver_count() > 0 {
                                 let _ = self.openings.send(Arc::new(row.clone()));
                             }
                             return Ok(row);
@@ -968,7 +977,9 @@ impl DurableDecisionService {
     /// refused hold announces nothing, a candidate launch opens nothing, and
     /// a decision another process holds in the same store is not announced:
     /// a subscriber lists the open decisions when it starts, and when it
-    /// reads [`DecisionOpening::Missed`].
+    /// reads [`DecisionOpening::Missed`]. A decision held in its review stage
+    /// is announced when it opens, in that stage; its later escalation to the
+    /// human stage is not announced.
     #[must_use]
     pub fn subscribe_openings(&self) -> DecisionOpenings {
         DecisionOpenings {

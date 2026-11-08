@@ -77,6 +77,10 @@ const SUMMARY: &str = "list the mob's peers";
 const REALM: &str = "decision-notice";
 /// The approver id the host's gate holds its decisions for.
 const APPROVER: &str = "team:owners";
+/// The approver id the operator of a stdio connection acts for when the
+/// configuration names none (`[governance.decisions] operator_approver_ids`):
+/// a decision held for it would be presented to an operator connection.
+const OPERATOR_APPROVER: &str = "operator";
 /// The JSON-RPC code of a method with no route.
 const METHOD_NOT_FOUND: i64 = -32601;
 /// The JSON-RPC code of a refused decision.
@@ -235,7 +239,7 @@ impl meerkat_core::ToolDispatchAdmission for DecisionGate {
         }
         let held = self
             .decisions
-            .hold(decision_hold(call.id), false)
+            .hold(decision_hold(call.id, APPROVER), false)
             .map_err(|error| ToolError::other(error.to_string()))?;
         let _ = self.raised.send(held.decision_id.to_string());
         loop {
@@ -277,9 +281,9 @@ fn principal(kind: PrincipalKind, id: &str) -> PrincipalRef {
 }
 
 /// The decision the host's gate holds for the tool call `call_id`: the call
-/// as the held request, [`SUMMARY`] as its rendering, for [`APPROVER`],
+/// as the held request, [`SUMMARY`] as its rendering, for `approver`,
 /// requested by the gate, open for ten minutes.
-fn decision_hold(call_id: &str) -> DecisionHoldRequest {
+fn decision_hold(call_id: &str, approver: &str) -> DecisionHoldRequest {
     let request = json!({"tool": GATED_TOOL, "arguments": {}});
     DecisionHoldRequest::new(
         DecisionKind::new("tool_call").expect("kind"),
@@ -289,7 +293,7 @@ fn decision_hold(call_id: &str) -> DecisionHoldRequest {
         DecisionRequestBody::from_value(&request).expect("request body"),
         DecisionPrincipalKey::of(&principal(PrincipalKind::RuntimeHost, "member-tool-gate"))
             .expect("principal key"),
-        ApproverId::new(APPROVER).expect("approver id"),
+        ApproverId::new(approver).expect("approver id"),
         now_ms() + 600_000,
         DecisionRendering::new(SUMMARY).expect("rendering"),
         DecisionRenderer::new("summary.v1").expect("renderer"),
@@ -810,7 +814,7 @@ async fn an_identity_the_host_does_not_admit_is_refused_typed() {
     let held = h
         .runtime
         .decision_service()
-        .hold(decision_hold("call-ineligible"), false)
+        .hold(decision_hold("call-ineligible", APPROVER), false)
         .expect("hold");
 
     let refused = h.adapter.decide(&held, "mallory", false, true).await;
@@ -843,8 +847,10 @@ async fn an_identity_the_host_does_not_admit_is_refused_typed() {
 }
 
 /// The unauthenticated TCP connection is no decider. A decision that opens
-/// while it is connected is not announced to it, and `decision/decide` has
-/// no route on it; the decision stays open and unpresented.
+/// while it is connected, held for the approver id a stdio connection's
+/// operator acts for (an operator connection would be told), is not
+/// announced to it, and `decision/decide` has no route on it; the decision
+/// stays open and unpresented.
 #[tokio::test]
 async fn an_unauthenticated_connection_is_not_told_and_cannot_decide() {
     let mut h = Harness::with_durable_decisions().await;
@@ -852,7 +858,7 @@ async fn an_unauthenticated_connection_is_not_told_and_cannot_decide() {
     let held = h
         .runtime
         .decision_service()
-        .hold(decision_hold("call-unannounced"), false)
+        .hold(decision_hold("call-unannounced", OPERATOR_APPROVER), false)
         .expect("hold");
 
     client.settle().await;

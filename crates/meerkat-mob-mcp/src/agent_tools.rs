@@ -181,6 +181,16 @@ enum ParentToolAccessPolicySource {
     LegacySessionMetadata,
 }
 
+/// The route a session's `delegate` helpers run on: the model, provider,
+/// self-hosted server and auth binding of the session's identity when the
+/// call runs (see `AgentMobToolSurface::current_route`).
+struct DelegateRoute {
+    model: String,
+    provider: Option<meerkat_core::Provider>,
+    self_hosted_server_id: Option<String>,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+}
+
 /// Agent-internal tool surface for mob delegation and orchestration.
 ///
 /// Composed by `build_agent()` into the tool gateway. Provides 8 tools
@@ -198,13 +208,15 @@ pub struct AgentMobToolSurface {
     parent_tool_access_policy_source: ParentToolAccessPolicySource,
     tools: Arc<[Arc<ToolDef>]>,
     owner_bridge_session_id: SessionId,
-    /// Model name inherited by implicit mob helpers.
+    /// The model the owning agent was built on. A `delegate` runs its helper
+    /// on the session's current route ([`Self::current_route`]); this one
+    /// stands in only where the session service records no durable identity
+    /// for the session, which then has not switched in place.
     model: String,
     /// The provider the owning agent's build resolved for `model`, named with
-    /// it on the implicit mob's `delegate` profile so helpers run on the
-    /// agent's own route. `None` on a surface built by [`Self::new`] or
-    /// [`Self::new_with_effective_authority`]: its implicit mob names the
-    /// model alone, which validates only for a catalogued model.
+    /// it on the build-time route. `None` on a surface built by [`Self::new`]
+    /// or [`Self::new_with_effective_authority`]: its build-time route names
+    /// the model alone, which validates only for a catalogued model.
     provider: Option<meerkat_core::Provider>,
     /// The self-hosted server the owning agent's build resolved for `model`,
     /// inherited with `provider`.
@@ -254,11 +266,13 @@ impl AgentMobToolSurface {
 
     /// Create a new agent mob tool surface.
     ///
-    /// The surface names no provider for `model`, so the implicit mob its
-    /// `delegate` creates validates only for a catalogued model.
+    /// The surface names no provider for `model`. A `delegate` runs its
+    /// helper on the session's current route as its durable metadata records
+    /// it; where the session service records none, the implicit mob names
+    /// `model` alone, which validates only for a catalogued model.
     /// [`AgentMobToolSurfaceFactory`] builds the surface with the provider
-    /// route the agent's build resolved, so a session on a model outside the
-    /// catalog delegates too.
+    /// route the agent's build resolved, so such a session on a model outside
+    /// the catalog delegates too.
     ///
     /// # Arguments
     /// * `state` - Shared MobMcpState for mob lifecycle operations
@@ -1057,20 +1071,23 @@ impl AgentMobToolSurface {
     // (agent loop) commits that projection to session build_state.
     // No re-entrant session service call from inside tool dispatch.
 
-    /// Get or create the implicit mob for this agent's session, on the
-    /// agent's model and the provider route its build resolved for it.
+    /// Get or create the implicit mob for this agent's session, on the route
+    /// the session runs on when the call runs ([`Self::current_route`]).
     ///
     /// Returns (mob_id, first_delegate) where first_delegate is true if the
-    /// mob was just created.
+    /// mob was just created, which includes replacing a mob whose route the
+    /// session has left.
     async fn ensure_implicit_mob(&self) -> Result<(MobId, bool), MobError> {
+        let route = self.current_route().await?;
         let cached_mob_id = self.cached_implicit_mob_id.read().await.clone();
         let (mob_id, first_delegate) = self
             .state
             .ensure_implicit_mob_on_route(
                 &self.owner_bridge_session_id.to_string(),
-                &self.model,
-                self.provider,
-                self.self_hosted_server_id.as_deref(),
+                &route.model,
+                route.provider,
+                route.self_hosted_server_id.as_deref(),
+                route.auth_binding.as_ref(),
                 cached_mob_id.as_ref(),
             )
             .await?;
@@ -1079,6 +1096,50 @@ impl AgentMobToolSurface {
         *cache = Some(mob_id.clone());
 
         Ok((mob_id, first_delegate))
+    }
+
+    /// The route the session runs on now: the model, provider, self-hosted
+    /// server and auth binding of the LLM identity its durable metadata
+    /// records. A turn that names another identity switches the session in
+    /// place and commits it before the turn runs, so a `delegate` after such
+    /// a switch, in the same turn or a later one, runs its helper where the
+    /// session runs, on the session's credentials.
+    ///
+    /// The read goes through the service's retained metadata, never through
+    /// the session's own task, which is waiting for this tool. A service that
+    /// keeps no durable metadata, or has none recorded for the session yet,
+    /// has not switched it in place, so the route the session was built with
+    /// is still its route. Any other failed read refuses the delegate: the
+    /// helper never runs on a route the session may have left.
+    async fn current_route(&self) -> Result<DelegateRoute, MobError> {
+        let service = self.state.session_service();
+        let session_id = self.owner_bridge_session_id.clone();
+        let recorded = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            service.load_retained_session_metadata(&session_id).await
+        })
+        .await;
+        let metadata = match recorded {
+            Ok(view) => view.and_then(|view| view.session_metadata),
+            Err(meerkat_core::service::SessionError::Unsupported(_)) => None,
+            Err(error) => return Err(MobError::SessionError(error)),
+        };
+        Ok(match metadata {
+            Some(metadata) => {
+                let identity = metadata.llm_identity();
+                DelegateRoute {
+                    model: identity.model,
+                    provider: Some(identity.provider),
+                    self_hosted_server_id: identity.self_hosted_server_id,
+                    auth_binding: identity.auth_binding,
+                }
+            }
+            None => DelegateRoute {
+                model: self.model.clone(),
+                provider: self.provider,
+                self_hosted_server_id: self.self_hosted_server_id.clone(),
+                auth_binding: None,
+            },
+        })
     }
 
     /// The authority grant a delegate returns for its session's implicit mob

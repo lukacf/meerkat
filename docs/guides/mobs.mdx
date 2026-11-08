@@ -94,9 +94,15 @@ A delegate helper is ephemeral: it is retired after its one task, and also when
 the calling turn stops waiting for it first.
 
 Unless its `tooling` supplies a profile, a helper runs on the model and
-provider (and self-hosted server) the calling session was built with, so a
-session on a realm `[models.<id>]` entry or a self-hosted model delegates. The
-helper resolves its own credentials from the realm.
+provider (and self-hosted server) the calling session runs on when the call
+runs, so a session on a realm `[models.<id>]` entry or a self-hosted model
+delegates. That is the session's current identity: after a turn that named
+another `model`, `provider`, `self_hosted_server_id` or `auth_binding`, the
+next `delegate` follows the switch. The helper also resolves its credentials
+through the session's auth binding; a session with none leaves the helper to
+the realm's resolution. A `delegate` whose session's route changed since the
+last one replaces the session's implicit mob, and its result says it created
+the mob.
 
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 

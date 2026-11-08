@@ -7965,11 +7965,12 @@ impl MobMcpState {
 
     /// Whether `mob_id` is `bridge_session_id`'s implicit mob with its
     /// `delegate` profile on `model` and, when the caller names one, on the
-    /// provider route `provider` and `self_hosted_server_id`. A profile that
-    /// names no provider (created before implicit mobs named one) is on the
-    /// route the registry resolves for its model, the same route a session on
-    /// that model resolves, so it matches any provider; its self-hosted server
-    /// must still match.
+    /// provider route `provider`, `self_hosted_server_id` and `auth_binding`.
+    /// A profile that names no provider (created before implicit mobs named
+    /// one) is on the route the registry resolves for its model, the same
+    /// route a session on that model resolves, so it matches any provider;
+    /// its self-hosted server and auth binding must still match, so a binding
+    /// change alone replaces the mob as a model change does.
     async fn implicit_mob_matches_session_model(
         &self,
         mob_id: &MobId,
@@ -7977,6 +7978,7 @@ impl MobMcpState {
         model: &str,
         provider: Option<meerkat_core::Provider>,
         self_hosted_server_id: Option<&str>,
+        auth_binding: Option<&meerkat_core::AuthBindingRef>,
     ) -> bool {
         let delegate_profile = ProfileName::from("delegate");
         let bridge_session_id = match SessionId::parse(bridge_session_id) {
@@ -8001,6 +8003,7 @@ impl MobMcpState {
                                 profile.provider.is_none_or(|named| named == provider)
                                     && profile.self_hosted_server_id.as_deref()
                                         == self_hosted_server_id
+                                    && profile.auth_binding.as_ref() == auth_binding
                             })
                     })
         })
@@ -8021,14 +8024,14 @@ impl MobMcpState {
         model: &str,
         cached_mob_id: Option<&MobId>,
     ) -> Result<(MobId, bool), MobError> {
-        self.ensure_implicit_mob_on_route(bridge_session_id, model, None, None, cached_mob_id)
+        self.ensure_implicit_mob_on_route(bridge_session_id, model, None, None, None, cached_mob_id)
             .await
     }
 
     /// [`Self::ensure_implicit_mob_for_model`] whose definition's `delegate`
-    /// profile also names `provider` and `self_hosted_server_id`, the route
-    /// the owner session's build resolved for `model`
-    /// ([`MobDefinition::implicit_with_provider`]). An existing implicit mob
+    /// profile also names `provider`, `self_hosted_server_id` and
+    /// `auth_binding`: the route the owner session runs on when the caller
+    /// asks ([`MobDefinition::implicit_on_route`]). An existing implicit mob
     /// of the session is reused while its `delegate` profile runs on `model`
     /// over that route (see `implicit_mob_matches_session_model`), and
     /// replaced otherwise.
@@ -8038,6 +8041,7 @@ impl MobMcpState {
         model: &str,
         provider: Option<meerkat_core::Provider>,
         self_hosted_server_id: Option<&str>,
+        auth_binding: Option<&meerkat_core::AuthBindingRef>,
         cached_mob_id: Option<&MobId>,
     ) -> Result<(MobId, bool), MobError> {
         if let Some(cached_mob_id) = cached_mob_id
@@ -8048,6 +8052,7 @@ impl MobMcpState {
                     model,
                     provider,
                     self_hosted_server_id,
+                    auth_binding,
                 )
                 .await
         {
@@ -8075,6 +8080,7 @@ impl MobMcpState {
                     model,
                     provider,
                     self_hosted_server_id,
+                    auth_binding,
                 )
                 .await
             {
@@ -8092,11 +8098,12 @@ impl MobMcpState {
         })?;
         let mob_id = self
             .mob_create_definition_with_owner_bridge_session(
-                MobDefinition::implicit_with_provider(
+                MobDefinition::implicit_on_route(
                     bridge_session_id,
                     model,
                     provider,
                     self_hosted_server_id.map(str::to_owned),
+                    auth_binding.cloned(),
                 ),
                 owner_bridge_session_id,
                 true,
@@ -16492,6 +16499,7 @@ mod tests {
                 Some(meerkat_core::Provider::OpenAI),
                 None,
                 None,
+                None,
             )
             .await
             .expect("the owner's provider makes the definition validate");
@@ -16513,9 +16521,9 @@ mod tests {
 
     /// An implicit mob is reused while its `delegate` profile runs the
     /// requested model over the requested provider route, and replaced when
-    /// the route changes. A mob whose profile names no provider, as every
-    /// implicit mob did before they named one, runs on the provider its
-    /// model resolves to and is reused.
+    /// the route changes, a change of auth binding alone included. A mob
+    /// whose profile names no provider, as every implicit mob did before they
+    /// named one, runs on the provider its model resolves to and is reused.
     #[tokio::test]
     async fn an_implicit_mob_is_reused_on_its_route_and_replaced_when_the_route_changes() {
         use meerkat_core::Provider;
@@ -16540,6 +16548,7 @@ mod tests {
                 "claude-sonnet-4-5",
                 Some(Provider::Anthropic),
                 None,
+                None,
                 Some(&provider_less),
             )
             .await
@@ -16555,22 +16564,43 @@ mod tests {
             before
         );
 
+        let binding = |name: &str| meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").expect("realm id"),
+            binding: meerkat_core::BindingId::parse(name).expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let (one, two) = (binding("one"), binding("two"));
         let sid = SessionId::new().to_string();
         let model = "realm-gateway-model";
         let mut previous = None;
-        for (provider, server, replaced) in [
-            (Provider::OpenAI, None, true),
-            (Provider::OpenAI, None, false),
-            (Provider::Anthropic, None, true),
-            (Provider::SelfHosted, Some("local"), true),
-            (Provider::SelfHosted, Some("local"), false),
-            (Provider::SelfHosted, Some("other"), true),
+        for (provider, server, auth_binding, replaced) in [
+            (Provider::OpenAI, None, None, true),
+            (Provider::OpenAI, None, None, false),
+            (Provider::OpenAI, None, Some(&one), true),
+            (Provider::OpenAI, None, Some(&one), false),
+            (Provider::OpenAI, None, Some(&two), true),
+            (Provider::OpenAI, None, None, true),
+            (Provider::Anthropic, None, None, true),
+            (Provider::SelfHosted, Some("local"), None, true),
+            (Provider::SelfHosted, Some("local"), None, false),
+            (Provider::SelfHosted, Some("other"), None, true),
         ] {
             let (mob_id, created) = state
-                .ensure_implicit_mob_on_route(&sid, model, Some(provider), server, None)
+                .ensure_implicit_mob_on_route(
+                    &sid,
+                    model,
+                    Some(provider),
+                    server,
+                    auth_binding,
+                    None,
+                )
                 .await
                 .expect("ensure the implicit mob on the route");
-            assert_eq!(created, replaced, "{provider:?} {server:?}");
+            assert_eq!(
+                created, replaced,
+                "{provider:?} {server:?} {auth_binding:?}"
+            );
             let handle = state.handle_for(&mob_id).await.expect("handle");
             let profile = handle
                 .definition()
@@ -16578,12 +16608,20 @@ mod tests {
                 .cloned()
                 .expect("delegate profile");
             assert_eq!(
-                (profile.provider, profile.self_hosted_server_id.as_deref()),
-                (Some(provider), server)
+                (
+                    profile.provider,
+                    profile.self_hosted_server_id.as_deref(),
+                    profile.auth_binding.as_ref()
+                ),
+                (Some(provider), server, auth_binding)
             );
             let incarnation = handle.incarnation();
             if let Some(previous) = previous {
-                assert_eq!(incarnation != previous, replaced, "{provider:?} {server:?}");
+                assert_eq!(
+                    incarnation != previous,
+                    replaced,
+                    "{provider:?} {server:?} {auth_binding:?}"
+                );
             }
             previous = Some(incarnation);
         }

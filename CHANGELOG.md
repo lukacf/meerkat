@@ -776,6 +776,20 @@ them.
 
 ### Fixed
 
+- `meerkat-mob-mcp`: after an in-place model, provider, endpoint or
+  auth-binding switch (a turn that names `model`, `provider`,
+  `self_hosted_server_id` or `auth_binding`), `delegate` runs its helper on
+  the session's current identity: the model, provider and self-hosted
+  server the session runs on when the call runs, and its auth binding, so
+  the helper reaches the session's endpoint with the session's credentials.
+  Before, the helper ran on the route the session was built with and
+  resolved its credentials through the realm's default binding. The
+  session's implicit delegation mob records that route, binding included,
+  on its `delegate` profile, and the first `delegate` after the route
+  changed replaces the mob, as a model change did. A session with no auth
+  binding leaves its helpers to the realm's resolution, as before. An
+  implicit mob made by an earlier release records no binding, so a session
+  that has one gets its implicit mob replaced at its next `delegate`.
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends

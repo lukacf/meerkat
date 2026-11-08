@@ -6,8 +6,9 @@
 //! `self_hosted_server_id` or `auth_binding` (JSON-RPC `turn/start`, a mob
 //! member's `MemberTurnOptions`) reconfigures the live session, and its
 //! later turns run on the new identity. A `delegate` the session makes after
-//! the switch should run its helper on the identity the session has when the
-//! call runs.
+//! the switch runs its helper on the identity the session has when the call
+//! runs, its auth binding included, and a session whose route changed since
+//! its last delegate gets its implicit mob replaced on the new route.
 //!
 //! Every test here runs over the production runtime-backed session service
 //! with the real agent mob tools and no LLM client override: each build and
@@ -77,6 +78,12 @@ const SWITCH_TASK: &str = "IDENTITY-SWITCH-TURN";
 const DELEGATE_TASK: &str = "IDENTITY-DELEGATE-TASK";
 const HELPER_TASK: &str = "IDENTITY-HELPER-TASK";
 const HELPER_ANSWER: &str = "IDENTITY-HELPER-ANSWER";
+/// A second delegate of the same session, in a later turn. None of these
+/// contains its first-delegate counterpart, so each turn's answer is told
+/// apart by content alone.
+const SECOND_DELEGATE_TASK: &str = "IDENTITY-SECOND-DELEGATE-TASK";
+const SECOND_HELPER_TASK: &str = "IDENTITY-SECOND-HELPER-TASK";
+const SECOND_HELPER_ANSWER: &str = "IDENTITY-SECOND-HELPER-ANSWER";
 
 // ===========================================================================
 // Loopback OpenAI Responses endpoint
@@ -89,6 +96,8 @@ enum Caller {
     Parent,
     /// The delegated helper.
     Helper,
+    /// The helper of the session's second delegate.
+    SecondHelper,
 }
 
 /// One request an endpoint received.
@@ -109,6 +118,8 @@ struct Endpoint {
     /// The `delegate` call's result, as the delegating session's model got
     /// it back on this endpoint.
     delegate_result: Arc<Mutex<Option<String>>>,
+    /// The second `delegate` call's result, likewise.
+    second_delegate_result: Arc<Mutex<Option<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -120,17 +131,21 @@ impl Endpoint {
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let delegate_result = Arc::new(Mutex::new(None));
+        let second_delegate_result = Arc::new(Mutex::new(None));
         let task = {
             let requests = Arc::clone(&requests);
             let delegate_result = Arc::clone(&delegate_result);
+            let second_delegate_result = Arc::clone(&second_delegate_result);
             tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         return;
                     };
-                    let requests = Arc::clone(&requests);
-                    let delegate_result = Arc::clone(&delegate_result);
-                    tokio::spawn(serve_one(stream, requests, delegate_result));
+                    let results = DelegateResults {
+                        first: Arc::clone(&delegate_result),
+                        second: Arc::clone(&second_delegate_result),
+                    };
+                    tokio::spawn(serve_one(stream, Arc::clone(&requests), results));
                 }
             })
         };
@@ -138,6 +153,7 @@ impl Endpoint {
             base_url,
             requests,
             delegate_result,
+            second_delegate_result,
             task,
         }
     }
@@ -167,6 +183,17 @@ impl Endpoint {
     fn delegate_result(&self) -> Option<String> {
         self.delegate_result.lock().unwrap().clone()
     }
+
+    fn second_delegate_result(&self) -> Option<String> {
+        self.second_delegate_result.lock().unwrap().clone()
+    }
+}
+
+/// Where an endpoint records the delegate results the delegating session's
+/// model got back.
+struct DelegateResults {
+    first: Arc<Mutex<Option<String>>>,
+    second: Arc<Mutex<Option<String>>>,
 }
 
 impl Drop for Endpoint {
@@ -179,7 +206,7 @@ impl Drop for Endpoint {
 async fn serve_one(
     mut stream: tokio::net::TcpStream,
     requests: Arc<Mutex<Vec<WireRequest>>>,
-    delegate_result: Arc<Mutex<Option<String>>>,
+    results: DelegateResults,
 ) {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8192];
@@ -219,7 +246,7 @@ async fn serve_one(
     }
     let response = if head.starts_with("POST") {
         let body: Value = serde_json::from_slice(&buffer[header_end..]).unwrap_or(Value::Null);
-        let (content_type, payload) = answer(&body, &authorization, &requests, &delegate_result);
+        let (content_type, payload) = answer(&body, &authorization, &requests, &results);
         format!(
             "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
              connection: close\r\n\r\n{payload}",
@@ -250,11 +277,15 @@ fn function_call_output(body: &Value, call_id: &str) -> Option<String> {
 }
 
 /// Records the request and scripts its answer as a Responses event stream.
+///
+/// A turn's request carries the session's whole history, so a later turn
+/// still holds the first delegate's call and result. The second delegate is
+/// therefore matched first: its result, then its task.
 fn answer(
     body: &Value,
     authorization: &str,
     requests: &Mutex<Vec<WireRequest>>,
-    delegate_result: &Mutex<Option<String>>,
+    results: &DelegateResults,
 ) -> (&'static str, String) {
     let model = body["model"].as_str().unwrap_or_default().to_string();
     let input = body["input"].to_string();
@@ -263,26 +294,44 @@ fn answer(
         model: model.clone(),
         authorization: authorization.to_string(),
     };
-    let item = if let Some(result) = function_call_output(body, "call-delegate") {
-        requests.lock().unwrap().push(record(Caller::Parent));
-        *delegate_result.lock().unwrap() = Some(result);
-        text_item("delegated")
-    } else if input.contains(DELEGATE_TASK) {
-        requests.lock().unwrap().push(record(Caller::Parent));
+    let delegate_call = |item_id: &str, call_id: &str, task: &str, member_id: &str| {
         json!({
             "type": "function_call",
-            "id": "fc_delegate",
-            "call_id": "call-delegate",
+            "id": item_id,
+            "call_id": call_id,
             "name": "delegate",
             "status": "completed",
             "arguments": json!({
-                "task": HELPER_TASK,
-                "member_id": "helper",
+                "task": task,
+                "member_id": member_id,
                 "result_label": "helper_result",
                 "max_text_bytes": 4096,
             })
             .to_string(),
         })
+    };
+    let item = if let Some(result) = function_call_output(body, "call-delegate-second") {
+        requests.lock().unwrap().push(record(Caller::Parent));
+        *results.second.lock().unwrap() = Some(result);
+        text_item("delegated")
+    } else if input.contains(SECOND_DELEGATE_TASK) {
+        requests.lock().unwrap().push(record(Caller::Parent));
+        delegate_call(
+            "fc_delegate_second",
+            "call-delegate-second",
+            SECOND_HELPER_TASK,
+            "second-helper",
+        )
+    } else if let Some(result) = function_call_output(body, "call-delegate") {
+        requests.lock().unwrap().push(record(Caller::Parent));
+        *results.first.lock().unwrap() = Some(result);
+        text_item("delegated")
+    } else if input.contains(DELEGATE_TASK) {
+        requests.lock().unwrap().push(record(Caller::Parent));
+        delegate_call("fc_delegate", "call-delegate", HELPER_TASK, "helper")
+    } else if input.contains(SECOND_HELPER_TASK) {
+        requests.lock().unwrap().push(record(Caller::SecondHelper));
+        text_item(SECOND_HELPER_ANSWER)
     } else if input.contains(HELPER_TASK) {
         requests.lock().unwrap().push(record(Caller::Helper));
         text_item(HELPER_ANSWER)
@@ -590,6 +639,21 @@ impl Delegator {
     /// The `delegate` profile of the session's implicit delegation mob: the
     /// route its helpers run on.
     async fn implicit_delegate_profile(&self) -> Profile {
+        self.implicit_handle()
+            .await
+            .definition()
+            .resolve_inline_profile(&ProfileName::from("delegate"))
+            .cloned()
+            .expect("the implicit mob's delegate profile")
+    }
+
+    /// The incarnation the session's implicit delegation mob runs at: a
+    /// replaced mob keeps its id and runs at a new incarnation.
+    async fn implicit_incarnation(&self) -> meerkat_core::service::MobIncarnationId {
+        self.implicit_handle().await.incarnation()
+    }
+
+    async fn implicit_handle(&self) -> meerkat_mob::MobHandle {
         let session = self.session_id().await;
         let implicit = self
             .state
@@ -600,10 +664,6 @@ impl Delegator {
             .handle_for(&implicit)
             .await
             .expect("implicit mob handle")
-            .definition()
-            .resolve_inline_profile(&ProfileName::from("delegate"))
-            .cloned()
-            .expect("the implicit mob's delegate profile")
     }
 
     async fn destroy(self) {
@@ -623,6 +683,35 @@ fn completed_delegate_result(endpoints: &[&Endpoint]) -> String {
         "the helper ran to completion: {result}"
     );
     result
+}
+
+/// The second delegate's result on whichever endpoint the delegating
+/// session's turn ran, checked to be a completed helper run.
+fn completed_second_delegate_result(endpoints: &[&Endpoint]) -> String {
+    let result = endpoints
+        .iter()
+        .find_map(|endpoint| endpoint.second_delegate_result())
+        .expect("the delegating session's model got the second delegate's result back");
+    assert!(
+        result.contains("\"status\":\"completed\"") && result.contains(SECOND_HELPER_ANSWER),
+        "the second helper ran to completion: {result}"
+    );
+    result
+}
+
+/// The note a delegate result carries when the call created the session's
+/// implicit mob, a replacement included.
+const IMPLICIT_MOB_CREATED: &str = "Implicit delegation mob created";
+
+/// The auth binding a `delegate` profile records, in its persisted form: the
+/// form the implicit mob's profile is rebuilt from when the mob is restored.
+fn recorded_auth_binding(profile: &Profile) -> Value {
+    serde_json::to_value(profile).expect("the profile serializes")["auth_binding"].clone()
+}
+
+/// A binding in the same persisted form, for comparison.
+fn persisted_auth_binding(binding: Option<&AuthBindingRef>) -> Value {
+    serde_json::to_value(binding).expect("the binding serializes")
 }
 
 fn self_hosted_switch(model: &str, server: &str) -> MemberTurnOptions {
@@ -671,15 +760,14 @@ async fn model_switch_scenario() -> (Endpoint, Endpoint, Profile) {
     (one, two, delegate)
 }
 
-/// Intended behaviour. A session built on [`MIRROR_ON_ONE`] and switched in
-/// place to [`OTHER_ON_ONE`] (same provider and server) delegates: the
-/// helper runs on the session's current model, so its request to the
-/// endpoint names [`OTHER_REMOTE_MODEL`], and the implicit mob records
-/// [`OTHER_ON_ONE`] as the helpers' model. The session's identity is the
-/// one its turns run on now; a helper delegated from it should not run on a
-/// model the session has left.
+/// A session built on [`MIRROR_ON_ONE`] and switched in place to
+/// [`OTHER_ON_ONE`] (same provider and server) delegates: the helper runs on
+/// the session's current model, so its request to the endpoint names
+/// [`OTHER_REMOTE_MODEL`], and the implicit mob records [`OTHER_ON_ONE`] as
+/// the helpers' model. The session's identity is the one its turns run on
+/// now; a helper delegated from it should not run on a model the session has
+/// left.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "delegate keeps the session's build-time identity after an in-place switch; see the PR"]
 async fn delegate_after_an_in_place_model_switch_runs_the_helper_on_the_new_model() {
     let (one, two, delegate) = model_switch_scenario().await;
 
@@ -694,20 +782,6 @@ async fn delegate_after_an_in_place_model_switch_runs_the_helper_on_the_new_mode
         (OTHER_ON_ONE, Some(Provider::SelfHosted)),
         "the implicit mob records the session's current model for its helpers"
     );
-}
-
-/// Records today's behaviour; delete it when
-/// [`delegate_after_an_in_place_model_switch_runs_the_helper_on_the_new_model`]
-/// (which states the intended behaviour) passes. The delegate tool keeps
-/// the model the session was built with, so after the switch the helper's
-/// request names the build-time [`SHARED_REMOTE_MODEL`] and the implicit
-/// mob records [`MIRROR_ON_ONE`].
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn today_delegate_after_an_in_place_model_switch_runs_the_helper_on_the_build_model() {
-    let (one, _two, delegate) = model_switch_scenario().await;
-
-    assert_eq!(one.models_of(Caller::Helper), [SHARED_REMOTE_MODEL]);
-    assert_eq!(delegate.model, MIRROR_ON_ONE);
 }
 
 // ===========================================================================
@@ -756,15 +830,13 @@ async fn endpoint_switch_scenario() -> (Endpoint, Endpoint, Profile) {
     (one, two, delegate)
 }
 
-/// Intended behaviour. Two self-hosted servers serve the same model
-/// ([`SHARED_REMOTE_MODEL`]); a session built on server `one` and switched
-/// in place to server `two` delegates. The helper's request arrives at
-/// server `two`, where the session now runs, and not at server `one`; the
-/// implicit mob records server `two`. The model name alone cannot tell the
-/// two routes apart, so this is the case where a helper on the build-time
-/// route is visibly on the wrong endpoint.
+/// Two self-hosted servers serve the same model ([`SHARED_REMOTE_MODEL`]); a
+/// session built on server `one` and switched in place to server `two`
+/// delegates. The helper's request arrives at server `two`, where the session
+/// now runs, and not at server `one`; the implicit mob records server `two`.
+/// The model name alone cannot tell the two routes apart, so this is the case
+/// where a helper on the build-time route is visibly on the wrong endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "delegate keeps the session's build-time identity after an in-place switch; see the PR"]
 async fn delegate_after_an_in_place_endpoint_switch_sends_the_helper_to_the_new_endpoint() {
     let (one, two, delegate) = endpoint_switch_scenario().await;
 
@@ -787,46 +859,21 @@ async fn delegate_after_an_in_place_endpoint_switch_sends_the_helper_to_the_new_
     );
 }
 
-/// Records today's behaviour; delete it when
-/// [`delegate_after_an_in_place_endpoint_switch_sends_the_helper_to_the_new_endpoint`]
-/// (which states the intended behaviour) passes. The delegate tool keeps
-/// the route the session was built with, so after the switch to server
-/// `two` the helper's request still arrives at server `one`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn today_delegate_after_an_in_place_endpoint_switch_sends_the_helper_to_the_build_endpoint() {
-    let (one, two, delegate) = endpoint_switch_scenario().await;
-
-    assert_eq!(one.models_of(Caller::Helper), [SHARED_REMOTE_MODEL]);
-    assert!(two.models_of(Caller::Helper).is_empty());
-    assert_eq!(
-        (
-            delegate.model.as_str(),
-            delegate.self_hosted_server_id.as_deref()
-        ),
-        (MIRROR_ON_ONE, Some(SERVER_ONE))
-    );
-}
-
 // ===========================================================================
-// 3. Auth binding switch: a record, not a requirement
+// 3. Auth binding switch
 // ===========================================================================
 
-/// A record of today's behaviour, not a requirement: whether a helper should
-/// follow its session's auth binding is an open decision upstream.
-///
 /// One catalog model ([`CATALOG_MODEL`]) is served by two realm bindings
 /// whose backends are two endpoints; [`BINDING_ONE`] is the provider's
 /// default. A session built with no binding (so on [`BINDING_ONE`]'s
 /// endpoint) is switched in place to [`BINDING_TWO`] and delegates.
 ///
-/// Today the switch moves the session to endpoint two, while the helper's
-/// request arrives at endpoint one: the delegate tool names no binding for
-/// its helpers, so the helper resolves its own credentials through the
-/// realm's default binding. If the decision is that a helper follows the
-/// session's binding, this test inverts (the helper's request arrives at
-/// endpoint two) and should be renamed to state that requirement.
+/// The helper follows the session's binding: its request reaches endpoint
+/// two with endpoint two's key, and none reaches endpoint one. The implicit
+/// mob's `delegate` profile records the binding, so the helper's credentials
+/// are the session's, not the realm's default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn record_delegate_after_an_auth_binding_switch_resolves_the_helper_on_the_default_binding() {
+async fn delegate_after_an_auth_binding_switch_sends_the_helper_to_the_new_binding_with_its_key() {
     let one = Endpoint::start().await;
     let two = Endpoint::start().await;
     let delegator = Delegator::spawn(
@@ -857,18 +904,19 @@ async fn record_delegate_after_an_auth_binding_switch_resolves_the_helper_on_the
     assert!(two.models_of(Caller::Parent).len() >= 2);
     completed_delegate_result(&[&one, &two]);
 
-    // Today: the helper is on the realm's default binding, endpoint one.
     assert_eq!(
-        one.models_of(Caller::Helper),
+        two.models_of(Caller::Helper),
         [CATALOG_MODEL],
-        "today the helper resolves its own credentials (the realm default), not the session's \
-         binding"
+        "the helper's request reaches the endpoint of the session's current binding"
     );
-    assert!(two.models_of(Caller::Helper).is_empty());
+    assert!(
+        one.models_of(Caller::Helper).is_empty(),
+        "no helper request reaches the binding the session left"
+    );
     assert_eq!(
-        one.authorizations_of(Caller::Helper),
-        [format!("Bearer synthetic-key-{BINDING_ONE}")],
-        "today the helper authenticates with the default binding's credential"
+        two.authorizations_of(Caller::Helper),
+        [format!("Bearer synthetic-key-{BINDING_TWO}")],
+        "the helper authenticates with the session's binding's credential"
     );
     assert!(
         two.authorizations_of(Caller::Parent)
@@ -880,7 +928,12 @@ async fn record_delegate_after_an_auth_binding_switch_resolves_the_helper_on_the
     assert_eq!(
         (delegate.model.as_str(), delegate.provider),
         (CATALOG_MODEL, Some(Provider::OpenAI)),
-        "the implicit mob records the model and provider; a profile carries no auth binding"
+        "the implicit mob records the session's model and provider"
+    );
+    assert_eq!(
+        recorded_auth_binding(&delegate),
+        persisted_auth_binding(metadata.auth_binding.as_ref()),
+        "the implicit mob records the session's current binding for its helpers"
     );
     delegator.destroy().await;
 }
@@ -985,15 +1038,14 @@ async fn provider_switch_scenario() -> (Endpoint, Endpoint, Endpoint, Profile) {
     (one, two, openai, delegate)
 }
 
-/// Intended behaviour. A session built on the self-hosted [`MIRROR_ON_ONE`]
-/// (server `one`) and switched in place to [`CATALOG_MODEL`] on provider
-/// OpenAI delegates. The helper's request arrives at the OpenAI endpoint
-/// and names [`CATALOG_MODEL`], and the implicit mob records the OpenAI
-/// route with no self-hosted server. The delegate tool keeps the model,
-/// provider and server separately, so a fix that refreshed the model and
-/// server but kept the build-time provider would fail this case.
+/// A session built on the self-hosted [`MIRROR_ON_ONE`] (server `one`) and
+/// switched in place to [`CATALOG_MODEL`] on provider OpenAI delegates. The
+/// helper's request arrives at the OpenAI endpoint and names
+/// [`CATALOG_MODEL`], and the implicit mob records the OpenAI route with no
+/// self-hosted server. The model, provider and server are separate parts of
+/// the route, so a helper that took the session's model and server but kept
+/// the build-time provider would fail this case.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "delegate keeps the session's build-time identity after an in-place switch; see the PR"]
 async fn delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_new_provider() {
     let (one, two, openai, delegate) = provider_switch_scenario().await;
 
@@ -1018,24 +1070,281 @@ async fn delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_new_
     );
 }
 
-/// Records today's behaviour; delete it when
-/// [`delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_new_provider`]
-/// (which states the intended behaviour) passes. The delegate tool keeps
-/// the route the session was built with, so after the switch to OpenAI the
-/// helper's request still arrives at the self-hosted server `one` and names
-/// the build-time [`SHARED_REMOTE_MODEL`].
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn today_delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_build_provider() {
-    let (one, _two, openai, delegate) = provider_switch_scenario().await;
+// ===========================================================================
+// 5. A second delegate: the implicit mob follows the session's route
+// ===========================================================================
 
-    assert_eq!(one.models_of(Caller::Helper), [SHARED_REMOTE_MODEL]);
-    assert!(openai.models_of(Caller::Helper).is_empty());
+/// A session on server `one` delegates, which creates its implicit mob on
+/// that route. It then switches in place to server `two` and delegates
+/// again: the implicit mob is replaced (a new incarnation, and the call
+/// reports a created mob), the replacement records server `two`, and the
+/// second helper's request arrives at server `two` while the first helper's
+/// stayed at server `one`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delegate_after_a_switch_replaces_the_implicit_mob_and_runs_the_helper_on_the_new_route()
+{
+    let one = Endpoint::start().await;
+    let two = Endpoint::start().await;
+    let delegator = Delegator::spawn(
+        self_hosted_config(&one, &two),
+        MIRROR_ON_ONE,
+        Provider::SelfHosted,
+        Some(SERVER_ONE),
+    )
+    .await;
+
+    delegator
+        .turn(DELEGATE_TASK, MemberTurnOptions::default())
+        .await;
+    let first = completed_delegate_result(&[&one, &two]);
+    assert!(
+        first.contains(IMPLICIT_MOB_CREATED),
+        "the first delegate creates the implicit mob: {first}"
+    );
+    let before = delegator.implicit_incarnation().await;
+    let profile = delegator.implicit_delegate_profile().await;
     assert_eq!(
         (
-            delegate.model.as_str(),
-            delegate.provider,
-            delegate.self_hosted_server_id.as_deref()
+            profile.model.as_str(),
+            profile.self_hosted_server_id.as_deref()
+        ),
+        (MIRROR_ON_ONE, Some(SERVER_ONE))
+    );
+
+    delegator
+        .turn(SWITCH_TASK, self_hosted_switch(MIRROR_ON_TWO, SERVER_TWO))
+        .await;
+    delegator
+        .turn(SECOND_DELEGATE_TASK, MemberTurnOptions::default())
+        .await;
+
+    let second = completed_second_delegate_result(&[&one, &two]);
+    assert!(
+        second.contains(IMPLICIT_MOB_CREATED),
+        "the second delegate replaces the implicit mob the session's route left: {second}"
+    );
+    assert_ne!(
+        delegator.implicit_incarnation().await,
+        before,
+        "the replacement runs at a new incarnation"
+    );
+    let profile = delegator.implicit_delegate_profile().await;
+    assert_eq!(
+        (
+            profile.model.as_str(),
+            profile.self_hosted_server_id.as_deref()
+        ),
+        (MIRROR_ON_TWO, Some(SERVER_TWO)),
+        "the replacement records the session's current route"
+    );
+    assert_eq!(
+        one.models_of(Caller::Helper),
+        [SHARED_REMOTE_MODEL],
+        "the first helper ran on the route the session had then"
+    );
+    assert_eq!(
+        two.models_of(Caller::SecondHelper),
+        [SHARED_REMOTE_MODEL],
+        "the second helper runs where the session runs now"
+    );
+    assert!(
+        one.models_of(Caller::SecondHelper).is_empty(),
+        "no second-helper request reaches the server the session left"
+    );
+    delegator.destroy().await;
+}
+
+/// Without a switch nothing changes: the session's second delegate reuses
+/// its implicit mob (the same incarnation, and the call reports no created
+/// mob), and both helpers run on the route the session was built with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_a_switch_a_second_delegate_reuses_the_implicit_mob_on_the_same_route() {
+    let one = Endpoint::start().await;
+    let two = Endpoint::start().await;
+    let delegator = Delegator::spawn(
+        self_hosted_config(&one, &two),
+        MIRROR_ON_ONE,
+        Provider::SelfHosted,
+        Some(SERVER_ONE),
+    )
+    .await;
+
+    delegator
+        .turn(DELEGATE_TASK, MemberTurnOptions::default())
+        .await;
+    let first = completed_delegate_result(&[&one, &two]);
+    assert!(
+        first.contains(IMPLICIT_MOB_CREATED),
+        "the first delegate creates the implicit mob: {first}"
+    );
+    let before = delegator.implicit_incarnation().await;
+
+    delegator
+        .turn(SECOND_DELEGATE_TASK, MemberTurnOptions::default())
+        .await;
+
+    let second = completed_second_delegate_result(&[&one, &two]);
+    assert!(
+        !second.contains(IMPLICIT_MOB_CREATED),
+        "the second delegate reuses the implicit mob: {second}"
+    );
+    assert_eq!(
+        delegator.implicit_incarnation().await,
+        before,
+        "the implicit mob keeps its incarnation"
+    );
+    let profile = delegator.implicit_delegate_profile().await;
+    assert_eq!(
+        (
+            profile.model.as_str(),
+            profile.provider,
+            profile.self_hosted_server_id.as_deref()
         ),
         (MIRROR_ON_ONE, Some(Provider::SelfHosted), Some(SERVER_ONE))
     );
+    assert_eq!(one.models_of(Caller::Helper), [SHARED_REMOTE_MODEL]);
+    assert_eq!(one.models_of(Caller::SecondHelper), [SHARED_REMOTE_MODEL]);
+    assert!(two.requests().is_empty(), "nothing reaches server two");
+    delegator.destroy().await;
+}
+
+/// A binding change alone replaces the implicit mob. A session on
+/// [`CATALOG_MODEL`] that names no binding runs on the realm's default,
+/// [`BINDING_ONE`], and delegates: its implicit mob records the session's
+/// binding, and the helper reaches endpoint one with endpoint one's key. The
+/// session then switches in place to [`BINDING_TWO`], model and provider
+/// unchanged, and delegates again: the implicit mob is replaced, the
+/// replacement records binding two, and the second helper reaches endpoint
+/// two with endpoint two's key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_binding_change_alone_replaces_the_implicit_mob() {
+    let one = Endpoint::start().await;
+    let two = Endpoint::start().await;
+    let delegator = Delegator::spawn(
+        two_binding_config(&one, &two),
+        CATALOG_MODEL,
+        Provider::OpenAI,
+        None,
+    )
+    .await;
+
+    delegator
+        .turn(DELEGATE_TASK, MemberTurnOptions::default())
+        .await;
+    let first = completed_delegate_result(&[&one, &two]);
+    assert!(
+        first.contains(IMPLICIT_MOB_CREATED),
+        "the first delegate creates the implicit mob: {first}"
+    );
+    let before = delegator.implicit_incarnation().await;
+    let metadata = delegator.metadata().await;
+    assert_eq!(
+        metadata.auth_binding.as_ref().map(|b| b.binding.as_str()),
+        Some(BINDING_ONE),
+        "a session that names no binding runs on the realm's default"
+    );
+    assert_eq!(
+        recorded_auth_binding(&delegator.implicit_delegate_profile().await),
+        persisted_auth_binding(metadata.auth_binding.as_ref()),
+        "the implicit mob records the session's binding"
+    );
+    assert_eq!(
+        one.authorizations_of(Caller::Helper),
+        [format!("Bearer synthetic-key-{BINDING_ONE}")]
+    );
+
+    delegator
+        .turn(
+            SWITCH_TASK,
+            MemberTurnOptions::new()
+                .with_auth_binding(TurnMetadataOverride::Set(binding(BINDING_TWO))),
+        )
+        .await;
+    delegator
+        .turn(SECOND_DELEGATE_TASK, MemberTurnOptions::default())
+        .await;
+
+    let metadata = delegator.metadata().await;
+    assert_eq!(
+        (
+            metadata.model.as_str(),
+            metadata.provider,
+            metadata.auth_binding.as_ref().map(|b| b.binding.as_str())
+        ),
+        (CATALOG_MODEL, Provider::OpenAI, Some(BINDING_TWO)),
+        "the switch changed the session's binding alone"
+    );
+    let second = completed_second_delegate_result(&[&one, &two]);
+    assert!(
+        second.contains(IMPLICIT_MOB_CREATED),
+        "the binding change replaced the implicit mob: {second}"
+    );
+    assert_ne!(
+        delegator.implicit_incarnation().await,
+        before,
+        "the replacement runs at a new incarnation"
+    );
+    let profile = delegator.implicit_delegate_profile().await;
+    assert_eq!(
+        (profile.model.as_str(), profile.provider),
+        (CATALOG_MODEL, Some(Provider::OpenAI))
+    );
+    assert_eq!(
+        recorded_auth_binding(&profile),
+        persisted_auth_binding(metadata.auth_binding.as_ref()),
+        "the replacement records the session's current binding"
+    );
+    assert_eq!(
+        two.authorizations_of(Caller::SecondHelper),
+        [format!("Bearer synthetic-key-{BINDING_TWO}")],
+        "the second helper reaches endpoint two with endpoint two's key"
+    );
+    assert!(
+        one.models_of(Caller::SecondHelper).is_empty(),
+        "no second-helper request reaches the binding the session left"
+    );
+    delegator.destroy().await;
+}
+
+/// The switch and the delegate in one turn: a turn that names server `two`
+/// and delegates. The switch is committed before the turn runs, so the
+/// helper of that same turn already runs on server `two`, and nothing
+/// reaches server `one`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delegate_in_the_switching_turn_runs_the_helper_on_the_new_route() {
+    let one = Endpoint::start().await;
+    let two = Endpoint::start().await;
+    let delegator = Delegator::spawn(
+        self_hosted_config(&one, &two),
+        MIRROR_ON_ONE,
+        Provider::SelfHosted,
+        Some(SERVER_ONE),
+    )
+    .await;
+
+    delegator
+        .turn(DELEGATE_TASK, self_hosted_switch(MIRROR_ON_TWO, SERVER_TWO))
+        .await;
+
+    completed_delegate_result(&[&one, &two]);
+    assert!(
+        one.requests().is_empty(),
+        "the switching turn and its helper run on server two: {:?}",
+        one.requests()
+    );
+    assert_eq!(
+        two.models_of(Caller::Helper),
+        [SHARED_REMOTE_MODEL],
+        "the helper runs where the switched session runs"
+    );
+    let profile = delegator.implicit_delegate_profile().await;
+    assert_eq!(
+        (
+            profile.model.as_str(),
+            profile.self_hosted_server_id.as_deref()
+        ),
+        (MIRROR_ON_TWO, Some(SERVER_TWO)),
+        "the implicit mob records the route the turn switched to"
+    );
+    delegator.destroy().await;
 }

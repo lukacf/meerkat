@@ -1810,10 +1810,11 @@ impl SpiRealm {
                 WriterFenceAcquireStep::Exclusive => AcquireMode::Exclusive,
                 WriterFenceAcquireStep::TakeoverOwn => AcquireMode::Takeover,
             };
+            let sent = Instant::now();
             let acquired =
                 tokio::time::timeout(self.config.renew_timeout, self.host.acquire_fence(mode))
                     .await;
-            match self.acquire_answered(acquired)? {
+            match self.acquire_answered(acquired, sent)? {
                 AcquireNext::Takeover => step = WriterFenceAcquireStep::TakeoverOwn,
                 AcquireNext::Prove(grant) => break grant,
             }
@@ -1949,10 +1950,12 @@ impl SpiRealm {
     }
 
     /// Report the answer of an acquire of the re-acquire to the writer fence,
-    /// and say what comes next.
+    /// and say what comes next. `sent` is when the acquire was sent: the
+    /// store decided its answer at or after it.
     fn acquire_answered(
         &self,
         acquired: Result<Result<FenceGrant, HostStoreError>, tokio::time::error::Elapsed>,
+        sent: Instant,
     ) -> Result<AcquireNext, SpiError> {
         let installed = self.fence();
         let own_grant = lock(&self.writer_fence).machine.state().own_grant;
@@ -1991,16 +1994,18 @@ impl SpiRealm {
         };
         // The holder met again after the writer waited out the end it
         // recorded renewed its lease only when that lease now ends more than
-        // one renew interval later: a holder that renews on schedule moves
-        // its end by at least the lease minus one interval, while a store
-        // that rounds the remaining lease down, or reads it on a slower
-        // clock, only makes the recorded end early.
+        // one renew interval later. The new end is read from when this
+        // acquire was sent: the store decided its answer at or after that
+        // instant, so an answer that reaches the writer late cannot move the
+        // end later, and a store that rounds the remaining lease down only
+        // makes it earlier. A holder that renews on schedule moves its end by
+        // at least the lease minus one interval (two intervals at least), so
+        // a live renewer still reads as moved.
         let lease_moved = outcome == WriterFenceAcquireOutcome::Held
             && lock(&self.writer_fence)
                 .waited_until
                 .is_some_and(|(waited, until)| {
-                    waited == token
-                        && Instant::now() + remaining > until + self.timing.renew_interval()
+                    waited == token && sent + remaining > until + self.timing.renew_interval()
                 });
         let effects = self.apply_fence(
             FenceInput::AcquireAnswered {

@@ -504,9 +504,11 @@ The store relies on Core keeping these rules:
   the listing as at any re-acquire. The realm stops until it is opened
   again only when the same holder still holds the fence after that lease
   ended with its lease moved later by more than one renew interval (only a
-  live writer renews it), or when the listing shows a batch this writer did
-  not write. A holder whose lease did not move is waited out again: a
-  store that rounds `remaining` down only makes Core's recorded end early.
+  live writer renews it; Core reads the new end from when it sent the
+  acquire, so an answer that arrives late cannot move it), or when the
+  listing shows a batch this writer did not write. A holder whose lease
+  did not move is waited out again: a store that rounds `remaining` down
+  only makes Core's recorded end early.
   With no acquire of its
   own timed out, a holder Core does not know stops the realm at once. A
   takeover your store grants after Core's next successful acquire

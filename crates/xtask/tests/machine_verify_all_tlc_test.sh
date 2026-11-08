@@ -1126,7 +1126,8 @@ fi
 # committed write owes the new generation to exactly the members the slot's
 # old or new target selects, a seat owes the mob's generation, an unseat
 # leaves no delivery fact, a delivery is prepared only for an owed, bound,
-# born, local member, and no region step touches residency or wakes. It
+# born member (a placed member as a local one), and no region step touches
+# residency or wakes. It
 # first checks that the generated model defines every arm it drives,
 # requires each run's covered arms to fire and its eleven witnesses reached
 # (among them a retiring member's release, after its retire unbound it), one

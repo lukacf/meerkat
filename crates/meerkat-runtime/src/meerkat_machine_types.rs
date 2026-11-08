@@ -1564,6 +1564,11 @@ pub enum SupervisorBridgeCommandKind {
     // bound-supervisor ladder, as `ReadMemberHistory` does.
     HostFeatures,
     ReadMemberVisibleTools,
+    // Protocol V7 (a placed member's operator instructions): the
+    // host-addressed record and release of a member session's target,
+    // admitted and served by the host daemon, as `ReleaseMember` is.
+    RecordMemberInstructionTarget,
+    ReleaseMemberInstructionTarget,
 }
 
 impl SupervisorBridgeCommandKind {
@@ -1605,6 +1610,8 @@ impl SupervisorBridgeCommandKind {
         Self::MemberOperatorRequest,
         Self::HostFeatures,
         Self::ReadMemberVisibleTools,
+        Self::RecordMemberInstructionTarget,
+        Self::ReleaseMemberInstructionTarget,
     ];
 
     /// Wire enum variant identifier this kind mirrors.
@@ -1648,6 +1655,8 @@ impl SupervisorBridgeCommandKind {
             Self::MemberOperatorRequest => "MemberOperatorRequest",
             Self::HostFeatures => "HostFeatures",
             Self::ReadMemberVisibleTools => "ReadMemberVisibleTools",
+            Self::RecordMemberInstructionTarget => "RecordMemberInstructionTarget",
+            Self::ReleaseMemberInstructionTarget => "ReleaseMemberInstructionTarget",
         }
     }
 
@@ -1695,7 +1704,11 @@ impl SupervisorBridgeCommandKind {
             | Self::HostStatus
             | Self::IssueHostBindingDescriptor
             | Self::MemberOperatorRequest
-            | Self::HostFeatures => SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed,
+            | Self::HostFeatures
+            | Self::RecordMemberInstructionTarget
+            | Self::ReleaseMemberInstructionTarget => {
+                SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed
+            }
         }
     }
 
@@ -1754,8 +1767,12 @@ impl SupervisorBridgeCommandKind {
             | Self::HostStatus
             | Self::IssueHostBindingDescriptor
             // V7: the effect-free feature probe, answered by the host
-            // daemon's serving loop like `HostStatus`.
-            | Self::HostFeatures => {
+            // daemon's serving loop like `HostStatus`, and a placed member's
+            // operator-instruction record and release, served by it like
+            // `ReleaseMember`.
+            | Self::HostFeatures
+            | Self::RecordMemberInstructionTarget
+            | Self::ReleaseMemberInstructionTarget => {
                 SupervisorBridgeCommandRealization::RealizedOffDrain {
                 by: OffDrainResponder::HostDaemon,
                 }

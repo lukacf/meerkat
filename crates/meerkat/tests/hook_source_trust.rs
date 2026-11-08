@@ -971,3 +971,85 @@ async fn a_same_id_with_another_definition_is_refused() {
         vec![(HookId::new("shared"), untrusted_source())]
     );
 }
+
+/// A host tests its trust without a build: it builds a source from a path
+/// and the digest of the bytes with `HookSource::new` and puts it to
+/// `decide`. Only the approved bytes at the approved path are trusted.
+#[test]
+fn a_host_puts_a_source_it_built_to_its_trust() {
+    let path = Path::new("/srv/project/.rkat/config.toml");
+    let approved = HookSourceDigest::of(b"[hooks]\n");
+    let trust = RecordedTrust::new([(path.to_path_buf(), approved)]);
+
+    let source = HookSource::new(path, approved);
+    assert_eq!((source.path, source.sha256), (path, approved));
+    assert_eq!(trust.decide(source), HookSourceDecision::Trusted);
+
+    let rewritten = HookSourceDigest::of(b"[hooks]\ndefault_timeout_ms = 1\n");
+    assert_eq!(
+        trust.decide(HookSource::new(path, rewritten)),
+        HookSourceDecision::Untrusted,
+        "other bytes at the approved path"
+    );
+    let elsewhere = Path::new("/srv/other/.rkat/config.toml");
+    assert_eq!(
+        trust.decide(HookSource::new(elsewhere, approved)),
+        HookSourceDecision::Untrusted,
+        "the approved bytes at another path"
+    );
+    assert_eq!(
+        trust.asked(),
+        vec![
+            (path.to_path_buf(), approved),
+            (path.to_path_buf(), rewritten),
+            (elsewhere.to_path_buf(), approved),
+        ]
+    );
+}
+
+/// Trusts only the source a host builds with `HookSource::new` from a path
+/// and a digest, compared as a whole, and counts the questions that match it.
+struct BuiltSourceTrust {
+    path: PathBuf,
+    sha256: HookSourceDigest,
+    matched: AtomicUsize,
+}
+
+impl HookSourceTrust for BuiltSourceTrust {
+    fn decide(&self, source: HookSource<'_>) -> HookSourceDecision {
+        if source == HookSource::new(&self.path, self.sha256) {
+            self.matched.fetch_add(1, Ordering::SeqCst);
+            HookSourceDecision::Trusted
+        } else {
+            HookSourceDecision::Untrusted
+        }
+    }
+}
+
+/// The source a host builds for a convention file's path and the digest of
+/// its bytes is the source a build asks about when it reads those bytes, so
+/// a host's own test of `decide` covers the question the factory asks.
+#[tokio::test]
+async fn a_build_asks_about_the_source_a_host_builds() {
+    let (_temp, base, project) = fixture();
+    let marker = base.join("approved-hook-entered");
+    write_project_hooks(&project, vec![marker_guardrail("approved", &marker)]);
+    let trust = Arc::new(BuiltSourceTrust {
+        path: project_file(&project),
+        sha256: host_digest(&project),
+        matched: AtomicUsize::new(0),
+    });
+
+    let run = build_and_run_with(
+        &base,
+        &project,
+        None,
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+    )
+    .await;
+
+    assert_eq!(trust.matched.load(Ordering::SeqCst), 1);
+    assert!(marker.exists(), "the approved hook ran");
+    assert_eq!(run.tool.0.load(Ordering::SeqCst), 1);
+    assert!(refused_hooks(&run.events).is_empty());
+}

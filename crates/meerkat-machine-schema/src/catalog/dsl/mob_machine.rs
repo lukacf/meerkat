@@ -35347,15 +35347,18 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // Delivery. An owed member's delivery is prepared at the current
-        // generation for the session bound to it. A placed member's host has
-        // no delivery yet: it is blocked until a write selects it again or it
-        // is seated again. An unborn seat waits for the first wake that
-        // creates its session (carrying the snapshot), a member without a
-        // session for its binding, a retiring member for its retirement, and
-        // a member whose spawn committed its membership but not yet its
-        // activation for that activation: a failed activation rolls the
-        // member back, and a session it had delivered to would keep a
-        // target no member holds.
+        // generation for the session bound to it, local or placed alike: a
+        // placed member's session lives on its member host, and the shell
+        // carries the delivery there over the supervisor bridge. A member
+        // host that does not serve it refuses it before any effect, and that
+        // refusal's feedback blocks the member (member_host_unsupported)
+        // until a write selects it again or it is seated again. An unborn
+        // seat waits for the first wake that creates its session (carrying
+        // the snapshot), a member without a session for its binding, a
+        // retiring member for its retirement, and a member whose spawn
+        // committed its membership but not yet its activation for that
+        // activation: a failed activation rolls the member back, and a
+        // session it had delivered to would keep a target no member holds.
         transition PrepareMemberInstructionDeliveryNotOwed {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
@@ -35365,24 +35368,10 @@ macro_rules! mob_catalog_machine_dsl {
             emit MemberInstructionDeliveryDeferred { agent_identity: agent_identity, reason: MemberInstructionDeferReason::NotOwed }
         }
 
-        transition PrepareMemberInstructionDeliveryPlaced {
-            per_phase [Running, Stopped]
-            on signal PrepareMemberInstructionDelivery { agent_identity }
-            guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
-            guard "member_is_placed" { self.member_placement.contains_key(agent_identity) == true }
-            update {
-                self.member_instruction_owed.remove(agent_identity);
-                self.member_instruction_blocked.insert(agent_identity, MemberInstructionBlock::MemberHostUnsupported);
-            }
-            to Running
-            emit MemberInstructionTargetBlocked { agent_identity: agent_identity, generation: self.operator_instruction_generation, block: MemberInstructionBlock::MemberHostUnsupported }
-        }
-
         transition PrepareMemberInstructionDeliveryUnborn {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
             guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
-            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_unborn" { self.member_seat_session_unborn.contains(agent_identity) == true }
             update {}
             to Running
@@ -35393,7 +35382,6 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
             guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
-            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
             guard "session_unbound" { self.member_session_bindings.contains_key(agent_identity) == false }
             guard "member_not_retiring" {
@@ -35412,7 +35400,6 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
             guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
-            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
             guard "member_retiring" {
                 self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value"))
@@ -35427,7 +35414,6 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
             guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
-            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
             guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "member_not_retiring" {
@@ -35451,7 +35437,6 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped]
             on signal PrepareMemberInstructionDelivery { agent_identity }
             guard "owed" { self.member_instruction_owed.contains_key(agent_identity) == true }
-            guard "member_is_local" { self.member_placement.contains_key(agent_identity) == false }
             guard "seat_session_born" { self.member_seat_session_unborn.contains(agent_identity) == false }
             guard "session_bound" { self.member_session_bindings.contains_key(agent_identity) == true }
             guard "member_not_retiring" {

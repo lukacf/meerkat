@@ -1725,6 +1725,13 @@ pub struct RunStartInstructionApplication {
     state_before: serde_json::Value,
 }
 
+impl RunStartInstructionApplication {
+    /// The entry row's index in the transcript.
+    pub(crate) fn entry_index(&self) -> usize {
+        self.entry_index
+    }
+}
+
 /// Take out of a model request the operator-instruction rows a fork copied
 /// that the model cannot lower where they stand
 /// ([`Session::messages_for_model_request`]).

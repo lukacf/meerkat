@@ -2594,6 +2594,9 @@ export class MetaRuntime {
    * times out, the activation may still apply at the boundary: re-send the
    * identical activation, which answers `"applied"`, `"duplicate"` or the
    * typed refusal.
+   *
+   * @deprecated Since 0.9.11: keep standing instructions with
+   * {@link setInstruction}. This method keeps working.
    */
   async activateMemberInstruction(
     identity: string,
@@ -2622,6 +2625,94 @@ export class MetaRuntime {
       if (value !== undefined) params[name] = value;
     }
     const raw = await this._rpc("meta/member_instruction_activations", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects.
+   *
+   * Host-only. `target` is `{ kind: "mob" }` (every member of the gateway's
+   * mob), `{ kind: "profile", profile }` or `{ kind: "member", identity }`.
+   * The slot is `namespace` (one your host owns) and `key`; `revision` is at
+   * least 1 and strictly increasing per slot; `body` is the exact text, at
+   * most 256 KiB. `options.contentSha256` (`"sha256:<hex>"` of the body),
+   * when given, must be the body's.
+   *
+   * Resolves to Meerkat's write receipt once the record is durable:
+   * `disposition` (`"committed"`, or `"duplicate"` for an exact repeat),
+   * `generation` and `matched_members`. Each selected member receives the
+   * instruction at its next run start, never inside a run;
+   * {@link instructionStatus} reports it. A refusal rejects with an RPC
+   * error whose `data.instruction_set_code` names it, for example
+   * `"stale_revision"` or `"body_too_large"`.
+   */
+  async setInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target:
+      | { kind: "mob" }
+      | { kind: "profile"; profile: string }
+      | { kind: "member"; identity: string },
+    options: { contentSha256?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {
+      namespace,
+      key,
+      revision,
+      body,
+      target: { ...target },
+    };
+    if (options.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this._rpc("meta/set_instruction", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Revoke one operator instruction at a higher revision.
+   *
+   * Host-only. The record keeps its target; the members it selected drop the
+   * instruction at their next run start. Resolves to Meerkat's write
+   * receipt, as {@link setInstruction} does.
+   */
+  async revokeInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/revoke_instruction", { namespace, key, revision });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Read the operator instructions of the gateway's mob and one page of
+   * members.
+   *
+   * Host-only; read from committed state, so no member is woken. `namespace`
+   * and `key` narrow the records; `identity` or `profile` narrows the
+   * members; `offset` and `limit` (1 to 200, 100 by default) page them.
+   * Resolves to `{ mob_id, generation, desired, members }` (plus
+   * `next_offset` when there is another page): each record with its
+   * `target`, and each member, named by its `identity`, with its delivery and
+   * per-slot state. Advisory values such as a pending reason can be new to
+   * this SDK: keep an unknown one as it is.
+   */
+  async instructionStatus(
+    query: {
+      namespace?: string;
+      key?: string;
+      identity?: string;
+      profile?: string;
+      offset?: number;
+      limit?: number;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(query)) {
+      if (value !== undefined) params[name] = value;
+    }
+    const raw = await this._rpc("meta/instruction_status", params);
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 

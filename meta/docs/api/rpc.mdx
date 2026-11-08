@@ -286,7 +286,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32044` | A mob announcement method on a gateway that did not enable mob announcements (see [Mob announcements](#mob-announcements-optional)). `MobAnnouncementsUnavailableError` in both SDKs. | `{kind: "mob_announcements_unavailable"}` |
 | `-32045` | Mob announcement conflict: a source key already bound to other content, a stale subscription or source revision, a collector step from a cursor version another step already moved, a reused operation id, a batch that moved. `AnnouncementConflictError` in both SDKs; a source's stale revision is `SourceStaleRevisionError` and a moved cursor `SourceVersionConflictError`, both carrying the source's current position. | `{kind: "announcement_conflict", existing}`, `{kind: "stale_revision", current_revision}` (a subscription), `{kind: "stale_revision", current_revision, current_version, generation, cursor}` (a source), `{kind: "source_version_conflict", current_version, cursor, state, revision}`, `{kind: "operation_reused"}` or `{kind: "batch_moved", current}` |
 | `-32046` | `meta/mob_announcements/subscriptions/put` start frontier outside a mob's announcements: older than what is retained, or beyond its head (a mob that has announced nothing yet is at head 0). `AnnouncementFrontierError` in both SDKs. | `{kind: "gap", mob_id, earliest_retained}` or `{kind: "frontier_beyond_head", mob_id, head}` |
-| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/console/sign_out`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
+| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), the operator instruction writes (`meta/set_instruction` and `meta/revoke_instruction`), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/console/sign_out`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
 | `-32048` | A mob announcement method names a subscription, delivery, source or mob that does not exist here. `AnnouncementNotFoundError` in both SDKs. | `{kind: "unknown_subscription"}`, `{kind: "unknown_delivery"}`, `{kind: "unknown_source"}` or `{kind: "unknown_mob", mobs}` |
 
 `meta/init` refuses the members' native realm and auth binding
@@ -2255,9 +2255,11 @@ change alone never refuses a send.
 ## Identity delivery and turn tickets
 
 Identity-addressed methods (these, the identity status, inspect and
-lifecycle methods, and the operator member methods
+lifecycle methods, the operator member methods
 `meta/member_activate_instruction`, `meta/member_instruction_activations`,
-`meta/compact_member` and `meta/bound_member_transcript`) take the durable
+`meta/compact_member` and `meta/bound_member_transcript`, and the identity an
+operator instruction names: `meta/set_instruction`'s member target and
+`meta/instruction_status`'s `identity`) take the durable
 identity or its current generated runtime id,
 `rt:<identity>:<generation>`. A runtime id that is no longer the
 identity's binding, such as the predecessor's after a reset, is refused with
@@ -3032,6 +3034,10 @@ Errors:
 
 ### `meta/member_activate_instruction`
 
+Deprecated since 0.9.11: keep standing instructions with
+[operator instructions](#operator-instructions) (`meta/set_instruction`). The
+verb keeps working, and its records stay readable.
+
 Host-only: present on the gateway's JSON-RPC surface and the SDKs, never in an
 agent tool catalog. It changes a member's standing instructions after its
 session was minted (resume authors nothing, so a restored member otherwise keeps
@@ -3097,6 +3103,103 @@ current session. Params: `identity`, and optionally `namespace`, `key`,
 Meerkat's `InstructionActivationReadPage`; naming one exact `namespace` and
 `key` also returns its `key_state`, including the `next_expectation` for the
 next activation.
+
+## Operator instructions
+
+Operator instructions are standing System-plane instructions a host keeps
+for the members of the gateway's mob: one body per slot (a `namespace` your
+host owns and a `key`) at a revision, for every member, the members of one
+profile, or one identity. The write answers once the record is durable in
+the mob's journal; each member it selects applies the instruction at its next
+fresh run start as one System entry, never inside a run, and a member added
+later, or moved to the profile later, receives it then. Meta keeps no state
+of its own here: the three verbs map onto Meerkat's mob
+(`MobHandle::set_operator_instruction`, `revoke_operator_instruction` and
+`operator_instruction_status`), with each member named by its Meta identity.
+
+They are host verbs, listed where an identity runtime is configured, never in
+an agent tool catalog. A candidate launch refuses `meta/set_instruction` and
+`meta/revoke_instruction` with `-32047` `candidate_launch` and still answers
+`meta/instruction_status`. It delivers no instruction either: a member owed
+its snapshot when the candidate starts stays owed (its status reads `owed`)
+until the authoritative launch delivers it, and a `candidate launch census`
+WARN counts such members.
+
+They replace `meta/member_activate_instruction` (deprecated since 0.9.11) for
+standing instructions: an activation changes one live member's current
+transcript at a turn boundary, while an operator instruction is the desired
+set the mob keeps for its members and delivers at their run starts.
+
+### `meta/set_instruction`
+
+Params: `namespace`, `key`, `revision` (at least 1, strictly increasing per
+slot), `body` (the exact text, at most 256 KiB), optional `content_sha256`
+(`sha256:` and 64 lowercase hex digits of the body; one that is not the
+body's digest is refused), and `target`: `{"kind": "mob"}`,
+`{"kind": "profile", "profile": "worker"}` or
+`{"kind": "member", "identity": "triage:main"}`. A member target's identity
+is resolved through the same identity-control gate as `meta/respawn`. A
+profile that no member has yet selects nobody until one does. Unknown fields
+are refused.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":1,"method":"meta/set_instruction","params":{"namespace":"app.example","key":"tone","revision":1,"body":"Answer formally.","target":{"kind":"profile","profile":"worker"}}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":1,"result":{"mob_id":"team","namespace":"app.example","key":"tone","revision":1,"disposition":"committed","generation":1,"matched_members":2}}
+```
+</CodeGroup>
+
+The result is Meerkat's write receipt: the `disposition` (`committed`, or
+`duplicate` for an exact repeat of the slot's current revision, which changes
+nothing), the mob's operator-instruction `generation` after the write, and
+`matched_members`, the current members the target selects. Delivery is
+asynchronous: the mob records each selected member's snapshot in its
+session, through the session while it is live and store-only while it is
+dormant, never waking it. `meta/instruction_status` reports it.
+
+A refused write answers `-32602` (a malformed instruction history `-32603`)
+with Meerkat's closed code in `error.data.instruction_set_code`:
+`invalid_request`, `digest_mismatch`, `stale_revision`, `revision_conflict`,
+`unknown_slot`, `slot_limit_exceeded`, `body_too_large`,
+`active_set_budget_exceeded`, `mob_terminal`, `malformed_instruction_history`
+or `prepared_authorization_required` (a governed runtime). Nothing was
+written. A mob that cannot answer keeps Meerkat's own error code and data.
+
+### `meta/revoke_instruction`
+
+Params: `namespace`, `key` and `revision`, higher than the slot's current
+one. The record keeps its target, and the members it selected drop the
+instruction at their next run start. The result and the refusals are those of
+`meta/set_instruction`.
+
+### `meta/instruction_status`
+
+Params, all optional: `namespace` and `key` (the records of one namespace or
+slot), `identity` (one member, resolved through the identity-control gate)
+or `profile` (the members of one profile), and `offset` and `limit` (1 to
+200 members, 100 when absent). The read comes from committed state and never
+wakes or materializes a member.
+
+The result is Meerkat's status page with each member named by its Meta
+identity: `generation`; `desired`, the records sorted by slot, each with its
+`target` (a member target reads `{"kind": "member", "identity": ...}`);
+`members`, one page in identity order, each with its `identity`, `profile`,
+`residency` (`live`, `dormant` or `unborn`), `delivery` (the
+`recorded_generation`, and `state` `current`, `owed` with the `generation`
+and the `last_failure`, or `blocked` with a `reason`), per slot the
+`desired`, `recorded` and `effective` views and the slot's `state`
+(`effective`, `pending` with a `reason`, `blocked` with a `reason`, or
+`not_targeted`), `effective_read` (`ok`, or `unreadable` with a `reason`:
+the member's session could not be read, and the page still answers) and
+`live_channel_open` (operator instructions apply to the member's turns, not
+to a live channel); and `next_offset` when another page follows.
+
+Dispositions, refusal codes and the state kinds are closed. The advisory
+values (a pending or blocked `reason`, `residency`) may grow: keep a value
+you do not know as it is.
 
 ## Scheduling
 

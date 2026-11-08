@@ -49,6 +49,36 @@ const results = await handle.memoryQuery({
 
 ```
 
+## Operator instructions
+
+Standing instructions for the members of the gateway's mob: the host writes
+one body per slot (a `namespace` it owns and a `key`) at a revision, for
+every member, the members of one profile, or one identity. Each member it
+selects applies the instruction at its next run start, never inside a run.
+Host methods only: no agent tool sets, revokes or reads them.
+
+```typescript
+const receipt = await rt.setInstruction("app.example", "tone", 1, "Answer formally.", {
+  kind: "profile",
+  profile: "worker",
+});
+await rt.setInstruction("app.example", "persona", 1, "You review releases.", {
+  kind: "member",
+  identity: "triage:main",
+});
+const status = await rt.instructionStatus({ identity: "triage:main" });
+await rt.revokeInstruction("app.example", "tone", 2);
+```
+
+A write resolves once the record is durable (`disposition` `"committed"`, or
+`"duplicate"` for an exact repeat); a refusal rejects with an RPC error whose
+`data.instruction_set_code` names it (for example `stale_revision`). The
+status read never wakes a member and names each member by its `identity`;
+its advisory values (a pending or blocked `reason`, `residency`) may be new
+to this SDK, so keep them as they are. These replace
+`activateMemberInstruction` (`meta/member_activate_instruction`, deprecated
+since 0.9.11). See [Operator instructions](/api/rpc#operator-instructions).
+
 ## Fork instruction policy
 
 A member forked with `fork_off`, a delegation fork or a council does not run

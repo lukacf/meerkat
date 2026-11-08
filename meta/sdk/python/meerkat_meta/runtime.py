@@ -1796,6 +1796,9 @@ class MetaRuntime:
     ) -> dict[str, Any]:
         """Append one keyed instruction activation to a member's current session.
 
+        Deprecated since 0.9.11: keep standing instructions with
+        :meth:`set_instruction`. This method keeps working.
+
         Host-only. ``activation`` is Meerkat's ``InstructionActivationRequest``
         (``revision``, ``activation_id``, ``expectation``, optional
         ``supersedes``, ``body``). The activation is a new transcript row that
@@ -1854,6 +1857,100 @@ class MetaRuntime:
             if value is not None:
                 params[name] = value
         raw = await self._rpc("meta/member_instruction_activations", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: dict[str, Any],
+        *,
+        content_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Write one operator instruction for the members ``target`` selects.
+
+        Host-only. ``target`` is ``{"kind": "mob"}`` (every member of the
+        gateway's mob), ``{"kind": "profile", "profile": ...}`` or
+        ``{"kind": "member", "identity": ...}``. The slot is ``namespace``
+        (one your host owns) and ``key``; ``revision`` is at least 1 and
+        strictly increasing per slot; ``body`` is the exact text, at most
+        256 KiB. ``content_sha256`` (``"sha256:<hex>"`` of the body), when
+        given, must be the body's.
+
+        Returns Meerkat's write receipt once the record is durable:
+        ``disposition`` (``"committed"``, or ``"duplicate"`` for an exact
+        repeat), ``generation`` and ``matched_members``. Each selected member
+        receives the instruction at its next run start, never inside a run;
+        :meth:`instruction_status` reports it. A refusal raises ``RpcError``
+        with ``data["instruction_set_code"]``, for example
+        ``"stale_revision"`` or ``"body_too_large"``.
+        """
+        params: dict[str, Any] = {
+            "namespace": namespace,
+            "key": key,
+            "revision": revision,
+            "body": body,
+            "target": dict(target),
+        }
+        if content_sha256 is not None:
+            params["content_sha256"] = content_sha256
+        raw = await self._rpc("meta/set_instruction", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def revoke_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+    ) -> dict[str, Any]:
+        """Revoke one operator instruction at a higher revision.
+
+        Host-only. The record keeps its target; the members it selected drop
+        the instruction at their next run start. Returns Meerkat's write
+        receipt, as :meth:`set_instruction` does.
+        """
+        raw = await self._rpc(
+            "meta/revoke_instruction",
+            {"namespace": namespace, "key": key, "revision": revision},
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    async def instruction_status(
+        self,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Read the operator instructions of the gateway's mob and one page of members.
+
+        Host-only; read from committed state, so no member is woken.
+        ``namespace`` and ``key`` narrow the records; ``identity`` or
+        ``profile`` narrows the members; ``offset`` and ``limit`` (1 to 200,
+        100 by default) page them. Returns ``{"mob_id", "generation",
+        "desired", "members"}`` (plus ``"next_offset"`` when there is another
+        page): each record with its ``target``, and each member, named by its
+        ``identity``, with its delivery and per-slot state. Advisory values
+        such as a pending reason can be new to this SDK: keep an unknown one
+        as it is.
+        """
+        params: dict[str, Any] = {}
+        for name, value in (
+            ("namespace", namespace),
+            ("key", key),
+            ("identity", identity),
+            ("profile", profile),
+            ("offset", offset),
+            ("limit", limit),
+        ):
+            if value is not None:
+                params[name] = value
+        raw = await self._rpc("meta/instruction_status", params)
         return raw if isinstance(raw, dict) else {}
 
     async def prune_member_system_rows(

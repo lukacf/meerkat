@@ -47,8 +47,9 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def manifest_value():
-    """A main candidate built from this checkout's release inputs."""
+def manifest_value(targets=None):
+    """A main candidate built from this checkout's release inputs: a package for each given target,
+    or for every target the inputs pin."""
     def package(target, data):
         return {"target": target, "name": forge.package_name(VERSION, target), "size": len(data), "sha256": sha256(data),
                 "artifact": {"id": 11, "name": forge.package_artifact_name(target, ATTEMPT), "digest": "e" * 64}}
@@ -63,7 +64,8 @@ def manifest_value():
                                        "backend": {"python": "Python 3.12.12", "node": "v22.21.1"},
                                        "frontend": {"python": "Python 3.12.3", "node": "v22.21.1"}}},
             "inputs_sha256": sha256(INPUTS_BYTES),
-            "packages": [package(target, f"{target} package".encode()) for target in sorted(INPUTS["targets"])]}
+            "packages": [package(target, f"{target} package".encode())
+                         for target in sorted(targets or INPUTS["targets"])]}
 
 
 def selection_value(manifest_bytes):
@@ -132,10 +134,11 @@ def fixture_directory():
 
 
 class DispatchTests(unittest.TestCase):
-    def run_tool(self, *, join=None, projection=None, expected=None, main_head=MERGED, remove=None):
+    def run_tool(self, *, join=None, projection=None, expected=None, main_head=MERGED, remove=None, targets=None):
         """join(slot, record) and projection(value) change the records before they are written;
-        expected(digests) changes the digests given to the tool. Returns (rc, stdout, stderr, files)."""
-        manifest = manifest_value()
+        expected(digests) changes the digests given to the tool; targets names the candidate's
+        packages (default: every target the checkout's inputs pin). Returns (rc, stdout, stderr, files)."""
+        manifest = manifest_value(targets)
         manifest_bytes = forge.rc.json_bytes(manifest)
         selection = selection_value(manifest_bytes)
         records = {"a5_join": a5_record(),
@@ -281,19 +284,20 @@ class DispatchTests(unittest.TestCase):
         self.refused("carries a candidate block", join=a5_candidate)
 
     def test_a_join_for_another_target_refuses_even_when_consistent(self):
-        # Connect's C1 control, through the record-reading dispatcher: either slot's record names
-        # macos-arm64 with that target's actual package digest. Every file digest and the
-        # projection's join digests are recomputed from the changed records, so only the
-        # agreed target can refuse it.
+        # Connect's C1 control, through the record-reading dispatcher: for a candidate that built
+        # every Forge target, either slot's record names macos-arm64 with that target's actual
+        # package digest. Every file digest and the projection's join digests are recomputed from
+        # the changed records, so only the agreed target can refuse it.
         # Mac in either slot alone, and in both; the Linux A5 owner join is kept every time.
         for slots in (("application_join",), ("guide_join",), ("application_join", "guide_join")):
             def mac(name, record, slots=slots):
                 if name in slots:
                     record["target"] = "macos-arm64"
-                    record["subjects"]["package_sha256"] = forge.manifest_packages(manifest_value())["macos-arm64"]
+                    record["subjects"]["package_sha256"] = forge.manifest_packages(
+                        manifest_value(forge.TARGETS))["macos-arm64"]
 
             with self.subTest(slots=slots):
-                self.refused(f"{slots[0]} record must cover linux-x86_64", join=mac)
+                self.refused(f"{slots[0]} record must cover linux-x86_64", join=mac, targets=forge.TARGETS)
 
     def test_the_a5_owner_join_must_cover_the_same_linux_target(self):
         def mac(name, record):
@@ -303,16 +307,18 @@ class DispatchTests(unittest.TestCase):
         self.refused("a5_join record must cover linux-x86_64", join=mac)
 
     def test_every_join_must_cover_the_same_target(self):
-        # Were a kind ever allowed for another target, the joins must still cover one target.
+        # Were a kind ever allowed for another target, the joins of a candidate that built every
+        # Forge target must still cover one target.
         def mac(name, record):
             if name == "guide_join":
                 record["target"] = "macos-arm64"
-                record["subjects"]["package_sha256"] = forge.manifest_packages(manifest_value())["macos-arm64"]
+                record["subjects"]["package_sha256"] = forge.manifest_packages(
+                    manifest_value(forge.TARGETS))["macos-arm64"]
 
         kinds = copy.deepcopy(tool.JOIN_KINDS)
         kinds["guide_join"]["connect_guide_candidate_join"]["target"] = "macos-arm64"
         with mock.patch.object(tool, "JOIN_KINDS", kinds):
-            self.refused("the joins cover different targets", join=mac)
+            self.refused("the joins cover different targets", join=mac, targets=forge.TARGETS)
 
     def test_an_unknown_kind_refuses(self):
         def unknown(slot, record):

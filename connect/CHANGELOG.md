@@ -35,6 +35,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   name the grant owner and the store a host's close releases, and
   `PrivateHostLifetimeControl::release_native_custody` is that release.
 
+### Security
+
+- `zip` is updated from 2.4.2 to 9.0.4 for RUSTSEC-2026-0367,
+  RUSTSEC-2026-0368, RUSTSEC-2026-0369 and RUSTSEC-2026-0429. They affect
+  `zip`'s archive extraction functions, which Connect never calls: it reads
+  MCPB bundles with its own bounded ZIP32 reader. `zip` is linked only
+  through `toolkit-package`'s `local-artifacts` feature, which
+  `toolkit-mcpb-install` uses; `meerkat-connect` and `toolkit_gateway` do
+  not link it.
+
 ### Known limitations
 
 - After a host loss, or a close that ran out of its 30-second join bound, an

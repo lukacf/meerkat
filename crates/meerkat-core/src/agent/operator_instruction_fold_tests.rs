@@ -1612,3 +1612,81 @@ async fn chatgpt_backend_session_defers_every_entry_with_lowering_unavailable() 
         "nothing is in effect"
     );
 }
+
+/// The snapshot a compaction folds the session's entry rows into is
+/// observed once its rewrite commits: one `operator_instructions_applied` of
+/// kind snapshot, projected from the snapshot row. On a model that lowers
+/// System rows only in the leading prefix the run start defers, so no delta
+/// is observed; the fold at that run's first request applies the target.
+#[tokio::test]
+async fn operator_instructions_applied_is_published_when_a_fold_commits() {
+    let client = Arc::new(FoldClient::default());
+    let compactor = Arc::new(ArmedCompactor::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        &compactor,
+        InstructionLowering::LeadingPrefixOnly,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(activate("tone", 1, "Answer formally."))
+        .unwrap();
+    compactor.arm(1);
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Deferred(InstructionDeferReason::LeadingPrefixOnly)
+    );
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(512);
+    agent
+        .run_with_events("next".into(), event_tx)
+        .await
+        .expect("the run completes");
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(compactor.rebuilds(), 1, "the run's first request compacts");
+
+    let snapshot = entry_identities(agent.session().messages())
+        .pop()
+        .expect("the snapshot row");
+    assert_eq!(snapshot.kind(), InstructionEntryKind::Snapshot);
+    let applied = events
+        .iter()
+        .filter_map(|event| match event {
+            meerkat_core::event::AgentEvent::OperatorInstructionsApplied {
+                session_id,
+                entry_sequence,
+                kind,
+                run_id,
+                active,
+                changes,
+            } => Some((
+                session_id.clone(),
+                *entry_sequence,
+                *kind,
+                run_id.clone(),
+                active.clone(),
+                changes.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        applied.len(),
+        1,
+        "one observation, of the snapshot: {events:?}"
+    );
+    let (session_id, entry_sequence, kind, run_id, active, changes) = applied[0].clone();
+    assert_eq!(&session_id, agent.session().id());
+    assert_eq!(entry_sequence, snapshot.entry_sequence());
+    assert_eq!(kind, InstructionEntryKind::Snapshot);
+    assert_eq!(run_id.as_ref(), snapshot.run_id());
+    assert!(run_id.is_some(), "the fold at a run start names that run");
+    assert_eq!(active.as_slice(), snapshot.active());
+    assert!(changes.is_empty(), "a snapshot carries no changes");
+}

@@ -49,6 +49,13 @@ import type {
   MobStopMemberRunResult,
 } from "./generated/types.js";
 import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
+import type {
+  InstructionTarget,
+  InstructionWriteOptions,
+  MobInstructionStatus,
+  MobInstructionStatusOptions,
+  MobInstructionWriteResult,
+} from "./instructions.js";
 import type { Usage } from "./events.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -560,6 +567,43 @@ export class Mob {
     options?: { source?: string; idempotencyKey?: string },
   ): Promise<Record<string, unknown>> {
     return this.client.appendMobSystemContext(this.mobId, agentIdentity, text, options);
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects;
+   * delivery to them is asynchronous.
+   */
+  async setInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target: InstructionTarget,
+    options?: InstructionWriteOptions,
+  ): Promise<MobInstructionWriteResult> {
+    return this.client.setMobInstruction(
+      this.mobId,
+      namespace,
+      key,
+      revision,
+      body,
+      target,
+      options,
+    );
+  }
+
+  /** Revoke one operator instruction at a higher revision; the record keeps its target. */
+  async revokeInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<MobInstructionWriteResult> {
+    return this.client.revokeMobInstruction(this.mobId, namespace, key, revision);
+  }
+
+  /** Read the mob's operator-instruction records and one page of members, without waking a member. */
+  async instructionStatus(options?: MobInstructionStatusOptions): Promise<MobInstructionStatus> {
+    return this.client.mobInstructionStatus(this.mobId, options);
   }
 
   async listFlows(): Promise<string[]> {

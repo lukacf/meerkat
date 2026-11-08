@@ -393,6 +393,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`unsupported runtime_options fields: decisions`): leave it out of the
   launch before rolling back.
 
+- Downgrade: Meta 0.9.10 does not read the gating state `rpc_gateway`
+  keeps (it keeps gating in memory), so after a rollback its pending
+  approvals and gating audit are missing, and a later start of this
+  release restores the state stored before the rollback. Decide pending
+  approvals before rolling back.
+- Downgrade: Meta 0.9.10 reads a memory record that names the console
+  person who wrote it (`"author": "operator"` with a `principal`) as
+  written by the operator: it shows no name, and the record keeps the
+  name. Nothing needs doing first.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -687,6 +697,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`IdentityRuntimeError::IdentityNameUnreadable`). Both SDKs raise it as
   `StorageResolutionError`, with `kind`, `identity` and `remedy` set.
 
+- Operator instructions for the gateway's mob: `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status` (Python
+  `set_instruction`, `revoke_instruction` and `instruction_status`;
+  TypeScript `setInstruction`, `revokeInstruction` and
+  `instructionStatus`). A host keeps standing System-plane instructions by
+  slot and revision for every member, the members of one profile or one
+  identity; each member applies them at its next run start, never inside a
+  run, and the status read names every member by its identity and wakes
+  none. They map onto Meerkat's mob operator instructions and keep no Meta
+  state. Host verbs: listed where an identity runtime is configured, never
+  agent tools; a candidate launch refuses the two writes with `-32047`
+  `candidate_launch` and answers the read. A candidate delivers no
+  instruction either: a member owed its snapshot stays owed until the
+  authoritative launch delivers it, and a `candidate launch census` WARN
+  counts such members.
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals
@@ -897,10 +923,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   principal, it carries none. It never borrows the requester of the model
   run whose result the app shows.
 
-- The stock gateways keep the gating owner's state (pending approvals and
-  the gating audit) in the realm's metadata store across restarts.
-  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
-  embedded runtime; a host that persists `gating_state_snapshot` itself
+- `rpc_gateway` started with a `persistent_state` directory keeps the
+  gating owner's state (pending approvals and the gating audit) in that
+  directory's metadata store, so it survives a restart. `meta_gateway`,
+  with persistent sessions too, and `rpc_gateway` without
+  `persistent_state` keep it in memory, as before: after a restart there
+  is no pending approval and the gating audit is empty (see Known
+  limitations). `UnifiedRuntimeBuilder::keep_gating_state(true)` does the
+  same for an embedded runtime whose metadata store keeps realm documents
+  across restarts; a host that persists `gating_state_snapshot` itself
   leaves it off.
 - Memory written from the console names the person who wrote it: its
   author, `application` before, is now the operator with the caller's
@@ -989,6 +1020,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `MobRuntimeError::Mob(MobError::IdentityMember)`: Core admits no external
   work to an entry. The identity runtime's doors reach the identity, and
   `meta/send_message` routes a Core entry to them.
+
+- Docs: `meta/member_activate_instruction` (and the SDKs'
+  `activate_member_instruction` / `activateMemberInstruction`) is
+  deprecated in favour of operator instructions (`meta/set_instruction`).
+  The method keeps working.
+
+- The incident command center example generates images with
+  `gpt-image-2.6-sunburst`, Core 0.9.11's OpenAI image default, unless
+  `RKAT_INCIDENT_IMAGE_MODEL` names another model (was `gpt-image-2`).
 
 ### Fixed
 
@@ -1179,11 +1219,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the discards it settled, or those the session's memory already holds, as
   the session's live compaction's would be.
 
-- The Approvals panel's Audit tab shows who decided and with what
-  assurance ("Decided by alice@example.test (as Release manager) - person
-  authenticated") when the record names the verified decider, not only
-  the approver label, and says when the gateway keeps its records in
-  memory, where decisions from before a gateway restart may be missing.
+- Release notes: Forge 0.3.1 ships for Linux x86_64; macOS arm64 follows in
+  Forge 0.3.2. The 0.9.10 notes named both targets.
 
 - A status read over a bridge that cannot read Core's entry of the identity
   refuses typed, where a member Core held Broken read `active`; `statuses`
@@ -1196,6 +1233,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the identity out of the match or answered from the member plane. The
   roster pass refuses an identity typed (`-32052`) when Core's member history
   cannot be read after its declaration, where it read the identity Dormant.
+
+- The Approvals panel's Audit tab shows who decided and with what
+  assurance ("Decided by alice@example.test (as Release manager) - person
+  authenticated") when the record names the verified decider, not only
+  the approver label, and says when the gateway keeps its records in
+  memory, where decisions from before a gateway restart may be missing.
 
 ### Known limitations
 
@@ -1253,6 +1296,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`MobHandle::get_member` answers from the published state too), so
   `meta/member_health` never waits for the mob's actor there. Carrying the
   hold in Core's entry read is a tracked follow-up.
+
+- `meta_gateway` does not yet keep its metadata durably, with persistent
+  sessions too: its console audit log, gating state (pending approvals and
+  the gating audit), metadata cursor and identity records live in memory
+  and start empty after a restart. `rpc_gateway` started with a
+  `persistent_state` directory keeps them in that directory's metadata
+  store.
+
+- Forge 0.3.1 installs the Meta 0.9.10 runtime. With it, named Console
+  accounts, the move to named accounts at an update, the Console's own
+  access copy (`.mobkit/console-access.toml`), OIDC sign-in, the sign-in
+  limits, the forwarding of native consent and the controller review work
+  as described above. Two of the Forge changes above need Meta 0.9.11:
+  - signing out ends the front's login and drops the Console tokens the
+    front holds; with Meta 0.9.11 the Console itself also refuses them at
+    once;
+  - with Meta 0.9.11 the Console itself also refuses a shared account's
+    answers in the native Toolkit setup panel; with Meta 0.9.10 only the
+    front refuses its frontend approvals, controller review answers and
+    setup bridge answers.
 
 ## [0.9.10] - 2026-11-04
 

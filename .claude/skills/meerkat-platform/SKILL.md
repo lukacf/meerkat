@@ -517,8 +517,8 @@ surface, not the old live-adapter/docs-refresh snapshot:
   `rkat session repair-wholeblob <session-id> --json`, then `--apply`).
   Treat these as "session intact, not runnable yet", not as service faults.
 - `rkat run --output html` / `--html` writes standalone HTML artifacts.
-- Image generation uses `generate_image` with OpenAI `gpt-image-2` and Gemini
-  `gemini-nano-banana-2.1` as provider defaults.
+- Image generation uses `generate_image` with OpenAI `gpt-image-2.6-sunburst`
+  and Gemini `gemini-nano-banana-2.1` as provider defaults.
 - Mob host surfaces include batch wiring, helper/fork/respawn/cancel/wait
   operations, profile CRUD when a profile store is present, store-issued
   resume verdicts, and certified bounded helper results for SDK consumers.

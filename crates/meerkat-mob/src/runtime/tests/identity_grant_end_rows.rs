@@ -336,6 +336,124 @@ async fn an_abandonments_busy_grant_end_is_retried_and_the_mob_keeps_serving() {
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// A resume ends the grants of an identity its replayed abandonment ended
+/// before the pre-activation read: the hook passed to the resume finds the
+/// identity's grant already revoked.
+#[tokio::test]
+async fn the_resume_ends_the_grants_before_the_pre_activation_read() {
+    let mob = RecoverableMob::new();
+    let handle = mob.create().await;
+    let identity = AgentIdentity::from("respawn-hooked");
+    let grant = mob.spawn_granted(&handle, &identity).await;
+    let subject = identity_subject(&handle, &identity);
+
+    // The replacement fails after the old member's archive, and the grant
+    // store fails with it, so the identity's grant is still live when the
+    // mob stops.
+    mob.events.fail_appends_for("MemberSpawned").await;
+    mob.runtime_store
+        .fail_tool_grant_store_for_test(Some("grant store offline"));
+    let respawned = tokio::time::timeout(STEP, handle.respawn(identity.clone(), None))
+        .await
+        .expect("the respawn answers within the bound");
+    mob.runtime_store.fail_tool_grant_store_for_test(None);
+    mob.events.allow_appends_for("MemberSpawned").await;
+    assert!(respawned.is_err(), "the respawn fails: {respawned:?}");
+
+    let seen: Arc<std::sync::Mutex<Option<Vec<ToolGrantStatus>>>> = Arc::default();
+    let hook: MobBeforeActivation = {
+        let runtime = Arc::clone(&mob.runtime);
+        let subject = subject.clone();
+        let seen = Arc::clone(&seen);
+        Arc::new(move |_| {
+            let runtime = Arc::clone(&runtime);
+            let subject = subject.clone();
+            let seen = Arc::clone(&seen);
+            Box::pin(async move {
+                let listing = runtime
+                    .list_tool_grants(&subject, None)
+                    .await
+                    .map_err(|error| MobError::Internal(format!("the grants read: {error:?}")))?;
+                let statuses: Vec<ToolGrantStatus> =
+                    listing.grants.iter().map(|listed| listed.status).collect();
+                *seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(statuses);
+                Ok(())
+            })
+        })
+    };
+    let resumed = MobBuilder::for_resume(mob.storage())
+        .with_session_service(mob.service.clone())
+        .notify_orchestrator_on_resume(false)
+        .before_activation(hook)
+        .resume()
+        .await
+        .expect("the resume");
+    let seen_at_hook = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        seen_at_hook,
+        Some(vec![ToolGrantStatus::Revoked]),
+        "the grant ended before the pre-activation read"
+    );
+    let listing = mob
+        .runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    resumed.shutdown().await.expect("shutdown resumed mob");
+}
+
+/// A resume whose grant end fails (a failure of no busy class) fails, and
+/// the next resume, which replays the same durable abandonment, ends the
+/// identity's grants.
+#[tokio::test]
+async fn a_failed_resume_leaves_the_end_to_the_next_resume() {
+    let mob = RecoverableMob::new();
+    let handle = mob.create().await;
+    let identity = AgentIdentity::from("respawn-twice");
+    let grant = mob.spawn_granted(&handle, &identity).await;
+    let subject = identity_subject(&handle, &identity);
+
+    mob.events.fail_appends_for("MemberSpawned").await;
+    mob.runtime_store
+        .fail_tool_grant_store_for_test(Some("grant store offline"));
+    let respawned = tokio::time::timeout(STEP, handle.respawn(identity.clone(), None))
+        .await
+        .expect("the respawn answers within the bound");
+    mob.events.allow_appends_for("MemberSpawned").await;
+    assert!(respawned.is_err(), "the respawn fails: {respawned:?}");
+
+    // The grant store still fails: the first resume's grant end fails.
+    let first = MobBuilder::for_resume(mob.storage())
+        .with_session_service(mob.service.clone())
+        .notify_orchestrator_on_resume(false)
+        .resume()
+        .await;
+    mob.runtime_store.fail_tool_grant_store_for_test(None);
+    assert!(first.is_err(), "a resume whose grant end fails fails");
+
+    let second = mob.resume().await;
+    let listing = mob
+        .runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    assert_eq!(
+        listing.grants[0].status,
+        ToolGrantStatus::Revoked,
+        "the next resume ended the identity's grant"
+    );
+    second.shutdown().await.expect("shutdown resumed mob");
+}
+
 /// `identity`'s sealed intent in a fresh identity store of `definition`'s
 /// mob, from the adoption fixture's material changed by `edit`.
 async fn store_with_intent(

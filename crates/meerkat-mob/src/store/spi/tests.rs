@@ -824,6 +824,67 @@ async fn a_quarantined_storage_lists_and_opens_again_after_a_repair_and_a_reopen
     assert_eq!(events.len(), 1, "it holds what it held: {events:?}");
 }
 
+// A storage key over 200 bytes is hashed in its scope names, so when the
+// store reports its only scope conflicted the realm knows that scope by its
+// store name alone, and no head names the key. The storage is still listed:
+// typed, as quarantined, under that name, the conflict and the repair in its
+// cause, and opening that name refuses with the quarantine instead of
+// creating a storage. The neighbour lists and opens as usual.
+#[tokio::test]
+async fn a_quarantined_storage_whose_key_its_scope_names_hash_is_listed_by_that_name() {
+    let host = Arc::new(MemoryHost::default());
+    let long = "m".repeat(250);
+    for storage_key in [long.as_str(), "neighbour"] {
+        let process = start(&host, storage_key).await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:h");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens beside the conflicted scope");
+    let quarantined = realm.quarantined_scopes();
+    assert_eq!(quarantined.len(), 1, "{name} is quarantined");
+    let scope = quarantined[0].scope.clone();
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let stored = listed
+        .iter()
+        .find(|stored| stored.storage_key == scope)
+        .unwrap_or_else(|| {
+            panic!("the hashed storage is listed by its scope's name, not left out: {listed:?}")
+        });
+    assert!(
+        stored.quarantined.as_deref().is_some_and(|cause| {
+            cause.contains(&name) && cause.contains("repair the scope in the store")
+        }),
+        "listed as quarantined: {stored:?}"
+    );
+    match mobs.open(&scope).await {
+        Err(MobStoreError::ReadFailed(message)) => assert!(
+            message.contains("quarantined") && message.contains(&name),
+            "opening it refuses with the quarantine: {message}"
+        ),
+        other => panic!("opening the listed name refuses: {:?}", other.err()),
+    }
+    let neighbour = listed
+        .iter()
+        .find(|stored| stored.storage_key == "neighbour")
+        .expect("the neighbour is listed");
+    assert_eq!(neighbour.quarantined, None);
+    mobs.open("neighbour")
+        .await
+        .expect("the storage beside it opens");
+}
+
 // Unrun until the candidate's validation.
 #[test]
 fn entries_of_an_unknown_format_are_refused() {

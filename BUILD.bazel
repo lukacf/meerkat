@@ -997,6 +997,7 @@ test_suite(
         "//crates/meerkat:cold_restart_resume_test",
         "//crates/meerkat:command_hook_confinement_test",
         "//crates/meerkat:compaction_context_window_test",
+        "//crates/meerkat:compaction_ownership_gaps_test",
         "//crates/meerkat:consent_notice_delivery_test",
         "//crates/meerkat:continuation_delivery_test",
         "//crates/meerkat:continuation_submit_test",

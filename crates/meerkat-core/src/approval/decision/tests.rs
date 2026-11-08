@@ -949,3 +949,55 @@ fn a_row_without_the_executed_decisions_facts_keeps_its_bytes() {
         EXECUTED_ROW_WITHOUT_FACTS
     );
 }
+
+/// What sealing a hold of `kind` in a reviewer's review stage answers.
+fn sealed_with_a_reviewer(kind: &str) -> Result<DecisionDescriptor, DecisionContractError> {
+    let mut request = hold_request(rendering("Approve the held operation."), None)
+        .with_reviewer(key(PrincipalKind::SharedAgent, "reviewer"));
+    request.kind = DecisionKind::new(kind).expect("kind");
+    DecisionDescriptor::seal(request, 10)
+}
+
+/// `kind` is decided by people only: a hold of it that names a reviewer is
+/// refused, and nothing is sealed.
+fn assert_decided_by_people_only(kind: &str) {
+    let parsed = DecisionKind::new(kind).expect("kind");
+    assert!(decided_by_people_only(&parsed), "{kind} is listed");
+    assert_eq!(
+        sealed_with_a_reviewer(kind).expect_err("a review stage is refused"),
+        DecisionContractError::ReviewStageNotAllowed { kind: parsed }
+    );
+}
+
+#[test]
+fn a_grant_child_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("grant.child");
+}
+
+#[test]
+fn a_tool_grant_issue_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("tool_grant.issue");
+}
+
+#[test]
+fn a_route_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("route.release");
+}
+
+#[test]
+fn a_gating_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("gating.release");
+}
+
+/// The control: a kind a reviewer may decide keeps its review stage.
+#[test]
+fn a_release_decision_keeps_its_review_stage() {
+    assert!(!decided_by_people_only(
+        &DecisionKind::new("release").expect("kind")
+    ));
+    let sealed = sealed_with_a_reviewer("release").expect("sealed with its review stage");
+    assert_eq!(
+        sealed.reviewer,
+        Some(key(PrincipalKind::SharedAgent, "reviewer"))
+    );
+}

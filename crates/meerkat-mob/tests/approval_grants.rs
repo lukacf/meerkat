@@ -1676,7 +1676,7 @@ async fn the_approved_work_queries_once_and_replies_once() {
     );
     let other = flow.feedback("reply-3");
     assert!(
-        other.is_error && other.text_content().contains("reply_already_delivered"),
+        other.is_error && other.text_content().contains("reply_already_settled"),
         "{}",
         other.text_content()
     );
@@ -1696,7 +1696,7 @@ async fn reply_once_holds_when_the_hosts_route_delivers_every_call() {
     let Outcome { flow, .. } = run_on(flow).await;
     let other = flow.feedback("reply-3");
     assert!(
-        other.is_error && other.text_content().contains("reply_already_delivered"),
+        other.is_error && other.text_content().contains("reply_already_settled"),
         "{}",
         other.text_content()
     );
@@ -1875,6 +1875,26 @@ async fn a_redelivered_executed_notice_forks_nothing_and_settles() {
         "the approved work was admitted once"
     );
     assert!(!flow.branch_seated(&decision.decision_id).await);
+    // The redelivery never settles silently: it tells the origin how its
+    // request ended, from the decision's reply fact (the work settled its
+    // reply, so approved), and settles with the origin's receipt.
+    assert_eq!(
+        *flow.route.notices.lock().expect("notices"),
+        vec![
+            (decision.decision_id.clone(), AccessOutcome::Approved),
+            (decision.decision_id.clone(), AccessOutcome::Approved),
+        ],
+        "the redelivered notice told the origin again"
+    );
+    assert_eq!(
+        flow.decisions
+            .get(&decision.decision_id)
+            .expect("the decision")
+            .notice_receipt,
+        Some(ApprovalConsentDeliveryState::Failed {
+            reason: "the origin was told: approved".into()
+        })
+    );
 }
 
 /// The refusal a reserved approval branch path answers: typed, naming the

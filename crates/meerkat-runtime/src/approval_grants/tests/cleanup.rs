@@ -1,8 +1,9 @@
 //! Rows of an approval branch's cleanup: the branch is retired and its
 //! controller grant revoked from durable state, by Core's pass, whatever the
 //! process or the custody did in between; the sweep's reading of each
-//! decision phase; and the origin told how an admission that failed for good
-//! ended.
+//! decision phase; the origin told how an admission that failed for good,
+//! or a branch that already ended, ended; a branch listing the host cannot
+//! give whole; and a branch the host will not retire.
 
 use std::sync::atomic::AtomicU32;
 
@@ -10,10 +11,11 @@ use meerkat_authorization::grants::GrantRefusal;
 use meerkat_core::approval::ApprovalStoreError;
 use meerkat_core::approval::decision::{
     DecisionExecutorClaim, DecisionKind, DecisionListFilter, DecisionPage, DecisionRow,
-    UnreadableDecision,
+    DecisionSubjectKey, Sha256Digest, UnreadableDecision,
 };
 
 use super::*;
+use crate::decision::DecisionDeferral;
 
 /// The runtime's native custody, busy while `refusing`: every revoke is
 /// refused as unavailable, as when some session's mutation gate or driver is
@@ -406,8 +408,12 @@ async fn swept(phase: DecisionPhase) -> bool {
         }
         DecisionPhase::ExecutionRefused => {
             fixture.decide(&held, true);
-            // The offering grant's window now ends first: terms_changed.
-            fixture.clock.advance(10 * MINUTE_MS);
+            // The offering grant is revoked after the approval: the
+            // execution is refused `parent_refused`.
+            fixture
+                .owner
+                .revoke(&agent("grant-root"), &fixture.offering[0], &mut AnyCustody)
+                .expect("the offering grant is revoked");
             let _ = fixture.executor_loop().pass().await;
         }
         DecisionPhase::Executed => unreachable!("the executed phase has rows of its own"),
@@ -499,5 +505,248 @@ async fn an_admission_that_fails_for_good_tells_the_origin_refused_and_never_app
     assert_eq!(
         fixture.stored(&decision).state.cleanup,
         DecisionCleanup::Settled
+    );
+}
+
+/// The Executed notice of a decision whose branch already ended never
+/// settles silently: the origin is told how its request ended, from the
+/// decision's own reply fact and with no content (approved when the work
+/// settled a reply for the requester, refused when it settled none, so no
+/// answer is coming), and the notice settles with the origin's receipt.
+/// While the origin cannot be told, the notice stays owed.
+#[tokio::test]
+async fn a_notice_whose_branch_already_ended_tells_the_origin_how_it_ended() {
+    // The origin cannot be told until the approval grant's window passed,
+    // and the sweep retired the branch first. No reply was settled.
+    let fixture = Fixture::new();
+    let decision = executed(&fixture).await;
+    fixture.route.notices_down.store(true, Ordering::SeqCst);
+    fixture.clock.advance(15 * MINUTE_MS + 1);
+    let mut executor_loop = fixture.executor_loop();
+    let pass = executor_loop.pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(decision.clone(), DecisionPassOutcome::CleanupSettled)),
+        "the sweep retired the branch once its window passed: {pass:?}"
+    );
+    assert_eq!(fixture.branches.retired(), vec![decision.clone()]);
+    let pass = executor_loop.pass().await;
+    assert!(
+        pass.outcomes.contains(&(
+            decision.clone(),
+            DecisionPassOutcome::Deferred(DecisionDeferral::NoticeUndelivered)
+        )),
+        "the notice of an ended branch stays owed while its origin cannot be told: {pass:?}"
+    );
+    assert_eq!(fixture.stored(&decision).notice_receipt, None);
+    fixture.route.notices_down.store(false, Ordering::SeqCst);
+    let pass = executor_loop.pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(decision.clone(), DecisionPassOutcome::NoticeSettled)),
+        "{pass:?}"
+    );
+    assert_eq!(
+        fixture.route.notices(),
+        vec![(decision.clone(), AccessOutcome::Refused)],
+        "the work settled no reply: no answer is coming"
+    );
+    assert_eq!(
+        fixture.stored(&decision).notice_receipt,
+        Some(ApprovalConsentDeliveryState::Failed {
+            reason: "origin told: refused".into()
+        }),
+        "the notice settled with the origin's receipt"
+    );
+
+    // The approved work ran, replied and ended, and its branch retired,
+    // before the notice's receipt was recorded: the notice is delivered
+    // again.
+    let fixture = Fixture::new();
+    let decision = executed(&fixture).await;
+    fixture
+        .decisions
+        .settle_reply(&decision, &Sha256Digest::of(b"revenue by region"))
+        .expect("the approved work's reply is settled");
+    fixture
+        .branches
+        .retire(&decision)
+        .await
+        .expect("its branch retired");
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(decision.clone(), DecisionPassOutcome::NoticeSettled)),
+        "{pass:?}"
+    );
+    assert_eq!(
+        fixture.route.notices(),
+        vec![(decision.clone(), AccessOutcome::Approved)],
+        "the work settled its reply for the requester"
+    );
+    assert_eq!(
+        fixture.stored(&decision).notice_receipt,
+        Some(ApprovalConsentDeliveryState::Failed {
+            reason: "origin told: approved".into()
+        })
+    );
+}
+
+/// A host that cannot list every open branch now without waking a member or
+/// a mob answers unavailable, never a partial list: the notice of an
+/// executed decision is then left for a later pass, and nothing is told,
+/// admitted, retired or revoked on that answer.
+#[tokio::test]
+async fn a_branch_listing_the_host_cannot_give_whole_defers_the_notice() {
+    let fixture = Fixture::new();
+    let decision = executed(&fixture).await;
+    fixture.branches.calls.lock().expect("calls").clear();
+    fixture
+        .branches
+        .listing_unavailable
+        .store(true, Ordering::SeqCst);
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes.contains(&(
+            decision.clone(),
+            DecisionPassOutcome::Deferred(DecisionDeferral::NoticeUndelivered)
+        )),
+        "a listing the host cannot give whole defers the notice: {pass:?}"
+    );
+    assert_eq!(
+        fixture.stored(&decision).notice_receipt,
+        None,
+        "the notice stays owed"
+    );
+    assert!(
+        fixture.route.notices().is_empty(),
+        "the origin is told nothing on that answer"
+    );
+    let calls = fixture.branches.calls();
+    assert!(
+        !calls.contains(&"seat"),
+        "nothing is admitted on that answer: {calls:?}"
+    );
+    assert!(
+        fixture.branches.retired().is_empty(),
+        "nothing is retired on that answer"
+    );
+    assert!(controller_current(&fixture, &decision), "nor revoked");
+}
+
+/// A host that refuses for good to retire a branch keeps it; the branch's
+/// controller grant is revoked all the same, so no work runs under it, and
+/// the decision's cleanup settles.
+#[tokio::test]
+async fn a_branch_the_host_will_not_retire_has_its_controller_grant_revoked_all_the_same() {
+    let fixture = Fixture::new();
+    let decision = executed(&fixture).await;
+    settle_the_notice(&fixture, &decision);
+    fixture
+        .branches
+        .retire_refused
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        fixture.grants.clean_up(&decision).await,
+        executor::Cleanup::Done
+    );
+    assert!(
+        fixture.branches.retired().is_empty(),
+        "the host kept the branch"
+    );
+    assert!(
+        !controller_current(&fixture, &decision),
+        "its controller grant is revoked all the same"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
+    );
+}
+
+/// The sweep reports the cleanup of a branch the host will not retire once:
+/// the branch stays listed open, and once its decision's cleanup is settled
+/// and its controller grant revoked, the later passes leave it.
+#[tokio::test]
+async fn a_branch_the_host_will_not_retire_is_reported_settled_once() {
+    let fixture = Fixture::new();
+    let decision = executed(&fixture).await;
+    settle_the_notice(&fixture, &decision);
+    fixture
+        .branches
+        .retire_refused
+        .store(true, Ordering::SeqCst);
+    fixture.clock.advance(15 * MINUTE_MS + 1);
+    let mut executor_loop = fixture.executor_loop();
+    let first = executor_loop.pass().await;
+    assert!(
+        first
+            .outcomes
+            .contains(&(decision.clone(), DecisionPassOutcome::CleanupSettled)),
+        "{first:?}"
+    );
+    assert!(!controller_current(&fixture, &decision));
+    for _ in 0..2 {
+        let later = executor_loop.pass().await;
+        assert!(
+            later.outcomes.iter().all(|(id, _)| *id != decision),
+            "a settled cleanup is reported once: {later:?}"
+        );
+    }
+    assert!(
+        fixture.branches.retired().is_empty(),
+        "the host still keeps the branch"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
+    );
+}
+
+/// A branch the host lists open for a decision that cannot be read, or is
+/// gone, and whose approval-carried grant was never issued, is retired at
+/// once: no work can run in it, so there is no window to wait for.
+#[tokio::test]
+async fn a_branch_of_an_unreadable_or_missing_decision_with_no_grant_is_retired_at_once() {
+    let rows = Arc::new(DecisionRows::default());
+    let fixture = Fixture::with(Terms {
+        store: Some(rows.clone()),
+        ..Terms::default()
+    });
+    let open = |decision: &DecisionId| ApprovalBranchRequest {
+        decision: decision.clone(),
+        grantee: data_agent(),
+        branch: approval_branch_principal(&data_agent(), decision).expect("branch"),
+        expires_at_ms: fixture.clock.now() + 15 * MINUTE_MS,
+    };
+    // An offer held and never executed, whose row this binary cannot read.
+    let held = fixture.offer(true).expect("held");
+    fixture
+        .branches
+        .open(&open(&held.decision_id))
+        .await
+        .expect("the host holds a branch open");
+    rows.unreadable_for(&held.decision_id);
+    let _ = fixture.grants.sweep_branches().await;
+    assert_eq!(
+        fixture.branches.retired(),
+        vec![held.decision_id.clone()],
+        "a branch of an unreadable decision with no grant issued is retired at once"
+    );
+    // A decision that is gone.
+    let gone = DecisionId::derive(
+        &DecisionKind::new(GRANT_CHILD_KIND).expect("kind"),
+        &DecisionSubjectKey::new("a-decision-never-held").expect("subject key"),
+    );
+    fixture
+        .branches
+        .open(&open(&gone))
+        .await
+        .expect("the host holds a branch open");
+    let _ = fixture.grants.sweep_branches().await;
+    assert_eq!(
+        fixture.branches.retired(),
+        vec![held.decision_id.clone(), gone],
+        "a branch of a missing decision with no grant issued is retired at once"
     );
 }

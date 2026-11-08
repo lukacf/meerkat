@@ -173,6 +173,9 @@ impl ApprovalControllerCustody for Custody {
 /// (and on which controller lineage), which branches were opened and
 /// retired, and every call Core made. It seats nothing (or refuses the seat
 /// for good, `seat_refused`): these rows stop before an approved work runs.
+/// While `listing_unavailable` it cannot list every open branch (as a host
+/// that would have to wake a dormant mob to list its branches), and while
+/// `retire_refused` it refuses for good to retire a branch, which stays open.
 #[derive(Default)]
 struct Branches {
     bases: Mutex<HashMap<String, ApprovalGranteeBasis>>,
@@ -180,6 +183,8 @@ struct Branches {
     retired: Mutex<Vec<DecisionId>>,
     calls: Mutex<Vec<&'static str>>,
     seat_refused: AtomicBool,
+    listing_unavailable: AtomicBool,
+    retire_refused: AtomicBool,
 }
 
 impl Branches {
@@ -267,12 +272,22 @@ impl ApprovalBranchHost for Branches {
 
     async fn retire(&self, decision: &DecisionId) -> Result<(), ApprovalBranchError> {
         self.call("retire");
+        if self.retire_refused.load(Ordering::SeqCst) {
+            return Err(ApprovalBranchError::Refused(
+                "the host keeps this branch".into(),
+            ));
+        }
         self.retired.lock().expect("retired").push(decision.clone());
         Ok(())
     }
 
     async fn open_branches(&self) -> Result<Vec<DecisionId>, ApprovalBranchError> {
         self.call("open_branches");
+        if self.listing_unavailable.load(Ordering::SeqCst) {
+            return Err(ApprovalBranchError::Unavailable(
+                "a mob holding branches is not loaded".into(),
+            ));
+        }
         let retired = self.retired();
         Ok(self
             .opened()
@@ -283,10 +298,17 @@ impl ApprovalBranchHost for Branches {
     }
 }
 
-/// The host's requester reply route, recorded.
+/// The host's requester reply route, recorded. It delivers once per reply id
+/// (the same text again answers the first delivery's receipt, another text is
+/// refused), and fails the next `delivery_failures` deliveries as not now.
+/// While `notices_down` it cannot tell an origin anything now.
 struct Route {
     deliverable: AtomicBool,
     notices: Mutex<Vec<(DecisionId, AccessOutcome)>>,
+    notices_down: AtomicBool,
+    delivery_failures: AtomicU64,
+    deliveries: Mutex<HashMap<String, (String, ReplyReceipt)>>,
+    delivered: Mutex<Vec<String>>,
 }
 
 impl Default for Route {
@@ -294,7 +316,23 @@ impl Default for Route {
         Self {
             deliverable: AtomicBool::new(true),
             notices: Mutex::new(Vec::new()),
+            notices_down: AtomicBool::new(false),
+            delivery_failures: AtomicU64::new(0),
+            deliveries: Mutex::new(HashMap::new()),
+            delivered: Mutex::new(Vec::new()),
         }
+    }
+}
+
+impl Route {
+    /// Every origin notice delivered, in order.
+    fn notices(&self) -> Vec<(DecisionId, AccessOutcome)> {
+        self.notices.lock().expect("notices").clone()
+    }
+
+    /// Every reply text delivered to a requester, in order.
+    fn delivered(&self) -> Vec<String> {
+        self.delivered.lock().expect("delivered").clone()
     }
 }
 
@@ -307,12 +345,40 @@ impl RequesterReplyRoute for Route {
     async fn deliver(
         &self,
         _origin: &ApprovalOrigin,
-        _reply: &EvidenceId,
-        _text: &str,
+        reply: &EvidenceId,
+        text: &str,
     ) -> Result<ReplyReceipt, ReplyRouteError> {
-        Err(ReplyRouteError::Unavailable(
-            "no replies in these rows".into(),
-        ))
+        if self
+            .delivery_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(ReplyRouteError::Unavailable(
+                "the requester's channel is down".into(),
+            ));
+        }
+        let mut deliveries = self.deliveries.lock().expect("deliveries");
+        if let Some((delivered, receipt)) = deliveries.get(reply.as_str()) {
+            return if delivered == text {
+                Ok(receipt.clone())
+            } else {
+                Err(ReplyRouteError::AlreadyDelivered)
+            };
+        }
+        let receipt = ReplyReceipt {
+            delivery: format!("delivery-{}", deliveries.len() + 1),
+        };
+        deliveries.insert(
+            reply.as_str().to_owned(),
+            (text.to_owned(), receipt.clone()),
+        );
+        self.delivered
+            .lock()
+            .expect("delivered")
+            .push(text.to_owned());
+        Ok(receipt)
     }
 
     async fn notify_origin(
@@ -321,6 +387,9 @@ impl RequesterReplyRoute for Route {
         decision: &DecisionId,
         outcome: AccessOutcome,
     ) -> Option<ApprovalConsentDeliveryState> {
+        if self.notices_down.load(Ordering::SeqCst) {
+            return None;
+        }
         self.notices
             .lock()
             .expect("notices")
@@ -653,23 +722,31 @@ impl Fixture {
 
     /// Present the held offer to the approver and approve it (or decline).
     fn decide(&self, decision: &StoredDecision, approve: bool) -> StoredDecision {
+        self.try_decide(decision, approve).expect("decide")
+    }
+
+    /// Present the held offer to the approver and approve it (or decline),
+    /// as the decision owner answers both now.
+    fn try_decide(
+        &self,
+        decision: &StoredDecision,
+        approve: bool,
+    ) -> Result<StoredDecision, crate::decision::DecisionError> {
         let rendering = &decision.descriptor.rendering;
         let at_ms = self.clock.now();
-        self.decisions
-            .present(
-                &decision.decision_id,
-                &PresentationRecord::complete(
-                    PresentationAudience::Approver {
-                        approver_id: approver(),
-                    },
-                    rendering,
-                    None,
-                    reference("chat"),
-                    reference("message-1"),
-                    at_ms,
-                ),
-            )
-            .expect("present");
+        self.decisions.present(
+            &decision.decision_id,
+            &PresentationRecord::complete(
+                PresentationAudience::Approver {
+                    approver_id: approver(),
+                },
+                rendering,
+                None,
+                reference("chat"),
+                reference("message-1"),
+                at_ms,
+            ),
+        )?;
         let attested = AttestedDecision::new(
             AuthenticatedApprover::new(
                 principal(PrincipalKind::Human, "the-data-owner"),
@@ -686,7 +763,6 @@ impl Fixture {
         .expect("attested decision");
         self.decisions
             .decide(&decision.decision_id, &attested, &Eligible)
-            .expect("decide")
     }
 
     fn executor_loop(&self) -> DecisionExecutorLoop {
@@ -1063,14 +1139,37 @@ fn access_offer_takes_requester_and_origin_from_the_calling_work() {
     );
 }
 
+/// Store `held` again with its deadline at `deadline_at_ms`, as a writer of
+/// the decision store other than `access_offer` could have held it.
+fn hold_until(store: &InMemoryDecisionStore, held: &StoredDecision, deadline_at_ms: u64) {
+    let mut row = held.clone();
+    row.descriptor.deadline_at_ms = deadline_at_ms;
+    row.state.deadline_at_ms = deadline_at_ms;
+    row.revision = held.revision + 1;
+    store
+        .replace_if_revision(held.revision, &row)
+        .expect("the row is stored with its new deadline");
+}
+
+/// The executor compares the effective terms of now with the presented
+/// ones, whatever deadline the decision's row carries: here one that
+/// outlives the offering grant's window less the requested window, so that
+/// its approval comes after the presented terms could still be issued.
 #[tokio::test]
 async fn the_executor_closes_terms_changed_when_the_parent_narrowed() {
     let start = real_now_ms();
+    let store = Arc::new(InMemoryDecisionStore::new());
     let fixture = Fixture::with(Terms {
         offering_lifetime: Some(LifetimeRestriction::window(start, start + 20 * MINUTE_MS)),
+        store: Some(store.clone()),
         ..Terms::default()
     });
     let held = fixture.offer(true).expect("held");
+    hold_until(
+        &store,
+        &held,
+        held.descriptor.created_at_ms + 60 * MINUTE_MS,
+    );
     fixture.decide(&held, true);
     // The offering grant's window now ends before the approved window would:
     // the effective terms are no longer the presented ones.
@@ -1460,3 +1559,4 @@ fn controller_current(fixture: &Fixture, decision: &DecisionId) -> bool {
 
 mod binding;
 mod cleanup;
+mod reply;

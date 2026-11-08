@@ -77,6 +77,41 @@ fn access_offer_refuses_at_hold_an_offer_its_parent_cannot_run() {
     assert!(fixture.offer(true).is_ok());
 }
 
+/// An offer's decision is due by the offering grant's window end less the
+/// requested window, the last moment its grant can still be issued with the
+/// presented terms: an approval after that expires the decision, which
+/// opens and issues nothing, instead of executing it into `terms_changed`.
+#[tokio::test]
+async fn an_offer_approved_after_its_parent_can_run_it_expires_instead() {
+    let start = real_now_ms();
+    let fixture = Fixture::with(Terms {
+        offering_lifetime: Some(LifetimeRestriction::window(start, start + 20 * MINUTE_MS)),
+        ..Terms::default()
+    });
+    let held = fixture.offer(true).expect("held");
+    assert_eq!(
+        held.descriptor.deadline_at_ms,
+        start + 5 * MINUTE_MS,
+        "the offering grant's window end less the requested 15 minutes"
+    );
+    // The approver answers after that.
+    fixture.clock.advance(10 * MINUTE_MS);
+    assert!(
+        fixture.try_decide(&held, true).is_err(),
+        "an approval past the deadline approves nothing"
+    );
+    let pass = fixture.executor_loop().pass().await;
+    let stored = fixture.stored(&held.decision_id);
+    assert_eq!(stored.state.phase, DecisionPhase::Expired, "{pass:?}");
+    assert_eq!(stored.execution_refusal, None, "never terms_changed");
+    assert!(fixture.branches.opened().is_empty(), "no branch was opened");
+    assert_eq!(fixture.issued(approval_grant_id(&held.decision_id)), None);
+    assert_eq!(
+        fixture.issued(branch_controller_grant_id(&held.decision_id)),
+        None
+    );
+}
+
 #[tokio::test]
 async fn the_executor_resolves_the_parent_lineage_before_it_opens_a_branch() {
     let fixture = Fixture::new();
@@ -489,7 +524,7 @@ fn offer_arguments(server: &str) -> Box<serde_json::value::RawValue> {
     .expect("arguments")
 }
 
-fn resolution() -> ToolExecutionResolutionContext {
+pub(super) fn resolution() -> ToolExecutionResolutionContext {
     ToolExecutionResolutionContext::new(
         ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
             ToolDeadlineOwner::CoreToolDispatch,

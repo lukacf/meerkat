@@ -224,10 +224,10 @@ Meerkat fields and OpenAI lowering:
 | `size` | `auto`, `1024x1024`, `1024x1536`, `1536x1024`, `WIDTHxHEIGHT` | Universal Meerkat field. Lowered to OpenAI `size`. |
 | `quality` | `auto`, `low`, `medium`, `high` | Universal Meerkat field. Lowered to OpenAI `quality`. |
 | `format` | `auto`, `png`, `jpeg`, `jpg`, `webp` | Universal Meerkat field. Lowered to OpenAI `output_format`; `jpg` normalizes to `jpeg`. |
-| `provider_params.background` | `auto`, `opaque`, `transparent` | Advanced OpenAI override. `transparent` needs `format` `png` or `webp`. |
+| `provider_params.background` | `auto`, `opaque`, `transparent` | Advanced OpenAI override. `transparent` needs `format` `png` or `webp`; with `jpeg` the request is denied with `projection_unsupported`. |
 | `provider_params.output_compression` | `0` to `100` | Advanced OpenAI override. Applies only when the universal `format` is `jpeg` or `webp`. |
 | `provider_params.moderation` | `auto`, `low` | Advanced GPT Image moderation strictness override. Omit it for OpenAI's default filtering. |
-| `provider_params.action` | `auto`, `generate`, `edit` | Advanced hosted Responses image-tool override. Normal Meerkat calls should use top-level `intent` and omit `action`; Images API routes reject it. |
+| `provider_params.action` | `auto`, `generate`, `edit` | Advanced hosted Responses image-tool override. Normal Meerkat calls should use top-level `intent` and omit `action`. |
 | `provider_params.reasoning_effort` | Backing model's advertised effort ladder | Hosted Responses route only. The current `gpt-image-2.6-sunburst` default is backed by GPT-5.4 and stops at `xhigh`; GPT-5.6 text-model routes also accept `max`. On GPT Image 2.6 models, `low`, `medium` and `high` also set the image model's planning complexity. |
 | `provider_params.web_search` | `true`, `false`, `null`, or object | Hosted Responses route only. `true`/`{}` enables OpenAI `web_search`; object values may include OpenAI web-search options such as `search_context_size`, `filters`, `user_location`, `external_web_access`, and `return_token_budget`. |
 
@@ -239,7 +239,6 @@ Model behavior:
 - Do not copy raw Responses API JSON into `provider_params`. Use Meerkat's universal `size`, `quality`, `format`, and `intent` fields, and reserve `provider_params` for the advanced OpenAI overrides above.
 - For fresh/current image-only requests, prefer passing `provider_params.web_search` to `generate_image` over doing a separate search turn first.
 - Do not pass `input_fidelity`; Meerkat's OpenAI adapter uses a closed provider-params shape and rejects unknown fields.
-- A catalog row on OpenAI's Images API route rejects edit requests, reference images, `action`, `reasoning_effort`, and `web_search`. Meerkat's catalog has no such row.
 
 ### Gemini
 
@@ -310,7 +309,7 @@ Important fields:
 |---------|-------|-----|
 | `denied` with `unsupported_target` | No configured image provider owns the requested target, or `auto` resolved to a non-image provider. | Set `provider: "openai"` or `provider: "gemini"` and verify credentials with `rkat doctor`. |
 | `denied` with `unsupported_count` | `count` or `n` was greater than `1`. | Run one image operation per variant. |
-| `denied` with `projection_unsupported` | The selected backend cannot represent the request or provider params. | Remove unsupported params, avoid edits/reference images on the OpenAI Images API path, or use the provider default target. |
+| `denied` with `projection_unsupported` | The selected backend cannot represent the request or provider params. | Remove unsupported params (for OpenAI, `background: "transparent"` needs `format` `png` or `webp`) or use the provider default target. |
 | `denied` with `realtime_transport_conflict` | The operation would require an internal scoped image-model turn while a realtime binding is active. | Run image generation from a non-realtime session or choose an image target that does not require a scoped override. |
 | `safety_filtered` or `refused_by_provider` | The provider rejected the prompt or output. | Revise the prompt and retry. |
 | `failed` with `provider_execution_failed` | Provider call failed after planning. | Check provider credentials, model access, rate limits, and network connectivity. |

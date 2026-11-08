@@ -23611,6 +23611,66 @@ mod tests {
         ));
     }
 
+    /// The OpenAI image models OpenAI shut down are no image targets: with
+    /// provider openai the planner denies them `UnsupportedTarget` before any
+    /// provider call, and without a provider no configured image provider owns
+    /// them, so `generate_image` refuses the arguments.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "openai"))]
+    #[test]
+    fn image_planner_refuses_shut_down_openai_image_models() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(
+            meerkat_openai::image_generation::OpenAiImageGenerationProfile,
+        )]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-5.5"),
+            None,
+            None,
+            None,
+        )
+        .with_session_provider(Some(meerkat_core::Provider::OpenAI));
+
+        for model in ["gpt-image-1", "dall-e-3", "dall-e-2"] {
+            let request = meerkat_core::GenerateImageRequest::new(
+                meerkat_core::ImageGenerationIntent::Generate {
+                    prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                    prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                        tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                    },
+                    reference_images: Vec::new(),
+                },
+                meerkat_core::ImageGenerationTargetPreference::Model {
+                    provider: meerkat_core::ProviderId::new("openai"),
+                    model: meerkat_core::lifecycle::run_primitive::ModelId::new(model),
+                },
+                meerkat_core::ImageSizePreference::Square1024,
+                meerkat_core::ImageQualityPreference::Auto,
+                meerkat_core::ImageFormatPreference::Png,
+                std::num::NonZeroU32::MIN,
+            )
+            .unwrap();
+
+            let result = planner.resolve_image_generation_plan(
+                &status,
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+                &request,
+            );
+
+            assert!(
+                matches!(
+                    result,
+                    Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+                ),
+                "{model} with provider openai must be denied UnsupportedTarget"
+            );
+            assert!(
+                planner.infer_provider_for_model(model).is_none(),
+                "no configured image provider may own {model}"
+            );
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn image_planner_rejects_unknown_provider_without_alias_fallback() {

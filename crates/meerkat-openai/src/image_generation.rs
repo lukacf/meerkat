@@ -227,9 +227,9 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
         Some(
             r#"OpenAI:
 - Normal requests need no provider_params: use the universal size, quality, format, count, and intent fields (format maps to output_format).
-- provider_params (advanced overrides): {"background":"auto"|"opaque"|"transparent","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}. background:"transparent" needs format png or webp.
+- provider_params (advanced overrides): {"background":"auto"|"opaque"|"transparent","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}. background:"transparent" needs format png or webp; jpeg is refused.
 - Hosted Responses routes also accept {"reasoning_effort":<a level the backing text model advertises>,"web_search":true|false|null|{...}}. The gpt-image-2.6-sunburst default is backed by GPT-5.4 (up to xhigh); GPT-5.6 text-model routes also accept max. On GPT Image 2.6 models a low, medium or high reasoning_effort also sets the image model's planning complexity. An object web_search becomes the hosted web_search tool with type:"web_search".
-- action applies only to the hosted Responses image tool and is usually omitted in favor of intent. Images API requests reject action, reasoning_effort, and web_search."#,
+- action applies only to the hosted Responses image tool and is usually omitted in favor of intent."#,
         )
     }
 
@@ -247,6 +247,12 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
 
         let output = openai_image_output_options(request);
         let provider_params = openai_image_provider_params(request)?;
+        // OpenAI renders a transparent background only into png or webp.
+        if provider_params.background == Some(OpenAiImageBackground::Transparent)
+            && output.output_format == OpenAiImageOutputFormat::Jpeg
+        {
+            return Err(ImageOperationDenialReason::ProjectionUnsupported);
+        }
 
         if let ImageGenerationModelRoute::OpenAiImagesApi { request_shape } = model.route {
             if matches!(request.intent, ImageGenerationIntent::Edit { .. })
@@ -402,6 +408,13 @@ mod tests {
     fn generate_request(
         provider_params: serde_json::Value,
     ) -> Result<GenerateImageRequest, Box<dyn std::error::Error>> {
+        generate_request_in(ImageFormatPreference::Png, provider_params)
+    }
+
+    fn generate_request_in(
+        format: ImageFormatPreference,
+        provider_params: serde_json::Value,
+    ) -> Result<GenerateImageRequest, Box<dyn std::error::Error>> {
         Ok(GenerateImageRequest::with_provider_params(
             ImageGenerationIntent::Generate {
                 prompt: PromptText::new("draw a cat")?,
@@ -415,7 +428,7 @@ mod tests {
             },
             ImageSizePreference::Square1024,
             ImageQualityPreference::Auto,
-            ImageFormatPreference::Png,
+            format,
             NonZeroU32::MIN,
             Some(provider_params),
         )?)
@@ -509,6 +522,33 @@ mod tests {
             Some(OpenAiImageBackground::Transparent)
         );
         assert_eq!(plan.output.output_format, OpenAiImageOutputFormat::Png);
+        Ok(())
+    }
+
+    /// OpenAI renders a transparent background only into png or webp, so a
+    /// jpeg request is refused before any provider call.
+    #[test]
+    fn profile_rejects_transparent_background_with_jpeg() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let profile = default_image_generation_model(Provider::OpenAI)
+            .expect("OpenAI default image profile must be cataloged");
+        let request = generate_request_in(
+            ImageFormatPreference::Jpeg,
+            json!({"background": "transparent"}),
+        )?;
+
+        let result = OpenAiImageGenerationProfile.resolve_execution_plan(
+            operation_id()?,
+            &profile,
+            &request,
+            capabilities(),
+            NonZeroU32::MIN,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ImageOperationDenialReason::ProjectionUnsupported)
+        ));
         Ok(())
     }
 

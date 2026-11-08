@@ -708,7 +708,8 @@ them.
   sets the image model's planning complexity. A transparent background
   (`provider_params.background: "transparent"` with `png` or `webp`) works
   on the default; the `generate_image` tool description and the docs no
-  longer advise against it.
+  longer advise against it. With `jpeg`, which cannot carry one, the
+  request is denied with `projection_unsupported` before the provider call.
 
 ### Deprecated
 

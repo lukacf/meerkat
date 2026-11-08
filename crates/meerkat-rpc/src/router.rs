@@ -9335,11 +9335,13 @@ mod tests {
 
         /// A complete roster's seal ends every unseated entry it does not
         /// list in its one step, and their grants with them, before the
-        /// step commits. When the end of any entry's grants fails, the
-        /// whole step fails and commits nothing: both entries and all their
-        /// grants stand, and the next apply ends them all.
+        /// step commits. When no entry's grant end succeeds (the grant
+        /// store fails), the step fails and nothing commits: both entries
+        /// and all their grants stand, and the next apply ends them all.
+        /// Ending grants for several identities is not atomic: the row
+        /// after this one fails the second entry's end only.
         #[tokio::test]
-        async fn a_seal_ends_the_grants_of_every_unseated_entry_it_unlists_or_none() {
+        async fn a_seal_whose_grant_store_fails_is_refused_and_the_next_apply_ends_them() {
             let rig = rig().await;
             create_mob(&rig, "seal-step", shell_gated_role()).await;
             let handle = mob_handle(&rig, "seal-step").await;
@@ -9400,6 +9402,92 @@ mod tests {
                     &list_identity(&rig, "seal-step", entry.as_str(), true).await,
                     grant,
                     "the seal ended the entry's grant",
+                );
+            }
+        }
+
+        /// Ending grants for several identities in one step is not atomic.
+        /// When the seal's end of the second entry's grants fails, the
+        /// first entry's grants it already ended stay ended, and nothing
+        /// else commits: the seal fails, both entries stand, and so do the
+        /// second entry's grants. The next apply ends the rest and seals.
+        #[tokio::test]
+        async fn a_seal_whose_second_grant_end_fails_keeps_the_first_end_and_commits_nothing_else()
+        {
+            let rig = rig().await;
+            create_mob(&rig, "seal-partial", shell_gated_role()).await;
+            let handle = mob_handle(&rig, "seal-partial").await;
+            let mut grants = Vec::new();
+            for name in ["entry-1", "entry-2"] {
+                declare_entry(&rig, "seal-partial", name).await;
+                grants.push((
+                    meerkat_mob::AgentIdentity::from(name),
+                    grant_identity_shell(&rig, "seal-partial", name, 600_000).await,
+                ));
+                handle
+                    .retire(meerkat_mob::AgentIdentity::from(name))
+                    .await
+                    .expect("the host retires the entry's member");
+            }
+            let complete =
+                || meerkat_mob::DeclaredRoster::complete(Vec::<meerkat_mob::DeclaredEntry>::new());
+            let second = meerkat_core::tool_grant::ToolGrantSubject::member(
+                "seal-partial",
+                &handle.live_incarnation(),
+                "entry-2",
+            )
+            .key();
+
+            rig.memory.fail_tool_grant_subject_for_test(
+                second.as_str(),
+                Some("entry-2's grants offline"),
+            );
+            let failed = handle.apply_declared_roster(complete()).await;
+            rig.memory
+                .fail_tool_grant_subject_for_test(second.as_str(), None);
+            assert!(
+                failed.is_err(),
+                "a seal whose second grant end fails fails its step: {failed:?}"
+            );
+            for (entry, _) in &grants {
+                assert!(
+                    matches!(
+                        handle.identity_entry(entry),
+                        Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+                    ),
+                    "the failed step ended no entry: {entry}"
+                );
+            }
+            assert_ended(
+                &list_identity(&rig, "seal-partial", "entry-1", true).await,
+                &grants[0].1,
+                "the first entry's ended grant stays ended",
+            );
+            assert_eq!(
+                list_identity(&rig, "seal-partial", "entry-2", false)
+                    .await
+                    .len(),
+                1,
+                "the second entry's grant stands"
+            );
+
+            let sealed = handle
+                .apply_declared_roster(complete())
+                .await
+                .expect("the next apply seals");
+            for (entry, grant) in &grants {
+                assert!(
+                    matches!(
+                        sealed.unlisted.get(entry),
+                        Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                    ),
+                    "{entry}: {:?}",
+                    sealed.unlisted
+                );
+                assert_ended(
+                    &list_identity(&rig, "seal-partial", entry.as_str(), true).await,
+                    grant,
+                    "the next apply ended the entry's grant",
                 );
             }
         }
@@ -9509,6 +9597,54 @@ mod tests {
                 &list_identity(&rig, "reset-retry", "entry-1", true).await,
                 &grant,
                 "the retried reset ended the entry's grant",
+            );
+        }
+
+        /// The reset ends the grants of the sessions MobMachine holds for
+        /// its identities, not only the identities' own: an unseated entry's
+        /// archived session record is one, and a grant of that session
+        /// reads revoked after the reset.
+        #[tokio::test]
+        async fn a_mob_reset_ends_the_grants_of_its_entries_archived_sessions() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-sessions", shell_gated_role()).await;
+            declare_entry(&rig, "reset-sessions", "entry-1").await;
+            let session_id = member_session(&rig, "reset-sessions", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "reset-sessions", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "reset-sessions", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "reset-sessions").await;
+            handle
+                .retire(meerkat_mob::AgentIdentity::from("entry-1"))
+                .await
+                .expect("the host retires the entry's member");
+            assert_eq!(
+                list_session(&rig, &session_id, false).await.len(),
+                1,
+                "the entry outlives the retirement, unseated, and its archived session's \
+                 grant stands"
+            );
+
+            ok(
+                &rig,
+                "mob/lifecycle",
+                serde_json::json!({"mob_id": "reset-sessions", "action": "reset"}),
+                "the mob resets",
+            )
+            .await;
+            assert_ended(
+                &list_identity(&rig, "reset-sessions", "entry-1", true).await,
+                &identity_grant,
+                "the reset ended the entry's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the reset ended the grant of the entry's archived session",
             );
         }
     }

@@ -12943,7 +12943,7 @@ control_mob_ObserveRespawnTopologyAbandonedTerminalRecoveredFresh(arg_agent_iden
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "IdentityEnded", payload |-> [agent_identity |-> packet.payload.agent_identity], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveRespawnTopologyAbandonedTerminalRecoveredFresh"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ObserveRespawnTopologyAbandonedTerminalRecoveredFresh", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -67243,7 +67243,7 @@ layer_mob_ObserveRespawnTopologyAbandonedTerminalRecoveredFresh(arg_agent_identi
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "IdentityEnded", payload |-> [agent_identity |-> packet.payload.agent_identity], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveRespawnTopologyAbandonedTerminalRecoveredFresh"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ObserveRespawnTopologyAbandonedTerminalRecoveredFresh", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1

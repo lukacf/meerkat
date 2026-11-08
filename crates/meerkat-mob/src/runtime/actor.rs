@@ -480,8 +480,10 @@ pub(super) fn is_transcript_revision_conflict(error: &meerkat_core::service::Ses
 /// The mob's answer to a failure to end `identity`'s scoped tool grants: a
 /// concurrent writer that changed one of them twice meanwhile answers the
 /// busy class ([`MobError::LifecycleOperationPending`], `SESSION_BUSY` on
-/// the wire), so the step that ends the identity is retried; any other
-/// failure is internal.
+/// the wire); any other failure is internal. A respawn abandonment retries
+/// the busy class within its bound ([`ABANDONMENT_GRANT_END_ATTEMPTS`]); the
+/// other steps that end an identity answer it to their caller, which may
+/// retry the step.
 #[cfg(feature = "runtime-adapter")]
 pub(super) fn tool_grant_end_failure(
     identity: &AgentIdentity,
@@ -500,6 +502,101 @@ pub(super) fn tool_grant_end_failure(
             "ending the tool grants of the identity '{identity}' failed: {error}"
         )),
     }
+}
+
+/// The sessions `state` holds for `identity`: its member's session binding
+/// and its identity entry's archived session record.
+pub(super) fn held_sessions_of(
+    state: &mob_dsl::MobMachineState,
+    identity: &mob_dsl::AgentIdentity,
+) -> Result<BTreeSet<SessionId>, MobError> {
+    state
+        .member_session_bindings
+        .get(identity)
+        .into_iter()
+        .chain(state.identity_entry_archived_sessions.get(identity))
+        .map(|session| {
+            SessionId::parse(&session.0).map_err(|error| {
+                MobError::Internal(format!(
+                    "'{}' holds an invalid session: {error}",
+                    identity.0
+                ))
+            })
+        })
+        .collect()
+}
+
+/// How many times a respawn abandonment attempts the end of an identity's
+/// scoped tool grants while it answers the busy class (a concurrent writer
+/// changed one of the grants twice meanwhile; each attempt already retries a
+/// conflict once itself). Only another failure, or a busy class that
+/// outlasts the bound, fails the abandonment's step.
+pub(super) const ABANDONMENT_GRANT_END_ATTEMPTS: usize = 3;
+
+/// Run a respawn abandonment's grant end, `attempt_end`, retrying a busy
+/// answer ([`MobError::LifecycleOperationPending`]) within
+/// [`ABANDONMENT_GRANT_END_ATTEMPTS`]. A repeated end changes nothing it
+/// already made: a grant already ended is left as it stands.
+pub(super) async fn end_within_abandonment_bound<Fut>(
+    mut attempt_end: impl FnMut() -> Fut,
+) -> Result<(), MobError>
+where
+    Fut: std::future::Future<Output = Result<(), MobError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match attempt_end().await {
+            Ok(()) => return Ok(()),
+            Err(MobError::LifecycleOperationPending { .. })
+                if attempt < ABANDONMENT_GRANT_END_ATTEMPTS =>
+            {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// End every live scoped tool grant of `identity` in the mob `mob_id`'s
+/// `incarnation`, and of each of `sessions` (the sessions MobMachine held for
+/// it when it ended), recording `reason`: its identity ended. Each grant ends
+/// with its subject, so it explains no later refusal; a grant that already
+/// ended is left as it stands, so an end repeated changes nothing.
+///
+/// # Errors
+/// As [`tool_grant_end_failure`] maps them: a concurrent writer that changed
+/// one of the grants twice answers the busy class, any other failure is
+/// internal.
+#[cfg(feature = "runtime-adapter")]
+pub(super) async fn end_member_identity_tool_grants(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    mob_id: &str,
+    incarnation: &meerkat_core::service::LiveMobIncarnation,
+    identity: &AgentIdentity,
+    sessions: &BTreeSet<SessionId>,
+    reason: &str,
+) -> Result<(), MobError> {
+    let identity_subject =
+        meerkat_core::tool_grant::ToolGrantSubject::member(mob_id, incarnation, identity.as_str());
+    let subjects = std::iter::once(identity_subject).chain(
+        sessions
+            .iter()
+            .cloned()
+            .map(meerkat_core::tool_grant::ToolGrantSubject::session),
+    );
+    for subject in subjects {
+        runtime
+            .end_tool_grants_of(
+                &subject,
+                meerkat_runtime::tool_grant::ToolGrantRevocation {
+                    actor: None,
+                    reason: Some(reason.to_string()),
+                },
+            )
+            .await
+            .map_err(|error| tool_grant_end_failure(identity, error))?;
+    }
+    Ok(())
 }
 
 /// Whether a member's session is still present, live or durable, as read by
@@ -52356,12 +52453,16 @@ impl MobActor {
         }
         // An abandonment after the old member's archive ends the identity
         // the respawn hold kept (MobMachine names it, `IdentityEnded`): its
-        // scoped tool grants end before the step's journal row, so a replay
-        // that finds the row finds them ended. A failure fails the step.
-        self.end_tool_grants_of_ended_identities(
-            prepared.transition.effects(),
-            "its respawn was abandoned",
-        )
+        // scoped tool grants end before the step's journal row. A busy answer
+        // (a concurrent writer) is retried within the abandonment's bound;
+        // another failure fails the step, which stops the actor for cold
+        // recovery, and the resume that abandons the respawn ends them.
+        end_within_abandonment_bound(|| {
+            self.end_tool_grants_of_ended_identities(
+                prepared.transition.effects(),
+                "its respawn was abandoned",
+            )
+        })
         .await?;
 
         let cursor_floor = self.events.latest_cursor().await?;
@@ -65239,9 +65340,10 @@ impl MobActor {
     /// a runtime there are no grants.
     ///
     /// # Errors
-    /// A concurrent writer that changed one of the grants twice answers the
-    /// busy class ([`MobError::LifecycleOperationPending`]): the step that
-    /// ends the identity is retried. Any other failure is internal.
+    /// As [`tool_grant_end_failure`] maps them: a concurrent writer that
+    /// changed one of the grants twice answers the busy class
+    /// ([`MobError::LifecycleOperationPending`]), any other failure is
+    /// internal.
     #[cfg(feature = "runtime-adapter")]
     async fn end_identity_tool_grants(
         &self,
@@ -65252,30 +65354,15 @@ impl MobActor {
         let Some(runtime) = self.runtime_adapter.as_ref() else {
             return Ok(());
         };
-        let identity_subject = meerkat_core::tool_grant::ToolGrantSubject::member(
+        end_member_identity_tool_grants(
+            runtime,
             self.definition.id.as_str(),
             &self.incarnation,
-            identity.as_str(),
-        );
-        let subjects = std::iter::once(identity_subject).chain(
-            sessions
-                .iter()
-                .cloned()
-                .map(meerkat_core::tool_grant::ToolGrantSubject::session),
-        );
-        for subject in subjects {
-            runtime
-                .end_tool_grants_of(
-                    &subject,
-                    meerkat_runtime::tool_grant::ToolGrantRevocation {
-                        actor: None,
-                        reason: Some(reason.clone()),
-                    },
-                )
-                .await
-                .map_err(|error| tool_grant_end_failure(identity, error))?;
-        }
-        Ok(())
+            identity,
+            sessions,
+            &reason,
+        )
+        .await
     }
 
     /// The sessions `state` holds for `identity`: its member's session
@@ -65285,20 +65372,7 @@ impl MobActor {
         state: &mob_dsl::MobMachineState,
         identity: &mob_dsl::AgentIdentity,
     ) -> Result<std::collections::BTreeSet<SessionId>, MobError> {
-        state
-            .member_session_bindings
-            .get(identity)
-            .into_iter()
-            .chain(state.identity_entry_archived_sessions.get(identity))
-            .map(|session| {
-                SessionId::parse(&session.0).map_err(|error| {
-                    MobError::Internal(format!(
-                        "'{}' holds an invalid session: {error}",
-                        identity.0
-                    ))
-                })
-            })
-            .collect()
+        held_sessions_of(state, identity)
     }
 
     /// End the scoped tool grants of every identity a prepared MobMachine

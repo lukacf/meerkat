@@ -104,6 +104,238 @@ async fn a_respawn_abandoned_after_its_old_members_archive_ends_the_identitys_gr
     handle.shutdown().await.expect("shutdown test mob");
 }
 
+/// Bounds a hang only: a passing row never waits for it.
+const STEP: Duration = Duration::from_secs(30);
+
+/// A mob over a store-backed runtime, with every store kept, so a resume of
+/// the mob reads what its first actor wrote.
+struct RecoverableMob {
+    events: Arc<FaultInjectedMobEventStore>,
+    service: Arc<MockSessionService>,
+    runtime_store: Arc<meerkat_runtime::InMemoryRuntimeStore>,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    runs: Arc<InMemoryMobRunStore>,
+    specs: Arc<InMemoryMobSpecStore>,
+    runtime_metadata: Arc<InMemoryMobRuntimeMetadataStore>,
+    identity_store: Arc<InMemoryMobIdentityStore>,
+    identity_status: Arc<InMemoryMobIdentityStatusStore>,
+}
+
+impl RecoverableMob {
+    fn new() -> Self {
+        let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let runtime = Arc::new(
+            meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+                Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>
+            )
+            .expect("construct runtime authority"),
+        );
+        let service = Arc::new(MockSessionService::new());
+        service.set_runtime_adapter(Arc::clone(&runtime));
+        Self {
+            events: Arc::new(FaultInjectedMobEventStore::new()),
+            service,
+            runtime_store,
+            runtime,
+            runs: Arc::new(InMemoryMobRunStore::new()),
+            specs: Arc::new(InMemoryMobSpecStore::new()),
+            runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+            identity_store: Arc::new(InMemoryMobIdentityStore::new()),
+            identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        }
+    }
+
+    fn storage(&self) -> MobStorage {
+        MobStorage::custom_with_runtime_metadata(
+            self.events.clone(),
+            self.runs.clone(),
+            self.specs.clone(),
+            self.runtime_metadata.clone(),
+            self.identity_store.clone(),
+            self.identity_status.clone(),
+        )
+    }
+
+    async fn create(&self) -> MobHandle {
+        MobBuilder::new(sample_definition(), self.storage())
+            .with_session_service(self.service.clone())
+            .create()
+            .await
+            .expect("create mob")
+    }
+
+    async fn resume(&self) -> MobHandle {
+        MobBuilder::for_resume(self.storage())
+            .with_session_service(self.service.clone())
+            .notify_orchestrator_on_resume(false)
+            .resume()
+            .await
+            .expect("the resume")
+    }
+
+    /// Spawn `identity` in `handle`'s mob and grant it `shell`.
+    async fn spawn_granted(
+        &self,
+        handle: &MobHandle,
+        identity: &AgentIdentity,
+    ) -> meerkat_runtime::tool_grant::StoredToolGrant {
+        handle
+            .spawn_with_options(
+                ProfileName::from("worker"),
+                identity.clone(),
+                None,
+                Some(crate::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn the member");
+        self.runtime
+            .grant_tool(shell_grant(&identity_subject(handle, identity)), None)
+            .await
+            .expect("the identity is granted")
+    }
+}
+
+/// A respawn whose replacement fails after the old member's archive, when
+/// the live abandonment cannot end the identity's grants (the grant store
+/// fails, a failure of no busy class), stops the mob's actor before the
+/// abandonment's row is written: the mob serves nothing until its resume.
+/// The resume abandons the respawn itself, which ends the identity, and it
+/// ends the identity's grants before the mob serves.
+#[tokio::test]
+async fn a_respawn_a_resume_abandons_ends_the_identitys_grants() {
+    let mob = RecoverableMob::new();
+    let handle = mob.create().await;
+    let identity = AgentIdentity::from("respawn-recovered");
+    let grant = mob.spawn_granted(&handle, &identity).await;
+    let subject = identity_subject(&handle, &identity);
+
+    mob.events.fail_appends_for("MemberSpawned").await;
+    mob.runtime_store
+        .fail_tool_grant_store_for_test(Some("grant store offline"));
+    let respawned = tokio::time::timeout(STEP, handle.respawn(identity.clone(), None))
+        .await
+        .expect("the respawn answers within the bound");
+    mob.runtime_store.fail_tool_grant_store_for_test(None);
+    mob.events.allow_appends_for("MemberSpawned").await;
+    assert!(respawned.is_err(), "the respawn fails: {respawned:?}");
+    // A failure of no busy class fails the abandonment's step: the actor
+    // stops for cold recovery instead of serving with the grants live.
+    let after_stop = tokio::time::timeout(
+        STEP,
+        handle.spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("after-stop"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        ),
+    )
+    .await
+    .expect("the spawn answers within the bound");
+    assert!(
+        after_stop.is_err(),
+        "the stopped mob serves nothing: {after_stop:?}"
+    );
+    let before = mob
+        .runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(
+        before
+            .grants
+            .iter()
+            .map(|listed| listed.status)
+            .collect::<Vec<_>>(),
+        vec![ToolGrantStatus::Active],
+        "the stopped actor ended no grant"
+    );
+
+    let resumed = mob.resume().await;
+    let journal = mob.events.replay_all().await.expect("the journal");
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::RespawnTopologyAbandoned { .. }))
+            .count(),
+        1,
+        "the resume wrote the respawn's abandonment"
+    );
+    assert!(
+        resumed
+            .get_member(&identity)
+            .await
+            .expect("the member lookup")
+            .is_none(),
+        "the resume abandoned the respawn: no member holds the name"
+    );
+    let listing = mob
+        .runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    assert_eq!(
+        listing.grants[0].status,
+        ToolGrantStatus::Revoked,
+        "the resume's abandonment ended the identity's grant"
+    );
+    resumed.shutdown().await.expect("shutdown resumed mob");
+}
+
+/// When the abandonment's grant end meets a concurrent writer that changed a
+/// grant twice (the busy class), the abandonment retries it within its
+/// bound: the identity's grant ends, the respawn answers its own failure,
+/// and the mob keeps serving.
+#[tokio::test]
+async fn an_abandonments_busy_grant_end_is_retried_and_the_mob_keeps_serving() {
+    let mob = RecoverableMob::new();
+    let handle = mob.create().await;
+    let identity = AgentIdentity::from("respawn-busy");
+    let grant = mob.spawn_granted(&handle, &identity).await;
+    let subject = identity_subject(&handle, &identity);
+
+    mob.events.fail_appends_for("MemberSpawned").await;
+    // One attempt meets two conflicts, so the grant service answers the busy
+    // class (it retries a conflict once); the next attempt meets one and
+    // commits.
+    mob.runtime_store.conflict_tool_grant_writes_for_test(3);
+    let respawned = tokio::time::timeout(STEP, handle.respawn(identity.clone(), None))
+        .await
+        .expect("the respawn answers within the bound");
+    mob.runtime_store.conflict_tool_grant_writes_for_test(0);
+    mob.events.allow_appends_for("MemberSpawned").await;
+    assert!(respawned.is_err(), "the replacement fails: {respawned:?}");
+    let listing = mob
+        .runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    assert_eq!(
+        listing.grants[0].status,
+        ToolGrantStatus::Revoked,
+        "the retried end ended the identity's grant"
+    );
+    tokio::time::timeout(
+        STEP,
+        handle.spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("after-busy"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        ),
+    )
+    .await
+    .expect("the spawn answers within the bound")
+    .expect("the mob keeps serving after a busy grant end");
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
 /// `identity`'s sealed intent in a fresh identity store of `definition`'s
 /// mob, from the adoption fixture's material changed by `edit`.
 async fn store_with_intent(
@@ -286,11 +518,13 @@ async fn a_placed_member_answers_the_empty_gate_whatever_its_role_gates() {
     handle.shutdown().await.expect("shutdown test mob");
 }
 
-/// A grant end that met a concurrent writer twice answers the busy class,
-/// which the step that ends the identity retries (`SESSION_BUSY` on the
-/// wire); any other failure to end the grants stays internal.
+/// A grant end that met a concurrent writer twice answers the busy class
+/// (`SESSION_BUSY` on the wire); any other failure to end the grants stays
+/// internal. The row pins the mapping; the abandonment's retry of the busy
+/// class has its own row
+/// (`an_abandonments_busy_grant_end_is_retried_and_the_mob_keeps_serving`).
 #[test]
-fn a_grant_end_that_meets_a_concurrent_writer_is_retried() {
+fn a_grant_end_that_meets_a_concurrent_writer_answers_the_busy_class() {
     use meerkat_runtime::tool_grant::ToolGrantServiceError;
     let identity = AgentIdentity::from("busy-identity");
     let busy = super::super::actor::tool_grant_end_failure(

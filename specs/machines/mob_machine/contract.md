@@ -4916,6 +4916,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches_terminal_history`
   - `preservation_not_pending`
   - `abandonment_not_recorded`
+- Emits: `IdentityEnded`
 - To: `Running`
 
 ### `ObserveRespawnTopologyAbandonedStaleSuccessor`

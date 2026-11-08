@@ -2186,12 +2186,17 @@ of its member; at the end of a retirement that unlists or removes its
 identity entry; at the one-entry unlist, or a complete roster's seal, of an
 unseated identity entry; at the removal of an unseated store-owned
 identity; when a respawn whose replacement fails after the old member's
-archive is abandoned; and at a reset of its mob, which ends every identity
-the mob held. A respawn keeps them, and so does a retirement an identity
-entry outlives (the entry stays unseated, and the next apply seats it on
-its own session). A grant ended with its identity explains no later
-refusal: a name created or declared again, on a fresh session or on the
-old one, needs a grant of its own (`tool_grant_required`).
+archive is abandoned, by its own step or by the resume after a stop; and at
+a reset of its mob, which ends every identity the mob held. A respawn keeps
+them, and so does a retirement an identity entry outlives (the entry stays
+unseated, and the next apply seats it on its own session). A grant ended
+with its identity explains no later refusal: a name created or declared
+again, on a fresh session or on the old one, needs a grant of its own
+(`tool_grant_required`). The one exception is a session the mob no longer
+held for the identity when it ended (an archived session of an earlier
+fresh-session rotation, or the old session of a respawn abandoned after its
+old member's archive): its own session grants stay live until they expire,
+so revoke them before resuming that session (Known limitations).
 
 A grant's `status` is `active`, `expired` or `revoked`; `requested` and
 `declined` are reserved for grant requests. A request's `subject` and `target`

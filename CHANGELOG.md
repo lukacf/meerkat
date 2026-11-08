@@ -209,21 +209,31 @@ them.
   `Unrecorded`: material sealed before the field existed reads as
   `Unrecorded`, so every material this release seals writes its source,
   `definition` included.
-- `meerkat-mob`: the generated `MobMachineEffect` gains `IdentityEnded`
-  (`agent_identity`) and `DeclaredRosterSealRefused`, and the kernel
-  `generated::mob::TransitionId` gains `SealDeclaredRosterRefused` after
-  every published variant; exhaustive matches must add them. Behaviour:
-  `SealDeclaredRosterSealed` no longer removes an unseated Declared entry
-  the roster does not list. While such an entry remains, a seal answers the
-  refusal arm and changes nothing; the actor's seal ends each such entry
-  through the one-entry unlist first, so `MobHandle::apply_declared_roster`
-  answers as before.
+- `meerkat-mob`, `meerkat-machine-kernels`, `meerkat-machine-schema`: the
+  generated `MobMachineEffect`, the kernel `generated::mob::Effect` and
+  `EffectKind`, and the schema's `MobMachineEffectVariant` gain
+  `IdentityEnded` (`agent_identity`) and `DeclaredRosterSealRefused`, and the
+  kernel `generated::mob::TransitionId` gains `SealDeclaredRosterRefused`
+  after every published variant; exhaustive matches must add them.
+  Behaviour: `SealDeclaredRosterSealed` no longer removes an unseated
+  Declared entry the roster does not list. While such an entry remains, a
+  seal answers the refusal arm and changes nothing; the actor's seal ends
+  each such entry through the one-entry unlist first, so
+  `MobHandle::apply_declared_roster` answers as before. The recovered
+  terminal abandonment (`ObserveRespawnTopologyAbandonedTerminalRecoveredFresh`,
+  a respawn's abandonment replayed onto a retirement the replay folded as a
+  plain terminal) emits `IdentityEnded`, as the live terminal abandonment
+  does.
 - `meerkat-runtime`, `meerkat-machine-kernels`, `meerkat-machine-schema`:
   the generated `ToolGrantLifecycleMachine`'s `ToolGrantEndReason` and
   `ToolGrantUseRefusal` gain `SubjectEnded`, its `ToolGrantLifecycleInput`
-  gains `EndWithSubject`, and the kernel
-  `generated::tool_grant_lifecycle::TransitionId` gains its arms after every
-  published variant. `meerkat_runtime::tool_grant::StoredToolGrant` gains
+  and the schema's and the runtime's `ToolGrantLifecycleInputVariant` gain
+  `EndWithSubject`, and the kernel
+  `generated::tool_grant_lifecycle::TransitionId` gains
+  `EndWithSubjectActive`, `EndWithSubjectAfterDeadline`,
+  `EndWithSubjectSettledExpired`, `EndWithSubjectSettledRevoked` and
+  `AdmitEndedWithSubject` after every published variant.
+  `meerkat_runtime::tool_grant::StoredToolGrant` gains
   `subject_ended` (struct literals need it). Behaviour:
   `ToolGrantService::revoke_subject` and `MeerkatMachine::end_tool_grants_of`
   end each live grant with its subject (`SubjectEnded`; its status reads
@@ -432,9 +442,14 @@ them.
   unlists or removes its identity entry; at the one-entry unlist, or a
   complete roster's seal, of an unseated identity entry; at the removal of
   an unseated store-owned identity; when a respawn whose replacement fails
-  after the old member's archive is abandoned; and at a reset of the mob,
-  which ends every identity the mob held. A respawn keeps them, and so does
-  a retirement an identity entry outlives. A grant ended with its identity
+  after the old member's archive is abandoned, by its own step or by the
+  resume after a stop; and at a reset of the mob, which ends every identity
+  the mob held. A respawn keeps them, and so does a retirement an identity
+  entry outlives. Ending grants for several identities in one step is not
+  atomic: when one identity's end fails, the ends already made stay made,
+  the step fails and nothing else commits, and a retry ends the rest; a
+  respawn's abandonment retries a busy end (a concurrent writer) within its
+  bound. A grant ended with its identity
   explains no later refusal: a name created again needs a grant of its own
   (`tool_grant_required`).
 - `tool_grants/grant` takes `decision_ref`, the host's opaque reference to

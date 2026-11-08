@@ -488,9 +488,11 @@ impl MobActor {
     /// other entry as it is), and only then is the roster sealed; MobMachine
     /// refuses a seal while an unseated Declared entry it would end remains.
     /// The identities the step ends have their scoped tool grants, and those
-    /// of their archived sessions, ended before the step commits; a failure
-    /// fails the whole step, which commits nothing. A mob that is not
-    /// running answers an invalid transition.
+    /// of their archived sessions, ended before the step commits. Ending
+    /// grants for several identities in one step is not atomic: when one
+    /// identity's end fails, the ends already made stay made (they fail
+    /// closed), the step fails and nothing else commits, and a retry ends the
+    /// rest. A mob that is not running answers an invalid transition.
     pub(super) async fn seal_declared_roster(
         &mut self,
         desired: BTreeSet<AgentIdentity>,

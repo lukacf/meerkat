@@ -5242,6 +5242,28 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// Wait, at most `timeout`, until Core holds no lifecycle operation of
+    /// `identity`'s member in flight (`MobHandle::wait_member_lifecycle_settled`):
+    /// its spawn, a wake, its retirement, its entry's removal or archive, or
+    /// its held construction. These are the facts on which Core's declared
+    /// apply leaves the identity's declaration to its next apply
+    /// ([`DeclaredIdentityAnswer::Deferred`]). It sends Core no command and
+    /// wakes nothing.
+    ///
+    /// The default answers [`BridgeError::Unsupported`]: a bridge that cannot
+    /// read Core's member lifecycle waits for nothing, and a door whose
+    /// declaration Core left to its next apply answers its typed refusal at
+    /// once. A bridge that wraps another forwards it.
+    async fn wait_member_lifecycle_settled(
+        &self,
+        _identity: &AgentIdentity,
+        _timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "wait_member_lifecycle_settled",
+        })
+    }
+
     /// Core's output-only convergence status for `identity`, unclassified.
     async fn identity_convergence_status(
         &self,
@@ -9578,6 +9600,21 @@ impl SessionBridge for MobSessionBridge {
         Ok(Some(binding))
     }
 
+    async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        self.handle
+            .wait_member_lifecycle_settled(&member_id_for_identity(identity), timeout)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "waiting for the lifecycle of {identity}'s member to settle: {error}"
+                ))
+            })
+    }
+
     async fn identity_convergence_status(
         &self,
         identity: &AgentIdentity,
@@ -10801,6 +10838,16 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
         self.bridge.ensure_member_live(identity).await
+    }
+
+    async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        self.bridge
+            .wait_member_lifecycle_settled(identity, timeout)
+            .await
     }
 
     async fn identity_convergence_status(

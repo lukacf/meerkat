@@ -168,6 +168,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from the list read), and one without build preparation records no
   cause.
 
+- `SessionBridge::wait_member_lifecycle_settled`, Core's
+  `MobHandle::wait_member_lifecycle_settled`: it waits, at most a timeout,
+  until Core holds no lifecycle operation of an identity's member in flight,
+  and answers `meerkat_mob::MemberLifecycleSettlement`. The doors wait on it
+  (see Changed). Its default answers `BridgeError::Unsupported`, so a door
+  through a bridge without it answers Core's deferral at once; a host's own
+  wrapper of a session bridge forwards it.
+
 ### Changed
 
 - Registering an identity (`IdentityRuntime::register`) or updating its spec
@@ -199,11 +207,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keeps, restamps or moves each listed identity (MobMachine decides each
   verdict), and unlists each identity it holds declared that the roster no
   longer lists and retires its member, after which the identity leaves
-  Meta's registry. A send, a dispatch or a materialization of an identity
-  Core holds no member for, or one whose first-boot row, held role move or
-  host preparation is still owed, declares that identity alone before it
-  acts. A respawn of a built member is such a declaration: Core seats the
-  member again, Dormant, on the session it kept archived, building nothing,
+  Meta's registry. A send or a dispatch of an identity Core holds no member
+  for, or one whose first-boot row, held role move or host preparation is
+  still owed, and every materialization (a warm included), declares that
+  identity alone before it acts. Such a declaration that Core leaves to its
+  next apply, because a lifecycle operation of the identity's member is in
+  flight (the kickoff wake of the fresh life a reset seated, a delivery's
+  wake, its retirement), waits for that operation to end, up to 15 s, on
+  Core's machine state, and is declared again, so a warm right after a reset
+  answers the woken member. One still in flight then is refused retryable
+  (`-32052`, `identity_wake_retryable`). A roster pass leaves such an
+  identity to its next apply. A respawn of a built member is such a
+  declaration: Core seats the member again, Dormant, on the session it kept
+  archived, building nothing,
   and the wake that follows builds it once, so the host's `customize_build`
   runs twice (the seat's composed build, then the build's own), as for a
   lazily seated identity, where the seat step revived the member live with

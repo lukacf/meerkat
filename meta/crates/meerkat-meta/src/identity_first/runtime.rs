@@ -9237,7 +9237,10 @@ impl IdentityRuntime {
         // Make the identity a member of Core's mob first: its declaration in
         // Core's mob, whose verdict seats it (on its archived session, or its
         // pending first-boot row's), keeps it, or moves it, and is typed when
-        // it leaves no member to wake. The wake below makes the member live.
+        // it leaves no member to wake. Core decides it once a lifecycle
+        // operation of the member in flight (the kickoff wake of the fresh
+        // life a reset seated, a delivery's wake) ended: the door waits for
+        // it. The wake below makes the member live.
         let seat = self
             .declare_identity_locked(&spec, overrides.customizer)
             .await?;

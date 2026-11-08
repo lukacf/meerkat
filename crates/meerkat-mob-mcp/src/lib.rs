@@ -7793,8 +7793,9 @@ impl MobMcpState {
     /// An `identity` the roster already holds is refused with
     /// [`MobError::MemberAlreadyExists`] before anything is forked. A member
     /// seated under it between that read and the fork's own seat gets the
-    /// engine's answer, [`MobError::ForkMemberProvisionFailed`], whose
-    /// committed fork session stays recoverable.
+    /// engine's answer, [`MobError::ForkMemberProvisionFailed`]: its committed
+    /// fork session is bound to `identity`, so resume it under that identity
+    /// once the identity is free, or archive it.
     pub async fn mob_fork_member(
         &self,
         mob_id: &MobId,
@@ -7804,7 +7805,9 @@ impl MobMcpState {
         runtime_mode: Option<MobRuntimeMode>,
         message_count: Option<usize>,
     ) -> Result<meerkat_mob::ForkMemberResult, MobError> {
-        let handle = self.handle_for(mob_id).await?;
+        let handle = self
+            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
         let source = handle
             .get_member(source_identity)
             .await?

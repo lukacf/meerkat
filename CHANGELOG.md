@@ -765,8 +765,8 @@ them.
   (`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`): over RPC
   invalid params with `data.kind` `resume_session_bound_to_another_member`.
   It was an internal error whose message held a debug rendering of the
-  session's member binding. In a `mob/spawn_many` batch the refusal is
-  observed as a session error. With a declared role migration the refusal
+  session's member binding. In a `MobHandle::spawn_many` batch the refusal
+  is observed as a session error. With a declared role migration the refusal
   stays `MemberRoleMigrationRejected`, whose reason now names the session and
   the member it is bound to. (#2117, thanks @zond)
 

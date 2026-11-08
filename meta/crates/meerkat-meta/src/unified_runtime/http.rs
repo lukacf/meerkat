@@ -459,7 +459,6 @@ impl UnifiedRuntime {
                 identity_runtime: self.identity_runtime_ref().cloned(),
                 console_events: self.console_events(),
                 governed_ingress: self.console_governed_ingress.clone(),
-                operator_resolver: self.console_operator_resolver(),
                 session_fences: self.console_session_fences().clone(),
             },
         ));
@@ -479,7 +478,6 @@ impl UnifiedRuntime {
             visibility_policy,
             self.access_controller().cloned(),
             self.memory_panel_store(),
-            self.console_operator_resolver(),
             self.console_identity_roster(),
             self.workgraph_service(),
             Some(self.topology_runtime_handle()),

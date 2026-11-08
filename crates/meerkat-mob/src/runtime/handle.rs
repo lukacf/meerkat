@@ -4020,6 +4020,16 @@ fn submit_work_payload(
             .get_or_insert_with(Default::default)
             .request_reasoning = Some(preference);
     }
+    // Request-only context rides the typed carrier in this process only;
+    // the member delivery path refuses it where it cannot ride.
+    if let Some(context) = spec.request_only_context {
+        let contexts = &mut turn_metadata
+            .get_or_insert_with(Default::default)
+            .request_only_context;
+        if !contexts.contains(&context) {
+            contexts.push(context);
+        }
+    }
     Ok(Box::new(super::state::SubmitWorkPayload {
         runtime_id,
         fence_token,

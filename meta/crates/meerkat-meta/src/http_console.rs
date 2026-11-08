@@ -41,9 +41,10 @@ use crate::access::{
     ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN, ACTION_AGENT_RETIRE,
     ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_TOOL_GRANTS_MANAGE, ACTION_AGENT_VIEW,
     ACTION_AUDIT_VIEW, ACTION_GATING_DECIDE, ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW,
-    ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN,
-    ACTION_SCHEDULE_MANAGE, ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController,
-    AccessResource, AccessView, AgentResourceAttributes, LiveAccessView,
+    ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ,
+    ACTION_OPERATOR_MEMORY_READ_ANY, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
+    ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessResource, AccessView,
+    AgentResourceAttributes, LiveAccessView,
 };
 // The test modules build access rules and groups through `use super::*`.
 #[cfg(test)]
@@ -120,12 +121,6 @@ pub struct ConsoleJsonState {
     /// (recall-only provider, no memory configured) leaves those methods
     /// unadvertised.
     pub(crate) memory_panel: Option<Arc<dyn crate::memory::capabilities::MemoryPanelStore>>,
-    /// §16 Q1 provisional operator keying: the console send path notes
-    /// "authenticated principal P addressed identity I" through this
-    /// resolver; the memory coordinator reads it for operator-scope recall.
-    /// `None` when the operator scope is off (or memory is unconfigured).
-    pub(crate) operator_resolver:
-        Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
     /// Identity-first gateways: the mutable desired-identity roster that
     /// `meta/ensure_member` extends (ask K0). `None` on session-owned
     /// deployments.
@@ -670,7 +665,6 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         snapshot_read_model: ConsoleSnapshotReadModel::default(),
         access: None,
         memory_panel: None,
-        operator_resolver: None,
         identity_roster: None,
         workgraph: None,
         topology: None,
@@ -718,7 +712,6 @@ pub fn console_json_router_with_aggregator_and_access(
         snapshot_read_model: ConsoleSnapshotReadModel::default(),
         access,
         memory_panel: None,
-        operator_resolver: None,
         identity_roster: None,
         workgraph: None,
         topology: None,
@@ -789,7 +782,6 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         None,
         None,
         None,
-        None,
         Default::default(),
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         Default::default(),
@@ -815,7 +807,6 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     visibility_policy: Arc<dyn ConsoleVisibilityPolicy>,
     access: Option<AccessController>,
     memory_panel: Option<Arc<dyn crate::memory::capabilities::MemoryPanelStore>>,
-    operator_resolver: Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
     identity_roster: Option<Arc<crate::identity_first::MutableRosterProvider>>,
     workgraph: Option<meerkat::WorkGraphService>,
     topology: Option<crate::topology_control::TopologyRuntimeHandle>,
@@ -882,7 +873,6 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         snapshot_read_model,
         access,
         memory_panel,
-        operator_resolver,
         identity_roster,
         workgraph,
         topology,
@@ -1509,6 +1499,102 @@ fn console_caller_scope(scope: &ConsoleSendScope) -> String {
             .as_bytes(),
     );
     format!("console-caller:v1:{digest:x}")
+}
+
+/// The caller scope of the person a qualified principal names: a `Human` in
+/// the trust domain of a verified OIDC issuer, as the Console qualifies a
+/// person it authenticated
+/// ([`crate::runtime::AuthenticatedConsoleHuman::principal`]). It is the
+/// `caller_scope` `meta/console/whoami` reports to that person, a function of
+/// the issuer and the subject only. Any other principal names no person and
+/// has none.
+pub(crate) fn person_caller_scope(principal: &meerkat_core::PrincipalRef) -> Option<String> {
+    if principal.kind != meerkat_core::PrincipalKind::Human {
+        return None;
+    }
+    let meerkat_core::PrincipalQualification::Qualified(domain) = &principal.qualification else {
+        return None;
+    };
+    let issuer = domain
+        .as_str()
+        .strip_prefix(crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX)?;
+    Some(console_caller_scope(&ConsoleSendScope::Human {
+        issuer: issuer.to_string(),
+        subject: principal.id.as_str().to_string(),
+    }))
+}
+
+#[cfg(test)]
+mod person_caller_scope_tests {
+    use super::*;
+    use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+
+    /// A person's operator memory key is the caller scope
+    /// `meta/console/whoami` reports to them: the principal the Console
+    /// qualifies for a verified human gives the digest of that human's send
+    /// scope. A principal that names no Console person has none.
+    #[test]
+    fn person_caller_scope_is_the_whoami_caller_scope() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer = "https://issuer.example.test";
+        let subject = "person-sub";
+        let person = PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            subject,
+            TrustDomainId::new(format!(
+                "{}{issuer}",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))?,
+        )?;
+        assert_eq!(
+            person_caller_scope(&person),
+            Some(console_caller_scope(&ConsoleSendScope::Human {
+                issuer: issuer.to_string(),
+                subject: subject.to_string(),
+            }))
+        );
+        let service = PrincipalRef::in_domain(
+            PrincipalKind::ServiceAccount,
+            "svc:reporter",
+            TrustDomainId::new("service-issuer:reporting")?,
+        )?;
+        assert_eq!(person_caller_scope(&service), None);
+        let other_domain = PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            subject,
+            TrustDomainId::new("directory:corp")?,
+        )?;
+        assert_eq!(person_caller_scope(&other_domain), None);
+        Ok(())
+    }
+
+    /// Only a person has a person's caller scope: a principal of any other
+    /// kind in a verified OIDC issuer's trust domain (the domain a person
+    /// is qualified in) names no person and has none.
+    #[test]
+    fn person_caller_scope_is_only_for_humans() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer_domain = || {
+            TrustDomainId::new(format!(
+                "{}https://issuer.example.test",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))
+        };
+        for kind in [
+            PrincipalKind::ServiceAccount,
+            PrincipalKind::PersonalAgent,
+            PrincipalKind::SharedAgent,
+            PrincipalKind::RuntimeHost,
+        ] {
+            let principal = PrincipalRef::in_domain(kind, "person-sub", issuer_domain()?)?;
+            assert_eq!(
+                person_caller_scope(&principal),
+                None,
+                "a {kind:?} principal in an issuer's domain names no person"
+            );
+        }
+        let person = PrincipalRef::in_domain(PrincipalKind::Human, "person-sub", issuer_domain()?)?;
+        assert!(person_caller_scope(&person).is_some(), "the person has one");
+        Ok(())
+    }
 }
 
 /// Storage keys are opaque projections of the authenticated runtime/principal.
@@ -2755,8 +2841,6 @@ pub(crate) struct ConsoleSendPath<'a> {
     pub(crate) access: Option<&'a AccessController>,
     pub(crate) identity_runtime: Option<&'a Arc<crate::identity_first::IdentityRuntime>>,
     pub(crate) console_events: Option<&'a ConsoleEventStore>,
-    pub(crate) operator_resolver:
-        Option<&'a Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
 }
 
 impl<'a> ConsoleSendPath<'a> {
@@ -2772,7 +2856,6 @@ impl<'a> ConsoleSendPath<'a> {
                 .as_ref()
                 .map(crate::identity_first::PublicIdentityRuntime::runtime),
             console_events: state.console_events.as_ref(),
-            operator_resolver: state.operator_resolver.as_ref(),
         }
     }
 }
@@ -2877,20 +2960,11 @@ pub(crate) async fn send_as_admitted_console_caller(
     )
     .await
     .map_err(AdmittedConsoleSendError::Gate)?;
-    // The caller is checked after the gate's reads, before the operator
-    // note, and again right before the send is reserved or sent.
+    // The caller is checked after the gate's reads, and again right before
+    // the send is reserved or sent.
     governance
         .refuse_unless_caller_current()
         .map_err(|_| AdmittedConsoleSendError::CallerNotCurrent)?;
-    // §16 Q1 provisional operator keying: an authenticated principal
-    // addressing this identity IS the active operator for its turns.
-    // Unauthenticated consoles (no subject) note nothing: operator-scope
-    // recall stays inert without a real principal.
-    if let Some(resolver) = path.operator_resolver
-        && let Some(subject) = access_view.and_then(|view| view.subject())
-    {
-        resolver.note_interaction(request.identity.as_str(), subject);
-    }
     let Some(aggregator) = path.aggregator else {
         return Err(AdmittedConsoleSendError::AggregatorUnavailable);
     };
@@ -7106,8 +7180,9 @@ fn memory_panel_record_bytes(record: &crate::memory::records::MemoryRecord) -> u
 
 /// The read action guarding a record of this scope on the panel (§10.3).
 /// Realm-scope reads ride an *unscoped* `agent.memory.read` grant (a rule
-/// with no resource selector); operator scope (live since P4's provisional
-/// keying) requires its own explicit `operator.memory.read` grant.
+/// with no resource selector); operator scope requires its own explicit
+/// `operator.memory.read` grant, and another person's operator scope
+/// `operator.memory.read_any` as well ([`memory_panel_operator_visible`]).
 fn memory_panel_scope_action(scope: &crate::memory::records::MemoryScope) -> &'static str {
     match scope {
         crate::memory::records::MemoryScope::Identity { .. } => ACTION_AGENT_MEMORY_READ,
@@ -7118,15 +7193,18 @@ fn memory_panel_scope_action(scope: &crate::memory::records::MemoryScope) -> &'s
 }
 
 /// Who reads the memory panel, and through which console: the caller's
-/// access view and the identity namespace of the runtime that serves the
-/// read. A runtime's own console names identities bare (an empty
-/// namespace); a shared Console names them `<namespace>/<identity>` and
-/// records their access attributes under that name, so the identity a store
-/// row names is judged under the name the console gives it.
+/// access view, the identity namespace of the runtime that serves the read,
+/// and the caller's own operator scope key when the caller is a Console
+/// person (their caller scope). A runtime's own console names identities
+/// bare (an empty namespace); a shared Console names them
+/// `<namespace>/<identity>` and records their access attributes under that
+/// name, so the identity a store row names is judged under the name the
+/// console gives it.
 #[derive(Clone, Copy)]
 struct MemoryPanelCaller<'a> {
     view: Option<&'a AccessView>,
     namespace: &'a str,
+    operator: Option<&'a str>,
 }
 
 impl<'a> MemoryPanelCaller<'a> {
@@ -7135,7 +7213,14 @@ impl<'a> MemoryPanelCaller<'a> {
         Self {
             view,
             namespace: "",
+            operator: None,
         }
+    }
+
+    /// The same caller, who is the Console person whose operator scope has
+    /// the key `operator`.
+    fn with_operator(self, operator: Option<&'a str>) -> Self {
+        Self { operator, ..self }
     }
 
     /// The caller's view, when it enforces anything.
@@ -7158,17 +7243,37 @@ impl<'a> MemoryPanelCaller<'a> {
     }
 }
 
+/// The operator scope key of the Console person a send scope names: their
+/// caller scope. Any other caller (a token principal, a service, the open
+/// Console's anonymous caller) owns no operator scope.
+fn console_person_operator_key(scope: &ConsoleSendScope) -> Option<String> {
+    matches!(scope, ConsoleSendScope::Human { .. }).then(|| console_caller_scope(scope))
+}
+
+/// Whether the caller may read the operator scope keyed `operator`: with
+/// `operator.memory.read`, their own; with `operator.memory.read_any` as
+/// well, any person's.
+fn memory_panel_operator_visible(caller: MemoryPanelCaller<'_>, operator: &str) -> bool {
+    let Some(view) = caller.enforced() else {
+        return true;
+    };
+    view.allows(ACTION_OPERATOR_MEMORY_READ)
+        && (caller.operator == Some(operator) || view.allows(ACTION_OPERATOR_MEMORY_READ_ANY))
+}
+
 /// Per-row visibility for panel reads. Identity-scope rows require the
 /// per-scope read action AND `agent.view` on the identity (§10.3: the
 /// console keeps view as a prerequisite); mob rows require
 /// `mob.memory.read`; operator rows require the explicit
-/// `operator.memory.read` grant (cross-mob personal facts — an unscoped
-/// `agent.memory.read` deliberately does NOT cover them); realm rows
-/// require the unscoped read grant. Quarantine evidence is additionally
-/// reviewer-only (its bodies are exactly the content the quarantine gate
-/// exists for), including after a review or forget tombstones it. The scope
-/// half is [`memory_panel_scope_visible`]. The identity scope of an agent
-/// private to another person is never visible, enforced access or not.
+/// `operator.memory.read` grant for the caller's own operator scope and
+/// `operator.memory.read_any` as well for any other person's (personal
+/// facts: an unscoped `agent.memory.read` deliberately does NOT cover
+/// them); realm rows require the unscoped read grant. Quarantine evidence
+/// is additionally reviewer-only (its bodies are exactly the content the
+/// quarantine gate exists for), including after a review or forget
+/// tombstones it. The scope half is [`memory_panel_scope_visible`]. The
+/// identity scope of an agent private to another person is never visible,
+/// enforced access or not.
 fn memory_panel_record_visible(
     caller: MemoryPanelCaller<'_>,
     record: &crate::memory::records::MemoryRecord,
@@ -7209,7 +7314,9 @@ fn memory_panel_scope_visible(
             return memory_panel_identity_visible(caller, identity);
         }
         crate::memory::records::MemoryScope::Mob { .. } => ACTION_MOB_MEMORY_READ,
-        crate::memory::records::MemoryScope::Operator { .. } => ACTION_OPERATOR_MEMORY_READ,
+        crate::memory::records::MemoryScope::Operator { operator, .. } => {
+            return memory_panel_operator_visible(caller, operator);
+        }
         crate::memory::records::MemoryScope::Realm { .. } => ACTION_AGENT_MEMORY_READ,
     };
     caller.enforced().is_none_or(|view| view.allows(action))
@@ -7358,8 +7465,8 @@ async fn memory_panel_retain_readable_promotion_sources(
 /// ([`crate::memory::capabilities::MemoryPanelStore::realm_scopes`]: the
 /// scopes of its records, proposals and gated promotions, and its harvested
 /// identities), each by [`memory_panel_scope_visible`]: every identity
-/// there, its mobs (`mob.memory.read`), the operator scope once it holds
-/// anything (`operator.memory.read`) and the realm scope. While the realm
+/// there, its mobs (`mob.memory.read`), each operator scope it holds by
+/// [`memory_panel_operator_visible`] and the realm scope. While the realm
 /// holds quarantined content, the caller must also pass the quarantine half
 /// of the record rule ([`memory_panel_quarantine_evidence_visible`]). A
 /// steward dream spans the realm's scopes and its history names them (a
@@ -7432,7 +7539,7 @@ fn memory_panel_promotion_visible(
     let action = match scope_kind {
         "identity" => return memory_panel_identity_visible(caller, scope_key),
         "mob" => ACTION_MOB_MEMORY_READ,
-        "operator" => ACTION_OPERATOR_MEMORY_READ,
+        "operator" => return memory_panel_operator_visible(caller, scope_key),
         "realm" => ACTION_AGENT_MEMORY_READ,
         _ => return caller.enforced().is_none(),
     };
@@ -7506,7 +7613,12 @@ fn memory_panel_listing_may_be_readable(
         }
     };
     let mob_rows = view.allows(ACTION_MOB_MEMORY_READ);
-    let operator_rows = view.allows(ACTION_OPERATOR_MEMORY_READ);
+    // Operator rows need the read action, and the listing's key the
+    // caller's own or the read-any grant when it names one.
+    let operator_rows = match (scope_kind, scope_key) {
+        (Some("operator"), Some(operator)) => memory_panel_operator_visible(caller, operator),
+        _ => view.allows(ACTION_OPERATOR_MEMORY_READ),
+    };
     let realm_rows = view.allows(ACTION_AGENT_MEMORY_READ);
     match scope_kind {
         Some("identity") => identity_rows,
@@ -8177,6 +8289,15 @@ async fn handle_memory_panel_record(
                 view.enforced() && !view.allows(ACTION_MEMORY_QUARANTINE_REVIEW)
             }) {
             ACTION_MEMORY_QUARANTINE_REVIEW
+        } else if matches!(
+            record.scope,
+            crate::memory::records::MemoryScope::Operator { .. }
+        ) && caller
+            .enforced()
+            .is_some_and(|view| view.allows(ACTION_OPERATOR_MEMORY_READ))
+        {
+            // The caller reads operator memory, but not this person's.
+            ACTION_OPERATOR_MEMORY_READ_ANY
         } else {
             memory_panel_scope_action(&record.scope)
         };
@@ -12319,7 +12440,14 @@ async fn handle_console_aggregator_rpc(
             {
                 Box::pin(prime_access_cache_from_aggregator(aggregator, controller)).await;
             }
-            Box::pin(shared_panels::dispatch(aggregator, request, access_view)).await
+            let operator = console_person_operator_key(send_scope);
+            Box::pin(shared_panels::dispatch(
+                aggregator,
+                request,
+                access_view,
+                operator.as_deref(),
+            ))
+            .await
         }
         "meta/capabilities" => {
             let mut methods = vec![
@@ -12810,6 +12938,10 @@ async fn handle_console_runtime_rpc_with_visibility(
     if is_console_mutating_rpc_method(request.method.as_str()) && !can_mutate {
         return console_read_only_rpc_error(response_id);
     }
+    // The caller's own operator scope, when the caller is a Console person:
+    // the Memory panel shows it to them on `operator.memory.read`.
+    let panel_operator_key = console_person_operator_key(&governance.scope);
+    let panel_operator = panel_operator_key.as_deref();
     // A candidate launch refuses here what it refuses on its RPC surface,
     // typed, before anything is read or written.
     if let Some(refusal) = crate::rpc::candidate_launch_refusal(
@@ -13552,7 +13684,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/records" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_records(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13562,7 +13694,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/record" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_record(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13572,7 +13704,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/quarantine" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_quarantine(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13582,7 +13714,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/dreams" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_dreams(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13592,7 +13724,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/dream_runs" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_dream_runs(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13602,7 +13734,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/audit_verdicts" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_audit_verdicts(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13612,7 +13744,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/overview" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_overview(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13622,7 +13754,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/proposals" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_proposals(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13632,7 +13764,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/injections" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_injections(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -13642,7 +13774,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/panel/harvests" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_harvests(
                 memory_panel,
-                MemoryPanelCaller::own(access_view),
+                MemoryPanelCaller::own(access_view).with_operator(panel_operator),
                 &request.params,
                 response_id,
             )
@@ -21638,11 +21770,12 @@ comms = true
     const SHARED_MEMORY_IDENTITIES: [&str; 3] = ["router", "delivery", "ghost"];
 
     /// Every read grant of the memory panel, `agent.view` included.
-    const SHARED_MEMORY_READS: [&str; 5] = [
+    const SHARED_MEMORY_READS: [&str; 6] = [
         ACTION_AGENT_VIEW,
         ACTION_AGENT_MEMORY_READ,
         ACTION_MOB_MEMORY_READ,
         ACTION_OPERATOR_MEMORY_READ,
+        crate::access::ACTION_OPERATOR_MEMORY_READ_ANY,
         crate::access::ACTION_MEMORY_QUARANTINE_REVIEW,
     ];
 
@@ -23373,7 +23506,6 @@ message = "review"
             snapshot_read_model: ConsoleSnapshotReadModel::default(),
             access: Some(access.clone()),
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,
@@ -32656,7 +32788,6 @@ mod console_viewer_resolver_tests {
             snapshot_read_model: ConsoleSnapshotReadModel::default(),
             access,
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,
@@ -33162,7 +33293,6 @@ mod console_human_admission_tests {
             snapshot_read_model: ConsoleSnapshotReadModel::default(),
             access: None,
             memory_panel: None,
-            operator_resolver: None,
             identity_roster: None,
             workgraph: None,
             topology: None,

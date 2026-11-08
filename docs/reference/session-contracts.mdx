@@ -1304,6 +1304,22 @@ yet; attach it to the eventual turn instead. Browser/WASM sessions carry it
 through the same runtime-input path, with in-memory retention for the page
 lifetime.
 
+A Rust host that admits runtime input in its own process can also give a turn
+`RuntimeTurnMetadata::request_only_context`: request-only context that lives
+only in that process. It is projected exactly like `transient_turn_context`
+(an injected-context message at the tail of every foreground model request of
+the turn, never Session state), but it is never persisted: it is not
+serialized, so a stored input never holds it and no wire value carries it. It
+is not part of the prompt replay identity, so a retry of the same input with
+another value replays the original. An input recovered after a restart, and a
+run resumed from its ledger, carry none, so the turn recalls nothing rather
+than a stale value. A batch merge keeps each distinct value once, in order,
+and a durable steer that joins a running turn adds its own values to that
+turn's later requests. A mob member's work carries it
+(`WorkSpec::with_request_only_context`) only into a local session-backed
+member's runtime input; remote, peer-only and autonomous inbox delivery refuse
+it.
+
 ## Durable steer
 
 A `steer` input admitted while its session's turn is running reaches that
@@ -1314,7 +1330,7 @@ from its content:
 
 | Steer input | Delivery class | What the running turn sees |
 | --- | --- | --- |
-| A content input (a prompt, a peer message, request or lifecycle notice, an external event or a local flow step) whose transcript rows are all `system_notice`, `user` or `injected_context` rows (for example a peer message's comms notice, a text prompt's user row, or a detached job's persisted background-job notice), and whose own turn metadata carries only the handling mode, execution kind, objective and transcript identity | durable | The rows are written into the running turn's transcript after that boundary's tool results and before the next assistant message. The same request and every later request of the run see them, and they commit with the run like tool results. The input is consumed with the run terminal. |
+| A content input (a prompt, a peer message, request or lifecycle notice, an external event or a local flow step) whose transcript rows are all `system_notice`, `user` or `injected_context` rows (for example a peer message's comms notice, a text prompt's user row, or a detached job's persisted background-job notice), and whose own turn metadata carries only the handling mode, execution kind, objective, transcript identity and request-only context | durable | The rows are written into the running turn's transcript after that boundary's tool results and before the next assistant message. The same request and every later request of the run see them (and the input's request-only context, which is never a row), and they commit with the run like tool results. The input is consumed with the run terminal. |
 | A content input carrying any other row (a `system` row), a synthetic refresh-projection notice, turn metadata only a fresh turn can apply, or a directed interaction | follow-up only | Never joins the running turn. |
 | An ordinary continuation that carries a turn append, or a peer response progress notice (inputs with no content row of their own) | request-only | A temporary injected-context row at the tail of exactly one model request; never Session state. A continuation steer takes the next open boundary of the running turn and is consumed at injection (with none open it is normalised to `queue` and runs as one follow-up turn). Peer response progress never interrupts a running turn: it reaches the next turn that runs and is consumed with that run. |
 

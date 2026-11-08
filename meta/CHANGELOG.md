@@ -273,6 +273,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust: `ConventionalPaths` gains `mcp_accounts_toml` (the conventional
   `config/mcp_accounts.toml`), so a struct literal needs it.
 
+- Rust: the identity-keyed operator resolver is removed:
+  `OperatorResolver`, `ConsolePrincipalOperatorResolver`,
+  `AgentMemoryRuntimeInjector::with_operator_resolver`,
+  `AgentMemoryCustomizer::with_operator_resolver`,
+  `RecallCoordinator::with_operator_resolver`, and
+  `UnifiedRuntime::set_console_operator_resolver` and
+  `console_operator_resolver`. The operator memory of a turn comes from the
+  turn's requester instead (`RecallCoordinator::operator_context_for_turn`
+  and `AgentMemoryRuntimeInjector::operator_context_for_turn`).
+- Rust: `BridgeDelivery` gains the public field `request_only_context`
+  (`None` keeps the previous behaviour): the operator memory a local
+  host-human turn carries as request-only context. Every other lane refuses
+  one.
+- Rust: `StagedBatchError` gains the variant `OperatorMemoryRefused`, which
+  carries the new `OperatorMemoryRefusal`: a steward batch that would
+  change, copy or write a person's operator memory outside the accept of
+  their own proposal is refused.
+- Rust: `StewardProfile::load` now refuses a prompt bundle without an
+  `operator_proposals` phase (see Upgrade).
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -493,6 +513,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shows a private reply in a person's side chat there as a runtime event to
   whoever may view that side chat: 0.9.10 has no private side chats, so
   that is everyone who may view the agent it was forked from.
+
+- Operator-scope memory is keyed by the person's caller scope (the
+  `caller_scope` that `meta/console/whoami` reports to them). Records
+  written under the provisional keying (the console access subject) are no
+  longer recalled; a host that writes operator records keys them by the
+  person's caller scope. To find the old records, list the console Memory
+  panel's operator scopes (`meta/memory/panel/overview`, or
+  `meta/memory/panel/records` with an operator scope filter) as a caller
+  who holds `operator.memory.read` and `operator.memory.read_any`: a scope
+  whose key does not start with `console-caller:v1:` is an old key. Nothing
+  reads those records any more; a Rust host deletes one with
+  `AgentMemoryProvider::forget_authored` on its operator scope, as
+  `MemoryAuthor::Operator`.
+- A rule that grants `operator.memory.read` now reads only the caller's own
+  operator memory; grant `operator.memory.read_any` too where a role reads
+  every person's.
+- A steward prompt bundle a host supplies needs the new `operator_proposals`
+  phase, as the embedded bundle has it: its template holds the
+  `{{operator_scope}}` and `{{proposals}}` placeholders, and the model
+  replies with one JSON object holding a `proposal_verdicts` array (an
+  accept, reject or hold per proposal id). `StewardProfile::load` refuses a
+  bundle without the phase; a dream whose profile lacks it records that the
+  operator proposal call failed, and people's operator proposals stay
+  pending.
 
 ### Added
 
@@ -1424,6 +1468,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a schedule aimed elsewhere, is refused as a policy denial
   (`private_member_schedule_target`).
 
+- Operator memory reaches only the turns of the person who asked: a turn
+  recalls the operator memory of its direct requester (the person whose
+  own console message, or whose schedule, started it, on a console that
+  requires sign-in; a person's steer that starts a turn too) in a
+  request-only section that every model request of the turn sees and that
+  never enters the agent's transcript, a stored message, a session read or
+  a retry. A turn without a direct person requester recalls none, nor does
+  a turn of a member placed on another host or of an externally bound
+  member, and a member's build-time memory no longer carries operator
+  memory. `per_turn_injection = "off"` turns the section off too.
+- Reading another person's operator memory needs `operator.memory.read_any`
+  (admins hold it; a rule that grants `operator.memory.*` or `*` grants it
+  too). `operator.memory.read` reads the caller's own operator memory.
+- With the operator scope on, the `memory` tool files an `operator_said`
+  fact only as a proposal to the operator memory of the person whose own
+  message started the run, never in the agent's own memory or a mob
+  proposal, so other people's turns do not recall it. A run without such a
+  person (no requester, a carried request, a service, a governed run) files
+  nothing and gets a typed tool error that names the alternative
+  (`data.kind` `operator_fact_without_a_person`); an `operator_said` update
+  is refused (`operator_fact_update_refused`), and so are such a fact on a
+  memory store that keeps no proposals (`operator_memory_unavailable`) and
+  a `propose_to_mob` of one (`operator_fact_mob_proposal_refused`, whose
+  message names both alternatives). Such a fact becomes operator memory
+  only when the memory steward accepts its proposal; the configuration does
+  not require a steward. With the operator scope off (the default), an
+  `operator_said` fact stays the agent's own memory, as before.
+- The steward never changes a person's operator memory: it judges
+  people's pending operator proposals together, in a call of their own
+  that sees those proposals and nothing else of the store and can only
+  accept, reject or hold them, and accepts a proposal only into the
+  operator memory of the person it was filed for. If that call fails, the
+  proposals stay pending and the rest of the dream goes on, and what the
+  dream records of that call (its skips and run rows) holds no text its
+  model wrote. It refuses (typed) every dream op that would supersede,
+  tombstone, retier or copy an operator record, or name an operator key,
+  and refuses to promote a person's proposal or record to a mob scope. A
+  dream's gather and consolidate phases no longer read a person's operator
+  records or pending proposals, so no promotion gate shows them.
+- The Distiller is unchanged: it distills the agent's own transcript,
+  which everyone who views the agent reads, and cannot tell which person
+  said a fact, so a fact it tags `operator_said` stays the agent's own
+  memory.
+- `TurnRequestContext`'s `Debug` (Core) prints no text, so a request-only
+  section never reaches a log through `{:?}`.
+
 ### Fixed
 
 - `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
@@ -1649,6 +1739,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the approver label, and says when the gateway keeps its records in
   memory, where decisions from before a gateway restart may be missing.
 
+- Memory delivered with a turn as injected context, and context a host
+  attaches to a send, are no longer themselves evidence for the Distiller
+  (a turn's request-only section never enters the transcript it reads).
+- A member's build-time memory, which every run of the member shares, no
+  longer carries the operator memory of whoever spoke to it last.
 
 ### Known limitations
 
@@ -1761,6 +1856,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   in place, but nothing in this release answers a console request
   privately: every person's attention list stays empty, and no
   `private_reply` frame is appended to any conversation.
+
+- Operator memory is not injected on governed sends: a Console send to an
+  agent whose input is governed (its host binds every input) recalls none
+  of the sender's operator memory.
+- Operator memory reaches only this gateway's own session-backed members:
+  the person a turn is for does not cross the supervisor bridge. A turn of
+  a member placed on another host, or of an externally bound member,
+  recalls no operator memory, a turn that a person's schedule fires
+  included.
 
 ## [0.9.10] - 2026-11-04
 

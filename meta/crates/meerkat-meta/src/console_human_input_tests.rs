@@ -312,6 +312,37 @@ comms = true
         mode: HandlingMode,
         injected_context: Vec<ContentInput>,
     ) {
+        self.finish_human_turn(accepted, content, mode, injected_context, None)
+            .await;
+    }
+
+    /// [`Self::finish_human`] for a send that carried `requester` to the
+    /// agent's run: the replay names the same requester, which the original
+    /// input's replay identity holds.
+    async fn finish_human_for(
+        &self,
+        accepted: &ConsoleInteractionAccepted,
+        content: &str,
+        requester: Option<&meerkat_core::PrincipalRef>,
+    ) {
+        self.finish_human_turn(
+            accepted,
+            content,
+            HandlingMode::Queue,
+            Vec::new(),
+            requester,
+        )
+        .await;
+    }
+
+    async fn finish_human_turn(
+        &self,
+        accepted: &ConsoleInteractionAccepted,
+        content: &str,
+        mode: HandlingMode,
+        injected_context: Vec<ContentInput>,
+        requester: Option<&meerkat_core::PrincipalRef>,
+    ) {
         self.wait_status(accepted, ConsoleFrameStatus::Delivered)
             .await;
         let handle = self.unified.mob_handle();
@@ -321,9 +352,12 @@ comms = true
             .unwrap()
             .unwrap();
         let interaction = accepted.interaction_id.parse::<uuid::Uuid>().unwrap();
-        let spec = WorkSpec::new(content, WorkOrigin::Internal)
+        let mut spec = WorkSpec::new(content, WorkOrigin::Internal)
             .with_injected_context(injected_context)
             .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
+        if let Some(requester) = requester {
+            spec = spec.with_requester(requester.clone());
+        }
         let turn = handle
             .start_host_human_input_bounded(
                 member.agent_runtime_id,
@@ -799,6 +833,263 @@ async fn console_human_recall_stays_canonical_context_not_refreshed_or_paged_hum
         Message::User(user) if user.transcript_role == TranscriptUserRole::Conversational
             && user.identity.interaction_id == Some(interaction) && user.text_content() == HUMAN
     )).count(), 1);
+    h.stop().await;
+}
+
+/// A person's Console send carries that person's operator memory to the
+/// turn's model requests, request-only: the request holds it as injected
+/// context, and no transcript row and no timeline frame does. A later send
+/// that names no requester carries none of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn console_person_turn_recalls_their_operator_memory() {
+    const ALICE_FACT: &str = "Alice prefers terse status notes";
+    const ANONYMOUS: &str = "Second question, sent without a requester.";
+    let alice =
+        crate::runtime::console_human_principal("https://issuer.example.test", "alice").unwrap();
+    let operator = super::person_caller_scope(&alice).unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::memory::SqliteAgentMemoryStore::open(store_dir.path()).unwrap());
+    store
+        .remember_authored(
+            &crate::memory::MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator: operator.clone(),
+            },
+            crate::memory::records::NewMemoryRecord {
+                kind: crate::memory::MemoryKind::Preference,
+                title: ALICE_FACT.to_string(),
+                description: String::new(),
+                body: format!("{ALICE_FACT}."),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            crate::memory::records::MemoryAuthor::Operator { principal: None },
+        )
+        .await
+        .unwrap();
+    let h = Harness::new(WAIT).await;
+    h.identity_runtime
+        .set_agent_memory(Some(AgentMemoryRuntimeInjector::new(
+            store,
+            AgentMemoryConfig {
+                per_turn_injection: AgentMemoryPerTurnInjection::Budgeted,
+                operator_scope: crate::identity_first::AgentMemoryOperatorScope::Provisional,
+                ..Default::default()
+            },
+        )))
+        .await;
+    let governance = super::ConsoleSendGovernance {
+        sender: Some(crate::console_aggregator::ConsoleSender {
+            kind: crate::console_aggregator::ConsoleActorKind::Person,
+            assurance: crate::console_aggregator::ConsoleActorKind::Person.assurance(),
+            display_name: Some("alice@example.test".to_string()),
+            caller_scope: operator,
+            requester: Some(alice.clone()),
+            model_label: None,
+        }),
+        ..Default::default()
+    };
+    let accepted = super::console_send_identity_first_governed(
+        &h.aggregator,
+        h.identity_runtime.clone(),
+        None,
+        h.request("alice-send", HUMAN),
+        &governance,
+    )
+    .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
+    .unwrap();
+    h.finish_human_for(&accepted, HUMAN, Some(&alice)).await;
+    let alice_requests = std::mem::take(&mut *h.client.requests.lock().unwrap());
+    assert!(
+        alice_requests
+            .iter()
+            .any(|request| request_holds_injected_context(request, ALICE_FACT)),
+        "the person's turn requests carry their operator memory as injected context: \
+         {alice_requests:#?}"
+    );
+    let history = h.history().await;
+    assert!(
+        !format!("{history:?}").contains(ALICE_FACT),
+        "no transcript row holds the operator memory: {history:#?}"
+    );
+    let frames = h
+        .aggregator
+        .query_timeline(ConsoleTimelineQuery {
+            identity: Some(h.identity.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .frames;
+    assert!(
+        !serde_json::to_string(&frames).unwrap().contains(ALICE_FACT),
+        "no timeline frame holds the operator memory"
+    );
+
+    let anonymous = h
+        .send(h.request("anonymous-send", ANONYMOUS))
+        .await
+        .unwrap();
+    h.finish_human(&anonymous, ANONYMOUS).await;
+    let anonymous_requests = std::mem::take(&mut *h.client.requests.lock().unwrap());
+    assert!(
+        anonymous_requests
+            .iter()
+            .any(|request| format!("{request:?}").contains(ANONYMOUS)),
+        "the requester-less send reached the model: {anonymous_requests:#?}"
+    );
+    assert!(
+        !anonymous_requests
+            .iter()
+            .any(|request| format!("{request:?}").contains(ALICE_FACT)),
+        "a send that names no requester carries no operator memory: {anonymous_requests:#?}"
+    );
+    h.stop().await;
+}
+
+/// Whether one of `request`'s messages is injected context holding `text`.
+fn request_holds_injected_context(request: &LlmRequest, text: &str) -> bool {
+    request.messages.iter().any(|message| {
+        matches!(message, Message::User(user)
+            if user.transcript_role == TranscriptUserRole::InjectedContext
+                && user.text_content().contains(text))
+    })
+}
+
+/// A store holding one operator fact for `person`, and the runtime
+/// injector that recalls it with the operator scope on.
+async fn person_operator_memory(
+    person: &meerkat_core::PrincipalRef,
+    fact: &str,
+) -> (AgentMemoryRuntimeInjector, tempfile::TempDir) {
+    let operator = super::person_caller_scope(person).unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::memory::SqliteAgentMemoryStore::open(store_dir.path()).unwrap());
+    store
+        .remember_authored(
+            &crate::memory::MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator,
+            },
+            crate::memory::records::NewMemoryRecord {
+                kind: crate::memory::MemoryKind::Preference,
+                title: fact.to_string(),
+                description: String::new(),
+                body: format!("{fact}."),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            crate::memory::records::MemoryAuthor::Operator { principal: None },
+        )
+        .await
+        .unwrap();
+    let injector = AgentMemoryRuntimeInjector::new(
+        store,
+        AgentMemoryConfig {
+            per_turn_injection: AgentMemoryPerTurnInjection::Budgeted,
+            operator_scope: crate::identity_first::AgentMemoryOperatorScope::Provisional,
+            ..Default::default()
+        },
+    );
+    (injector, store_dir)
+}
+
+/// A person's Console steer that starts a turn (the member is idle) carries
+/// that person's operator memory to the turn's model requests, as their
+/// send does.
+#[tokio::test(flavor = "multi_thread")]
+async fn console_person_steer_that_starts_a_turn_recalls_their_operator_memory() {
+    const ALICE_FACT: &str = "Alice prefers terse status notes";
+    let alice =
+        crate::runtime::console_human_principal("https://issuer.example.test", "alice").unwrap();
+    let (injector, _store_dir) = person_operator_memory(&alice, ALICE_FACT).await;
+    let h = Harness::new(WAIT).await;
+    h.identity_runtime.set_agent_memory(Some(injector)).await;
+    // A first turn resolves the member's spawn kickoff (a host human steer
+    // is refused while it is unresolved), so Alice's steer finds the member
+    // idle and starts a turn of its own.
+    const WARM_UP: &str = "Warm-up message without a requester.";
+    let warm_up = h.send(h.request("warm-up", WARM_UP)).await.unwrap();
+    h.finish_human(&warm_up, WARM_UP).await;
+    h.client.requests.lock().unwrap().clear();
+    let governance = super::ConsoleSendGovernance {
+        sender: Some(crate::console_aggregator::ConsoleSender {
+            kind: crate::console_aggregator::ConsoleActorKind::Person,
+            assurance: crate::console_aggregator::ConsoleActorKind::Person.assurance(),
+            display_name: Some("alice@example.test".to_string()),
+            caller_scope: super::person_caller_scope(&alice).unwrap(),
+            requester: Some(alice.clone()),
+            model_label: None,
+        }),
+        ..Default::default()
+    };
+    let request = ConsoleSendRequest {
+        handling_mode: Some("steer".to_string()),
+        ..h.request("alice-steer", HUMAN)
+    };
+    let accepted = super::console_send_identity_first_governed(
+        &h.aggregator,
+        h.identity_runtime.clone(),
+        None,
+        request,
+        &governance,
+    )
+    .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
+    .unwrap();
+    h.finish_human_turn(
+        &accepted,
+        HUMAN,
+        HandlingMode::Steer,
+        Vec::new(),
+        Some(&alice),
+    )
+    .await;
+    let requests = std::mem::take(&mut *h.client.requests.lock().unwrap());
+    assert!(
+        requests
+            .iter()
+            .any(|request| request_holds_injected_context(request, ALICE_FACT)),
+        "the person's steer that starts a turn carries their operator memory: {requests:#?}"
+    );
+    assert!(
+        !format!("{:?}", h.history().await).contains(ALICE_FACT),
+        "no transcript row holds it"
+    );
+    h.stop().await;
+}
+
+/// Meta's rule: only the explicit local host-human lane carries a person's
+/// request-only section. The bridge refuses a delivery on any other lane
+/// that carries one, typed, before anything is submitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn request_only_context_rides_only_the_host_human_lane() {
+    const SECTION: &str = "a person's operator section";
+    let h = Harness::new(WAIT).await;
+    let mut delivery = BridgeDelivery::new(
+        ContentInput::Text("ordinary work".to_string()),
+        HandlingMode::Queue,
+    );
+    delivery.request_only_context =
+        Some(meerkat_core::lifecycle::TurnRequestContext::new(SECTION).unwrap());
+    let refused = h.bridge.deliver_admitted(&h.runtime_id, delivery).await;
+    assert!(
+        matches!(&refused, Err(BridgeError::InvalidInput(detail))
+            if detail.contains("only on the local host-human lane")),
+        "a request-only section on another lane is refused: {refused:?}"
+    );
+    assert!(
+        !h.client
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| format!("{request:?}").contains(SECTION)),
+        "nothing carrying the section reached the model"
+    );
     h.stop().await;
 }
 

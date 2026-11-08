@@ -520,12 +520,6 @@ pub struct UnifiedRuntimeCore {
     /// channel. The control listener starts before the receiver is composed,
     /// so it re-reads this per request.
     keyed_inject_slot: crate::runtime::keyed_inject::KeyedInjectSlot,
-    /// §16 Q1 provisional operator keying: the console-principal resolver,
-    /// shared between the memory coordinator (reads) and the console send
-    /// path (notes interactions). `&self`-settable like the panel store.
-    console_operator_resolver: std::sync::RwLock<
-        Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
-    >,
     /// The trusted host's governance of Console sends, shared with every
     /// Console router this runtime builds.
     console_governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
@@ -973,7 +967,6 @@ impl UnifiedRuntime {
                 console_identity_roster: std::sync::RwLock::new(None),
                 mob_announcements: Default::default(),
                 keyed_inject_slot: crate::runtime::keyed_inject::pending_keyed_inject_slot(),
-                console_operator_resolver: std::sync::RwLock::new(None),
                 console_governed_ingress: Default::default(),
                 console_schedule_doors: Default::default(),
                 metadata_table,
@@ -2222,19 +2215,6 @@ impl UnifiedRuntime {
         self.mob_runtime.workgraph_admission()
     }
 
-    /// Wire the §16 Q1 console-principal operator resolver (set by the
-    /// gateway's memory wiring when `operator_scope = "provisional"`); the
-    /// console send path notes authenticated interactions through it.
-    pub fn set_console_operator_resolver(
-        &self,
-        resolver: Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>,
-    ) {
-        *self
-            .console_operator_resolver
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
-    }
-
     /// Install the trusted host's governance of Console sends
     /// ([`crate::console_governed_ingress`]). A Console send to an identity
     /// it governs then reaches the member only through its binder, for the
@@ -2256,15 +2236,6 @@ impl UnifiedRuntime {
         &self,
     ) -> &crate::console_schedules::ConsoleScheduleDoorSlot {
         &self.console_schedule_doors
-    }
-
-    pub fn console_operator_resolver(
-        &self,
-    ) -> Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>> {
-        self.console_operator_resolver
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 
     /// Borrow the shared access controller if one was installed.

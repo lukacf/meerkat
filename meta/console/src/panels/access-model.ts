@@ -30,7 +30,8 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
     label: "Memory",
     actions: [
       "agent.memory.read", "agent.memory.write", "agent.memory.delete", "agent.memory.admin",
-      "operator.memory.read", "mob.memory.read", "mob.memory.propose", "mob.memory.commit",
+      "operator.memory.read", "operator.memory.read_any", "mob.memory.read", "mob.memory.propose",
+      "mob.memory.commit",
       "memory.quarantine.review",
     ],
   },

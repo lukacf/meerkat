@@ -4619,6 +4619,13 @@ fn unsupported_turn_metadata_fields(
     if !allow_transient_turn_context && metadata.transient_turn_context.is_some() {
         fields.push("transient_turn_context");
     }
+    // Request-only context is never serialized: a remote or peer-only lane
+    // would drop it on the wire, and the autonomous inbox carries no turn
+    // metadata. Only a local session-backed member's runtime input carries
+    // it, and that path does not reach this check.
+    if !metadata.request_only_context.is_empty() {
+        fields.push("request_only_context");
+    }
     if metadata.model.is_some() {
         fields.push("model");
     }

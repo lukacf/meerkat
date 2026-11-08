@@ -1552,6 +1552,14 @@ them.
   `AgentBuildConfig::mcp_auth_resolver` from the options, as it sets the
   other fields, so it is `None` after options without an override.
 
+- `meerkat-core`: `RuntimeTurnMetadata` gains the public field
+  `request_only_context` (`Vec<TurnRequestContext>`, empty by default):
+  request-only context that lives only in the process that admitted it (see
+  Added). Code that builds `RuntimeTurnMetadata` with a full struct literal
+  must add it (`Vec::new()`) or use `..Default::default()`, and a pattern
+  that lists every field must add it or `..`. The field is never
+  serialized, so no wire shape and no stored row changes.
+
 ### Added
 
 - `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-mob-mcp`,
@@ -3236,6 +3244,22 @@ them.
   (`MobError::MemberRestoreFailed`). `SpawnMemberCustomizerChain` forwards
   it.
 
+- `meerkat-core`, `meerkat-runtime`, `meerkat-session`, `meerkat-mob`:
+  request-only turn context that never leaves the process that admitted it
+  (`RuntimeTurnMetadata::request_only_context`). Every foreground model
+  request of the turn ends with it as injected context, exactly like
+  `transient_turn_context`, and no Session row, stored input, wire value or
+  prompt replay identity holds it: a retry of the same input with another
+  value replays the original, and an input recovered after a restart or a
+  run resumed from its ledger carries none. A batch keeps each distinct
+  value once, in order, and a durable steer that joins a running turn adds
+  its values to that turn's later requests
+  (`DurableTurnBoundaryAppends::with_request_only_context`). A mob member's
+  work carries it with `WorkSpec::with_request_only_context` into a local
+  session-backed member's runtime input; remote, peer-only and autonomous
+  inbox delivery refuse it with `MobError::UnsupportedForMode`. See the
+  session contracts reference, "Request-only turn context".
+
 ### Changed
 
 - `meerkat-runtime`: DurableDecisionMachine, not the decision service, decides
@@ -3640,6 +3664,11 @@ them.
   child, a temporary council's local participant, and the live delegation
   worker `MobHandle::fork_member_at_turn_boundary` seats). A fork of a
   member the rules apply to keeps the seating its request states.
+
+- `meerkat-core`: `TurnRequestContext`'s `Debug` prints the value's length,
+  never its text, so a `{:?}` of transient or request-only turn context, or
+  of a value that carries it (`RuntimeTurnMetadata`, a prompt input, a work
+  spec), never writes the text to a log.
 
 ### Deprecated
 

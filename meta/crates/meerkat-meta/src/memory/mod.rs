@@ -31,10 +31,9 @@ pub use capabilities::{
     PersistedDreamRun, ScopeOverview, StewardStore, TaintableStore,
 };
 pub use coordinator::{
-    ConsolePrincipalOperatorResolver, MobScopeResolver, OperatorResolver, RecallCoordinator,
-    ScopeBudget, TurnInjection, TurnInjectionSkip, compose_identity_scope_set,
-    compose_identity_scope_set_with_bindings, compose_identity_scope_set_with_operator,
-    compose_scope_budgets,
+    MobScopeResolver, RecallCoordinator, ScopeBudget, TurnInjection, TurnInjectionSkip,
+    compose_identity_scope_set, compose_identity_scope_set_with_bindings,
+    compose_identity_scope_set_with_operator, compose_scope_budgets,
 };
 pub use dispatch_taint::{DispatchTaintSlot, TaintObservingLlmClient};
 pub use distiller::{
@@ -71,8 +70,8 @@ pub use review::{
 pub use spawn_customizer::MemorySpawnCustomizer;
 pub use sqlite_store::SqliteAgentMemoryStore;
 pub use staged::{
-    CommitReceipt, StageToken, StagedBatchError, StagedBatchView, StagedMemoryStore,
-    StagedMutationBatch, StagedOp, StagedRecordView, validate_batch,
+    CommitReceipt, OperatorMemoryRefusal, StageToken, StagedBatchError, StagedBatchView,
+    StagedMemoryStore, StagedMutationBatch, StagedOp, StagedRecordView, validate_batch,
 };
 pub use steward::{
     DreamOutcome, DreamRun, FactoryStewardHandle, MemoryConflictBridge, MemoryGatingBridge,

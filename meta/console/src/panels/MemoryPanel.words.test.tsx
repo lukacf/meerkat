@@ -100,7 +100,7 @@ describe("Memory panel words", () => {
     expect(team.includes("mob.memory.read")).toBe(false);
     expect(hasTitle(view, "memory-holdings-scope-denied:mob", "Grant: mob.memory.read")).toBe(true);
     const operator = text(view, "memory-holdings-scope-denied:operator");
-    expect(operator.includes("You need permission to read operator memory")).toBe(true);
+    expect(operator.includes("You need permission to read own operator memory")).toBe(true);
     expect(hasTitle(view, "memory-holdings-scope-denied:operator", "Grant: operator.memory.read")).toBe(true);
 
     const holdings = text(view, "memory-holdings");

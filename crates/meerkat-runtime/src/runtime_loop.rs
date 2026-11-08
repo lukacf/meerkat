@@ -8180,6 +8180,10 @@ fn resumed_run_primitive(
     };
     let metadata = staged.turn_metadata.get_or_insert_with(Default::default);
     metadata.work_authorization = work_authorization;
+    // Request-only context lives only with the admission that carried it: a
+    // resumed run carries none, even while this process still holds the
+    // input, so it recalls nothing rather than replay a stale value.
+    metadata.request_only_context.clear();
     if from_tail {
         metadata.execution_kind = Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
     }
@@ -14571,7 +14575,15 @@ mod tests {
     async fn stage_one_run_for_disposition_test(
         driver: &crate::meerkat_machine::SharedDriver,
     ) -> (RunId, InputId) {
-        let input_id = accept_queued_input_id(driver, make_prompt("is the door locked?")).await;
+        stage_one_run_of(driver, make_prompt("is the door locked?")).await
+    }
+
+    /// [`stage_one_run_for_disposition_test`] for a given input.
+    async fn stage_one_run_of(
+        driver: &crate::meerkat_machine::SharedDriver,
+        input: Input,
+    ) -> (RunId, InputId) {
+        let input_id = accept_queued_input_id(driver, input).await;
         let batch = {
             let guard = driver.lock().await;
             crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard)
@@ -14687,6 +14699,38 @@ mod tests {
                 "describing the resumed batch changes no input"
             ),
             _ => panic!("expected ephemeral driver"),
+        }
+    }
+
+    /// A resumed run carries no request-only context, even while this
+    /// process still holds the input that brought it: request-only context
+    /// lives only with the admission that carried it, so a run resumed from
+    /// its ledger (from its tail or from its inputs) recalls nothing.
+    #[tokio::test]
+    async fn a_resumed_run_carries_no_request_only_context() {
+        let driver = make_shared_ephemeral_driver("resumed-request-only");
+        let mut prompt = make_prompt("recall for this admission only");
+        if let Input::Prompt(prompt) = &mut prompt {
+            prompt
+                .turn_metadata
+                .get_or_insert_with(Default::default)
+                .request_only_context = vec![
+                meerkat_core::lifecycle::TurnRequestContext::new("a person's section")
+                    .expect("section"),
+            ];
+        }
+        let (run_id, input_id) = stage_one_run_of(&driver, prompt).await;
+        let guard = driver.lock().await;
+        for from_tail in [true, false] {
+            let primitive =
+                resumed_run_primitive(&guard, &run_id, std::slice::from_ref(&input_id), from_tail)
+                    .expect("the run's own staged input describes its resumed batch");
+            assert!(
+                primitive
+                    .turn_metadata()
+                    .is_none_or(|metadata| metadata.request_only_context.is_empty()),
+                "a resumed run (from_tail {from_tail}) carries no request-only context"
+            );
         }
     }
 

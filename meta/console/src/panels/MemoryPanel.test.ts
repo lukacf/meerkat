@@ -1808,10 +1808,20 @@ test("a missing grant reads as a sentence; the grant's name is only the tooltip"
     "You need permission to review quarantined memory",
   );
   assert.equal(needsGrantText("mob.memory.read"), "You need permission to read team memory");
-  assert.equal(needsGrantText("operator.memory.read"), "You need permission to read operator memory");
+  assert.equal(needsGrantText("operator.memory.read"), "You need permission to read own operator memory");
+  assert.equal(
+    needsGrantText("operator.memory.read_any"),
+    "You need permission to read anyone's operator memory",
+  );
   // A grant this console has no words for never puts its key in the sentence.
   assert.equal(needsGrantText("custom.unknown.grant"), "You need a permission you do not have");
-  for (const grant of ["memory.quarantine.review", "mob.memory.read", "operator.memory.read", "custom.unknown.grant"]) {
+  for (const grant of [
+    "memory.quarantine.review",
+    "mob.memory.read",
+    "operator.memory.read",
+    "operator.memory.read_any",
+    "custom.unknown.grant",
+  ]) {
     assert.doesNotMatch(needsGrantText(grant), /\.|grant/, grant);
     assert.equal(grantTitle(grant), `Grant: ${grant}`);
   }

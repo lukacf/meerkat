@@ -711,6 +711,10 @@ fn project_message(message: &Message) -> Option<(&'static str, String)> {
             .body
             .as_deref()
             .map(|body| ("system notice", body.to_string())),
+        // Injected context (memory recalled into a turn, context a host
+        // attached to a send) is what the agent was given, not what was
+        // said: distilling it would turn recalled memory into new evidence.
+        Message::User(user) if user.transcript_role.is_injected_context() => None,
         Message::User(user) => Some(("user", user.text_content())),
         Message::BlockAssistant(assistant) => Some((
             "assistant",
@@ -2241,6 +2245,28 @@ mod tests {
     use crate::memory::records::RecordStatus;
     use futures::stream;
     use std::sync::Mutex as StdMutex;
+
+    /// Memory recalled into a turn is not evidence. An injected-context row
+    /// (what memory delivers with a turn, a person's operator memory among
+    /// it) stays out of the distillation window, so a recalled fact is never
+    /// distilled into the identity scope every requester recalls. What the
+    /// person said is still evidence.
+    #[test]
+    fn recalled_memory_is_not_distillation_evidence() {
+        let recalled = Message::User(UserMessage::injected_context(
+            "Operator records:\n- mem-1 [preference, saved today] Prefers terse status notes",
+        ));
+        assert_eq!(
+            project_message(&recalled),
+            None,
+            "an injected-context row is not distillation evidence"
+        );
+        let said = Message::User(UserMessage::text("Please keep status notes terse."));
+        assert_eq!(
+            project_message(&said),
+            Some(("user", "Please keep status notes terse.".to_string()))
+        );
+    }
 
     #[tokio::test]
     async fn complete_text_uses_final_assistant_output() {

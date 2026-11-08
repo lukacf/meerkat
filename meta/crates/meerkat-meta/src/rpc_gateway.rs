@@ -431,21 +431,6 @@ impl AgentMemoryStoreMigration {
     }
 }
 
-/// §7.2: `operator_scope = "provisional"` composes operator-scope recall
-/// only when an `OperatorResolver` is installed. The shipped SDK gateway
-/// installs the console-principal resolver when provisional scope is enabled;
-/// this predicate remains a fail-loud guard for any composition path that
-/// omits it.
-fn operator_scope_recall_inert(
-    agent_memory: Option<&GatewayAgentMemoryOptions>,
-    resolver_installed: bool,
-) -> bool {
-    !resolver_installed
-        && agent_memory.is_some_and(|memory| {
-            memory.config.operator_scope == crate::AgentMemoryOperatorScope::Provisional
-        })
-}
-
 impl GatewayRuntimeOptions {
     /// True when a strict GPT Live stdio registration (public `openai_live`
     /// or deprecated `experimental_live`) was configured. Either one needs the
@@ -6667,31 +6652,6 @@ comms = true
     }
 
     #[test]
-    fn operator_scope_warning_fires_exactly_when_provisional_without_resolver() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let parse = |scope: &str| {
-            let params = json!({
-                "runtime_options": {
-                    "agent_memory": { "operator_scope": scope }
-                }
-            });
-            parse_gateway_runtime_options(&params, Some(tmp.path()))
-                .expect("parse")
-                .agent_memory
-                .expect("agent memory options")
-        };
-        let provisional = parse("provisional");
-        let off = parse("off");
-
-        assert!(operator_scope_recall_inert(Some(&provisional), false));
-        assert!(!operator_scope_recall_inert(Some(&provisional), true));
-        assert!(!operator_scope_recall_inert(Some(&off), false));
-        assert!(!operator_scope_recall_inert(Some(&off), true));
-        assert!(!operator_scope_recall_inert(None, false));
-        assert!(!operator_scope_recall_inert(None, true));
-    }
-
-    #[test]
     fn gateway_runtime_options_agent_memory_distiller_parse_matrix() {
         let tmp = tempfile::tempdir().expect("temp dir");
 
@@ -11067,9 +11027,9 @@ fn parse_gateway_agent_memory_config(
         Some(value) => crate::ContentTrustConfig::from_json_value(value)
             .map_err(|err| format!("runtime_options.agent_memory.{err}"))?,
     };
-    // §7.2 operator-scope activation. PROVISIONAL keying (§16 Q1): the
-    // value name says so on purpose — deployments opting in accept that the
-    // keying (console auth principal) may change when the question closes.
+    // §7.2 operator-scope activation: `provisional` gives each console
+    // person an operator scope keyed by their caller scope; the value keeps
+    // its name for configuration compatibility.
     let operator_scope = match object.get("operator_scope") {
         None => crate::AgentMemoryOperatorScope::Off,
         Some(value) => match value.as_str().map(str::trim) {
@@ -20290,45 +20250,15 @@ external_addressable = true
         ) {
             side_chat_memory_slot.fill(provider.clone(), agent_memory.config.clone());
         }
-        // §7.2 / §16 Q1 operator-resolver seam. The PROVISIONAL keying is
-        // the console auth principal; that resolver lives with the console
-        // auth wiring and plugs in here as one line of glue. Until it is
-        // installed, `operator_scope = "provisional"` composes nothing
-        // (inert by design) while steward routing (proposal-keyed) is
-        // already active.
-        // §16 Q1 provisional keying (decided 2026-07-04): OperatorId = the
-        // console auth principal. When the scope is provisional, install the
-        // console-principal resolver and share it with the runtime so the
-        // console send path can note authenticated interactions; recall
-        // composition activates for identities an authenticated principal
-        // has addressed (config AND resolver AND a real principal).
-        let agent_memory_operator_resolver: Option<
-            Arc<dyn crate::memory::coordinator::OperatorResolver>,
-        > = if gateway_options.agent_memory.as_ref().is_some_and(|memory| {
+        // §7.2 operator scope: each console person's own, keyed by their
+        // caller scope. A turn recalls its direct requester's operator memory
+        // request-only; no build composes it, so nothing is wired here.
+        if gateway_options.agent_memory.as_ref().is_some_and(|memory| {
             memory.config.operator_scope == crate::AgentMemoryOperatorScope::Provisional
         }) {
-            let resolver = Arc::new(crate::ConsolePrincipalOperatorResolver::new());
-            runtime.set_console_operator_resolver(resolver.clone());
             tracing::info!(
-                "agent memory operator scope active (provisional keying: console auth principal)"
-            );
-            Some(resolver)
-        } else {
-            None
-        };
-        // Degrade LOUD, not silent: recall composition of the Operator scope
-        // needs BOTH the knob and a resolver (coordinator.rs scope_set), so a
-        // resolver-less provisional deployment gets steward proposal-routing
-        // only. Without this warning that half-activation is invisible.
-        if operator_scope_recall_inert(
-            gateway_options.agent_memory.as_ref(),
-            agent_memory_operator_resolver.is_some(),
-        ) {
-            tracing::warn!(
-                "agent_memory.operator_scope=\"provisional\" is configured but this gateway \
-                 installs no operator resolver: operator-scope recall composition is INERT \
-                 (records routed to the operator scope will not be recalled or injected); \
-                 steward routing of operator-scope proposals remains active"
+                "agent memory operator scope active (each console person's own, keyed by their \
+                 caller scope)"
             );
         }
         // §7.2 mob-scope binding: every identity this gateway hosts runs
@@ -20353,7 +20283,6 @@ external_addressable = true
                         provider,
                         agent_memory.config.clone(),
                     )
-                    .with_operator_resolver(agent_memory_operator_resolver.clone())
                     .with_mob_resolver(agent_memory_mob_resolver.clone()),
                 ))
             } else {
@@ -20379,7 +20308,6 @@ external_addressable = true
             if let Some(steward) = agent_memory_steward.clone() {
                 injector = injector.with_steward(steward);
             }
-            injector = injector.with_operator_resolver(agent_memory_operator_resolver.clone());
             injector = injector.with_mob_resolver(agent_memory_mob_resolver.clone());
             // Arm the always-on compaction reset sink (state is Arc-shared
             // across injector clones, so resetting through this clone

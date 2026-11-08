@@ -76,10 +76,10 @@
 //!   dispatcher rather than attaching it to the runtime; it is gated on the
 //!   SDK's `has_roster_provider` flag.
 //!
-//! - **Console identity seam.** Each binary installs a DIFFERENT one, and
-//!   neither installs the other's: `meta_gateway` calls
-//!   `runtime.set_console_identity_roster`, `rpc_gateway` calls
-//!   `runtime.set_console_operator_resolver`.
+//! - **Console identity seam.** Only `meta_gateway` installs one: it calls
+//!   `runtime.set_console_identity_roster`. `rpc_gateway` installs none (a
+//!   person's operator memory follows the requester of each turn, so no
+//!   console seam records who spoke last).
 //!
 //! - **Memory / steward / gating / job surfaces.** Present only in
 //!   `rpc_gateway`: `GatewayMobPurposeSource`, `GatewayMemoryGatingBridge`,

@@ -457,13 +457,28 @@ struct ConsoleHumanSend<'a> {
     sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
-enum DeliveryPreparation {
+enum DeliveryPreparation<'a> {
     Work(meerkat_mob::MobRuntimeMode),
-    ConsoleHuman,
+    /// The explicit local host-human lane (a Console person's turn). When
+    /// the send names its sender's person principal as the requester, the
+    /// turn also gets that person's operator memory as request-only context.
+    ConsoleHuman {
+        requester: Option<&'a meerkat_core::PrincipalRef>,
+    },
     /// A keyed send, committed as a member continuation: defanged like every
     /// other delivery, but a continuation's prompt carries no injected
     /// context, so ambient recall is skipped.
     KeyedContinuation,
+}
+
+/// What [`IdentityRuntime::prepare_member_delivery`] hands a member door:
+/// the (defanged) content, the ambient recall as injected context, and the
+/// request-only context of a local host-human turn (its requester's
+/// operator memory), which no other delivery carries.
+struct PreparedMemberDelivery {
+    content: meerkat_core::ContentInput,
+    injected_context: Vec<meerkat_core::ContentInput>,
+    request_only_context: Option<meerkat_core::lifecycle::TurnRequestContext>,
 }
 
 /// Map errors observed before a completion-bearing receipt is available.
@@ -10557,7 +10572,10 @@ impl IdentityRuntime {
         }
         let (live, scope) = self.live_delivery_target(identity, "send").await?;
         let memory_session_key = live.session_id.as_ref().map(ToString::to_string);
-        let (content_to_deliver, _) = self
+        let PreparedMemberDelivery {
+            content: content_to_deliver,
+            ..
+        } = self
             .prepare_member_delivery(
                 identity,
                 content,
@@ -11964,7 +11982,15 @@ impl IdentityRuntime {
                 super::bridge::HostHumanInputError::BindingChanged,
             ));
         }
-        let (content_to_deliver, injected_context) = self
+        // Only the local host-human lane names a requester to the memory
+        // seam: its person's operator memory rides that lane alone, as the
+        // turn's request-only context. An externally bound identity takes the
+        // external delivery and gets none.
+        let PreparedMemberDelivery {
+            content: content_to_deliver,
+            injected_context,
+            request_only_context,
+        } = self
             .prepare_member_delivery(
                 identity,
                 content,
@@ -11972,7 +11998,9 @@ impl IdentityRuntime {
                 memory_generation,
                 handling_mode == HandlingMode::Steer,
                 if local_human {
-                    DeliveryPreparation::ConsoleHuman
+                    DeliveryPreparation::ConsoleHuman {
+                        requester: console_human.as_ref().and_then(|human| human.requester),
+                    }
                 } else {
                     DeliveryPreparation::Work(memory_runtime_mode)
                 },
@@ -12140,6 +12168,7 @@ impl IdentityRuntime {
                             delivery.requester = console_human
                                 .as_ref()
                                 .and_then(|human| human.requester.cloned());
+                            delivery.request_only_context = request_only_context.clone();
                             delivery.sender_label = console_human
                                 .as_ref()
                                 .and_then(|human| human.sender_label.cloned());
@@ -12958,6 +12987,16 @@ impl IdentityRuntime {
     /// section 10.1 taint hook: `note_current_session` keeps session attribution
     /// authoritative ahead of the async observe stream; the generation bind
     /// feeds the Distiller's EvidenceRefs (section 8.4).
+    ///
+    /// A local host-human turn whose send names its requester also gets that
+    /// person's operator memory, as request-only context: it reaches the
+    /// turn's model requests and never a transcript row. No other delivery
+    /// names a requester, so none carries one (a placed or externally bound
+    /// member, a dispatch, a peer). A person's steer gets it too (it skips
+    /// only defang and ambient recall): a steer that starts a turn carries
+    /// the person's section, and one that joins the person's running turn
+    /// adds it only where it differs from what that turn holds (request-only
+    /// context merges as distinct values).
     async fn prepare_member_delivery(
         &self,
         identity: &AgentIdentity,
@@ -12965,13 +13004,28 @@ impl IdentityRuntime {
         memory_session_key: Option<&str>,
         memory_generation: Option<u64>,
         steer: bool,
-        preparation: DeliveryPreparation,
-    ) -> Result<(meerkat_core::ContentInput, Vec<meerkat_core::ContentInput>), IdentityRuntimeError>
-    {
+        preparation: DeliveryPreparation<'_>,
+    ) -> Result<PreparedMemberDelivery, IdentityRuntimeError> {
+        let unprepared = |content: meerkat_core::ContentInput| PreparedMemberDelivery {
+            content,
+            injected_context: Vec::new(),
+            request_only_context: None,
+        };
+        let injector = self.agent_memory.read().await.clone();
         if steer {
-            return Ok((content.clone(), Vec::new()));
+            let request_only_context = match &injector {
+                Some(injector) => {
+                    Self::operator_section(injector, identity, memory_session_key, &preparation)
+                        .await?
+                }
+                None => None,
+            };
+            return Ok(PreparedMemberDelivery {
+                request_only_context,
+                ..unprepared(content.clone())
+            });
         }
-        match self.agent_memory.read().await.clone() {
+        match injector {
             Some(injector) => {
                 if let Some(session_key) = memory_session_key {
                     injector.note_current_session(identity, session_key);
@@ -12993,7 +13047,7 @@ impl IdentityRuntime {
                         identity,
                         crate::memory::coordinator::TurnInjectionSkip::RuntimeModeAutonomousHost,
                     );
-                    return Ok((defanged, Vec::new()));
+                    return Ok(unprepared(defanged));
                 }
                 // A keyed send is committed as a member continuation, whose
                 // prompt has no injected-context body: recall is skipped,
@@ -13003,7 +13057,7 @@ impl IdentityRuntime {
                         identity,
                         crate::memory::coordinator::TurnInjectionSkip::KeyedContinuation,
                     );
-                    return Ok((defanged, Vec::new()));
+                    return Ok(unprepared(defanged));
                 }
                 let injected_context = injector
                     .inject_for_turn(identity, memory_session_key, &defanged)
@@ -13011,10 +13065,44 @@ impl IdentityRuntime {
                     .map_err(|err| {
                         IdentityRuntimeError::Internal(format!("agent memory recall: {err}"))
                     })?;
-                Ok((defanged, injected_context))
+                let request_only_context =
+                    Self::operator_section(&injector, identity, memory_session_key, &preparation)
+                        .await?;
+                Ok(PreparedMemberDelivery {
+                    content: defanged,
+                    injected_context,
+                    request_only_context,
+                })
             }
-            None => Ok((content.clone(), Vec::new())),
+            None => Ok(unprepared(content.clone())),
         }
+    }
+
+    /// The operator memory section of a local host-human turn whose send
+    /// names its requester (the person's own operator memory, request-only);
+    /// `None` for every other delivery.
+    async fn operator_section(
+        injector: &AgentMemoryRuntimeInjector,
+        identity: &AgentIdentity,
+        memory_session_key: Option<&str>,
+        preparation: &DeliveryPreparation<'_>,
+    ) -> Result<Option<meerkat_core::lifecycle::TurnRequestContext>, IdentityRuntimeError> {
+        let DeliveryPreparation::ConsoleHuman {
+            requester: Some(person),
+        } = preparation
+        else {
+            return Ok(None);
+        };
+        injector
+            .operator_context_for_turn(
+                identity,
+                memory_session_key,
+                Some(&meerkat_core::TurnRequester::direct((*person).clone())),
+            )
+            .await
+            .map_err(|err| {
+                IdentityRuntimeError::Internal(format!("agent memory operator recall: {err}"))
+            })
     }
 
     async fn dispatch_with_expected_member_alias(
@@ -13125,7 +13213,13 @@ impl IdentityRuntime {
         // the send door (defang, taint session attribution, ambient memory
         // injection). Dispatch has no Steer mode; `DispatchOrigin` rides the
         // input untouched.
-        let (content_to_deliver, injected_context) = self
+        // A dispatch names no requester, so it carries no request-only
+        // context: operator memory never rides this door.
+        let PreparedMemberDelivery {
+            content: content_to_deliver,
+            injected_context,
+            request_only_context: _,
+        } = self
             .prepare_member_delivery(
                 identity,
                 &input.content,

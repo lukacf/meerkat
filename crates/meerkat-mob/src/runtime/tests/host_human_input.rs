@@ -943,6 +943,168 @@ async fn host_human_requester_reaches_the_member_input_and_its_turn() {
     fixture.finish().await;
 }
 
+const SECTION: &str = "Operator records: prefers terse status notes";
+
+fn section(text: &str) -> TurnRequestContext {
+    TurnRequestContext::new(text).expect("non-empty section")
+}
+
+/// Host human input carries request-only context to its own turn: the
+/// turn's model request ends with it as injected context, while neither the
+/// stored input nor any Session row holds it. A retry of the same send that
+/// recalls another section replays the original (no conflict, no new turn),
+/// and another person's later turn carries none of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_human_request_only_context_reaches_its_requests_and_never_history() {
+    let fixture = Fixture::new().await;
+    let requests_before = fixture.client.requests().len();
+    let human = delivery("request-only-human");
+    let id = interaction(&human);
+    let spec = |recalled: &str| {
+        WorkSpec::new(HUMAN, WorkOrigin::External)
+            .with_interaction_id(id)
+            .with_requester(person("a"))
+            .with_request_only_context(section(recalled))
+    };
+    fixture.client.block();
+    let turn = fixture
+        .start(spec(SECTION), HandlingMode::Queue, human.clone())
+        .await
+        .expect("host human input carries request-only context");
+    let receipt = turn.receipt().clone();
+    fixture.client.wait_for_requests(requests_before + 1).await;
+    let stored = fixture.input_for_delivery(&human).await;
+    let Some(meerkat_runtime::Input::Prompt(stored_prompt)) =
+        stored.state().state.persisted_input.as_ref()
+    else {
+        panic!("the running input keeps its stored payload");
+    };
+    assert!(
+        stored_prompt
+            .turn_metadata
+            .as_ref()
+            .is_none_or(|metadata| metadata.request_only_context.is_empty()),
+        "the stored input holds no request-only context"
+    );
+    fixture.client.release();
+    completed(turn).await;
+
+    let requests = fixture.client.requests();
+    assert_eq!(requests.len(), requests_before + 1);
+    let request = requests.last().expect("the person's request");
+    assert!(
+        matches!(request.messages.last(), Some(Message::User(user))
+            if user.transcript_role == TranscriptUserRole::InjectedContext
+                && user.text_content() == SECTION),
+        "the section rides the request tail as injected context: {:?}",
+        request.messages.last()
+    );
+    let mentions_section = |messages: &[Message]| {
+        messages.iter().any(
+            |message| matches!(message, Message::User(user) if user.text_content().contains(SECTION)),
+        )
+    };
+    let durable = fixture.durable().await;
+    assert!(
+        !mentions_section(durable.messages()),
+        "no Session row holds the section"
+    );
+    assert_human(&durable, HUMAN, id);
+
+    let replay = fixture
+        .submit(spec("another section"), HandlingMode::Queue, human)
+        .await
+        .expect("a retry that recalls another section replays the original send");
+    assert_eq!(replay.work_ref, receipt.work_ref);
+    assert_eq!(
+        fixture.client.requests().len(),
+        requests_before + 1,
+        "the replay runs no new turn"
+    );
+
+    let later = delivery("request-only-later");
+    completed(
+        fixture
+            .start(
+                WorkSpec::new("a later message", WorkOrigin::External)
+                    .with_interaction_id(interaction(&later))
+                    .with_requester(person("b")),
+                HandlingMode::Queue,
+                later,
+            )
+            .await
+            .expect("another person's later turn"),
+    )
+    .await;
+    let requests = fixture.client.requests();
+    assert_eq!(requests.len(), requests_before + 2);
+    assert!(
+        !mentions_section(&requests.last().expect("the later request").messages),
+        "another person's later turn carries none of the section"
+    );
+    fixture.finish().await;
+}
+
+/// Request-only context rides only a local session-backed member's runtime
+/// input. The autonomous inbox delivers no turn metadata, so ordinary work
+/// that carries it is refused before admission, and host human input keeps
+/// refusing `transient_turn_context`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_only_context_is_refused_on_the_autonomous_inbox() {
+    let fixture = Fixture::new().await;
+    let rows_before = fixture.input_count().await;
+    let requests_before = fixture.client.requests().len();
+    let scope = fixture
+        .handle
+        .capture_member_delivery_scope(&fixture.entry.agent_identity)
+        .await
+        .expect("capture the member's delivery scope");
+    let refused = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("ordinary work", WorkOrigin::External)
+                .with_request_only_context(section(SECTION)),
+            HandlingMode::Queue,
+            delivery("request-only-inbox"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason.contains("request_only_context")
+        ),
+        "the autonomous inbox refuses request-only context: {:?}",
+        refused.as_ref().map(|_| ())
+    );
+    let refused = fixture
+        .submit(
+            WorkSpec::new(HUMAN, WorkOrigin::External)
+                .with_transient_turn_context(section(TRANSIENT)),
+            HandlingMode::Queue,
+            delivery("transient-human"),
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason.contains("transient turn context")
+        ),
+        "host human input keeps refusing transient turn context: {:?}",
+        refused.as_ref().map(|_| ())
+    );
+    assert_eq!(
+        fixture.input_count().await,
+        rows_before,
+        "the refused work admitted nothing"
+    );
+    assert_eq!(fixture.client.requests().len(), requests_before);
+    fixture.finish().await;
+}
+
 fn label(text: &str) -> crate::SenderLabel {
     crate::SenderLabel::new(text).expect("a sender label")
 }
@@ -1907,6 +2069,8 @@ async fn expired_deadline_reports_typed_fate_and_same_identity_can_be_retried() 
     fixture.finish().await;
 }
 
+/// Remote and peer-only members refuse host human input, and ordinary work
+/// that carries request-only context, before any transport delivery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_and_peer_only_members_refuse_host_human_before_transport_delivery() {
     use super::placement_support as support;
@@ -1985,6 +2149,28 @@ async fn remote_and_peer_only_members_refuse_host_human_before_transport_deliver
                 .expect_err("host human semantics must not degrade to remote or peer notices");
             assert!(matches!(error, MobError::UnsupportedForMode { .. }));
         }
+        // Neither lane carries request-only context (it is never
+        // serialized), so ordinary work that carries it is refused before
+        // transport delivery too.
+        let error = handle
+            .submit_work_with_mode(
+                entry.agent_runtime_id.clone(),
+                entry.fence_token,
+                WorkRef::new(),
+                WorkSpec::new("ordinary work", WorkOrigin::Internal)
+                    .with_request_only_context(section(SECTION)),
+                HandlingMode::Queue,
+            )
+            .await
+            .expect_err("request-only context cannot ride a remote or peer-only lane");
+        assert!(
+            matches!(
+                &error,
+                MobError::UnsupportedForMode { reason, .. }
+                    if reason.contains("request_only_context")
+            ),
+            "{name}: {error:?}"
+        );
     }
     assert!(responder.received_deliveries().is_empty());
     assert!(peer.delivered_input_ids().await.is_empty());

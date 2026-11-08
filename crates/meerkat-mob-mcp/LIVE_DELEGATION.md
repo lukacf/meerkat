@@ -54,7 +54,11 @@ not the separate Responses/function-bridge execution contract.
   request row, executor input and answer commit to the member's canonical
   session as for a turn that ran while the channel was open; words the user
   spoke to continue the request while it waited join its task, and the turn
-  keeps the reasoning preference the channel sealed.
+  keeps the reasoning preference the channel sealed. The close first closes
+  the channel's delegation intake in MeerkatMachine, under the channel's exact
+  binding: a request that reaches the host after the close began is refused
+  admission, and one admitted just before whose custody lands after the close
+  is cancelled.
 - Terminal, result eligibility, cancellation, and release remain generated
   lifecycle decisions. For borrowed members, authorized worker retirement means
   releasing delegation custody, not retiring the underlying member.
@@ -65,7 +69,12 @@ not the separate Responses/function-bridge execution contract.
 - The runtime's typed recovery image retains ClientContext operations as well
   as Responses operations. A cold restore does not restore a live transport;
   generated reconciliation fences completed recovered work as late and
-  permanently ineligible for provider delivery.
+  permanently ineligible for provider delivery. Recovery passes the Mob's
+  durable terminal, a completed turn, also for a turn the coordinator recorded
+  as a blocked hand-back, or as failed or cancelled with its work item: the
+  recorded terminal settles the operation, as the close settles it, so a
+  blocked hand-back is cancelled with its work item. A work item names its
+  operation in its evidence, by which recovery finds it.
 - Restart recovery never wakes a member. A member session the runtime holds no
   registration for at start (a member left dormant by lazy restore, an
   identity whose first wake is deferred, a released materialization) is not

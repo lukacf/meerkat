@@ -1055,11 +1055,16 @@ async fn linux_strict_paths_cover_metadata_and_namespace_escape() {
     assert_eq!(sibling.stdout, b"still permitted");
 }
 
-/// A confined child with IP access resolves a host name through a read-only
-/// grant of `/etc/resolv.conf` on a host that points it at systemd-resolved
-/// through a symbolic link: the backend binds the link's target at the
-/// link's path. systemd-resolved answers every `.localhost` name itself, so
-/// the lookup needs no outside network.
+/// A read-only grant of a path whose final component is a symbolic link
+/// binds the link's regular-file target at the link's path. On every host a
+/// confined child reads a fixture link laid out as systemd-resolved lays out
+/// `/etc/resolv.conf` through such a grant, and cannot read the target at its
+/// own path. On a host that points `/etc/resolv.conf` at systemd-resolved
+/// through a link, a child with IP access also resolves a host name through
+/// a read-only grant of it: systemd-resolved answers every `.localhost` name
+/// itself, so the lookup needs no outside network. On a host whose
+/// `/etc/resolv.conf` is not a link there is none to resolve through, and
+/// the row says so.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[cfg_attr(
@@ -1067,15 +1072,62 @@ async fn linux_strict_paths_cover_metadata_and_namespace_escape() {
     ignore = "Linux positive confinement acceptance lane; requires an eligible host"
 )]
 async fn linux_resolves_a_host_name_through_a_symlinked_resolv_conf() {
-    let resolv_conf = PathBuf::from("/etc/resolv.conf");
-    assert!(
-        std::fs::symlink_metadata(&resolv_conf)
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        "this host points /etc/resolv.conf through a symbolic link (systemd-resolved)"
-    );
+    use std::os::unix::fs::PermissionsExt;
+
     let fixture = Fixture::new();
+    // The fixture link and its target sit beside `work` (granted roots are
+    // disjoint). A link is granted only where nobody else can retarget it,
+    // so no directory from the fixture's root down to the link's may be
+    // group- or other-writable, whatever the umask.
+    let root = fixture.work.parent().unwrap();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let etc = root.join("etc");
+    let run = root.join("run");
+    for directory in [&etc, &run] {
+        std::fs::create_dir(directory).unwrap();
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let target = run.join("stub-resolv.conf");
+    std::fs::write(&target, "nameserver 127.0.0.53\n").unwrap();
+    let link = etc.join("resolv.conf");
+    std::os::unix::fs::symlink("../run/stub-resolv.conf", &link).unwrap();
+    let mut spec = fixture.spec();
+    spec.read = FilesystemAccess::Paths(vec![
+        PathAccess::Subtree(fixture.work.clone()),
+        PathAccess::Literal(link.clone()),
+    ]);
+    let launch = ProcessLaunchSpec::new(
+        PathBuf::from("/bin/sh"),
+        vec![
+            OsString::from("-c"),
+            OsString::from(r#"cat "$1" || exit 10; if cat "$2" 2>/dev/null; then exit 11; fi"#),
+            OsString::from("probe"),
+            link.as_os_str().to_owned(),
+            target.as_os_str().to_owned(),
+        ],
+        fixture.work.clone(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let prepared = match prepare(&ExecutionConfinement::try_from(spec).unwrap(), launch) {
+        Ok(prepared) => prepared,
+        Err(refusal) => panic!("a read-only grant of a final link is confined: {refusal:?}"),
+    };
+    let output = prepared.output().await.unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout, b"nameserver 127.0.0.53\n",
+        "the child read the link's target at the link's path"
+    );
+
+    let resolv_conf = PathBuf::from("/etc/resolv.conf");
+    if !std::fs::symlink_metadata(&resolv_conf).is_ok_and(|entry| entry.file_type().is_symlink()) {
+        eprintln!(
+            "the host name lookup is not eligible on this host: /etc/resolv.conf is not a \
+             symbolic link; the final-link grant was proven on the fixture link only"
+        );
+        return;
+    }
     let mut spec = fixture.spec();
     spec.read = FilesystemAccess::Paths(vec![
         PathAccess::Subtree(fixture.work.clone()),

@@ -42,6 +42,9 @@ from .errors import (
     SYSTEM_ROW_PRUNE_REFUSED_KIND,
     TRANSCRIPT_REVISION_CONFLICT_KIND,
     TOOL_GRANT_REQUEST_REFUSED_KIND,
+    REALM_MCP_OUTCOME_UNKNOWN_KIND,
+    REALM_MCP_REFUSED_KIND,
+    REALM_MCP_UNAVAILABLE_KIND,
     WORKGRAPH_CONFLICT_CODE,
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
@@ -57,6 +60,9 @@ from .errors import (
     SystemRowPruneRefusedError,
     TranscriptRevisionConflictError,
     ToolGrantRequestRefusedError,
+    RealmMcpOutcomeUnknownError,
+    RealmMcpRefusedError,
+    RealmMcpUnavailableError,
     CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE,
     ConsoleTimelineReplayUnavailableError,
     RegisteredSpecChangedError,
@@ -317,6 +323,28 @@ def _rpc_error_from_payload(
     code = int(err.get("code", -1))
     message = str(err.get("message", err))
     data = err.get("data")
+    data_kind = data.get("kind") if isinstance(data, dict) else None
+    if code == CAPABILITY_UNAVAILABLE_CODE and data_kind == REALM_MCP_UNAVAILABLE_KIND:
+        return RealmMcpUnavailableError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+    if code == -32603 and data_kind == REALM_MCP_OUTCOME_UNKNOWN_KIND:
+        return RealmMcpOutcomeUnknownError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+    if code == -32602 and data_kind == REALM_MCP_REFUSED_KIND:
+        return RealmMcpRefusedError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
     if code == CAPABILITY_UNAVAILABLE_CODE:
         return CapabilityUnavailableError(
             message,
@@ -2002,6 +2030,74 @@ class MetaRuntime:
         if limit is not None:
             params["limit"] = limit
         raw = await self._rpc("meta/tool_grants/audit", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def realm_mcp_servers(self) -> dict[str, Any]:
+        """List the installation realm's own MCP servers, for review.
+
+        Returns ``{"servers": [...], "generation": int}``: the definitions
+        the realm's own config document lists (never the ones it inherits),
+        which name their secret slots and hold no value, and the document's
+        generation, which :meth:`realm_mcp_install` checks. Served by the
+        stdio gateway only.
+        """
+        raw = await self._rpc("meta/realm_mcp/servers", {})
+        return raw if isinstance(raw, dict) else {}
+
+    async def realm_mcp_install(
+        self, server: dict[str, Any], *, expected_generation: int
+    ) -> dict[str, Any]:
+        """Add a reviewed server definition to the realm's own document.
+
+        Written only while the document is still at ``expected_generation``
+        (the generation :meth:`realm_mcp_servers` read) and lists no server
+        of that name; returns ``{"generation": int}``, the next one. Raises
+        :class:`RealmMcpRefusedError` (``generation_conflict``,
+        ``server_exists``, ``invalid_server``, ``no_document``) with nothing
+        written, and :class:`RealmMcpOutcomeUnknownError` when the write
+        began and its result is not known.
+        """
+        raw = await self._rpc(
+            "meta/realm_mcp/install",
+            {"server": server, "expected_generation": expected_generation},
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    async def realm_mcp_set_secret(
+        self, server: dict[str, Any], env: str, value: str
+    ) -> dict[str, Any]:
+        """Store the value of secret slot ``env`` of a reviewed definition.
+
+        ``server`` is the definition as :meth:`realm_mcp_servers` listed it:
+        the value binds to exactly that definition, and is refused
+        (``definition_changed``) once the document no longer lists it.
+        Setting again replaces the value. The value is sent once, in this
+        request, and appears in no answer, error or log line. Returns ``{}``.
+        Raises :class:`RealmMcpUnavailableError` on a launch without a
+        credential store of its own.
+        """
+        raw = await self._rpc(
+            "meta/realm_mcp/set_secret",
+            {"server": server, "env": env, "value": value},
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    async def realm_mcp_remove_secret(
+        self, server: dict[str, Any], env: str, *, removal: str = "current"
+    ) -> dict[str, Any]:
+        """Remove the value of secret slot ``env`` of a reviewed definition.
+
+        ``removal`` is ``"current"`` (the document still lists exactly the
+        definition) or ``"obsolete"`` (cleanup after the definition was
+        replaced or removed: refused ``still_current`` while the document
+        lists a definition that launches as this one did). Returns ``{}``.
+        """
+        if removal not in ("current", "obsolete"):
+            raise ValueError('removal is "current" or "obsolete"')
+        raw = await self._rpc(
+            "meta/realm_mcp/remove_secret",
+            {"server": server, "env": env, "removal": removal},
+        )
         return raw if isinstance(raw, dict) else {}
 
     async def reconcile(self) -> Any:

@@ -222,6 +222,35 @@ Name exactly one of `tool` and `family`, and exactly one of `durationMs` and
 kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/api/rpc#scoped-tool-grants).
 
+## Realm MCP administration
+
+The stdio gateway lets its host administer the installation realm's own MCP
+servers and the secret values of their stdio servers' `secret_env` slots,
+kept in the launch's provider credential store:
+
+```typescript
+import { RealmMcpRefusedError } from "@rkat/meta-sdk";
+
+const listed = await runtime.realmMcpServers(); // {servers, generation}
+const server = { name: "search", command: "search-mcp", secret_env: ["SEARCH_API_KEY"] };
+await runtime.realmMcpInstall(server, { expectedGeneration: listed.generation as number });
+await runtime.realmMcpSetSecret(server, "SEARCH_API_KEY", apiKey);
+try {
+  await runtime.realmMcpInstall(server, { expectedGeneration: listed.generation as number });
+} catch (error) {
+  if (error instanceof RealmMcpRefusedError) {
+    error.refusalKind; // "generation_conflict"
+  }
+}
+await runtime.realmMcpRemoveSecret(server, "SEARCH_API_KEY");
+```
+
+The value is sent once, in the `set_secret` request, and never appears in an
+answer or an error. A launch without a credential store of its own rejects the
+secret methods with `RealmMcpUnavailableError`; a write whose result is
+unknown rejects with `RealmMcpOutcomeUnknownError`. See
+[Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).
+
 ## Durable detached tools
 
 Long-running host work must declare detached execution rather than keeping a

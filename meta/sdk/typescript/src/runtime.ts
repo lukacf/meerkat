@@ -40,6 +40,9 @@ import {
   SYSTEM_ROW_PRUNE_REFUSED_KIND,
   TRANSCRIPT_REVISION_CONFLICT_KIND,
   TOOL_GRANT_REQUEST_REFUSED_KIND,
+  REALM_MCP_OUTCOME_UNKNOWN_KIND,
+  REALM_MCP_REFUSED_KIND,
+  REALM_MCP_UNAVAILABLE_KIND,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -55,6 +58,9 @@ import {
   SystemRowPruneRefusedError,
   TranscriptRevisionConflictError,
   ToolGrantRequestRefusedError,
+  RealmMcpOutcomeUnknownError,
+  RealmMcpRefusedError,
+  RealmMcpUnavailableError,
   ConsoleTimelineReplayUnavailableError,
   RegisteredSpecChangedError,
   StaleScopeError,
@@ -928,6 +934,19 @@ function rpcErrorFromPayload(
 ): Error {
   const code = Number(err.code ?? -1);
   const message = String(err.message ?? String(err));
+  const dataKind =
+    typeof err.data === "object" && err.data !== null
+      ? (err.data as Record<string, unknown>).kind
+      : undefined;
+  if (code === CAPABILITY_UNAVAILABLE_CODE && dataKind === REALM_MCP_UNAVAILABLE_KIND) {
+    return new RealmMcpUnavailableError(message, rid, method, err.data);
+  }
+  if (code === -32603 && dataKind === REALM_MCP_OUTCOME_UNKNOWN_KIND) {
+    return new RealmMcpOutcomeUnknownError(message, rid, method, err.data);
+  }
+  if (code === -32602 && dataKind === REALM_MCP_REFUSED_KIND) {
+    return new RealmMcpRefusedError(message, rid, method, err.data);
+  }
   if (code === CAPABILITY_UNAVAILABLE_CODE) {
     return new CapabilityUnavailableError(message, rid, method, err.data);
   }
@@ -2757,6 +2776,79 @@ export class MetaRuntime {
     if (options.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options.limit !== undefined) params.limit = options.limit;
     const raw = await this._rpc("meta/tool_grants/audit", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * List the installation realm's own MCP servers, for review. Resolves
+   * `{servers, generation}`: the definitions the realm's own config document
+   * lists (never the ones it inherits), which name their secret slots and
+   * hold no value, and the document's generation, which
+   * {@link MetaRuntime.realmMcpInstall} checks. Served by the stdio gateway
+   * only.
+   */
+  async realmMcpServers(): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/realm_mcp/servers", {});
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Add a reviewed server definition to the realm's own document, written
+   * only while the document is still at `expectedGeneration` (the generation
+   * {@link MetaRuntime.realmMcpServers} read) and lists no server of that
+   * name. Resolves `{generation}`, the next one. Rejects with
+   * {@link RealmMcpRefusedError} (`generation_conflict`, `server_exists`,
+   * `invalid_server`, `no_document`) with nothing written, and with
+   * {@link RealmMcpOutcomeUnknownError} when the write began and its result
+   * is not known.
+   */
+  async realmMcpInstall(
+    server: Record<string, unknown>,
+    options: { expectedGeneration: number },
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/realm_mcp/install", {
+      server,
+      expected_generation: options.expectedGeneration,
+    });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Store the value of secret slot `env` of a reviewed definition. `server`
+   * is the definition as {@link MetaRuntime.realmMcpServers} listed it: the
+   * value binds to exactly that definition, and is refused
+   * (`definition_changed`) once the document no longer lists it. Setting
+   * again replaces the value. The value is sent once, in this request, and
+   * appears in no answer or error. Resolves `{}`; rejects with
+   * {@link RealmMcpUnavailableError} on a launch without a credential store
+   * of its own.
+   */
+  async realmMcpSetSecret(
+    server: Record<string, unknown>,
+    env: string,
+    value: string,
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/realm_mcp/set_secret", { server, env, value });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Remove the value of secret slot `env` of a reviewed definition.
+   * `removal` is `"current"` (the default: the document still lists exactly
+   * the definition) or `"obsolete"` (cleanup after the definition was
+   * replaced or removed: refused `still_current` while the document lists a
+   * definition that launches as this one did). Resolves `{}`.
+   */
+  async realmMcpRemoveSecret(
+    server: Record<string, unknown>,
+    env: string,
+    options: { removal?: "current" | "obsolete" } = {},
+  ): Promise<Record<string, unknown>> {
+    const removal = options.removal ?? "current";
+    if (removal !== "current" && removal !== "obsolete") {
+      throw new TypeError('realmMcpRemoveSecret removal is "current" or "obsolete"');
+    }
+    const raw = await this._rpc("meta/realm_mcp/remove_secret", { server, env, removal });
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 

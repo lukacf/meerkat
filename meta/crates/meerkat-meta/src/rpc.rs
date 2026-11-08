@@ -29,6 +29,7 @@ pub(crate) mod memory_methods;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
 pub(crate) mod params;
+pub(crate) mod realm_mcp_methods;
 mod routing_delivery_methods;
 pub(crate) mod schedule_methods;
 mod session_store_methods;
@@ -2117,7 +2118,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// writes durable member intent and schedules the identity convergence that
 /// can replace a stored member; a scoped tool grant write
 /// ([`tool_grant_methods::is_tool_grant_mutating_method`]), which writes the
-/// runtime's grant rows and can seat a member; a WorkGraph write
+/// runtime's grant rows and can seat a member; a realm MCP write
+/// ([`realm_mcp_methods::is_realm_mcp_mutating_method`]), which writes the
+/// realm's own config document or its credential store; a WorkGraph write
 /// ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
@@ -2133,6 +2136,7 @@ pub(crate) fn candidate_launch_refuses(
     CANDIDATE_LAUNCH_REFUSED_METHODS.contains(&method)
         || mob_methods::is_member_declaration_mutating_method(method)
         || tool_grant_methods::is_tool_grant_mutating_method(method)
+        || realm_mcp_methods::is_realm_mcp_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
         || candidate_launch_refuses_mobpack_change(method, params, state_dir)
@@ -2735,6 +2739,12 @@ async fn handle_unified_rpc_json_inner(
             // served and advertised with it.
             if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
                 methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
+            }
+            // The stdio gateway's realm MCP administration, derived from its
+            // registry: advertised by the runtime the stdio gateway composed
+            // it on, and by no other.
+            if runtime.realm_mcp_administration().is_some() {
+                methods.extend_from_slice(realm_mcp_methods::REALM_MCP_METHODS);
             }
             // Workgraph methods are advertised only when the service is
             // configured (`runtime_options.workgraph = false` or a failed
@@ -4091,6 +4101,39 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        // ONE arm for the realm MCP administration family, from its registry,
+        // served by the runtime the stdio gateway composed it on (its SDK host
+        // administers the installation realm), as the capabilities advertise
+        // it; every other runtime answers method not found.
+        method
+            if realm_mcp_methods::is_realm_mcp_method(method)
+                && runtime.realm_mcp_administration().is_some() =>
+        {
+            let response = match runtime.realm_mcp_administration() {
+                Some(administration) => {
+                    realm_mcp_methods::handle_realm_mcp_rpc(
+                        administration,
+                        method,
+                        response_id.clone(),
+                        &request.params,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            response.unwrap_or_else(|| JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32601,
+                    message: format!(
+                        "{method} is registered in the realm MCP family but has no dispatcher arm"
+                    ),
+                    data: None,
+                }),
+            })
         }
         "meta/send_message" => {
             // Pass the identity runtime so bare durable identities resolve

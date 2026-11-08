@@ -429,6 +429,36 @@ and `expires_at_ms`. Every refusal raises `ToolGrantRequestRefusedError`; its
 kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/api/rpc#scoped-tool-grants).
 
+### Realm MCP administration
+
+The stdio gateway lets its host administer the installation realm's own MCP
+servers and the secret values of their stdio servers' `secret_env` slots,
+kept in the launch's provider credential store:
+
+```python
+from meerkat_meta import RealmMcpRefusedError
+
+listed = await runtime.realm_mcp_servers()          # {"servers": [...], "generation": 3}
+server = {
+    "name": "search",
+    "command": "search-mcp",
+    "secret_env": ["SEARCH_API_KEY"],
+}
+await runtime.realm_mcp_install(server, expected_generation=listed["generation"])
+await runtime.realm_mcp_set_secret(server, "SEARCH_API_KEY", api_key)
+try:
+    await runtime.realm_mcp_install(server, expected_generation=listed["generation"])
+except RealmMcpRefusedError as error:
+    error.refusal_kind                               # "generation_conflict"
+await runtime.realm_mcp_remove_secret(server, "SEARCH_API_KEY")
+```
+
+The value is sent once, in the `set_secret` request, and never appears in an
+answer, an exception or a log record. A launch without a credential store of
+its own answers the secret methods `RealmMcpUnavailableError`; a write whose
+result is unknown raises `RealmMcpOutcomeUnknownError`. See
+[Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).
+
 ## Mob-Level API
 
 For direct mob-member operations (discovery-based), the mob handle API is still available.
@@ -1375,6 +1405,9 @@ from meerkat_meta.errors import (
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
     ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
+    RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
+    RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
+    RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
     MobAnnouncementsUnavailableError,  # Mob announcements are not enabled (-32044)
     AnnouncementConflictError,         # Conflict or stale request (-32045): .kind
     SourceStaleRevisionError,          # A source's revision moved (-32045): .current_revision, .current_version, .generation, .cursor

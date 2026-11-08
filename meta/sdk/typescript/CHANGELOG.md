@@ -13,6 +13,16 @@
   rejects with `ToolGrantRequestRefusedError` (`refusal`, `refusalKind`; the
   constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
   `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+- `MetaRuntime.realmMcpServers()`,
+  `realmMcpInstall(server, { expectedGeneration })`,
+  `realmMcpSetSecret(server, env, value)` and
+  `realmMcpRemoveSecret(server, env, { removal })` call the stdio gateway's
+  `meta/realm_mcp/{servers, install, set_secret, remove_secret}`. A removal
+  other than `"current"` or `"obsolete"` is a `TypeError`, nothing sent. The
+  outcomes reject with `RealmMcpRefusedError` (`refusal`, `refusalKind`; the
+  closed `REALM_MCP_REFUSAL_KINDS`), `RealmMcpUnavailableError` (a
+  `CapabilityUnavailableError`) and `RealmMcpOutcomeUnknownError`; a secret
+  value appears in none of them.
 
 ## 0.9.10
 

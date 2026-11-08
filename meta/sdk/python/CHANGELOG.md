@@ -15,6 +15,16 @@ All notable changes to the Python SDK are documented here.
   raises `ToolGrantRequestRefusedError` (`refusal`, `refusal_kind`; the
   constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
   `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+- `MetaRuntime.realm_mcp_servers()`,
+  `realm_mcp_install(server, *, expected_generation)`,
+  `realm_mcp_set_secret(server, env, value)` and
+  `realm_mcp_remove_secret(server, env, *, removal="current")` call the stdio
+  gateway's `meta/realm_mcp/{servers, install, set_secret, remove_secret}`.
+  A removal other than `"current"` or `"obsolete"` is a `ValueError`, nothing
+  sent. The outcomes raise `RealmMcpRefusedError` (`refusal`, `refusal_kind`;
+  the closed `REALM_MCP_REFUSAL_KINDS`), `RealmMcpUnavailableError` (a
+  `CapabilityUnavailableError`) and `RealmMcpOutcomeUnknownError`; a secret
+  value appears in none of them and in no log record.
 
 ## 0.9.10
 

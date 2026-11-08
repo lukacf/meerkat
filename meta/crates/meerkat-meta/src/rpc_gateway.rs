@@ -16378,6 +16378,53 @@ impl GatewayStdioClose {
 
 type GatewayStdioObservation = watch::Receiver<Option<GatewayStdioClose>>;
 
+/// The administration entry of the gateway's stdio connection, for the realm
+/// MCP methods (`meta/realm_mcp/*`). The SDK host on that connection is the
+/// gateway's operator, so a write it sent is admitted while the connection is
+/// open and refused `not_authenticated` once it closed. The write's owner
+/// runs it after the document's locks and the credential owner's exclusion,
+/// immediately before it writes; it reads the stdio close observation and
+/// never waits.
+struct StdioConnectionEntry {
+    closed: GatewayStdioObservation,
+}
+
+impl meerkat_core::AdministrationEntry for StdioConnectionEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        if self.closed.borrow().is_some() {
+            return Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated);
+        }
+        Ok(meerkat_core::EnteredAdministration::admitted())
+    }
+}
+
+/// The stdio gateway's own realm MCP installation of `storage`'s realm, over
+/// `factory`'s own credential store when the launch keeps one. A store that
+/// did not open holds no secret value here: the secret methods answer
+/// `realm_mcp_unavailable`, as on a launch without one.
+fn gateway_realm_mcp_installation(
+    factory: &AgentFactory,
+    storage: &meerkat_core::storage_layout::ResolvedStorage,
+) -> crate::gateway_mcp_composition::GatewayRealmMcpInstallation {
+    let persistence = match factory.resolution_provider_auth_persistence() {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the launch's provider credential store did not open: the realm MCP secret \
+                 methods answer realm_mcp_unavailable"
+            );
+            None
+        }
+    };
+    crate::gateway_mcp_composition::GatewayRealmMcpInstallation::for_gateway(
+        storage.clone(),
+        persistence,
+    )
+}
+
 #[derive(Clone)]
 struct GatewayStdioOwner {
     host: Option<Arc<dyn GatewayHostComposition>>,
@@ -17605,6 +17652,9 @@ external_addressable = true
 
     // 3. Both physical stdio owners notify the same retained gateway driver.
     let (stdio, stdio_observation) = GatewayStdioOwner::new(host.cloned());
+    // The realm MCP administration's entry reads the same observation: a
+    // write the SDK host sent is admitted while its connection is open.
+    let realm_mcp_entry_observation = stdio_observation.clone();
     let shutdown_waits_for_drain = stdio.shutdown_waits_for_drain();
     // Raw keeps its established queue ordering and I/O behavior. Only an
     // explicitly composed native owner consumes immediate close observations.
@@ -18155,6 +18205,11 @@ external_addressable = true
                 format!("runtime_options.mob_announcements: {error}"),
             )
         })?;
+    // The installation realm's own MCP servers and their secrets, served to
+    // this gateway's SDK host (`meta/realm_mcp/*`): composed with the member
+    // factory, over the factory's own credential store when the launch keeps
+    // one.
+    let realm_mcp_installation;
     let (
         mob_spec,
         _temp_dir,
@@ -18346,6 +18401,7 @@ external_addressable = true
             &member_mcp_custody,
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
+        realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
         // Live (realtime) needs the SAME factory shape for its per-open
         // credential-resolving realtime session factory; clone before
         // the builder consumes it.
@@ -18800,6 +18856,7 @@ external_addressable = true
             &member_mcp_custody,
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
+        realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
         let runtime_delivery = runtime_delivery.with_consent_notice_issuer(consent_notice_issuer);
         let member_agent_config = gateway_agent_config(&gateway_options);
         let mut inner_builder = crate::gateway_mcp_composition::gateway_member_builder(
@@ -20181,6 +20238,15 @@ external_addressable = true
         }
         detached_jobs.arm_delivery_driver(Arc::clone(&runtime));
     }
+    // The realm MCP administration the SDK host on this gateway's stdio
+    // serves through (`meta/realm_mcp/*`), admitted while that connection
+    // is open.
+    runtime.serve_realm_mcp(crate::rpc::realm_mcp_methods::RealmMcpAdministration::new(
+        realm_mcp_installation,
+        Arc::new(StdioConnectionEntry {
+            closed: realm_mcp_entry_observation,
+        }),
+    ));
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
     steward_late_runtime.bind(runtime.clone());
@@ -26729,5 +26795,38 @@ mod identity_creation_launch_tests {
                 .starts_with("identity_creation: identity records are durable"),
             "{response}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stdio_connection_entry_tests {
+    //! The realm MCP administration's entry: the stdio connection admits a
+    //! write while it is open, and refuses `not_authenticated` once it
+    //! closed, however it closed.
+
+    use super::*;
+    use meerkat_core::AdministrationEntry as _;
+
+    #[test]
+    fn the_stdio_entry_admits_while_the_connection_is_open_and_refuses_once_it_closed() {
+        for kind in [
+            GatewayStdioCloseKind::InputLost,
+            GatewayStdioCloseKind::OutputLost,
+            GatewayStdioCloseKind::ShutdownRequested,
+        ] {
+            let (stdio, observation) = GatewayStdioOwner::new(None);
+            let entry = StdioConnectionEntry {
+                closed: observation,
+            };
+            assert!(entry.enter().is_ok(), "{kind:?}: admitted while open");
+            stdio.close(kind, None);
+            assert!(
+                matches!(
+                    entry.enter(),
+                    Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated)
+                ),
+                "{kind:?}: refused once closed"
+            );
+        }
     }
 }

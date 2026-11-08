@@ -449,6 +449,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust: `meerkat_meta::tool_grant_options` (`ToolGrantLaunchOptions`, the
   launch option's parser, and `TOOL_GRANT_LIFETIME_INVALID_KIND`) and the
   access action constant `ACTION_AGENT_TOOL_GRANTS_MANAGE`.
+- `meta/realm_mcp/servers`, `install`, `set_secret` and `remove_secret` on
+  the stdio gateway: its SDK host administers the installation realm's own
+  MCP servers and the secret values of their stdio servers' `secret_env`
+  slots, each method one call of the gateway's realm MCP installation. A
+  write is admitted while the stdio connection that sent it is open; the
+  value appears only in the `set_secret` request, never in an answer, an
+  error or a log line. Typed outcomes: `realm_mcp_refused` (`-32602`, a
+  closed vocabulary of kinds), `realm_mcp_unavailable` (`-32004`, also a
+  launch without a provider credential store of its own) and
+  `realm_mcp_outcome_unknown` (`-32603`). The Console does not serve them,
+  and a candidate launch refuses the writes. Python `realm_mcp_servers`,
+  `realm_mcp_install`, `realm_mcp_set_secret` and `realm_mcp_remove_secret`
+  and TypeScript `realmMcpServers`, `realmMcpInstall`, `realmMcpSetSecret`
+  and `realmMcpRemoveSecret`, with `RealmMcpRefusedError`,
+  `RealmMcpUnavailableError` and `RealmMcpOutcomeUnknownError`.
 - Meta's members build with their profiles' tool grant gate, and Meta now
   has grant methods: the 0.9.10 known limitation "Meta builds its members
   with no tool grant gate and has no grant methods" no longer applies.

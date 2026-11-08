@@ -114,7 +114,7 @@ impl<'a> GatewayFactoryConstruction<'a> {
             .ok_or(HostAuthError::PersistenceUnavailable)?;
         Ok(GatewayRealmMcpInstallation {
             storage: self.storage.clone(),
-            persistence,
+            persistence: Some(persistence),
         })
     }
 
@@ -157,10 +157,18 @@ impl<'a> GatewayFactoryConstruction<'a> {
 /// outcome that wrote nothing on a slot known to be empty, or a removal that
 /// succeeded, establishes that a launch finds no value. Nothing is retried
 /// or rolled back here, and an unknown outcome is never a success.
+///
+/// The stdio gateway serves its own installation to its SDK host
+/// (`meta/realm_mcp/*`); a launch without a provider credential store of its
+/// own keeps no secret value, and its secret writes answer
+/// [`McpServiceSecretUpdateError::Ownership`].
 #[derive(Clone)]
 pub struct GatewayRealmMcpInstallation {
     storage: ResolvedStorage,
-    persistence: ProviderAuthPersistence,
+    /// The factory's own credential store; `None` on a launch that keeps
+    /// none (only the stdio gateway's own installation, never one a host
+    /// gets from [`GatewayFactoryConstruction::realm_mcp_installation`]).
+    persistence: Option<ProviderAuthPersistence>,
 }
 
 /// Why the installation realm's own MCP servers could not be read or
@@ -222,6 +230,18 @@ impl From<McpRealmPersistError> for GatewayRealmMcpError {
 }
 
 impl GatewayRealmMcpInstallation {
+    /// The stdio gateway's own installation of `storage`'s realm, over the
+    /// launch's credential store when it keeps one.
+    pub(crate) fn for_gateway(
+        storage: ResolvedStorage,
+        persistence: Option<ProviderAuthPersistence>,
+    ) -> Self {
+        Self {
+            storage,
+            persistence,
+        }
+    }
+
     /// The realm whose own config document this administers.
     pub fn realm(&self) -> &RealmId {
         &self.storage.locator.realm
@@ -271,7 +291,7 @@ impl GatewayRealmMcpInstallation {
     ) -> Result<(), McpServiceSecretUpdateError> {
         meerkat::set_mcp_service_secret_entered(
             &self.storage,
-            &self.persistence,
+            self.credential_store()?,
             reviewed,
             env,
             value,
@@ -293,13 +313,25 @@ impl GatewayRealmMcpInstallation {
     ) -> Result<(), McpServiceSecretUpdateError> {
         meerkat::remove_mcp_service_secret_entered(
             &self.storage,
-            &self.persistence,
+            self.credential_store()?,
             reviewed,
             env,
             removal,
             entry,
         )
         .await
+    }
+
+    /// The credential store the secret values live in: refused, with
+    /// nothing written, on a launch that keeps none.
+    fn credential_store(&self) -> Result<&ProviderAuthPersistence, McpServiceSecretUpdateError> {
+        self.persistence.as_ref().ok_or_else(|| {
+            McpServiceSecretUpdateError::Ownership(
+                "this launch keeps no provider credential store of its own, so it holds no \
+                 MCP service secret"
+                    .to_owned(),
+            )
+        })
     }
 
     /// The native MCP target `target` names in this realm's effective

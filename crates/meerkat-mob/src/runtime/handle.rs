@@ -6568,6 +6568,29 @@ impl MobHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provisioner);
     }
 
+    /// The mob operator tools a member of this mob carries when its profile
+    /// enables mob tools, over the authority such a member's build composes
+    /// by default (no manage scope). A host's rows dispatch a member's call
+    /// through them with that member's session as the dispatch's origin.
+    /// Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn member_operator_tools_for_test(
+        &self,
+    ) -> Result<std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>, MobError> {
+        let authority = crate::build::default_member_mob_operator_authority(
+            &self.definition,
+            &self.definition.id,
+            self.live_incarnation(),
+        )?
+        .ok_or_else(|| {
+            MobError::Internal("a member with mob tools has an operator authority".to_string())
+        })?;
+        Ok(std::sync::Arc::new(
+            super::tools::MobOperatorToolDispatcher::new(self.clone(), true, authority),
+        ))
+    }
+
     /// Rebind a clone of this handle onto `authority` (phase 5, ADJ-P5-10).
     ///
     /// This is the PRODUCTION principal-binding seam: local single-user

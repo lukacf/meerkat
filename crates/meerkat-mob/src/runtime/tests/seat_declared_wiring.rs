@@ -1018,6 +1018,35 @@ impl WiringMob {
         }
         panic!("the source {source} never settled for its fork");
     }
+
+    /// Fork `source` into `child` with `spec` at the source's next turn
+    /// boundary, as a live delegation forks its worker, retried while the
+    /// source is still busy.
+    async fn fork_at_turn_boundary(&self, source: &AgentIdentity, child_spec: SpawnMemberSpec) {
+        for _ in 0..50 {
+            match tokio::time::timeout(
+                STEP,
+                self.handle.fork_member_at_turn_boundary(
+                    source,
+                    child_spec.clone(),
+                    None,
+                    Duration::from_secs(5),
+                ),
+            )
+            .await
+            .expect("the fork answers")
+            {
+                Ok(ForkMemberAtTurnBoundary::Forked(_)) => return,
+                Ok(ForkMemberAtTurnBoundary::SourceBusy { .. })
+                | Err(MobError::ForkSourceUnavailable {
+                    cause: crate::error::ForkSourceUnavailableCause::Running,
+                    ..
+                }) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => panic!("the turn-boundary fork of {source} is seated: {error}"),
+            }
+        }
+        panic!("the source {source} never reached a turn boundary for its fork");
+    }
 }
 
 /// Spawn `identity` of `profile` with a first turn, turn-driven, and wait
@@ -1352,6 +1381,61 @@ async fn a_fork_of_an_exempt_member_is_seated_exempt() {
             pair(&worker_child, &lead),
             pair(&seated, &lead),
         ]),
+        "only the members the rules apply to are wired to the orchestrator"
+    );
+}
+
+/// The live-delegation fork (`MobHandle::fork_member_at_turn_boundary`)
+/// takes its source's exemption from the definition's wiring rules, as every
+/// other durable fork does. A fork of a member seated exempt, asked for with
+/// the default seating, is seated exempt: unwired, and recorded exempt by
+/// MobMachine. A fork of a member the rules apply to keeps the seating its
+/// request states, and is wired as any member of its role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_boundary_fork_of_an_exempt_member_is_seated_exempt() {
+    let mob = WiringMob::new(
+        "exempt-boundary-source",
+        sample_definition_with_auto_wire(),
+        false,
+    )
+    .await;
+    let lead = AgentIdentity::from("boundary-lead");
+    let worker = AgentIdentity::from("boundary-worker");
+    spawn_settled(&mob.handle, "lead", &lead).await;
+    spawn_settled(&mob.handle, "worker", &worker).await;
+    let side = AgentIdentity::from("boundary-side");
+    mob.fork_when_idle(&worker, exempt(spec("worker", &side)))
+        .await;
+    assert!(mob.machine_exempt(&side), "the exempt source is seated");
+
+    let side_child = AgentIdentity::from("boundary-side-child");
+    mob.fork_at_turn_boundary(&side, spec("worker", &side_child))
+        .await;
+    assert_eq!(
+        mob.roster_definition_wiring(&side_child).await,
+        crate::DefinitionWiring::Exempt,
+        "a turn-boundary fork of an exempt member is seated exempt"
+    );
+    assert!(
+        mob.machine_exempt(&side_child),
+        "MobMachine records it exempt"
+    );
+    assert!(
+        mob.wired_to(&side_child).await.is_empty(),
+        "a turn-boundary fork of an exempt member takes no declared edge"
+    );
+
+    let worker_child = AgentIdentity::from("boundary-worker-child");
+    mob.fork_at_turn_boundary(&worker, spec("worker", &worker_child))
+        .await;
+    assert_eq!(
+        mob.roster_definition_wiring(&worker_child).await,
+        crate::DefinitionWiring::Applies,
+        "a turn-boundary fork of a member the rules apply to keeps its requested seating"
+    );
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([pair(&worker, &lead), pair(&worker_child, &lead)]),
         "only the members the rules apply to are wired to the orchestrator"
     );
 }

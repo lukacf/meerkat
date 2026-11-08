@@ -581,8 +581,14 @@ impl FirstFixture {
             (session, runtime, member_spec)
         } else {
             let member = MemberIdentity::from(MEMBER);
+            // The identity label marks this spawn as the identity's member, as
+            // Meta marks its own: registering the identity then adopts the
+            // member as the identity's entry, where an unmarked one is refused
+            // as a worker holding the name.
             handle
-                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()))
+                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()).with_labels(
+                    BTreeMap::from([("agent_identity".to_owned(), MEMBER.to_owned())]),
+                ))
                 .await
                 .unwrap();
             let session = handle
@@ -661,7 +667,10 @@ impl FirstFixture {
                 placement: None,
             };
             // Core already owns this spawned member and session; registration adds its roster spec.
-            runtime.register(member_spec.clone()).await;
+            runtime
+                .register(member_spec.clone())
+                .await
+                .expect("the identity registers");
             let status = runtime.status(&identity).await.unwrap();
             assert_eq!(status.state, IdentityLifecycleState::Active);
             assert_eq!(status.session_id, Some(session.clone()));
@@ -794,6 +803,30 @@ impl<S> FirstFixture<S> {
             .await
             .unwrap()
             .unwrap()
+    }
+    /// The originals store as a successor opens it: once this host's close
+    /// released the store's custody, this host's own handle refuses every
+    /// read, so what the close retained is read through a new opener.
+    pub(crate) fn closed_store(&self) -> toolkit_store::SqliteStore {
+        toolkit_store::SqliteStore::open_existing(&self.source_path)
+            .expect("the close released the originals store")
+    }
+    /// [`Self::cold_source_record`] after this host's close.
+    pub(crate) async fn closed_source_record(&self) -> toolkit_store::StoredRecord {
+        self.closed_store()
+            .get(&self.source.key(&self.submission.original).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    /// [`Self::binding`] after this host's close, from the record a new
+    /// opener of the same database reads.
+    pub(crate) async fn closed_binding(&self) -> Option<InputAuthorityAssociation> {
+        let record = self.closed_source_record().await;
+        self.source
+            .decode_record(&record, &self.submission.original)
+            .unwrap()
+            .final_association
     }
     pub(crate) fn cold_source_custody(
         &self,

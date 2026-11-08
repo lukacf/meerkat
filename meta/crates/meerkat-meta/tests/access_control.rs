@@ -6486,6 +6486,7 @@ mod checked_v1_acceptance {
             meerkat_meta::AccessApprover {
                 subjects: strings(subjects),
                 groups: strings(groups),
+                ..meerkat_meta::AccessApprover::default()
             }
         }
         /// A `meta/access/rules/upsert` payload.

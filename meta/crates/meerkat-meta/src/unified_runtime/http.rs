@@ -488,6 +488,7 @@ impl UnifiedRuntime {
             self.console_governed_ingress.clone(),
             self.console_session_fences().clone(),
             self.mob_announcements_slot(),
+            self.durable_decisions().clone(),
             self.console_audit_log(),
         )
     }
@@ -713,6 +714,11 @@ impl UnifiedRuntime {
                             let authority_identity = authority_runtime
                                 .identity_for_member_mutation(&agent_id)
                                 .await
+                                .map_err(|error| {
+                                    crate::MobRuntimeError::InvalidConfig(format!(
+                                        "identity event target refused before subscription: {agent_id}: {error}"
+                                    ))
+                                })?
                                 .ok_or_else(|| {
                                     crate::MobRuntimeError::InvalidConfig(format!(
                                         "identity event target lost authority before subscription: {agent_id}"

@@ -1,5 +1,6 @@
 import React from "react";
-import { ApprovalCard, HostAttentionCard, deadlineWords, useApprovalClock } from "../../../packages/console-components/src/conversation/approval-card";
+import { ApprovalCard, DepartedApprovalCard, HostAttentionCard, deadlineWords, useApprovalClock, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
+import { approvalAudience } from "../../../packages/console-core/src/pending-approvals";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
 import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
@@ -59,6 +60,8 @@ import {
   type DecisionKind,
   type RawRecord,
 } from "./gating-model";
+import { DecisionCardList } from "./DecisionCard";
+import type { DecisionCardView } from "./decision-cards";
 
 interface GatingInboxPanelProps {
   pending: unknown[];
@@ -89,6 +92,19 @@ interface GatingInboxPanelProps {
   /** Grows by one each time Needs you opens the inbox: each new value shows
    *  the Pending tab, also in an inbox that is already open on another tab. */
   showPending?: number;
+  /** The durable decisions the caller may see, listed on Pending after the
+   *  approvals. Read only: a decision is decided where it was presented. */
+  decisions?: readonly DecisionCardView[];
+  /** The cursor of the decisions' last page, while more may follow: the
+   *  list then offers "Load more", which asks for the page after it. */
+  decisionsNextAfter?: string;
+  /** Read the page of decisions after `after`. */
+  onLoadMoreDecisions?: (after: string) => void;
+  /** Whether a further page of decisions is being read. */
+  decisionsLoadingMore?: boolean;
+  /** Whether a person is signed in to the console. The decision cards offer
+   *  no decision either way. */
+  signedIn?: boolean;
 }
 
 type Tab = "pending" | "auto" | "audit" | "policies";
@@ -453,8 +469,14 @@ export function GatingInboxPanel({
   hostAttention,
   hostDecideSources,
   showPending,
+  decisions: durableDecisions,
+  decisionsNextAfter,
+  onLoadMoreDecisions,
+  decisionsLoadingMore = false,
+  signedIn = false,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
+  const viewer = useApprovalViewer();
   const tabIds = React.useId();
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
@@ -511,16 +533,34 @@ export function GatingInboxPanel({
   // says so in one line, so the items stay in view.
   const hostItems = tab === "pending" ? hostAttention?.items ?? [] : [];
   const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
-  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0;
+  // Durable decisions follow the approvals too, read only: each one is
+  // decided where it was presented. "Load more" follows the list's cursor.
+  const decisionCards = tab === "pending" ? durableDecisions ?? [] : [];
+  const decisionCursor = tab === "pending" && onLoadMoreDecisions ? decisionsNextAfter : undefined;
+  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0
+    || decisionCursor !== undefined;
   const hostList = hostShown ? (
-    <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
-      {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}
-      {hostFailedSources.length ? (
-        <Notice tone="warn" role="status" className="gating-inbox__host-note">
-          {`Could not read: ${hostFailedSources.join(", ")}`}
-        </Notice>
+    <>
+      {decisionCards.length || decisionCursor !== undefined ? (
+        <DecisionCardList
+          cards={decisionCards}
+          signedIn={signedIn}
+          nextAfter={decisionCursor}
+          onLoadMore={onLoadMoreDecisions}
+          loadingMore={decisionsLoadingMore}
+        />
       ) : null}
-    </div>
+      {hostItems.length > 0 || hostFailedSources.length > 0 ? (
+        <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
+          {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}
+          {hostFailedSources.length ? (
+            <Notice tone="warn" role="status" className="gating-inbox__host-note">
+              {`Could not read: ${hostFailedSources.join(", ")}`}
+            </Notice>
+          ) : null}
+        </div>
+      ) : null}
+    </>
   ) : null;
 
   let content: React.ReactNode;
@@ -529,6 +569,9 @@ export function GatingInboxPanel({
     // Soonest deadline first; a request decided here stays in place until
     // the owner drops it.
     const cards = byDeadline(resource.requests);
+    // Requests decided elsewhere that waited for this viewer (all of them
+    // while the viewer is unknown) stay, saying who decided them.
+    const departed = (resource.departed ?? []).filter((item) => !viewer || approvalAudience(item.request, viewer).kind === "you");
     content = (
       <>
         {state && resource.requests.length === 0 ? (
@@ -567,6 +610,11 @@ export function GatingInboxPanel({
                 />
               </div>
             ))}
+          </div>
+        ) : null}
+        {departed.length ? (
+          <div className="gating-inbox__cards gating-inbox__departed" data-testid="gating-departed-list">
+            {departed.map((item) => <DepartedApprovalCard key={item.request.pendingId} departed={item} />)}
           </div>
         ) : null}
         {hostList}

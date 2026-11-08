@@ -2123,7 +2123,7 @@ mod tests {
         async fn authorize(
             &self,
             _req: &mut HttpAuthorizationRequest<'_>,
-        ) -> Result<(), AuthError> {
+        ) -> Result<(), meerkat_core::AuthError> {
             Ok(())
         }
 

@@ -943,8 +943,27 @@ impl MobDefinition {
     /// does not own those facts.
     /// The owning session is wired as an external peer by the delegate tool;
     /// implicit mobs do not create a local orchestrator member.
+    ///
+    /// The `delegate` profile names `model` alone, so the definition
+    /// validates only for a catalogued model; see
+    /// [`Self::implicit_with_provider`].
     #[doc(hidden)]
     pub fn implicit(bridge_session_id: &str, model: &str) -> Self {
+        Self::implicit_with_provider(bridge_session_id, model, None, None)
+    }
+
+    /// [`Self::implicit`] whose `delegate` profile also names `provider` and
+    /// `self_hosted_server_id`: the route the owner session's build resolved
+    /// for `model`, so its helpers run on the owner's own route. A model
+    /// outside the catalog (a realm `[models.<id>]` entry, a self-hosted
+    /// model) validates only with its provider named.
+    #[doc(hidden)]
+    pub fn implicit_with_provider(
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<String>,
+    ) -> Self {
         let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -952,8 +971,8 @@ impl MobDefinition {
             ProfileBinding::Inline(Box::new(Profile {
                 model_fallback: None,
                 model: model.to_string(),
-                provider: None,
-                self_hosted_server_id: None,
+                provider,
+                self_hosted_server_id,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1943,6 +1962,53 @@ id = "minimal"
             !def.wiring.auto_wire_orchestrator,
             "implicit delegate mobs rely on external owner wiring"
         );
+    }
+
+    /// The implicit definition's `delegate` profile names the owner's
+    /// resolved provider route when given one, so a model outside the
+    /// catalog validates; without one it names the model alone, which
+    /// validates only for a catalogued model.
+    #[test]
+    fn implicit_definition_names_the_owners_provider_route() {
+        let model = "realm-gateway-model";
+        let unknown_model = |def: &MobDefinition| {
+            crate::validate::validate_definition(def)
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::UnknownModel)
+        };
+        let delegate = ProfileName::from("delegate");
+        assert!(unknown_model(&MobDefinition::implicit(
+            "bridge-session",
+            model
+        )));
+        assert_eq!(
+            MobDefinition::implicit_with_provider("bridge-session", model, None, None),
+            MobDefinition::implicit("bridge-session", model),
+            "no route is exactly the provider-less definition"
+        );
+
+        let def = MobDefinition::implicit_with_provider(
+            "bridge-session",
+            model,
+            Some(meerkat_core::Provider::OpenAI),
+            None,
+        );
+        assert!(!unknown_model(&def));
+        let profile = def.resolve_inline_profile(&delegate).unwrap();
+        assert_eq!(profile.model, model);
+        assert_eq!(profile.provider, Some(meerkat_core::Provider::OpenAI));
+        assert_eq!(profile.self_hosted_server_id, None);
+
+        let self_hosted = MobDefinition::implicit_with_provider(
+            "bridge-session",
+            "gemma-4-31b",
+            Some(meerkat_core::Provider::SelfHosted),
+            Some("local".to_string()),
+        );
+        assert!(!unknown_model(&self_hosted));
+        let profile = self_hosted.resolve_inline_profile(&delegate).unwrap();
+        assert_eq!(profile.provider, Some(meerkat_core::Provider::SelfHosted));
+        assert_eq!(profile.self_hosted_server_id.as_deref(), Some("local"));
     }
 
     #[test]

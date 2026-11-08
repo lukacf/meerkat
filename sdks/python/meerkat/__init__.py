@@ -36,6 +36,7 @@ from .mob import (
     MobKickoffMemberSnapshot,
     MobMemberCustodyDeferral,
     MobMemberCustodyUnknown,
+    MobMemberPreviewUnavailableUnknown,
     MobMemberSnapshot,
     MobPeerConnectivity,
     MobPeerConnectivitySnapshot,
@@ -46,7 +47,7 @@ from .mob import (
 )
 from .session import DeferredSession, Session
 from .streaming import EventStream, EventSubscription
-from .tools import ToolCallDedupeKey
+from .tools import RequesterPrincipal, ToolCallDedupeKey, ToolCallRequester
 
 # Domain types (clean, Wire-free public names)
 from .types import (
@@ -543,6 +544,7 @@ __all__ = [
     "MobMemberSnapshot",
     "MobMemberCustodyDeferral",
     "MobMemberCustodyUnknown",
+    "MobMemberPreviewUnavailableUnknown",
     "MobKickoffMemberSnapshot",
     "MobReadyMemberSnapshot",
     "MobRespawnResult",
@@ -556,7 +558,9 @@ __all__ = [
     "MobUnreachablePeer",
     "EventStream",
     "EventSubscription",
+    "RequesterPrincipal",
     "ToolCallDedupeKey",
+    "ToolCallRequester",
     # Types
     "CONTRACT_VERSION",
     "AttributedEvent",

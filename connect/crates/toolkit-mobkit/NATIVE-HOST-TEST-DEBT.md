@@ -24,7 +24,11 @@ Status: open. Kind: product or test fixture, not yet diagnosed.
 A cold restore refuses (`OwnerUnavailable`, `Unavailable` or `Conflict`)
 where the test expects the recovery to go on. One instrumented run with a
 diagnostic before each check in `cold_setup_admission.rs` and
-`custody_recovery/cold.rs` names the refusing step; then fix that step.
+`custody_recovery/cold.rs` names the refusing step; then fix that step. The
+refusing step can vary with load: the two `custody_recovery_helper_cold_tests`
+fail at the first original's promoted-custody restore when run alone, and at
+the helper's restore in the parallel known-red run, with the same refusal
+(`Unavailable`), so the diagnostic run should cover both.
 
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a`
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission`

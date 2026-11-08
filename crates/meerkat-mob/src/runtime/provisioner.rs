@@ -1894,6 +1894,22 @@ pub trait MobProvisioner: Send + Sync {
             reason: "this provisioner serves no placed run-fenced stop bridge lane".to_string(),
         })
     }
+    /// Settle the run a LOCAL member's runtime retained, without resuming it
+    /// and without a model request, through the member session's
+    /// MeerkatMachine (`settle_retained_run`). A session with no runtime
+    /// registration in this process is `member_identity`'s
+    /// [`MobError::MemberSessionNotLive`]. Default = typed reject.
+    async fn settle_member_retained_run(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        let _ = (member_ref, member_identity);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "this provisioner serves no retained-run settle".to_string(),
+        })
+    }
     /// Level-triggered cancellation of one exact tracked placed input.
     /// Implementations must preserve the full residency fence and return only
     /// an authenticated, replay-stable host receipt; transport failure is
@@ -7090,6 +7106,7 @@ impl SessionBackend {
                 idempotency_key,
                 supersession_key: None,
                 correlation_id,
+                requester: req.runtime.requester.clone(),
             },
             content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),
@@ -7562,8 +7579,8 @@ fn retried_input_read_failure(
 /// The typed requeue answer of an admitted input's wait, if it has one: a
 /// graceful stop kept the input durably queued for the next start
 /// ([`CompletionWaitError::RequeuedAcrossStop`](meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop)),
-/// or the next start ended it as older than its requeue bound (its committed
-/// terminal abandoned with
+/// or the next start ended it as kept longer than its requeue bound (its
+/// committed terminal abandoned with
 /// [`InputAbandonReason::RequeueExpired`](meerkat_runtime::InputAbandonReason::RequeueExpired)).
 /// Neither is ever completion plumbing or an abandoned reason string.
 #[cfg(feature = "runtime-adapter")]
@@ -7593,9 +7610,9 @@ fn requeue_terminal(
 }
 
 /// Whether `input_id`'s committed terminal is an expired requeue: the next
-/// start ended an input a graceful stop had kept queued, as older than its
-/// requeue bound. Read from the input's typed terminal, never from a reason
-/// string. A read that fails or finds no terminal says no.
+/// start ended an input a graceful stop had kept queued, as kept longer than
+/// its requeue bound. Read from the input's typed terminal, never from a
+/// reason string. A read that fails or finds no terminal says no.
 #[cfg(feature = "runtime-adapter")]
 async fn replayed_input_requeue_expired(
     adapter: &MeerkatMachine,
@@ -10791,6 +10808,181 @@ pub(super) async fn prepare_prepared_runtime_session_state(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::session_turn_error_to_mob_error;
+
+    /// A runtime refusal of a member's retained-run settle maps to a typed
+    /// mob refusal. A registration that is gone, draining for its
+    /// unregister or owing one, or whose store realm lost its fence (the
+    /// runtime's stale-authority refusal) answers
+    /// `MemberSessionNotLive`; one that needs a durability reload (its
+    /// settlement's write failed, say) answers `MemberReloadRequired`; and
+    /// an input of the run whose terminal is not readable yet answers the
+    /// retryable `MemberInputTerminalNotYetReadable`. Any other refusal stays
+    /// internal. RED before: only the absent registration was typed, and the
+    /// rest were `MobError::Internal` text a host cannot branch on.
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn the_retained_run_settle_answers_typed_mob_refusals() {
+        use super::retained_run_settle_refusal;
+        use crate::{AgentIdentity, MobError};
+        use meerkat_runtime::RuntimeDriverError;
+        let identity = AgentIdentity::from("w-1");
+        let session_id = meerkat_core::types::SessionId::new();
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        for (error, unregister_owed) in [
+            (
+                RuntimeDriverError::NotReady {
+                    state: meerkat_runtime::RuntimeState::Destroyed,
+                },
+                false,
+            ),
+            (
+                RuntimeDriverError::UnregisterInProgress { runtime_id },
+                false,
+            ),
+            (
+                RuntimeDriverError::UnregisterFinalizationOutcomeUnknown {
+                    reason: "the unregister's final transition is staged".to_string(),
+                },
+                true,
+            ),
+            (
+                RuntimeDriverError::ValidationFailed {
+                    reason: "the teardown-only anchor".to_string(),
+                },
+                true,
+            ),
+            (
+                RuntimeDriverError::StaleAuthority {
+                    reason: "the session's store realm lost its fence".to_string(),
+                },
+                false,
+            ),
+        ] {
+            let refusal = error.to_string();
+            let mapped =
+                retained_run_settle_refusal(error, &identity, session_id.clone(), unregister_owed);
+            assert!(
+                matches!(
+                    &mapped,
+                    MobError::MemberSessionNotLive { agent_identity, session_id: refused }
+                        if agent_identity == &identity && refused == &session_id
+                ),
+                "{refusal} answers MemberSessionNotLive, not {mapped:?}"
+            );
+        }
+        let reload = retained_run_settle_refusal(
+            RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest: None,
+                reason: "durability reload required".to_string(),
+            },
+            &identity,
+            session_id.clone(),
+            false,
+        );
+        assert!(
+            matches!(
+                &reload,
+                MobError::MemberReloadRequired { member_id, reason }
+                    if member_id == &identity && reason == "durability reload required"
+            ),
+            "a reload refusal answers MemberReloadRequired, not {reload:?}"
+        );
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let unread = retained_run_settle_refusal(
+            RuntimeDriverError::InputTerminalNotYetReadable {
+                input_id: input_id.clone(),
+                reason: "the input's stored row could not be read".to_string(),
+            },
+            &identity,
+            session_id.clone(),
+            false,
+        );
+        assert!(
+            matches!(
+                &unread,
+                MobError::MemberInputTerminalNotYetReadable {
+                    member_id,
+                    input_id: unread_input,
+                    reason,
+                } if member_id == &identity
+                    && unread_input == &input_id
+                    && reason == "the input's stored row could not be read"
+            ),
+            "an input whose terminal is not readable yet answers the retryable \
+             MemberInputTerminalNotYetReadable, not {unread:?}"
+        );
+        let other = retained_run_settle_refusal(
+            RuntimeDriverError::ValidationFailed {
+                reason: "not an unregister".to_string(),
+            },
+            &identity,
+            session_id,
+            false,
+        );
+        assert!(
+            matches!(other, MobError::Internal(_)),
+            "a validation failure of a registration that owes no unregister stays internal, \
+             not {other:?}"
+        );
+    }
+
+    /// A runtime refusal of a member's retained-run settle is mapped with the
+    /// facts of the member's registration read after the refusal. An
+    /// unregister that finished between the refusal and that read leaves no
+    /// registration, as for a session never registered here, so its teardown
+    /// anchor's validation refusal answers `MemberSessionNotLive`. A
+    /// registration that stays and owes no unregister keeps that refusal
+    /// internal. RED before: the read asked only whether an unregister was
+    /// owed, which a finished one no longer is, so the refusal reached the
+    /// host as `MobError::Internal` text.
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn a_settle_refusal_read_after_the_unregister_finished_answers_not_live() {
+        use super::retained_run_settle_refusal_after_read;
+        use crate::{AgentIdentity, MobError};
+        use meerkat_runtime::RuntimeDriverError;
+        let identity = AgentIdentity::from("w-1");
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let anchor_refusal = || RuntimeDriverError::ValidationFailed {
+            reason: "the teardown-only anchor".to_string(),
+        };
+
+        let gone = meerkat_core::types::SessionId::new();
+        let refused = retained_run_settle_refusal_after_read(
+            &machine,
+            anchor_refusal(),
+            &identity,
+            gone.clone(),
+        )
+        .await;
+        assert!(
+            matches!(
+                &refused,
+                MobError::MemberSessionNotLive { agent_identity, session_id }
+                    if agent_identity == &identity && session_id == &gone
+            ),
+            "a registration gone by the time of the read answers MemberSessionNotLive, not \
+             {refused:?}"
+        );
+
+        let registered = meerkat_core::types::SessionId::new();
+        machine
+            .register_session(registered.clone())
+            .await
+            .expect("the session registers");
+        let other = retained_run_settle_refusal_after_read(
+            &machine,
+            anchor_refusal(),
+            &identity,
+            registered,
+        )
+        .await;
+        assert!(
+            matches!(other, MobError::Internal(_)),
+            "a validation failure of a registration that stays and owes no unregister stays \
+             internal, not {other:?}"
+        );
+    }
 
     /// A retirement stage carries the runtime's repair-blocked refusal of a
     /// member reload as typed data, which the retirement maps to
@@ -15090,6 +15282,82 @@ pub(crate) mod provision_finish_test_hooks {
     }
 }
 
+/// The mob's refusal for a runtime refusal of a member's retained-run settle
+/// ([`MobProvisioner::settle_member_retained_run`]). `leaving` is whether the
+/// member's registration owes its unregister
+/// ([`MeerkatMachine::unregister_owed`]) or is gone, read after the refusal:
+/// an unregister that finished in between leaves no registration.
+///
+/// - The member's registration is gone from this process, drains for its
+///   unregister, or owes one (the unregister's staged final transition, or
+///   the teardown-only anchor a failed finalization leaves), or its
+///   session's store realm lost its fence (the runtime's stale-authority
+///   refusal): the member's session has no live runtime here,
+///   `MemberSessionNotLive`. Nothing wakes it.
+/// - The registration needs a durability reload (a settlement whose write
+///   failed, which the reload loses): `MemberReloadRequired`. The host keeps
+///   its hold, reloads the member and settles again.
+/// - The registration no longer keeps the run, but an input bound to it
+///   reads no committed terminal yet:
+///   `MemberInputTerminalNotYetReadable`. The host keeps its hold and settles
+///   again.
+/// - Anything else stays internal.
+#[cfg(feature = "runtime-adapter")]
+fn retained_run_settle_refusal(
+    error: meerkat_runtime::RuntimeDriverError,
+    member_identity: &AgentIdentity,
+    session_id: SessionId,
+    leaving: bool,
+) -> MobError {
+    use meerkat_runtime::RuntimeDriverError;
+    match error {
+        RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        }
+        | RuntimeDriverError::UnregisterInProgress { .. }
+        | RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
+        | RuntimeDriverError::StaleAuthority { .. } => MobError::MemberSessionNotLive {
+            agent_identity: member_identity.clone(),
+            session_id,
+        },
+        RuntimeDriverError::ValidationFailed { .. } if leaving => MobError::MemberSessionNotLive {
+            agent_identity: member_identity.clone(),
+            session_id,
+        },
+        RuntimeDriverError::RecoveryRepairBlocked { reason, .. } => {
+            MobError::MemberReloadRequired {
+                member_id: member_identity.clone(),
+                reason,
+            }
+        }
+        RuntimeDriverError::InputTerminalNotYetReadable { input_id, reason } => {
+            MobError::MemberInputTerminalNotYetReadable {
+                member_id: member_identity.clone(),
+                input_id,
+                reason,
+            }
+        }
+        error => MobError::Internal(format!(
+            "settling the retained run of '{session_id}' failed: {error}"
+        )),
+    }
+}
+
+/// [`retained_run_settle_refusal`] for a refusal the member runtime `adapter`
+/// answered, with the facts of the member's registration read after the
+/// refusal: whether it owes its unregister, or is gone (an unregister that
+/// finished after the refusal removed it).
+#[cfg(feature = "runtime-adapter")]
+async fn retained_run_settle_refusal_after_read(
+    adapter: &meerkat_runtime::MeerkatMachine,
+    error: meerkat_runtime::RuntimeDriverError,
+    member_identity: &AgentIdentity,
+    session_id: SessionId,
+) -> MobError {
+    let leaving = registration_unregister_owed_or_gone(adapter, &session_id).await;
+    retained_run_settle_refusal(error, member_identity, session_id, leaving)
+}
+
 /// One fresh member, provisioned and held before its publication.
 ///
 /// Its agent is built and finished, under the selection its host made from
@@ -15905,6 +16173,29 @@ impl MobProvisioner for SessionBackend {
         meerkat_runtime::run_stop_wire::wire_run_stop_receipt(&receipt).map_err(MobError::Internal)
     }
 
+    async fn settle_member_retained_run(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        let session_id = Self::require_session(member_ref, "settle retained run")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Err(MobError::Internal(format!(
+                "settling the retained run of '{session_id}' requires MeerkatMachine runtime authority"
+            )));
+        };
+        match adapter.settle_retained_run(&session_id).await {
+            Ok(settlement) => Ok(settlement),
+            Err(error) => Err(retained_run_settle_refusal_after_read(
+                adapter,
+                error,
+                member_identity,
+                session_id,
+            )
+            .await),
+        }
+    }
+
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
@@ -15926,6 +16217,12 @@ impl MobProvisioner for SessionBackend {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "stable external input identity requires a runtime-backed member"
                     .to_string(),
+            });
+        }
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester requires a runtime-backed member".to_string(),
             });
         }
         self.session_service
@@ -15977,6 +16274,12 @@ impl MobProvisioner for SessionBackend {
                     .to_string(),
             });
         }
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester requires a runtime-backed member".to_string(),
+            });
+        }
         self.admit_direct_session_turn(session_id, req, None, None)
             .await
     }
@@ -16010,6 +16313,12 @@ impl MobProvisioner for SessionBackend {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "stable external input identity requires a runtime-backed member"
                     .to_string(),
+            });
+        }
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester requires a runtime-backed member".to_string(),
             });
         }
         self.admit_direct_session_turn(
@@ -19927,6 +20236,25 @@ impl MobProvisioner for MultiBackendProvisioner {
             .await
     }
 
+    async fn settle_member_retained_run(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        // A legacy unplaced peer-only member has no local runtime to settle.
+        if matches!(member_ref, MemberRef::BackendPeer { .. }) {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a legacy peer-only member has no local runtime whose retained run \
+                         could be settled"
+                    .to_string(),
+            });
+        }
+        self.session
+            .settle_member_retained_run(member_ref, member_identity)
+            .await
+    }
+
     async fn stop_placed_member_run(
         &self,
         member_ref: &MemberRef,
@@ -20153,6 +20481,14 @@ impl MobProvisioner for MultiBackendProvisioner {
                         reason: "tracked turn event streams are not supported for peer-only members in phase 1".to_string(),
                     });
                 }
+                // The bridge delivery has no requester to carry: refuse one
+                // instead of delivering the turn without it.
+                if req.runtime.requester.is_some() {
+                    return Err(MobError::UnsupportedForMode {
+                        mode: crate::MobRuntimeMode::TurnDriven,
+                        reason: "a requester is not carried to peer-only members".to_string(),
+                    });
+                }
                 let peer = self.peer_only_spec(member_ref).await?;
                 let authorization = self
                     .ensure_supervisor_authorized(
@@ -20283,6 +20619,14 @@ impl MobProvisioner for MultiBackendProvisioner {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "tracked turn event streams are not supported for placed members"
                     .to_string(),
+            });
+        }
+        // The bridge delivery has no requester to carry: refuse one instead
+        // of delivering the turn without it.
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester is not carried to remotely hosted members".to_string(),
             });
         }
         let peer = Self::peer_only_spec_from_parts(peer_id, address, *pubkey)?;
@@ -21560,6 +21904,7 @@ mod bridge_rejection_tests {
                         run_id: None,
                         objective_id: Some(objective_id),
                         turn_input: None,
+                        requester: None,
                     },
                     ..Default::default()
                 },

@@ -103,7 +103,7 @@ async fn console_memory_write_records_person() -> TestResult {
             binding: None,
             placement: None,
         })
-        .await;
+        .await?;
     let memory_dir = tempfile::tempdir()?;
     let memory_store = Arc::new(SqliteAgentMemoryStore::open(memory_dir.path())?);
     identity_runtime

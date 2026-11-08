@@ -10,7 +10,7 @@ import pytest
 
 from launchkit.templates_v2.console_auth import ConsoleFront
 from test_console_auth import (connect_ready, connect_view, finish_stream_tasks,
-                               login, managed_connect_factory)
+                               login, managed_connect_factory, named)
 
 
 PREFIX = "/console/forge/connect"
@@ -46,7 +46,8 @@ def wire_sends(trace):
 
 async def test_same_login_other_tab_cannot_resolve_unknown_association_or_repeat_original(tmp_path):
     factory, children, _, traces = managed_connect_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    # Answering the prompt needs a person: a named account.
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as a:
@@ -91,7 +92,7 @@ async def test_same_login_other_tab_cannot_resolve_unknown_association_or_repeat
 
 async def test_entered_send_lost_http_reply_observes_only_original_future_and_login(tmp_path):
     factory, children, _, traces = managed_connect_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as client:

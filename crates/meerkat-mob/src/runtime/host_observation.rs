@@ -4578,6 +4578,7 @@ mod tests {
                 correlation_id: Some(meerkat_runtime::identifiers::CorrelationId::from_uuid(
                     stable,
                 )),
+                requester: None,
             },
             convention: Some(meerkat_runtime::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(vec![

@@ -661,6 +661,16 @@ struct RegisteredHandler {
     revision: HookHandlerRevision,
 }
 
+/// One entry scheduled for an invocation: its registration index, the entry,
+/// its typed adapter, and the host's refusal of the base entry it resolved to
+/// ([`ResolvedEntries::refusal`]).
+type ScheduledHook = (
+    usize,
+    HookEntryConfig,
+    HookAdapterConfig,
+    Option<meerkat_core::confinement::ConfinementRefusal>,
+);
+
 /// Effective hook entries plus their typed adapters for one run.
 ///
 /// Either borrows the engine's construction-time base resolution or owns a
@@ -674,6 +684,11 @@ enum ResolvedEntries<'a> {
     Owned {
         entries: Vec<HookEntryConfig>,
         adapters: HashMap<HookId, HookAdapterConfig>,
+        /// The ids of the run's override entries, taken from the override
+        /// list itself. Each is the caller's own entry, so a refusal the host
+        /// set for a base entry of the same id (one the overrides disabled)
+        /// does not follow it.
+        override_ids: HashSet<HookId>,
     },
 }
 
@@ -685,8 +700,16 @@ impl<'a> ResolvedEntries<'a> {
         }
     }
 
-    fn owned(entries: Vec<HookEntryConfig>, adapters: HashMap<HookId, HookAdapterConfig>) -> Self {
-        Self::Owned { entries, adapters }
+    fn owned(
+        entries: Vec<HookEntryConfig>,
+        adapters: HashMap<HookId, HookAdapterConfig>,
+        override_ids: HashSet<HookId>,
+    ) -> Self {
+        Self::Owned {
+            entries,
+            adapters,
+            override_ids,
+        }
     }
 
     fn entries(&self) -> &[HookEntryConfig] {
@@ -700,6 +723,20 @@ impl<'a> ResolvedEntries<'a> {
         match self {
             Self::Base { adapters, .. } => adapters.get(hook_id),
             Self::Owned { adapters, .. } => adapters.get(hook_id),
+        }
+    }
+
+    /// The launch refusal of the resolved entry `hook_id`: the one the host
+    /// set for the base entry of that id, when the resolved entry is that
+    /// base entry. An entry the run's overrides supplied carries none.
+    fn refusal(
+        &self,
+        refused: &HashMap<HookId, meerkat_core::confinement::ConfinementRefusal>,
+        hook_id: &HookId,
+    ) -> Option<meerkat_core::confinement::ConfinementRefusal> {
+        match self {
+            Self::Owned { override_ids, .. } if override_ids.contains(hook_id) => None,
+            Self::Base { .. } | Self::Owned { .. } => refused.get(hook_id).copied(),
         }
     }
 }
@@ -740,8 +777,10 @@ pub struct DefaultHookEngine {
     /// Durable custody for command-hook processes, when the host supplies it.
     #[cfg(not(target_arch = "wasm32"))]
     process_custody: Option<Arc<dyn CommandHookProcessCustody>>,
-    /// Entries the host refuses at every invocation, with the typed launch
-    /// refusal each returns before its runtime is reached.
+    /// Base entries the host refuses at every invocation, with the typed
+    /// launch refusal each returns before its runtime is reached. A refusal
+    /// belongs to the base entry, not to its id: a run override supplied under
+    /// that id (with the base entry disabled) carries none.
     refused_entries: Arc<HashMap<HookId, meerkat_core::confinement::ConfinementRefusal>>,
 }
 
@@ -830,11 +869,16 @@ impl DefaultHookEngine {
         self
     }
 
-    /// Refuse every invocation of each listed entry, before its runtime is
-    /// reached, with its typed launch refusal. The entry keeps its slot: a
-    /// mandatory guardrail withholds what it gates instead of disappearing,
-    /// and an observer reports its refusal. A host lists the entries whose
-    /// definition comes from a source its confined processes can write.
+    /// Refuse every invocation of each listed entry of this engine's own
+    /// configuration, before its runtime is reached, with its typed launch
+    /// refusal. The entry keeps its slot: a mandatory guardrail withholds what
+    /// it gates instead of disappearing, and an observer reports its refusal.
+    /// A host lists the entries whose definition comes from a source it does
+    /// not trust. The refusal stays with that entry, whatever the run's
+    /// overrides do: disabled, it does not run; an override entry of its id
+    /// that leaves it in place is a duplicate id; and an override entry that
+    /// replaces it (the run disables it and supplies its own entry under the
+    /// same id) is the caller's own and runs, refused by nothing listed here.
     #[must_use]
     pub fn with_refused_entries(
         mut self,
@@ -968,8 +1012,13 @@ impl DefaultHookEngine {
 
             Self::resolve_base(&entries)?;
             let adapters = Self::resolve_adapters(&entries);
+            let override_ids = overrides
+                .entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
 
-            return Ok(ResolvedEntries::owned(entries, adapters));
+            return Ok(ResolvedEntries::owned(entries, adapters, override_ids));
         }
 
         Ok(ResolvedEntries::base(self))
@@ -1018,17 +1067,21 @@ impl DefaultHookEngine {
         Ok(())
     }
 
+    /// Run one resolved entry. `refusal` is the host's refusal of the base
+    /// entry it resolved to ([`ResolvedEntries::refusal`]); a refused entry
+    /// fails before its runtime is reached.
     async fn execute_one(
         &self,
         entry: HookEntryConfig,
         adapter: HookAdapterConfig,
+        refusal: Option<meerkat_core::confinement::ConfinementRefusal>,
         registration_index: usize,
         invocation: HookInvocation,
     ) -> Result<HookOutcome, HookEngineError> {
-        if let Some(refusal) = self.refused_entries.get(&entry.id) {
+        if let Some(refusal) = refusal {
             return Err(HookEngineError::LaunchRefused {
                 hook_id: entry.id.clone(),
-                reason: HookFailureReason::ConfinementRefused { refusal: *refusal },
+                reason: HookFailureReason::ConfinementRefused { refusal },
             });
         }
         let start = meerkat_core::time_compat::Instant::now();
@@ -1548,8 +1601,8 @@ impl HookEngine for DefaultHookEngine {
         let _invocation_scope = self
             .background_dispatch_ledger
             .enter_scope(&invocation.session_id);
-        let mut foreground: Vec<(usize, HookEntryConfig, HookAdapterConfig)> = Vec::new();
-        let mut background: Vec<(usize, HookEntryConfig, HookAdapterConfig)> = Vec::new();
+        let mut foreground: Vec<ScheduledHook> = Vec::new();
+        let mut background: Vec<ScheduledHook> = Vec::new();
         let resolved = self.effective_entries(overrides)?;
         for (registration_index, entry) in resolved
             .entries()
@@ -1573,10 +1626,11 @@ impl HookEngine for DefaultHookEngine {
                     entry.id
                 ))
             })?;
+            let refusal = resolved.refusal(&self.refused_entries, &entry.id);
             if entry.mode == HookExecutionMode::Background {
-                background.push((registration_index, entry, adapter));
+                background.push((registration_index, entry, adapter, refusal));
             } else {
-                foreground.push((registration_index, entry, adapter));
+                foreground.push((registration_index, entry, adapter, refusal));
             }
         }
         drop(resolved);
@@ -1585,7 +1639,7 @@ impl HookEngine for DefaultHookEngine {
             return Ok(HookExecutionReport::empty());
         }
 
-        foreground.sort_by(|(a_idx, a_entry, _), (b_idx, b_entry, _)| {
+        foreground.sort_by(|(a_idx, a_entry, _, _), (b_idx, b_entry, _, _)| {
             a_entry
                 .priority
                 .cmp(&b_entry.priority)
@@ -1593,12 +1647,18 @@ impl HookEngine for DefaultHookEngine {
         });
 
         let mut merged = HookExecutionReport::empty();
-        for (registration_index, entry, adapter) in foreground {
+        for (registration_index, entry, adapter, refusal) in foreground {
             let capability = entry.capability;
             let hook_id = entry.id.clone();
             let point = entry.point;
             let outcome = match self
-                .execute_one(entry, adapter, registration_index, invocation.clone())
+                .execute_one(
+                    entry,
+                    adapter,
+                    refusal,
+                    registration_index,
+                    invocation.clone(),
+                )
                 .await
             {
                 Ok(outcome) => outcome,
@@ -1654,7 +1714,7 @@ impl HookEngine for DefaultHookEngine {
             if !background.is_empty() {
                 self.reap_finished_background_tasks().await;
             }
-            for (registration_index, entry, adapter) in background {
+            for (registration_index, entry, adapter, refusal) in background {
                 let skip = |reason| HookBackgroundSkip {
                     hook_id: entry.id.clone(),
                     point: entry.point,
@@ -1696,7 +1756,13 @@ impl HookEngine for DefaultHookEngine {
                     let _permit = permit;
                     let mut diagnostic_truncated = false;
                     let result = match engine
-                        .execute_one(entry, adapter, registration_index, invocation_cloned)
+                        .execute_one(
+                            entry,
+                            adapter,
+                            refusal,
+                            registration_index,
+                            invocation_cloned,
+                        )
                         .await
                     {
                         Ok(mut outcome) => {
@@ -1745,7 +1811,7 @@ impl HookEngine for DefaultHookEngine {
     ) -> Result<HookExecutionReport, HookEngineError> {
         debug_assert!(invocation.point.is_observe_only());
         let resolved = self.effective_entries(overrides)?;
-        let mut entries: Vec<(usize, HookEntryConfig, HookAdapterConfig)> = resolved
+        let mut entries: Vec<ScheduledHook> = resolved
             .entries()
             .iter()
             .filter(|entry| entry.enabled && entry.point == invocation.point)
@@ -1758,11 +1824,12 @@ impl HookEngine for DefaultHookEngine {
                         entry.id
                     ))
                 })?;
-                Ok((registration_index, entry, adapter))
+                let refusal = resolved.refusal(&self.refused_entries, &entry.id);
+                Ok((registration_index, entry, adapter, refusal))
             })
             .collect::<Result<_, HookEngineError>>()?;
         drop(resolved);
-        entries.sort_by(|(a_idx, a_entry, _), (b_idx, b_entry, _)| {
+        entries.sort_by(|(a_idx, a_entry, _, _), (b_idx, b_entry, _, _)| {
             a_entry
                 .priority
                 .cmp(&b_entry.priority)
@@ -1770,12 +1837,18 @@ impl HookEngine for DefaultHookEngine {
         });
 
         let mut report = HookExecutionReport::empty();
-        for (registration_index, entry, adapter) in entries {
+        for (registration_index, entry, adapter, refusal) in entries {
             let hook_id = entry.id.clone();
             let point = entry.point;
             let capability = entry.capability;
             let outcome = match self
-                .execute_one(entry, adapter, registration_index, invocation.clone())
+                .execute_one(
+                    entry,
+                    adapter,
+                    refusal,
+                    registration_index,
+                    invocation.clone(),
+                )
                 .await
             {
                 Ok(outcome) => outcome,

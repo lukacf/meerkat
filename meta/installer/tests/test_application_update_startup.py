@@ -158,6 +158,33 @@ async def fixture(tmp_path, monkeypatch):
             source.close()
 
 
+@pytest.fixture
+async def access_fixture(tmp_path, monkeypatch):
+    directory, receipt, root = await admitted(tmp_path, extra_files={
+        "assets/user-context.txt": b"actual original accepted source\n",
+        "config/access.toml": b'enabled = true\nadmins = ["operator"]\nrules = []\n\n[groups]\n'})
+    with project_lock(root) as lease:
+        source = await retain(directory, receipt, lease)
+        try:
+            yield Fixture(root, source, lease, monkeypatch)
+        finally:
+            source.close()
+
+
+async def test_replacement_startup_points_the_console_at_its_live_access_file(access_fixture):
+    # The console's live access file is private state, never the package's
+    # config/access.toml; the generated host then writes the same path.
+    f = access_fixture
+    await f.owner.prepare(f.app)
+    config = f.config()
+    live = str(f.root / ".mobkit/console-access.toml")
+    assert config.access_config_path == live
+    config.access_config_path = live
+    runtime = await f.owner.connect(config, f.app)
+    await f.owner.shutdown(runtime)
+    assert runtime.closed
+
+
 @pytest.mark.parametrize("revision", [7, None])
 async def test_exact_replacement_uses_original_config_callbacks_and_actual_outcome(fixture, revision):
     f = fixture

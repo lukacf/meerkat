@@ -9,7 +9,7 @@ import { consoleSendStorageKey, saveConsoleSendAttempts } from "./send-attempt-s
 import { createConsoleContextRecord } from "../../../packages/console-core/src/context-record";
 import { ACCEPTANCE_NOTICE_GRACE_MS, PendingStack, type PendingItem } from "../panels/PendingStack";
 import { idleSettleClock } from "./idle-reconcile";
-import { turnSender } from "./turn-origin";
+import { forgetOwnSends, turnSender } from "./turn-origin";
 
 const identity = "identity:queue-agent";
 function seed(twoPanes = false) {
@@ -188,7 +188,7 @@ describe("stock durable queue integration", () => {
     expect(screen.queryByText("Agent busy")).toBeNull();
   });
 
-  it("persists default embedded drafts and legacy queues in the server-owned scope", async () => {
+  it("persists default embedded drafts and imports a legacy queue once, in the server-owned scope", async () => {
     const send = vi.fn(async (input) => ({ interaction_id: "accepted", identity: input.identity }));
     const fake = transport(send);
     const experience = await fake.loadExperience();
@@ -217,7 +217,8 @@ describe("stock durable queue integration", () => {
     await waitFor(() => expect((screen.getByTestId(`chat-composer:${identity}`) as HTMLTextAreaElement).value).toBe("Unsent default embedded draft"));
     await screen.findByTestId("pending-stack");
     expect(screen.queryByRole("button", { name: "Import and send older queued messages" })).toBeNull();
-    expect(window.localStorage.getItem(`mobkit-pending-stack:${identity}`)).toBe(legacy);
+    // Imported once: the unscoped bytes are gone, so no other account is offered them.
+    expect(window.localStorage.getItem(`mobkit-pending-stack:${identity}`)).toBeNull();
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -260,6 +261,32 @@ describe("stock durable queue integration", () => {
     await act(async () => { receive?.({ id: "scope-refresh", event: "interaction_started", identity, interactionId: "refresh", timestampMs: 2, data: {} } as never); });
     await waitFor(() => expect(vi.mocked(fake.loadExperience).mock.calls.length).toBeGreaterThan(loads + 1));
     expect(turnSender(ownFrame)).toBe("operator");
+  });
+
+  it("reads a message whose sender carries the caller scope whoami names as \"You asked\", from any tab", async () => {
+    // Nothing remembered from an earlier row: the frame below reads "You"
+    // only through this console's own whoami answer.
+    forgetOwnSends();
+    const fake = transport(vi.fn());
+    const whoami = vi.fn(async () => ({
+      actorKind: "person", principal: "alice@example.test", approverIds: [], canAdminister: false,
+      callerScope: "console-caller:v1:alice",
+    }));
+    fake.whoami = whoami;
+    // Sent from another tab of the same caller: this tab never made the send.
+    const fromAnotherTab = {
+      origin: "console:pane", origin_kind: "operator", idempotency_key: "sent-in-another-tab",
+      sender: { kind: "person", display_name: "alice@example.test", caller_scope: "console-caller:v1:alice" },
+    };
+    const fromAnotherCaller = {
+      ...fromAnotherTab, idempotency_key: "bobs-send",
+      sender: { kind: "person", display_name: "bob@example.test", caller_scope: "console-caller:v1:bob" },
+    };
+    expect(turnSender(fromAnotherTab)).toBe("named");
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="runtime/realm/principal" />);
+    await waitFor(() => expect(whoami).toHaveBeenCalled());
+    await waitFor(() => expect(turnSender(fromAnotherTab)).toBe("you"));
+    expect(turnSender(fromAnotherCaller)).toBe("named");
   });
 
   it("names an agent without a display name the way the sidebar does in the chat header and pane title", async () => {
@@ -583,11 +610,8 @@ describe("stock durable queue integration", () => {
     expect(commands.find(entry => entry.command === "decideGating")?.params).toEqual({ pending_id: "gate-1", decision: "approve", reason: "console_approve" });
   });
 
-  it.each([
-    ["a transport without whoami", undefined],
-    ["a failed whoami read", async () => { throw new Error("whoami unavailable"); }],
-  ] as const)("shows approvals read-only to %s", async (_label, whoami) => {
-    const { fake, commands } = approvalTransport(whoami as MetaConsoleTransport["whoami"]);
+  it("shows approvals read-only to a transport without whoami", async () => {
+    const { fake, commands } = approvalTransport(undefined);
     render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
     fireEvent.click(await screen.findByRole("button", { name: "Needs you, 1 pending approval" }));
     const approve = await screen.findByRole("button", { name: "Approve" }) as HTMLButtonElement;
@@ -596,6 +620,15 @@ describe("stock durable queue integration", () => {
     fireEvent.click(approve);
     await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 20)); });
     expect(commands.some(entry => entry.command === "decideGating")).toBe(false);
+  });
+
+  it("sends no approval request while a failed whoami read leaves the caller unknown", async () => {
+    const { fake, commands } = approvalTransport(async () => { throw new Error("whoami unavailable"); });
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 100)); });
+    // Neither read nor decided: no console request leaves without its caller.
+    expect(commands).toEqual([]);
   });
 
   it.each(["anonymous", "service", "token_principal"] as const)("tells a %s caller to sign in as themselves to decide", async (actorKind) => {
@@ -692,11 +725,21 @@ describe("stock durable queue integration", () => {
   });
   const savedAttempts = (scope = "runtime/realm/principal") =>
     JSON.parse(window.localStorage.getItem(consoleSendStorageKey(scope, identity))!).attempts;
+  /** A 401 is the console's one sign-in state; signing in again (here, in
+   * another tab of this browser) brings the console and its saved rows back. */
+  const signInAgain = async () => {
+    expect(await screen.findByTestId("console-sign-in")).toBeVisible();
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "meta-console-caller:v1:", newValue: JSON.stringify({ caller: "caller-signed-in-again", at: Date.now() }) }));
+    });
+    await screen.findByTestId(`chat-composer:${identity}`);
+  };
 
   it("shows a refused queue send as a typed 401, never as a pending acceptance, and clears the busy mark", async () => {
     const send = vi.fn(async () => { throw unauthenticated(); });
     render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={transport(send)} />);
     await compose("sent from off the home network");
+    await signInAgain();
     const row = await screen.findByTestId(/^pending-item:/);
     await waitFor(() => expect(within(row).getByText("Not sent")).toBeVisible());
     expect(within(row).getByTestId(/^pending-explanation:/)).toHaveTextContent(
@@ -725,6 +768,7 @@ describe("stock durable queue integration", () => {
     await compose("steer from off the home network");
     await waitFor(() => expect(screen.getByTestId("pending-stack")).toBeTruthy());
     fireEvent.click(screen.getByTestId(/^pending-steer:/));
+    await signInAgain();
     const row = await screen.findByTestId(/^pending-item:/);
     await waitFor(() => expect(within(row).getByText("Not sent")).toBeVisible());
     const saved = savedAttempts();
@@ -880,14 +924,31 @@ describe("stock durable queue integration", () => {
     const send = vi.fn(async () => { throw Object.assign(new TypeError("Failed to fetch"), { transportFailure: "connection_failed" }); });
     const fake = transport(send);
     fake.capabilities = async () => ({ version: "test", methods: ["meta/console/send", "meta/console/timeline", "meta/console/inspect_identity"] }) as never;
-    fake.executeCommand = vi.fn(async () => { throw unauthenticated(); });
+    fake.executeCommand = vi.fn(async () => { throw Object.assign(new Error("meta/console/inspect_identity request failed 503"), { httpStatus: 503 }); });
     render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
     await compose("check me");
     const row = await screen.findByTestId(/^pending-item:/);
     fireEvent.click(await within(row).findByRole("button", { name: "Check" }));
     expect(await within(row).findByTestId(/^pending-check:/)).toHaveTextContent(
-      "Couldn't check: you were signed out. Sign in and check again.",
+      "Couldn't check: the server had a problem.",
     );
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(savedAttempts()[0].state).toBe("outcome-unknown");
+  });
+
+  it("enters the sign-in state when an acceptance check meets an ended login, and keeps the row uncertain", async () => {
+    const send = vi.fn(async () => { throw Object.assign(new TypeError("Failed to fetch"), { transportFailure: "connection_failed" }); });
+    const fake = transport(send);
+    fake.capabilities = async () => ({ version: "test", methods: ["meta/console/send", "meta/console/timeline", "meta/console/inspect_identity"] }) as never;
+    fake.executeCommand = vi.fn(async () => { throw unauthenticated(); });
+    render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
+    await compose("check me");
+    const row = await screen.findByTestId(/^pending-item:/);
+    fireEvent.click(await within(row).findByRole("button", { name: "Check" }));
+    expect(await screen.findByTestId("console-sign-in")).toBeVisible();
+    fake.executeCommand = vi.fn(async () => ({ result: {} }) as never);
+    await signInAgain();
+    expect(within(await screen.findByTestId(/^pending-item:/)).getByRole("button", { name: "Check" })).toBeEnabled();
     expect(send).toHaveBeenCalledTimes(1);
     expect(savedAttempts()[0].state).toBe("outcome-unknown");
   });
@@ -897,7 +958,11 @@ describe("stock durable queue integration", () => {
       static createObjectURL = vi.fn(() => `blob:preview-${Math.random()}`);
       static revokeObjectURL = vi.fn();
     });
-    const send = vi.fn(async (_input: Parameters<MetaConsoleTransport["send"]>[0]) => { throw unauthenticated(); });
+    const refused = Object.assign(new Error("meta/console/send request failed 403: send access denied"), {
+      httpStatus: 403,
+      responseRpcError: { code: -32030, message: "send access denied", data: { kind: "access_denied" } },
+    });
+    const send = vi.fn(async (_input: Parameters<MetaConsoleTransport["send"]>[0]) => { throw refused; });
     const fake = transport(send); const experience = await fake.loadExperience();
     fake.loadExperience = async () => ({ ...experience, agent_sidebar: { live_snapshot: { agents: [{ identity, member_id: identity, agent_id: identity, label: "Queue agent", kind: "member", state: "running", addressable: true, affordances: { can_send_message: true }, model_capabilities: { image_input: true } }] } } }) as never;
     render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
@@ -909,10 +974,32 @@ describe("stock durable queue integration", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     expect(send.mock.calls[0][0].attachments).toEqual([file]);
     expect(await screen.findByTestId("console-action-error")).toHaveTextContent(
-      "Sign-in required (401). Nothing was sent.",
+      "Not allowed to send to this agent (403): send access denied. Nothing was sent.",
     );
     expect(textarea.value).toBe("look at this from off the home network");
     expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1);
+    expect(screen.queryByText("Sending")).toBeNull();
+  });
+
+  it("keeps an attachment send's text and files when it meets an ended login", async () => {
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => `blob:preview-${Math.random()}`);
+      static revokeObjectURL = vi.fn();
+    });
+    const send = vi.fn(async (_input: Parameters<MetaConsoleTransport["send"]>[0]) => { throw unauthenticated(); });
+    const fake = transport(send); const experience = await fake.loadExperience();
+    fake.loadExperience = async () => ({ ...experience, agent_sidebar: { live_snapshot: { agents: [{ identity, member_id: identity, agent_id: identity, label: "Queue agent", kind: "member", state: "running", addressable: true, affordances: { can_send_message: true }, model_capabilities: { image_input: true } }] } } }) as never;
+    render(<ConsoleApp baseUrl="" storageNamespace="runtime/realm/principal" transport={fake} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", { type: "image/png" });
+    fireEvent.drop(document.querySelector(".composer__shell")!, { dataTransfer: { files: [file], items: [], types: ["Files"], getData: () => "" } });
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1));
+    await compose("look at this from off the home network");
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    await signInAgain();
+    expect((screen.getByTestId(`chat-composer:${identity}`) as HTMLTextAreaElement).value).toBe("look at this from off the home network");
+    // The same person signed in again: the staged file is still there.
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1));
     expect(screen.queryByText("Sending")).toBeNull();
   });
 

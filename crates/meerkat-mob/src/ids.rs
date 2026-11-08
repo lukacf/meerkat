@@ -619,6 +619,44 @@ pub struct WorkSpec {
     #[serde(skip)]
     pub(crate) request_reasoning:
         Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
+    /// The original requester of this work: an opaque, qualified principal
+    /// the host authenticated, never a request body, a tool argument or
+    /// model output. Only host human input carries one (the member's runtime
+    /// stores it with the admitted input and its run hands it to tool
+    /// dispatch); other work that carries one is refused. Set only through
+    /// [`Self::with_requester`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
+    /// The label naming the person who sent this host human input, for the
+    /// member's model (see [`SenderLabel`]). Only host human input carries
+    /// one; other work that carries one is refused. Set only through
+    /// [`Self::with_sender_label`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) sender_label: Option<SenderLabel>,
+}
+
+/// The label a host gives the member's model for the person who sent host
+/// human input, such as "Message from alice@example.com". It is attribution
+/// the model reads before the message, never control data: nothing parses
+/// it back. The member's turn receives it as its own injected-context row
+/// right before the message, whether the input is queued or steered into a
+/// running turn, which ordinary injected context cannot be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderLabel(String);
+
+impl SenderLabel {
+    /// A label with the text `text`; `None` when the text is blank.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Option<Self> {
+        let text = text.into();
+        (!text.trim().is_empty()).then_some(Self(text))
+    }
+
+    /// The label's text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl WorkSpec {
@@ -635,7 +673,36 @@ impl WorkSpec {
             interaction_id: None,
             objective_id: None,
             request_reasoning: None,
+            requester: None,
+            sender_label: None,
         }
+    }
+
+    /// Carry the original requester the host authenticated for this work
+    /// (see the `requester` field): only host human input may carry one.
+    #[must_use]
+    pub fn with_requester(mut self, requester: meerkat_core::PrincipalRef) -> Self {
+        self.requester = Some(requester);
+        self
+    }
+
+    /// The original requester this work carries, if any.
+    pub fn requester(&self) -> Option<&meerkat_core::PrincipalRef> {
+        self.requester.as_ref()
+    }
+
+    /// Carry the label naming the person who sent this work, for the
+    /// member's model (see [`SenderLabel`]): only host human input may carry
+    /// one.
+    #[must_use]
+    pub fn with_sender_label(mut self, label: SenderLabel) -> Self {
+        self.sender_label = Some(label);
+        self
+    }
+
+    /// The sender label this work carries, if any.
+    pub fn sender_label(&self) -> Option<&SenderLabel> {
+        self.sender_label.as_ref()
     }
 
     /// Carry a live delegation admission's reasoning preference.

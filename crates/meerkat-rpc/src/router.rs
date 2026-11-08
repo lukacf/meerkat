@@ -10694,6 +10694,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
             content: "helper finished via comms".into(),
@@ -10752,6 +10753,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
             content: "urgent helper update via comms".into(),
@@ -21658,7 +21660,7 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         /// A router over in-memory stores. With `realm`, construction arms
         /// the runtime's delivery owner, so committed continuations drain;
         /// without it nothing drains them until the test arms the owner.
-        async fn keyed_router(
+        pub(super) async fn keyed_router(
             realm: bool,
         ) -> (MethodRouter, Arc<SessionRuntime>, tempfile::TempDir) {
             let temp = tempfile::tempdir().unwrap();
@@ -22442,6 +22444,819 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 status,
                 meerkat::ContinuationStatus::NotCommitted,
                 "nothing was committed"
+            );
+        }
+
+        /// A mob with two worker profiles: `worker` admits external work and
+        /// `closed` admits none.
+        #[cfg(feature = "mob")]
+        pub(super) async fn create_doors_mob(router: &MethodRouter, mob: &str) -> String {
+            let create_resp = router
+                .dispatch(make_request(
+                    "mob/create",
+                    serde_json::json!({
+                        "definition": {
+                            "id": mob,
+                            "profiles": {
+                                "worker": {
+                                    "model": "claude-sonnet-4-5",
+                                    "external_addressable": true,
+                                    "tools": { "comms": true }
+                                },
+                                "closed": {
+                                    "model": "claude-sonnet-4-5",
+                                    "external_addressable": false,
+                                    "tools": { "comms": true }
+                                }
+                            }
+                        }
+                    }),
+                ))
+                .await
+                .unwrap();
+            result_value(&create_resp)["mob_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+
+        /// Seat `name` on the `worker` profile as the host's identity entry.
+        /// Entry custody is a Rust host API: no wire method takes it.
+        #[cfg(feature = "mob")]
+        pub(super) async fn seat_identity_entry(
+            router: &MethodRouter,
+            mob_id: &str,
+            name: &str,
+        ) -> meerkat_mob::MobHandle {
+            let handle = router
+                .mob_state
+                .handle_for(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .expect("the mob's handle");
+            let mut spec =
+                meerkat_mob::SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from(name));
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            handle
+                .spawn_spec(spec.with_entry_custody(true))
+                .await
+                .expect("the host seats its identity entry");
+            assert!(
+                matches!(
+                    handle
+                        .identity_entry(&meerkat_mob::AgentIdentity::from(name))
+                        .expect("the entry read answers"),
+                    meerkat_mob::IdentityEntryRead::Entry(_)
+                ),
+                "'{name}' is an identity entry"
+            );
+            handle
+        }
+
+        /// Spawn the worker `name` on `profile` through the wire.
+        #[cfg(feature = "mob")]
+        pub(super) async fn spawn_worker(
+            router: &MethodRouter,
+            mob_id: &str,
+            profile: &str,
+            name: &str,
+        ) {
+            let spawn_resp = router
+                .dispatch(make_request(
+                    "mob/spawn",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "profile": profile,
+                        "agent_identity": name,
+                        "runtime_mode": "turn_driven"
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(result_value(&spawn_resp)["agent_identity"], name);
+        }
+
+        #[cfg(feature = "mob")]
+        async fn member_send_to(
+            router: &MethodRouter,
+            mob_id: &str,
+            member: &str,
+            content: &str,
+            key: Option<&str>,
+        ) -> RpcResponse {
+            let mut params = serde_json::json!({
+                "mob_id": mob_id,
+                "agent_identity": member,
+                "content": content,
+            });
+            if let Some(key) = key {
+                params["idempotency_key"] = serde_json::json!(key);
+            }
+            router
+                .dispatch(make_request("mob/member_send", params))
+                .await
+                .unwrap()
+        }
+
+        /// The continuation status the router's service reads for `member`
+        /// under the caller key `key`.
+        #[cfg(feature = "mob")]
+        async fn keyed_send_status(
+            router: &MethodRouter,
+            mob_id: &str,
+            member: &str,
+            key: &str,
+        ) -> meerkat::ContinuationStatus {
+            router
+                .mob_state
+                .continuation_service()
+                .expect("the RPC mob state binds its continuation service")
+                .continuation_status(
+                    &meerkat::ContinuationOwner::Member {
+                        mob_id: mob_id.to_string(),
+                        identity: member.to_string(),
+                    },
+                    &meerkat::ContinuationKey::new(format!(
+                        "{}{key}",
+                        meerkat_mob_mcp::MEMBER_SEND_CONTINUATION_KEY_PREFIX
+                    ))
+                    .expect("key"),
+                )
+                .await
+                .expect("status")
+        }
+
+        /// The error `response` answers; `context` names the refusal expected.
+        #[cfg(feature = "mob")]
+        fn refused(response: &RpcResponse, context: &str) -> crate::protocol::RpcError {
+            response
+                .error
+                .clone()
+                .unwrap_or_else(|| panic!("{context}: {response:?}"))
+        }
+
+        /// The keyed and the unkeyed member send share one external
+        /// admission: a keyed send to an identity entry is refused
+        /// `identity_member` before its first commit, with exactly the
+        /// answer the unkeyed send gets, and nothing is committed under the
+        /// key.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_key_to_an_identity_entry_is_refused_like_the_unkeyed_send() {
+            let (router, _runtime, _temp) = keyed_router(true).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-entry").await;
+            seat_identity_entry(&router, &mob_id, "entry-1").await;
+
+            let unkeyed = member_send_to(&router, &mob_id, "entry-1", "unkeyed", None).await;
+            let unkeyed = refused(&unkeyed, "the unkeyed send to an entry is refused");
+            assert_eq!(
+                unkeyed.data.as_ref().map(|data| data["kind"].clone()),
+                Some(serde_json::json!("identity_member")),
+                "{unkeyed:?}"
+            );
+
+            let keyed =
+                member_send_to(&router, &mob_id, "entry-1", "keyed", Some("entry-key")).await;
+            let keyed = refused(&keyed, "the keyed send to an entry is refused");
+            assert_eq!(
+                (keyed.code, &keyed.message, &keyed.data),
+                (unkeyed.code, &unkeyed.message, &unkeyed.data),
+                "the keyed send answers exactly as the unkeyed send"
+            );
+            assert_eq!(
+                keyed_send_status(&router, &mob_id, "entry-1", "entry-key").await,
+                meerkat::ContinuationStatus::NotCommitted,
+                "nothing is committed under the key"
+            );
+        }
+
+        /// A keyed send to a worker whose profile admits no external work
+        /// answers exactly as the unkeyed send, `NotExternallyAddressable`,
+        /// and commits nothing.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_key_to_a_member_that_admits_no_external_work_answers_like_the_unkeyed_send()
+         {
+            let (router, _runtime, _temp) = keyed_router(true).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-closed").await;
+            spawn_worker(&router, &mob_id, "closed", "closed-1").await;
+
+            let unkeyed = member_send_to(&router, &mob_id, "closed-1", "unkeyed", None).await;
+            let unkeyed = refused(&unkeyed, "the unkeyed send to a closed member is refused");
+            assert!(
+                unkeyed.message.contains("not externally addressable"),
+                "{unkeyed:?}"
+            );
+
+            let keyed =
+                member_send_to(&router, &mob_id, "closed-1", "keyed", Some("closed-key")).await;
+            let keyed = refused(&keyed, "the keyed send to a closed member is refused");
+            assert_eq!(
+                (keyed.code, &keyed.message, &keyed.data),
+                (unkeyed.code, &unkeyed.message, &unkeyed.data),
+                "the keyed send answers exactly as the unkeyed send"
+            );
+            assert_eq!(
+                keyed_send_status(&router, &mob_id, "closed-1", "closed-key").await,
+                meerkat::ContinuationStatus::NotCommitted,
+                "nothing is committed under the key"
+            );
+        }
+
+        /// Delivery asks the external admission again: a keyed send
+        /// committed while its member was a worker, whose member then became
+        /// an identity entry (a legacy member's adoption) before the send
+        /// was delivered, settles refused, typed and final, and nothing is
+        /// admitted into the entry's session. Its status says so on every
+        /// replay; nothing retries it.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_key_committed_before_its_member_became_an_entry_settles_refused() {
+            let (router, runtime, _temp) = keyed_router(false).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-adopted").await;
+            let handle = router
+                .mob_state
+                .handle_for(&meerkat_mob::MobId::from(mob_id.as_str()))
+                .await
+                .expect("the mob's handle");
+            let legacy = meerkat_mob::AgentIdentity::from("legacy-1");
+            // A member a legacy host seated: its spawn row carries the legacy
+            // identity label naming its own identity.
+            let mut spec = meerkat_mob::SpawnMemberSpec::new("worker", legacy.clone());
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            spec.labels = Some(std::collections::BTreeMap::from([(
+                "agent_identity".to_string(),
+                "legacy-1".to_string(),
+            )]));
+            handle.spawn_spec(spec).await.expect("a legacy member");
+
+            let content = "Ingest item 21.";
+            let first = result_value(
+                &member_send_to(&router, &mob_id, "legacy-1", content, Some("item-21")).await,
+            );
+            let (delivery_id, _, state) = delivery(&first);
+            assert_eq!(state, "pending", "no delivery owner drains it yet: {first}");
+
+            assert_eq!(
+                handle
+                    .adopt_legacy_identity_entry(&legacy)
+                    .await
+                    .expect("the adoption answers"),
+                meerkat_mob::LegacyIdentityEntryAdoption::Adopted
+            );
+
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::global()),
+                None,
+                None,
+            );
+            runtime.arm_runtime_delivery_owner();
+            let settled = tokio::time::timeout(STATUS_WAIT, async {
+                loop {
+                    let replay = result_value(
+                        &member_send_to(&router, &mob_id, "legacy-1", content, Some("item-21"))
+                            .await,
+                    );
+                    if replay["continuation"]["status"]["state"] != "pending" {
+                        return replay;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the keyed send settles");
+            assert_eq!(
+                settled["continuation"]["status"],
+                serde_json::json!({ "state": "refused", "reason": "authority_denied" }),
+                "a keyed send to a member that became an entry settles refused: {settled}"
+            );
+            assert_eq!(
+                settled["continuation"]["delivery_id"].as_str(),
+                Some(delivery_id.as_str())
+            );
+
+            let session = handle
+                .resolve_bridge_session_id(&legacy)
+                .await
+                .expect("the entry's session");
+            use meerkat_runtime::SessionServiceRuntimeExt as _;
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .input_state_by_idempotency_key(&session, &delivery_id)
+                    .await
+                    .expect("read the entry's input ledger")
+                    .is_none(),
+                "nothing was admitted into the entry's session"
+            );
+            let again = result_value(
+                &member_send_to(&router, &mob_id, "legacy-1", content, Some("item-21")).await,
+            );
+            assert_eq!(
+                again["continuation"]["status"], settled["continuation"]["status"],
+                "the refusal is final: {again}"
+            );
+        }
+
+        /// The host's own keyed door commits its send to its identity entry
+        /// as the host's plain row: the drain asks it no external admission,
+        /// and the content is admitted into the entry's session, where an
+        /// external keyed send to the same entry is refused.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn the_hosts_keyed_send_to_its_identity_entry_is_admitted_at_delivery() {
+            let (router, runtime, _temp) = keyed_router(false).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-host").await;
+            let handle = seat_identity_entry(&router, &mob_id, "entry-1").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            let receipt = router
+                .mob_state
+                .mob_member_send_keyed_as_host(
+                    handle.mob_id(),
+                    entry.clone(),
+                    meerkat_core::types::ContentInput::from("Host item 41."),
+                    meerkat_core::types::HandlingMode::Queue,
+                    "host-41",
+                )
+                .await
+                .expect("the host's keyed send to its entry commits");
+            assert_eq!(
+                receipt.status,
+                meerkat_contracts::WireContinuationStatus::Pending,
+                "no delivery owner drains it yet"
+            );
+
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::global()),
+                None,
+                None,
+            );
+            runtime.arm_runtime_delivery_owner();
+            let settled = tokio::time::timeout(STATUS_WAIT, async {
+                loop {
+                    let status = keyed_send_status(&router, &mob_id, "entry-1", "host-41").await;
+                    if !matches!(status, meerkat::ContinuationStatus::Pending { .. }) {
+                        return status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the host's keyed send settles");
+            let meerkat::ContinuationStatus::Applied {
+                session: admitted_to,
+                ..
+            } = &settled
+            else {
+                panic!("the host's keyed send to its entry is admitted at delivery: {settled:?}");
+            };
+            let session = handle
+                .resolve_bridge_session_id(&entry)
+                .await
+                .expect("the entry's session");
+            assert_eq!(admitted_to, &session, "admitted into the entry's session");
+            use meerkat_runtime::SessionServiceRuntimeExt as _;
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .input_state_by_idempotency_key(&session, &receipt.delivery_id)
+                    .await
+                    .expect("read the entry's input ledger")
+                    .is_some(),
+                "the entry's session holds the input"
+            );
+        }
+    }
+
+    /// The doors that act on a member's session as its host
+    /// (`mob/turn_start`, `mob/append_system_context`, `mob/member_live_open`,
+    /// `mob/member_live_control`, `mob/member_live_close`) and the internal
+    /// work origin of `mob/submit_work`: an identity entry is reached through
+    /// them only with the `AdminHost` control scope, which the owner holds. A
+    /// scoped principal without it is refused before anything runs; on any
+    /// other member the doors are unchanged.
+    #[cfg(feature = "mob")]
+    mod identity_entry_host_doors {
+        use super::caller_idempotency_key::{
+            create_doors_mob, keyed_router, seat_identity_entry, spawn_worker,
+        };
+        use super::*;
+
+        /// Bounds every door call: a door that hangs fails its row.
+        const DOOR_WAIT: Duration = Duration::from_mins(1);
+
+        /// The owner's router over a mob that holds the identity entry
+        /// `entry-1` and the worker `worker-1`, both on a profile that
+        /// admits external work.
+        struct Doors {
+            owner: MethodRouter,
+            _runtime: Arc<SessionRuntime>,
+            _temp: tempfile::TempDir,
+            mob_id: String,
+            handle: meerkat_mob::MobHandle,
+        }
+
+        impl Doors {
+            async fn new(mob: &str) -> Self {
+                let (owner, runtime, temp) = keyed_router(true).await;
+                let mob_id = create_doors_mob(&owner, mob).await;
+                let handle = seat_identity_entry(&owner, &mob_id, "entry-1").await;
+                spawn_worker(&owner, &mob_id, "worker", "worker-1").await;
+                Self {
+                    owner,
+                    _runtime: runtime,
+                    _temp: temp,
+                    mob_id,
+                    handle,
+                }
+            }
+
+            /// A router serving the console principal `principal`, which
+            /// holds exactly `scopes` on the mob.
+            async fn scoped(
+                &self,
+                principal: &str,
+                scopes: &[meerkat_mob::ControlScope],
+            ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+                let id = meerkat_core::auth::PrincipalId::new(principal).expect("principal id");
+                self.handle
+                    .grant_scopes(
+                        meerkat_mob::MobControlPrincipal::Owner,
+                        id.clone(),
+                        scopes.iter().copied().collect(),
+                        None,
+                    )
+                    .await
+                    .expect("the owner grants the scopes");
+                let state = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
+                    meerkat_mob::MobControlPrincipal::External(id),
+                );
+                state
+                    .mob_insert_handle(
+                        meerkat_mob::MobId::from(self.mob_id.as_str()),
+                        self.handle.clone(),
+                    )
+                    .await;
+                test_router_with_mob_state(state).await
+            }
+
+            fn member_request(
+                &self,
+                method: &str,
+                member: &str,
+                extra: serde_json::Value,
+            ) -> RpcRequest {
+                let mut params = serde_json::json!({
+                    "mob_id": self.mob_id,
+                    "agent_identity": member,
+                });
+                if let (Some(params), Some(extra)) = (params.as_object_mut(), extra.as_object()) {
+                    params.extend(extra.clone());
+                }
+                make_request(method, params)
+            }
+        }
+
+        async fn call(router: &MethodRouter, request: RpcRequest) -> RpcResponse {
+            tokio::time::timeout(DOOR_WAIT, router.dispatch(request))
+                .await
+                .expect("the door answers")
+                .expect("a response")
+        }
+
+        /// The door refused `member` as an identity member.
+        fn assert_identity_member(response: &RpcResponse, member: &str, context: &str) {
+            let error = response.error.as_ref().unwrap_or_else(|| {
+                panic!("{context}: refused as an identity member, got {response:?}")
+            });
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({
+                    "kind": "identity_member",
+                    "member_id": member,
+                    "retryable": false
+                })),
+                "{context}: {error:?}"
+            );
+        }
+
+        /// The door passed its admission: whatever the call answers after
+        /// it, it is neither an identity member refusal nor a scope denial.
+        fn assert_passed_the_door(response: &RpcResponse, context: &str) {
+            if let Some(error) = response.error.as_ref() {
+                assert_ne!(
+                    error.data.as_ref().map(|data| data["kind"].clone()),
+                    Some(serde_json::json!("identity_member")),
+                    "{context}: {error:?}"
+                );
+                assert_ne!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{context}: {error:?}"
+                );
+            }
+        }
+
+        /// `mob/turn_start` runs a turn on the member's session as its host.
+        #[tokio::test]
+        async fn mob_turn_start_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-turn").await;
+            let turn = |member: &str| {
+                doors.member_request(
+                    "mob/turn_start",
+                    member,
+                    serde_json::json!({ "prompt": "door turn" }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("turn-operator", &[meerkat_mob::ControlScope::SendCommand])
+                .await;
+            assert_identity_member(
+                &call(&scoped, turn("entry-1")).await,
+                "entry-1",
+                "a SendCommand principal starts no turn on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, turn("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "turn-host",
+                    &[
+                        meerkat_mob::ControlScope::SendCommand,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, turn("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            let owner = call(&doors.owner, turn("entry-1")).await;
+            assert!(
+                owner.error.is_none(),
+                "the owner runs a turn on its entry: {owner:?}"
+            );
+        }
+
+        /// `mob/append_system_context` appends to the member's session as
+        /// its host.
+        #[tokio::test]
+        async fn mob_append_system_context_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-append").await;
+            let append = |member: &str, key: &str| {
+                doors.member_request(
+                    "mob/append_system_context",
+                    member,
+                    serde_json::json!({
+                        "text": "door context",
+                        "source": "mob",
+                        "idempotency_key": key
+                    }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("append-operator", &[meerkat_mob::ControlScope::SendCommand])
+                .await;
+            assert_identity_member(
+                &call(&scoped, append("entry-1", "scoped-entry")).await,
+                "entry-1",
+                "a SendCommand principal appends nothing to an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, append("worker-1", "scoped-worker")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "append-host",
+                    &[
+                        meerkat_mob::ControlScope::SendCommand,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, append("entry-1", "host-entry")).await,
+                "AdminHost reaches the entry",
+            );
+            let owner = call(&doors.owner, append("entry-1", "owner-entry")).await;
+            assert_eq!(
+                result_value(&owner)["status"],
+                "applied",
+                "the owner appends to its entry: {owner:?}"
+            );
+        }
+
+        /// `mob/member_live_open` opens a live channel on the member's
+        /// session as its host.
+        #[tokio::test]
+        async fn mob_member_live_open_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-open").await;
+            let open = |member: &str| {
+                doors.member_request("mob/member_live_open", member, serde_json::json!({}))
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("live-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, open("entry-1")).await,
+                "entry-1",
+                "a Live principal opens no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, open("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "live-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, open("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, open("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
+        /// `mob/member_live_control` drives a live channel on the member's
+        /// session as its host.
+        #[tokio::test]
+        async fn mob_member_live_control_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-control").await;
+            let control = |member: &str| {
+                doors.member_request(
+                    "mob/member_live_control",
+                    member,
+                    serde_json::json!({
+                        "channel_id": "no-such-channel",
+                        "verb": { "verb": "interrupt" }
+                    }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("control-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, control("entry-1")).await,
+                "entry-1",
+                "a Live principal drives no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, control("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "control-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, control("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, control("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
+        /// `mob/member_live_close` ends a live channel on the member's
+        /// session as its host, as the control verbs drive one: a principal
+        /// that holds only `Live` closes no channel on an entry.
+        #[tokio::test]
+        async fn mob_member_live_close_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-close").await;
+            let close = |member: &str| {
+                doors.member_request(
+                    "mob/member_live_close",
+                    member,
+                    serde_json::json!({ "channel_id": "no-such-channel" }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("close-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, close("entry-1")).await,
+                "entry-1",
+                "a Live principal closes no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, close("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "close-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, close("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, close("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
+        /// `origin: internal` on `mob/submit_work` acts as the mob's host:
+        /// it needs `AdminHost` for every member, an entry or a worker, and a
+        /// principal without it is refused `ScopeDenied { required:
+        /// admin_host }` before anything is submitted. The default external
+        /// origin is unchanged.
+        #[tokio::test]
+        async fn mob_submit_work_with_the_internal_origin_needs_admin_host() {
+            let doors = Doors::new("mob-door-submit").await;
+            let submit = |member: &str, origin: &str| {
+                make_request(
+                    "mob/submit_work",
+                    serde_json::json!({
+                        "member_ref": meerkat_contracts::WireMemberRef::encode(&doors.mob_id, member),
+                        "content": "door work",
+                        "origin": origin
+                    }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("work-operator", &[meerkat_mob::ControlScope::SendCommand])
+                .await;
+            for member in ["entry-1", "worker-1"] {
+                let refused = call(&scoped, submit(member, "internal")).await;
+                let error = refused.error.as_ref().unwrap_or_else(|| {
+                    panic!("the internal origin to {member} is refused: {refused:?}")
+                });
+                assert_eq!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{member}: {error:?}"
+                );
+                assert_eq!(
+                    error.data,
+                    Some(serde_json::json!({
+                        "required": "admin_host",
+                        "presented": ["send_command"]
+                    })),
+                    "{member}: {error:?}"
+                );
+            }
+            // A principal that also lists the mob (and so can read which
+            // members are entries) is refused the same for every member: the
+            // door asks `AdminHost` of the internal origin itself, never only
+            // for the entries it can read.
+            let (lister, _lister_rx) = doors
+                .scoped(
+                    "work-lister",
+                    &[
+                        meerkat_mob::ControlScope::List,
+                        meerkat_mob::ControlScope::SendCommand,
+                    ],
+                )
+                .await;
+            for member in ["entry-1", "worker-1"] {
+                let refused = call(&lister, submit(member, "internal")).await;
+                let error = refused.error.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "the internal origin to {member} is refused for a principal that lists the mob: {refused:?}"
+                    )
+                });
+                assert_eq!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{member}: {error:?}"
+                );
+                assert_eq!(
+                    error.data.as_ref().map(|data| data["required"].clone()),
+                    Some(serde_json::json!("admin_host")),
+                    "{member}: {error:?}"
+                );
+            }
+            let external = call(&scoped, submit("worker-1", "external")).await;
+            assert!(
+                result_value(&external)["work_ref"].is_string(),
+                "the default external origin is unchanged: {external:?}"
+            );
+            let owner = call(&doors.owner, submit("entry-1", "internal")).await;
+            assert!(
+                result_value(&owner)["work_ref"].is_string(),
+                "the owner submits internal work to its entry: {owner:?}"
             );
         }
     }

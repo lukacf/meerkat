@@ -1,5 +1,22 @@
 //! The Console's session fence record: per principal, the instant before
-//! which the Console refuses every token issued to that principal.
+//! which the Console refuses every token issued to that principal, and per
+//! login of a principal that signed out, the instant before which the
+//! Console refuses every token of that login.
+//!
+//! A login is the issuer's signed `sid` when a token carries one, else the
+//! token itself, as its issuer signed it (its header and claims, whatever
+//! valid encoding its signature comes in). The record keys a login by an
+//! opaque digest the Console's verifier computes; it never holds a `sid` or
+//! a token. A login's fence is dropped once the principal's fence covers
+//! it, and the fence of a login that is one token once that token expired.
+//!
+//! A principal keeps at most 64 login fences that only a fence of the
+//! principal ends (a `sid` login's, and a token's that never expires). One
+//! more folds the oldest into the principal's sign-out fence, a fence of
+//! every login of the principal: it refuses each token of the principal the
+//! folded fence refused, and the logins older than it are signed out with
+//! it. The sign-out fence is not a revocation: the principal's own fence,
+//! which also stops the schedules it defined before it, is untouched.
 //!
 //! The record belongs to the Console's authentication, not to access
 //! control. It exists whether or not an access controller is installed, and
@@ -48,6 +65,10 @@ pub const CONSOLE_SESSION_FENCES_FILE: &str = "console-session-fences.json";
 const RECORD_FORMAT: &str = "meerkat-meta.console-session-fences";
 /// The record format version this binary reads and writes.
 const RECORD_VERSION: u32 = 1;
+/// The most login fences a principal keeps that only a fence of the
+/// principal ends. One more folds the oldest into its sign-out fence
+/// ([`FenceRecordFile::fold_excess_sign_outs`]).
+const MAX_KEPT_SIGN_OUTS: usize = 64;
 
 /// The record as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +81,17 @@ struct FenceRecordFile {
     /// Principals the Console accepted a token without `exp` for.
     #[serde(default)]
     non_expiring_principals: BTreeSet<String>,
+    /// Per principal, the logins it signed out of: per login (the digest
+    /// the verifier keys it by), the fence its tokens are refused at. Not
+    /// written while empty, so a record that never had a sign-out keeps its
+    /// shape; a binary without sign-out keeps the field as read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    signed_out_logins: BTreeMap<String, BTreeMap<String, LoginFence>>,
+    /// Per principal, its sign-out fence: the fence of every login of the
+    /// principal, which its oldest sign-outs were folded into. Not written
+    /// while empty, as the sign-outs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    folded_sign_outs: BTreeMap<String, PrincipalFence>,
     /// Fields this binary does not know, kept as read so a rewrite never
     /// drops them.
     #[serde(flatten)]
@@ -73,12 +105,85 @@ impl Default for FenceRecordFile {
             version: RECORD_VERSION,
             fences: BTreeMap::new(),
             non_expiring_principals: BTreeSet::new(),
+            signed_out_logins: BTreeMap::new(),
+            folded_sign_outs: BTreeMap::new(),
             other: BTreeMap::new(),
         }
     }
 }
 
-/// One principal's fence as stored.
+impl FenceRecordFile {
+    /// Drop the login fences that refuse nothing more: one at or before its
+    /// principal's fence or sign-out fence (each refuses every token of the
+    /// principal the login's fence does), and the fence of a login that is
+    /// one token once the verifier refuses that token on its expiry (`now`,
+    /// seconds since the epoch). A sign-out fence at or before its
+    /// principal's fence is dropped as well.
+    fn drop_spent_login_fences(&mut self, now: u64) {
+        let principal_fences = &self.fences;
+        self.folded_sign_outs.retain(|principal, folded| {
+            principal_fences.get(principal).is_none_or(|fence| {
+                folded.not_before_epoch_seconds > fence.not_before_epoch_seconds
+            })
+        });
+        let folded_sign_outs = &self.folded_sign_outs;
+        self.signed_out_logins.retain(|principal, logins| {
+            let covered_through = principal_fences
+                .get(principal)
+                .into_iter()
+                .chain(folded_sign_outs.get(principal))
+                .map(|fence| fence.not_before_epoch_seconds)
+                .max();
+            logins.retain(|_, login| {
+                let covered = covered_through
+                    .is_some_and(|not_before| login.not_before_epoch_seconds <= not_before);
+                let expired = login
+                    .token_refused_from_epoch_seconds
+                    .is_some_and(|refused_from| refused_from <= now);
+                !covered && !expired
+            });
+            !logins.is_empty()
+        });
+    }
+
+    /// Fold the oldest login fences of `principal` that only a fence of the
+    /// principal ends (those no token expiry drops) into its sign-out fence,
+    /// so it keeps at most [`MAX_KEPT_SIGN_OUTS`]: the sign-out fence moves
+    /// to the newest of the folded ones (it never moves back) and refuses
+    /// every token they refused. The folded fences are then dropped as
+    /// covered ([`Self::drop_spent_login_fences`]).
+    fn fold_excess_sign_outs(&mut self, principal: &str) {
+        let Some(logins) = self.signed_out_logins.get(principal) else {
+            return;
+        };
+        let mut kept: Vec<u64> = logins
+            .values()
+            .filter(|login| login.token_refused_from_epoch_seconds.is_none())
+            .map(|login| login.not_before_epoch_seconds)
+            .collect();
+        let excess = kept.len().saturating_sub(MAX_KEPT_SIGN_OUTS);
+        if excess == 0 {
+            return;
+        }
+        kept.sort_unstable();
+        let Some(&fold_to) = kept.get(excess - 1) else {
+            return;
+        };
+        let folded = self
+            .folded_sign_outs
+            .entry(principal.to_string())
+            .or_insert_with(|| PrincipalFence {
+                not_before_epoch_seconds: fold_to,
+                revoked_by: None,
+                revoked_by_not_before: None,
+                other: BTreeMap::new(),
+            });
+        folded.not_before_epoch_seconds = folded.not_before_epoch_seconds.max(fold_to);
+    }
+}
+
+/// One principal's fence as stored: the fence its sessions were revoked at,
+/// or its sign-out fence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrincipalFence {
     /// Seconds since the epoch: tokens issued before this instant (and up to
@@ -106,6 +211,21 @@ impl PrincipalFence {
             .clone()
             .filter(|_| self.revoked_by_not_before == Some(self.not_before_epoch_seconds))
     }
+}
+
+/// One signed-out login's fence as stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LoginFence {
+    /// Seconds since the epoch: the login's tokens issued before this
+    /// instant (and up to the verifier's clock leeway after it) are refused.
+    not_before_epoch_seconds: u64,
+    /// For a login that is one token (no `sid`): the first whole second the
+    /// verifier refuses that token on its expiry. From then on the fence
+    /// refuses nothing and is dropped at the record's next change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_refused_from_epoch_seconds: Option<u64>,
+    #[serde(flatten)]
+    other: BTreeMap<String, Value>,
 }
 
 /// Why the session fence record could not be read or changed. Later releases
@@ -239,8 +359,8 @@ struct FencesInner {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FenceProbeStage {
-    /// In a revocation, after the record's publication change began and
-    /// before the fence is visible.
+    /// In a fence change (a revocation or a sign-out), after the record's
+    /// publication change began and before the fence is visible.
     RevocationPublishing,
     /// In an observation of a Console human, after its re-verification and
     /// before its publication stamp is validated.
@@ -376,6 +496,10 @@ impl ConsoleSessionFences {
     /// that leaves a fence unchanged, invalidates every evidence observed
     /// under this record ([`Self::observe_current_human`]) before its fence
     /// is visible.
+    ///
+    /// A revocation also drops the principal's sign-outs of single logins,
+    /// and its sign-out fence, at or before its fence: the fence refuses
+    /// every token they refused.
     pub fn revoke_sessions_by(
         &self,
         principal: &str,
@@ -418,32 +542,8 @@ impl ConsoleSessionFences {
         }
         let not_before_epoch_seconds = fence.not_before_epoch_seconds;
         let revoked_by = fence.revoker();
-        // Persist first. A write that did not replace the file changed
-        // nothing: nothing is published and nothing becomes visible. One
-        // that replaced it may be read after a restart, so it takes effect
-        // now even when its durability is not confirmed.
-        let unconfirmed = match write_record(path, &next) {
-            Ok(()) => None,
-            Err(RecordWriteFailure::NotWritten(error)) => return Err(error),
-            Err(RecordWriteFailure::Unconfirmed(error)) => Some(error),
-        };
-        {
-            // Every evidence observed under the record stops checking
-            // current before the fence is visible. A publication that
-            // cannot begin a change (poisoned or exhausted) already refuses
-            // every evidence, so the change proceeds without one.
-            let _published = self.inner.publication.begin_owner_change().ok();
-            #[cfg(test)]
-            self.run_probe(FenceProbeStage::RevocationPublishing);
-            *self
-                .inner
-                .record
-                .write()
-                .unwrap_or_else(PoisonError::into_inner) = next;
-        }
-        self.inner
-            .revision
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        next.drop_spent_login_fences(now_epoch_seconds());
+        let unconfirmed = self.commit_fence_change(path, next)?;
         tracing::info!(
             principal,
             not_before_epoch_seconds,
@@ -470,6 +570,157 @@ impl ConsoleSessionFences {
                 })
             }
         }
+    }
+
+    /// The fence one login of `principal` (the digest the Console's
+    /// verifier keys the login by) is under, read now: the later of the
+    /// login's own fence and the principal's sign-out fence, in seconds
+    /// since the epoch, or `None` when there is neither: the login never
+    /// signed out (or its fence was dropped), and no sign-out was folded.
+    pub(crate) fn login_not_before(&self, principal: &str, login: &str) -> Option<u64> {
+        let record = self.read();
+        let own = record
+            .signed_out_logins
+            .get(principal)
+            .and_then(|logins| logins.get(login))
+            .map(|fence| fence.not_before_epoch_seconds);
+        let folded = record
+            .folded_sign_outs
+            .get(principal)
+            .map(|fence| fence.not_before_epoch_seconds);
+        own.max(folded)
+    }
+
+    /// Sign one login of `principal` out: from then on the Console refuses
+    /// each token of that login issued before `not_before_epoch_seconds`
+    /// plus the verifier's clock leeway, or carrying no `iat`, on every
+    /// route, and ends every open stream and voice session such a token
+    /// opened. The principal's other logins are untouched. `login` is the
+    /// digest the Console's verifier keys the login by;
+    /// `token_refused_from_epoch_seconds`, for a login that is one token,
+    /// is when the verifier refuses that token on its expiry, after which
+    /// the fence is dropped. A later fence of the login replaces an earlier
+    /// one; an earlier one never moves it back. Returns the login's fence.
+    ///
+    /// A principal keeps at most [`MAX_KEPT_SIGN_OUTS`] login fences that
+    /// only a fence of the principal ends (those without
+    /// `token_refused_from_epoch_seconds`). The sign-out that would keep one
+    /// more folds the oldest into the principal's sign-out fence
+    /// ([`FenceRecordFile::fold_excess_sign_outs`]), which then signs out
+    /// every login of the principal up to that fence. It revokes nothing:
+    /// the principal's own fence ([`Self::not_before`]) is untouched.
+    ///
+    /// Written, published and announced exactly as a revocation
+    /// ([`Self::revoke_sessions`]), with the same failures: refused when the
+    /// record has no file, nothing changed when the write failed before it
+    /// replaced the file, and in effect but
+    /// [`ConsoleSessionFencesError::DurabilityUnconfirmed`] when the
+    /// directory could not be synced afterwards.
+    pub(crate) fn sign_out_login(
+        &self,
+        principal: &str,
+        login: &str,
+        not_before_epoch_seconds: u64,
+        token_refused_from_epoch_seconds: Option<u64>,
+    ) -> Result<u64, ConsoleSessionFencesError> {
+        if principal.trim().is_empty() {
+            return Err(ConsoleSessionFencesError::InvalidPrincipal);
+        }
+        let path = self
+            .inner
+            .path
+            .as_deref()
+            .ok_or(ConsoleSessionFencesError::NotDurable)?;
+        let _writer = self
+            .inner
+            .writer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut next = self.read().clone();
+        let fence = next
+            .signed_out_logins
+            .entry(principal.to_string())
+            .or_default()
+            .entry(login.to_string())
+            .or_insert_with(|| LoginFence {
+                not_before_epoch_seconds,
+                token_refused_from_epoch_seconds,
+                other: BTreeMap::new(),
+            });
+        fence.not_before_epoch_seconds =
+            fence.not_before_epoch_seconds.max(not_before_epoch_seconds);
+        let not_before_epoch_seconds = fence.not_before_epoch_seconds;
+        next.fold_excess_sign_outs(principal);
+        next.drop_spent_login_fences(now_epoch_seconds());
+        // The login's fence counts the sign-out fence a fold moved past it.
+        let not_before_epoch_seconds =
+            next.folded_sign_outs
+                .get(principal)
+                .map_or(not_before_epoch_seconds, |folded| {
+                    folded
+                        .not_before_epoch_seconds
+                        .max(not_before_epoch_seconds)
+                });
+        let unconfirmed = self.commit_fence_change(path, next)?;
+        tracing::info!(
+            principal,
+            not_before_epoch_seconds,
+            "console login signed out"
+        );
+        match unconfirmed {
+            None => Ok(not_before_epoch_seconds),
+            Some(error) => {
+                tracing::warn!(
+                    principal,
+                    path = %path.display(),
+                    %error,
+                    "console login signed out, but the session fence record's directory could \
+                     not be synced, so the sign-out may not survive a power loss"
+                );
+                Err(ConsoleSessionFencesError::DurabilityUnconfirmed {
+                    path: path.to_path_buf(),
+                    error,
+                })
+            }
+        }
+    }
+
+    /// Commit `next`, a change of the fences, as the record: the caller
+    /// holds the writer lock. It is written to the record's file first. A
+    /// write that did not replace the file changes nothing: nothing is
+    /// published and nothing becomes visible. One that replaced it may be
+    /// read after a restart, so it takes effect now even when its
+    /// durability is not confirmed, and the directory sync's error is
+    /// returned. Every evidence observed under the record stops checking
+    /// current before the change is visible, and every reader of the
+    /// record's revision learns of it after.
+    fn commit_fence_change(
+        &self,
+        path: &Path,
+        next: FenceRecordFile,
+    ) -> Result<Option<std::io::Error>, ConsoleSessionFencesError> {
+        let unconfirmed = match write_record(path, &next) {
+            Ok(()) => None,
+            Err(RecordWriteFailure::NotWritten(error)) => return Err(error),
+            Err(RecordWriteFailure::Unconfirmed(error)) => Some(error),
+        };
+        {
+            // A publication that cannot begin a change (poisoned or
+            // exhausted) already refuses every evidence, so the change
+            // proceeds without one.
+            let _published = self.inner.publication.begin_owner_change().ok();
+            #[cfg(test)]
+            self.run_probe(FenceProbeStage::RevocationPublishing);
+            *self
+                .inner
+                .record
+                .write()
+                .unwrap_or_else(PoisonError::into_inner) = next;
+        }
+        self.inner
+            .revision
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+        Ok(unconfirmed)
     }
 
     /// The principals the Console accepted a token without `exp` for.
@@ -609,6 +860,15 @@ pub fn read_console_session_record(
             non_expiring_principals: record.non_expiring_principals.into_iter().collect(),
         }),
     )
+}
+
+/// The wall clock now, in whole seconds since the epoch (the epoch for a
+/// clock before it), as the verifier reads it.
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn read_record(path: &Path) -> Result<Option<FenceRecordFile>, ConsoleSessionFencesError> {
@@ -1047,5 +1307,292 @@ mod tests {
             .revoke_sessions("alice@example.test", at(2_000_000_000))
             .expect("revoking again confirms it");
         assert_eq!(confirmed.not_before_epoch_seconds, 2_000_000_000);
+    }
+
+    /// A sign-out fences one login of a principal and nothing else: it is
+    /// written before it takes effect, publishes through the record's own
+    /// publication and wakes streams, as a revocation does, and survives a
+    /// reopen. A later fence of the login replaces an earlier one; an
+    /// earlier one never moves it back. A record without a file refuses it.
+    #[test]
+    fn a_sign_out_fences_one_login_and_survives_a_reopen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fences = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("open");
+        let observed = fences
+            .publication()
+            .observe(|| ())
+            .expect("quiet publication")
+            .1;
+        let revision = fences.revision();
+        let fence = fences
+            .sign_out_login("alice@example.test", "login-a", 2_000_000_000, None)
+            .expect("sign out");
+        assert_eq!(fence, 2_000_000_000);
+        assert_eq!(
+            fences.login_not_before("alice@example.test", "login-a"),
+            Some(2_000_000_000)
+        );
+        assert_eq!(
+            fences.login_not_before("alice@example.test", "login-b"),
+            None,
+            "another login of the principal"
+        );
+        assert_eq!(
+            fences.not_before("alice@example.test"),
+            None,
+            "no fence of the principal"
+        );
+        assert!(observed.check_current().is_err(), "the change published");
+        assert_ne!(fences.revision(), revision, "streams wake");
+        let kept = fences
+            .sign_out_login("alice@example.test", "login-a", 1_999_999_000, None)
+            .expect("sign out again");
+        assert_eq!(kept, 2_000_000_000, "an earlier fence never moves it back");
+
+        let reopened = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("reopen");
+        assert_eq!(
+            reopened.login_not_before("alice@example.test", "login-a"),
+            Some(2_000_000_000)
+        );
+        assert!(matches!(
+            ConsoleSessionFences::detached().sign_out_login(
+                "alice@example.test",
+                "login-a",
+                2_000_000_000,
+                None
+            ),
+            Err(ConsoleSessionFencesError::NotDurable)
+        ));
+    }
+
+    /// A login fence is dropped once it refuses nothing more: when its
+    /// principal's fence is at or after it (that fence refuses every token
+    /// the login's fence does), and, for a login that is one token, once
+    /// the verifier refuses that token on its expiry. Every other login
+    /// fence stays, and a principal left with none is dropped.
+    #[test]
+    fn spent_login_fences_are_dropped() {
+        let login = |not_before_epoch_seconds, token_refused_from_epoch_seconds| LoginFence {
+            not_before_epoch_seconds,
+            token_refused_from_epoch_seconds,
+            other: BTreeMap::new(),
+        };
+        let mut record = FenceRecordFile::default();
+        record.fences.insert(
+            "alice@example.test".to_string(),
+            PrincipalFence {
+                not_before_epoch_seconds: 2_000,
+                revoked_by: None,
+                revoked_by_not_before: None,
+                other: BTreeMap::new(),
+            },
+        );
+        record.signed_out_logins.insert(
+            "alice@example.test".to_string(),
+            BTreeMap::from([
+                ("before-the-fence".to_string(), login(1_500, None)),
+                ("at-the-fence".to_string(), login(2_000, None)),
+                ("after-the-fence".to_string(), login(2_500, None)),
+                ("expired-token".to_string(), login(2_500, Some(3_000))),
+                ("live-token".to_string(), login(2_500, Some(3_001))),
+            ]),
+        );
+        record.signed_out_logins.insert(
+            "bob@example.test".to_string(),
+            BTreeMap::from([("expired-token".to_string(), login(1_000, Some(1_031)))]),
+        );
+        record.drop_spent_login_fences(3_000);
+        assert_eq!(
+            record
+                .signed_out_logins
+                .get("alice@example.test")
+                .map(|logins| logins.keys().cloned().collect::<Vec<_>>()),
+            Some(vec![
+                "after-the-fence".to_string(),
+                "live-token".to_string()
+            ])
+        );
+        assert!(
+            !record.signed_out_logins.contains_key("bob@example.test"),
+            "a principal with no login fence left is dropped"
+        );
+    }
+
+    /// A revocation drops the sign-outs of its principal that it covers,
+    /// and only those.
+    #[test]
+    fn a_revocation_drops_the_sign_outs_it_covers() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fences = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("open");
+        for (principal, login, not_before) in [
+            ("alice@example.test", "early", 1_999_000_000),
+            ("alice@example.test", "late", 2_001_000_000),
+            ("bob@example.test", "early", 1_999_000_000),
+        ] {
+            fences
+                .sign_out_login(principal, login, not_before, None)
+                .expect("sign out");
+        }
+        fences
+            .revoke_sessions("alice@example.test", at(2_000_000_000))
+            .expect("revoke");
+        assert_eq!(
+            fences.login_not_before("alice@example.test", "early"),
+            None,
+            "covered by the revocation"
+        );
+        assert_eq!(
+            fences.login_not_before("alice@example.test", "late"),
+            Some(2_001_000_000),
+            "after the revocation"
+        );
+        assert_eq!(
+            fences.login_not_before("bob@example.test", "early"),
+            Some(1_999_000_000),
+            "another principal"
+        );
+    }
+
+    /// A principal keeps at most 64 sign-outs that only a fence of the
+    /// principal ends: a `sid` login's, or a token's that never expires.
+    /// The 65th folds the oldest into a fence of every login of the
+    /// principal, which refuses every token the folded sign-out refused,
+    /// and the record keeps the 64 newest. The principal's own fence, which
+    /// a revocation sets, is untouched. The sign-out of a token that expires
+    /// is not counted: it is dropped once its token is refused on expiry.
+    #[test]
+    fn the_sign_out_cap_folds_the_oldest_into_a_fence_of_every_login() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fences = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("open");
+        let principal = "alice@example.test";
+        fences
+            .sign_out_login(
+                principal,
+                "token-login",
+                3_000,
+                Some(now_epoch_seconds() + 3_600),
+            )
+            .expect("sign out a token that expires");
+        for login in 0..64_u64 {
+            fences
+                .sign_out_login(principal, &format!("login-{login}"), 2_000 + login, None)
+                .expect("sign out");
+        }
+        fences
+            .sign_out_login("bob@example.test", "login-0", 1_000, None)
+            .expect("another principal signs out");
+        assert_eq!(
+            fences.login_not_before(principal, "never-signed-out"),
+            None,
+            "64 kept sign-outs and one that expires fold nothing"
+        );
+
+        fences
+            .sign_out_login(principal, "login-64", 2_064, None)
+            .expect("the 65th kept sign-out");
+        assert_eq!(
+            fences.login_not_before(principal, "never-signed-out"),
+            Some(2_000),
+            "every login of the principal is signed out up to the oldest sign-out"
+        );
+        assert_eq!(
+            fences.login_not_before(principal, "login-0"),
+            Some(2_000),
+            "the folded sign-out still refuses its login"
+        );
+        for login in 1..=64_u64 {
+            assert_eq!(
+                fences.login_not_before(principal, &format!("login-{login}")),
+                Some(2_000 + login),
+                "the 64 newest are kept"
+            );
+        }
+        assert_eq!(
+            fences.login_not_before(principal, "token-login"),
+            Some(3_000),
+            "the sign-out of a token that expires is kept and not counted"
+        );
+        assert_eq!(
+            fences.not_before(principal),
+            None,
+            "a fold revokes nothing: the principal's own fence is untouched"
+        );
+        assert_eq!(
+            fences.login_not_before("bob@example.test", "never-signed-out"),
+            None,
+            "another principal"
+        );
+        assert_eq!(
+            fences.login_not_before("bob@example.test", "login-0"),
+            Some(1_000)
+        );
+
+        let reopened = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("reopen");
+        assert_eq!(
+            reopened.login_not_before(principal, "never-signed-out"),
+            Some(2_000)
+        );
+        assert_eq!(reopened.not_before(principal), None);
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(CONSOLE_SESSION_FENCES_FILE)).expect("read"),
+        )
+        .expect("json");
+        assert_eq!(
+            stored["signed_out_logins"][principal]
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(65),
+            "64 kept sign-outs and the one that expires: {stored}"
+        );
+    }
+
+    /// A record that never had a sign-out keeps its shape, so a binary
+    /// without sign-out reads exactly what it wrote. Sign-outs, and fields
+    /// of them this binary does not know, are kept when the record is
+    /// rewritten.
+    #[test]
+    fn sign_outs_are_written_only_when_present_and_kept_on_rewrite() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(CONSOLE_SESSION_FENCES_FILE);
+        let stored = |path: &Path| -> Value {
+            serde_json::from_slice(&std::fs::read(path).expect("read")).expect("json")
+        };
+        ConsoleSessionFences::open(&path)
+            .expect("open")
+            .revoke_sessions("alice@example.test", at(2_000_000_000))
+            .expect("revoke");
+        assert!(
+            stored(&path).get("signed_out_logins").is_none(),
+            "{}",
+            stored(&path)
+        );
+
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"format\":\"{RECORD_FORMAT}\",\"version\":1,\"signed_out_logins\":\
+                 {{\"bob@example.test\":{{\"login-1\":{{\"not_before_epoch_seconds\":2100000000,\
+                 \"by\":\"front\"}}}}}}}}"
+            ),
+        )
+        .expect("write record");
+        let fences = ConsoleSessionFences::open(&path).expect("open");
+        assert_eq!(
+            fences.login_not_before("bob@example.test", "login-1"),
+            Some(2_100_000_000)
+        );
+        fences
+            .revoke_sessions("carol@example.test", at(2_000_000_000))
+            .expect("revoke");
+        let rewritten = stored(&path);
+        assert_eq!(
+            rewritten["signed_out_logins"]["bob@example.test"]["login-1"]["by"], "front",
+            "{rewritten}"
+        );
+        assert_eq!(
+            rewritten["signed_out_logins"]["bob@example.test"]["login-1"]["not_before_epoch_seconds"],
+            2_100_000_000,
+            "{rewritten}"
+        );
     }
 }

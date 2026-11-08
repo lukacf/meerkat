@@ -1323,7 +1323,8 @@ impl StewardEngine {
     }
 
     /// [`Self::note_identity_retired`] for a retirement whose step was asked
-    /// at `retired_at_ms`, the key of its harvest: a repeat of the same
+    /// (or, when no step asked for it, that Core journaled) at
+    /// `retired_at_ms`, the key of its harvest: a repeat of the same
     /// retirement records nothing more. Answers the store's error, so a
     /// caller that owes the harvest at least once runs it again.
     pub async fn record_identity_retired_at(

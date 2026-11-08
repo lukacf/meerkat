@@ -82,12 +82,14 @@ pub use store::{
     ConsoleLogError, ConsoleLogResult, ConsoleLogStore, ConsoleSendDedupeDurability,
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
 };
+pub(crate) use types::ConsoleHumanAttribution;
 pub use types::{
-    AppendDisposition, AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind,
-    ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance, ConsoleFrameSource,
-    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection, ConsoleIdentityRecord,
-    ConsoleInteractionAccepted, ConsoleReplayUnavailable, ConsoleSendRequest, ConsoleTimelineEvent,
-    ConsoleTimelineMode, ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
+    AppendDisposition, AppendOutcome, ConsoleActorKind, ConsoleCursor, ConsoleDeltaCompaction,
+    ConsoleDeltaKind, ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance,
+    ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection,
+    ConsoleIdentityRecord, ConsoleInteractionAccepted, ConsoleReplayUnavailable,
+    ConsoleSendRequest, ConsoleSender, ConsoleTimelineEvent, ConsoleTimelineMode,
+    ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
     ConsoleTimelineWindowQuery, ConsoleTurnOrigin, ConsoleVisibility, IdentityFirstReservation,
     NewConsoleFrame,
 };
@@ -178,6 +180,8 @@ struct MemberProvenanceSearch {
 }
 type NoticeObservationCache =
     BoundedProjectionCache<(String, String, String), RuntimeNoticeObservation>;
+type StatusUnknownRedrives =
+    BTreeMap<(uuid::Uuid, String, String, String), tokio::sync::oneshot::Sender<()>>;
 
 struct AggregatorInner {
     /// Policy views share one canonical projector and publish to its broadcaster.
@@ -227,10 +231,16 @@ struct AggregatorInner {
     /// Retry keys with an armed status-unknown re-drive (one waiter per key):
     /// an idle member whose status read did not answer emits no event of its
     /// own, so its next typed change re-drives the retained retry instead of
-    /// only the discovery tick.
-    status_unknown_redrives: std::sync::Mutex<BTreeSet<(uuid::Uuid, String, String, String)>>,
+    /// only the discovery tick. Each key holds its waiter's hold: removing the
+    /// key (its runtime's registration ended or was replaced) drops it, which
+    /// ends a waiter still parked.
+    status_unknown_redrives: std::sync::Mutex<StatusUnknownRedrives>,
     #[cfg(test)]
     status_unknown_redrive_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Retry keys whose last status reads did not answer, with when their
+    /// member's status may be read again ([`StatusUnknownBackoff`]).
+    status_unknown_backoff:
+        std::sync::Mutex<BTreeMap<(uuid::Uuid, String, String, String), StatusUnknownBackoff>>,
     /// Retry keys with a queued moved-boundary re-drive: a completed pass whose
     /// session's committed boundary moved during its read re-reads once at
     /// the new boundary instead of waiting for a discovery tick and
@@ -453,7 +463,10 @@ impl ClassicResend<'_> {
         let Some(identity_runtime) = self.resolved.entry.identity_runtime.as_ref() else {
             return false;
         };
-        let Some(identity) = identity_runtime
+        // A name the runtime refuses (Core holds it for an identity the
+        // runtime has not registered, or its entry could not be read) is no
+        // keyed identity delivery: never dispatched again.
+        let Ok(Some(identity)) = identity_runtime
             .identity_for_member_mutation(&self.resolved.runtime_identity)
             .await
         else {
@@ -969,9 +982,10 @@ impl MetaConsoleAggregator {
                     MemberProvenanceSearchCache::new(MEMBER_PROVENANCE_CACHE_LIMIT),
                 ),
                 assistant_history_retries: std::sync::Mutex::new(BTreeSet::new()),
-                status_unknown_redrives: std::sync::Mutex::new(BTreeSet::new()),
+                status_unknown_redrives: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 status_unknown_redrive_tasks: std::sync::Mutex::new(Vec::new()),
+                status_unknown_backoff: std::sync::Mutex::new(BTreeMap::new()),
                 moved_boundary_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 moved_boundary_redrive_tasks: std::sync::Mutex::new(Vec::new()),
@@ -1061,9 +1075,10 @@ impl MetaConsoleAggregator {
                     MemberProvenanceSearchCache::new(MEMBER_PROVENANCE_CACHE_LIMIT),
                 ),
                 assistant_history_retries: std::sync::Mutex::new(BTreeSet::new()),
-                status_unknown_redrives: std::sync::Mutex::new(BTreeSet::new()),
+                status_unknown_redrives: std::sync::Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 status_unknown_redrive_tasks: std::sync::Mutex::new(Vec::new()),
+                status_unknown_backoff: std::sync::Mutex::new(BTreeMap::new()),
                 moved_boundary_redrives: std::sync::Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 moved_boundary_redrive_tasks: std::sync::Mutex::new(Vec::new()),
@@ -1131,6 +1146,21 @@ impl MetaConsoleAggregator {
             frame.payload["frame"] = projected;
         }
         frame.source.member_provenance = None;
+        // The requester and the sender label a send carried to the agent stay
+        // with the stored frame (a redispatch reads them there); no view
+        // reads them.
+        if let Some(sender) = frame
+            .payload
+            .get_mut("sender")
+            .and_then(Value::as_object_mut)
+        {
+            sender.remove("requester");
+            sender.remove("model_label");
+        }
+        // Nor the same requester on the run's transcript identities: a
+        // committed message's (the session history's frames), a run event's
+        // own and the lineage a console event inherits.
+        crate::mob_handle_runtime::strip_transcript_requesters(&mut frame.payload);
         frame
     }
 
@@ -1316,7 +1346,12 @@ impl MetaConsoleAggregator {
             .status_unknown_redrives
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(_, key, _, _)| key != &runtime_key);
+            .retain(|(_, key, _, _), _| key != &runtime_key);
+        self.inner
+            .status_unknown_backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _), _| key != &runtime_key);
         self.inner
             .member_provenance_searches
             .lock()
@@ -1486,7 +1521,12 @@ impl MetaConsoleAggregator {
             .status_unknown_redrives
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(_, key, _, _)| key != runtime_key);
+            .retain(|(_, key, _, _), _| key != runtime_key);
+        self.inner
+            .status_unknown_backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, key, _, _), _| key != runtime_key);
         self.inner
             .member_provenance_searches
             .lock()
@@ -1814,8 +1854,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the request,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let mut record = identity_record_for_status(entry, &status);
                     let topology_peers =
@@ -2003,7 +2051,13 @@ impl MetaConsoleAggregator {
                 && let Some(parsed_identity) = identity_runtime
                     .owned_identity_for_member_alias(&resolved.runtime_identity)
                     .await
-                && let Ok(status) = identity_runtime.status(&parsed_identity).await
+                && let Some(status) = match identity_runtime.status(&parsed_identity).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    // A read Core could not serve fails the inspection,
+                    // typed, never an answer without the identity's record.
+                    Err(error) => return Err(error.into()),
+                }
             {
                 let durable_record = identity_record_for_status(&resolved.entry, &status);
                 let durable_live_records = Box::pin(self.live_records_for_durable_record(
@@ -2104,8 +2158,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the retire,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let record = identity_record_for_status(entry, &status);
                     if !Box::pin(console_identity_record_visible(entry, &record)).await {
@@ -2213,10 +2275,17 @@ impl MetaConsoleAggregator {
             {
                 return Err(stale_error.into());
             }
-            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
-                && let Some(parsed_identity) = identity_runtime
+            let mutation_identity = match resolved.entry.identity_runtime.as_ref() {
+                Some(identity_runtime) => identity_runtime
                     .identity_for_member_mutation(&resolved.runtime_identity)
                     .await
+                    .map_err(|err| -> ConsoleLogError {
+                        format!("retire failed for {identity}: {err}").into()
+                    })?,
+                None => None,
+            };
+            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+                && let Some(parsed_identity) = mutation_identity
             {
                 let status = identity_runtime.status(&parsed_identity).await.map_err(
                     |err| -> ConsoleLogError {
@@ -2747,18 +2816,21 @@ impl MetaConsoleAggregator {
         &self,
         request: ConsoleSendRequest,
     ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
-        Box::pin(self.send_scoped(request, &ConsoleSendScope::Unscoped)).await
+        Box::pin(self.send_scoped(request, &ConsoleSendScope::Unscoped, None)).await
     }
 
     /// [`Self::send`] deduplicated in the sending caller's `scope`. A scoped
     /// replay of a send that has not settled, and whose dispatch has no live
     /// owner, is reconciled from native admission evidence: an admitted input
     /// settles it delivered; an absent one is dispatched again under the
-    /// send's own delivery identity, into the session it recorded.
+    /// send's own delivery identity, into the session it recorded. A fresh
+    /// send's frame records its `sender`, and its dispatch carries the
+    /// sender's requester to the agent.
     pub(crate) async fn send_scoped(
         &self,
         request: ConsoleSendRequest,
         scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
     ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
         validate_send_request(&request)?;
         let Some(resolved) = Box::pin(self.resolve_send_member(&request.identity)).await? else {
@@ -2943,7 +3015,7 @@ impl MetaConsoleAggregator {
             session_id: session_id.clone(),
             kind: "user_input".to_string(),
             status: ConsoleFrameStatus::Accepted,
-            payload: user_input_payload(&request, &handling_mode_value),
+            payload: user_input_payload(&request, &handling_mode_value, sender),
             source: ConsoleFrameSource {
                 member_provenance: provenance,
                 kind: ConsoleFrameSourceKind::Send,
@@ -3346,6 +3418,7 @@ impl MetaConsoleAggregator {
                 request,
                 session_id,
                 &ConsoleSendScope::Unscoped,
+                None,
             ))
             .await?
             {
@@ -3361,12 +3434,14 @@ impl MetaConsoleAggregator {
     /// [`Self::reserve_identity_first_interaction`] deduplicated in the
     /// sending caller's `scope`. A scoped caller gets the dispatch claim of a
     /// fresh interaction, and owns the reconciliation of a replayed one that
-    /// has not settled and whose dispatch has no live owner.
+    /// has not settled and whose dispatch has no live owner. A fresh
+    /// interaction's frame records its `sender`.
     pub(crate) async fn reserve_identity_first_interaction_scoped(
         &self,
         request: ConsoleSendRequest,
         session_id: Option<&str>,
         scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
     ) -> Result<ScopedReservation, ConsoleSendError> {
         validate_send_request(&request)?;
         let _content = content_input_from_value(&request.content)?;
@@ -3451,7 +3526,7 @@ impl MetaConsoleAggregator {
             session_id: session_id.map(ToString::to_string),
             kind: "user_input".to_string(),
             status: ConsoleFrameStatus::Accepted,
-            payload: user_input_payload(&request, &handling_mode_value),
+            payload: user_input_payload(&request, &handling_mode_value, sender),
             source: ConsoleFrameSource {
                 member_provenance: provenance,
                 kind: ConsoleFrameSourceKind::Send,
@@ -4825,18 +4900,29 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
 
 /// Deliver a Console send to `resolved` and answer the session it landed
 /// on: best effort for an identity, empty when that read fails after the
-/// delivery (the send is delivered all the same).
+/// delivery (the send is delivered all the same). `attribution` is what the
+/// send carries for its person: the requester of the agent's run and the
+/// sender label its model reads.
 async fn dispatch_message_to_resolved_member(
     resolved: &ResolvedConsoleMember,
     content: ContentInput,
     skill_references: &[meerkat_core::skills::SkillKey],
     handling_mode: meerkat_core::types::HandlingMode,
     accepted: &ConsoleInteractionAccepted,
+    attribution: &ConsoleHumanAttribution,
 ) -> Result<String, ConsoleSendError> {
-    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
-        && let Some(identity) = identity_runtime
+    // A name the identity runtime refuses (Core holds it for an identity the
+    // runtime has not registered, or its entry could not be read) is refused
+    // typed, never sent through the raw member door.
+    let identity = match resolved.entry.identity_runtime.as_ref() {
+        Some(identity_runtime) => identity_runtime
             .identity_for_member_mutation(&resolved.runtime_identity)
             .await
+            .map_err(|error| ConsoleSendError::RuntimeOperation(Box::new(error)))?,
+        None => None,
+    };
+    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+        && let Some(identity) = identity
     {
         identity_runtime
             .send_console_human_input_tracked(
@@ -4846,6 +4932,7 @@ async fn dispatch_message_to_resolved_member(
                 handling_mode,
                 skill_references,
                 accepted,
+                attribution,
                 None,
             )
             .await
@@ -4869,6 +4956,7 @@ async fn dispatch_message_to_resolved_member(
         skill_references,
         handling_mode,
         accepted,
+        attribution,
     )
     .await
     .map_err(|err| match err {
@@ -4904,12 +4992,17 @@ fn spawn_console_send_dispatch(
         // The claim names this task the frame's dispatch owner until it
         // settles the frame (dropped at the end of the task).
         let _claim = claim;
+        // The sender's requester and label, as the send's own frame recorded
+        // them, so a redispatch after a restart carries the same ones.
+        let sender = ConsoleSender::of_frame_payload(&user_frame.payload);
+        let attribution = ConsoleHumanAttribution::of_sender(sender.as_ref());
         match dispatch_message_to_resolved_member(
             &resolved,
             content,
             &skill_references,
             handling_mode,
             &accepted_from_frame(&user_frame),
+            &attribution,
         )
         .await
         {
@@ -6773,8 +6866,18 @@ where
         }
         // A complete read is not a commit barrier. An eligible refresh must
         // observe fresh typed idle status and no pending commit before reading.
-        let assistant_refresh_gate =
-            observe_refresh(&entry, &record, &session_id, assistant_refresh_requested).await;
+        // A member whose last status reads did not answer is not asked again
+        // before its backoff ends: the pass stays unsettled without a read.
+        let assistant_refresh_gate = if assistant_refresh_requested
+            && status_read_not_before(&inner, &assistant_retry_key).is_some()
+        {
+            assistant_history_refresh::AssistantHistoryRefreshGate::StatusUnknown
+        } else {
+            let gate =
+                observe_refresh(&entry, &record, &session_id, assistant_refresh_requested).await;
+            note_status_read(&inner, &assistant_retry_key, gate);
+            gate
+        };
         let assistant_history_settled = matches!(
             assistant_refresh_gate,
             assistant_history_refresh::AssistantHistoryRefreshGate::Settled
@@ -7444,15 +7547,6 @@ fn spawn_session_history_backfill_target(
     });
 }
 
-/// Re-drive a retained assistant-history retry whose gate read found no fresh
-/// typed status (`StatusUnknown`): the bounded status read did not answer, for
-/// example under contention, while the member may already be idle. An idle
-/// member emits no run or commit event of its own, so without this only the
-/// discovery tick would retry it. One waiter per retry key wakes on the
-/// member's next event or the primary mob's next machine-state change and
-/// runs one targeted backfill; the retained retry key makes that pass request
-/// the assistant refresh again. The discovery loop stays the backup (a
-/// member outside the primary mob, or a mob with no further activity).
 /// One spawned or armed session-history backfill job. It counts from the
 /// moment it is spawned, before its task first runs, until it finishes, so a
 /// convergence wait started right after registration already sees the
@@ -7531,6 +7625,27 @@ fn arm_moved_boundary_redrive(
     drop(task);
 }
 
+/// Re-drive a retained assistant-history retry whose gate read found the
+/// member unsettled with nothing of its own to re-drive it: no fresh typed
+/// status (`StatusUnknown`: the bounded status read did not answer, for
+/// example under contention, while the member may already be idle), or work
+/// still landing (`Draining`, `Running`). An idle member emits no run or
+/// commit event of its own, so without this only the discovery tick would
+/// retry it. One waiter per retry key wakes on the member's next event or the
+/// primary mob's next machine-state change and runs one targeted backfill; the
+/// retained retry key makes that pass request the assistant refresh again.
+/// A member with no events to follow (its session has no live actor in the
+/// primary mob, or it is no member there) wakes only on a change of its own
+/// state: the changes of other members, an answered status read among them,
+/// say nothing new about it and would re-drive a read of it each. A member
+/// outside the primary mob has no state there that changes, so its waiter
+/// stays parked (its key armed, so no second waiter starts) and the discovery
+/// sweep reads it, within one tick; so does a member whose own state the
+/// handle cannot read, for which nothing waits. Either way the pass waits out
+/// the member's status-read backoff ([`status_read_not_before`]). A waiter
+/// still parked when its key is removed (its runtime's registration ended or
+/// was replaced) ends without a pass. The discovery loop stays the backup
+/// (also for a mob with no further activity).
 fn arm_status_unknown_redrive(
     inner: &Arc<AggregatorInner>,
     retry_key: (uuid::Uuid, String, String, String),
@@ -7539,13 +7654,17 @@ fn arm_status_unknown_redrive(
     if !inner.options.session_history_backfill_enabled {
         return;
     }
-    if !inner
+    let (hold, released) = tokio::sync::oneshot::channel::<()>();
+    match inner
         .status_unknown_redrives
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(retry_key.clone())
+        .entry(retry_key.clone())
     {
-        return;
+        std::collections::btree_map::Entry::Occupied(_) => return,
+        std::collections::btree_map::Entry::Vacant(armed) => {
+            armed.insert(hold);
+        }
     }
     let handle = target.entry.runtime.handle();
     let member =
@@ -7556,33 +7675,75 @@ fn arm_status_unknown_redrive(
     // the waiter (otherwise a persisting unknown status would re-drive
     // back-to-back instead of on the next typed change).
     let _ = futures::FutureExt::now_or_never(changes.changed());
+    // The member's own state as this arm sees it, for a waiter that may wake
+    // only on a change of it.
+    let armed_own_state = OwnMemberState::read(&handle, &member);
     let redrive_inner = Arc::clone(inner);
     let activity = BackfillActivity::begin(inner);
     let task = tokio::spawn(async move {
-        use futures::StreamExt as _;
-        let (woke, _activity) = if handle.member_unmaterialized(&member) {
-            // Not materialized in this process (Dormant, or being woken): it
-            // has no events to wait on and settles nothing until it runs.
-            // Wait for the change that materializes it, not for every change
-            // of the mob. The wait owes no backfill, so it holds no backfill
-            // activity: a console whose other work is done converges.
-            drop(activity);
-            let materialized = wait_for_member_materialized(&handle, &member, &mut changes).await;
-            (
-                materialized,
-                materialized.then(|| BackfillActivity::begin(&redrive_inner)),
-            )
-        } else {
-            let woke = match handle.subscribe_agent_events(&member).await {
-                Ok(mut events) => tokio::select! {
-                    event = events.next() => event.is_some(),
-                    changed = changes.changed() => changed.is_ok(),
-                },
-                // Not a member of the primary mob (or not live there): the
-                // mob's own changes still wake it.
-                Err(_) => changes.changed().await.is_ok(),
+        let wait = async {
+            use futures::StreamExt as _;
+            let (woke, activity) = if handle.member_unmaterialized(&member) {
+                // Not materialized in this process (Dormant, or being woken):
+                // it has no events to wait on and settles nothing until it
+                // runs. Wait for the change that materializes it, not for
+                // every change of the mob. The wait owes no backfill, so it
+                // holds no backfill activity: a console whose other work is
+                // done converges.
+                drop(activity);
+                let materialized =
+                    wait_for_member_materialized(&handle, &member, &mut changes).await;
+                (
+                    materialized,
+                    materialized.then(|| BackfillActivity::begin(&redrive_inner)),
+                )
+            } else {
+                match handle.subscribe_agent_events(&member).await {
+                    Ok(mut events) => {
+                        let woke = tokio::select! {
+                            event = events.next() => event.is_some(),
+                            changed = changes.changed() => changed.is_ok(),
+                        };
+                        (woke, Some(activity))
+                    }
+                    // Not live in the primary mob (its session actor is gone,
+                    // or it is no member there): only a change of its own
+                    // state can make a read of it say more. Like the wait
+                    // above, this one owes no backfill until then.
+                    Err(_) => {
+                        drop(activity);
+                        let changed = match &armed_own_state {
+                            Ok(armed) => {
+                                wait_for_own_member_change(&handle, &member, armed, &mut changes)
+                                    .await
+                            }
+                            Err(error) => {
+                                warn_own_member_state_unreadable(&member, error);
+                                false
+                            }
+                        };
+                        (
+                            changed,
+                            changed.then(|| BackfillActivity::begin(&redrive_inner)),
+                        )
+                    }
+                }
             };
-            (woke, Some(activity))
+            // Whatever woke it, a member whose status reads did not answer
+            // is not asked again before its backoff ends.
+            if woke {
+                while let Some(not_before) = status_read_not_before(&redrive_inner, &retry_key) {
+                    tokio::time::sleep_until(not_before).await;
+                }
+            }
+            (woke, activity)
+        };
+        // The key's removal drops its hold: the registration this waiter
+        // re-drives for is gone, so it stops waiting and re-drives nothing.
+        let (woke, _activity) = tokio::select! {
+            biased;
+            _ = released => (false, None),
+            waited = wait => waited,
         };
         redrive_inner
             .status_unknown_redrives
@@ -7623,6 +7784,138 @@ async fn wait_for_member_materialized(
         }
     }
     true
+}
+
+/// A member's own state in its mob's published machine state, read without
+/// a command to the mob's actor: its identity entry (standing, Broken fact,
+/// host preparation, rotation in flight) and whether it is materialized in
+/// this process.
+#[derive(PartialEq, Eq)]
+struct OwnMemberState {
+    entry: meerkat_mob::IdentityEntryRead,
+    unmaterialized: bool,
+}
+
+impl OwnMemberState {
+    /// `Err` when the handle cannot read the member's identity entry (its
+    /// principal lacks the list scope, or a machine fact is malformed): a
+    /// wait could then not tell the member's own changes from others'.
+    fn read(handle: &MobHandle, member: &AgentIdentity) -> Result<Self, meerkat_mob::MobError> {
+        Ok(Self {
+            entry: handle.identity_entry(member)?,
+            unmaterialized: handle.member_unmaterialized(member),
+        })
+    }
+}
+
+/// Wait until `member`'s own state differs from `armed`: a change of another
+/// member never ends the wait. `false` when the mob's machine state stops
+/// changing first (its actor is gone), or when the member's own state can no
+/// longer be read.
+async fn wait_for_own_member_change(
+    handle: &MobHandle,
+    member: &AgentIdentity,
+    armed: &OwnMemberState,
+    changes: &mut meerkat_mob::MobMachineStateChanges,
+) -> bool {
+    loop {
+        if changes.changed().await.is_err() {
+            return false;
+        }
+        match OwnMemberState::read(handle, member) {
+            Ok(own) if own == *armed => {}
+            Ok(_) => return true,
+            Err(error) => {
+                warn_own_member_state_unreadable(member, &error);
+                return false;
+            }
+        }
+    }
+}
+
+/// A re-drive that cannot read its member's own state does not wait on it:
+/// the discovery sweep reads the member's status instead.
+fn warn_own_member_state_unreadable(member: &AgentIdentity, error: &meerkat_mob::MobError) {
+    tracing::warn!(
+        member = %member,
+        error = %error,
+        "console status re-drive cannot read the member's own state; the discovery sweep reads its status"
+    );
+}
+
+/// The wait before a member's status is read again after a read that did
+/// not answer; each further such read in a row doubles it.
+const STATUS_UNKNOWN_BACKOFF_FIRST: Duration = Duration::from_secs(1);
+/// The longest wait between two reads of a member's status that did not
+/// answer.
+const STATUS_UNKNOWN_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// How long a member's status stays unread after reads that did not answer.
+#[derive(Debug, Clone, Copy)]
+struct StatusUnknownBackoff {
+    /// Status reads in a row that did not answer.
+    unknown_reads: u32,
+    /// No pass reads the member's status before this instant.
+    not_before: tokio::time::Instant,
+}
+
+/// The wait after `unknown_reads` status reads in a row that did not answer:
+/// 1 s, doubled for each such read after the first, at most 30 s.
+fn status_unknown_backoff_wait(unknown_reads: u32) -> Duration {
+    STATUS_UNKNOWN_BACKOFF_FIRST
+        .saturating_mul(1 << unknown_reads.saturating_sub(1).min(16))
+        .min(STATUS_UNKNOWN_BACKOFF_MAX)
+}
+
+/// Record what a pass's status read of `key` found. A read that did not
+/// answer (`StatusUnknown`) leaves the member's status unread for the next
+/// backoff wait; an answered read ends the backoff. A pass that asked for no
+/// status (`PositiveOnly`) changes nothing.
+fn note_status_read(
+    inner: &AggregatorInner,
+    key: &(uuid::Uuid, String, String, String),
+    gate: assistant_history_refresh::AssistantHistoryRefreshGate,
+) {
+    use assistant_history_refresh::AssistantHistoryRefreshGate as Gate;
+    let mut backoff = inner
+        .status_unknown_backoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match gate {
+        Gate::PositiveOnly => {}
+        Gate::StatusUnknown => {
+            let unknown_reads = backoff
+                .get(key)
+                .map_or(0, |backoff| backoff.unknown_reads)
+                .saturating_add(1);
+            backoff.insert(
+                key.clone(),
+                StatusUnknownBackoff {
+                    unknown_reads,
+                    not_before: tokio::time::Instant::now()
+                        + status_unknown_backoff_wait(unknown_reads),
+                },
+            );
+        }
+        Gate::Pending | Gate::Draining | Gate::Running | Gate::Settled => {
+            backoff.remove(key);
+        }
+    }
+}
+
+/// The instant before which `key`'s status is not read again, while a
+/// backoff after an unanswered read runs; `None` when it may be read now.
+fn status_read_not_before(
+    inner: &AggregatorInner,
+    key: &(uuid::Uuid, String, String, String),
+) -> Option<tokio::time::Instant> {
+    inner
+        .status_unknown_backoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .map(|backoff| backoff.not_before)
+        .filter(|not_before| *not_before > tokio::time::Instant::now())
 }
 
 async fn run_targeted_session_history_backfill(
@@ -10305,8 +10598,13 @@ fn send_request_fingerprint(
 }
 
 /// The `user_input` frame payload for a console send. `origin_kind` is
-/// written only when the caller declared one.
-fn user_input_payload(request: &ConsoleSendRequest, handling_mode: &str) -> Value {
+/// written only when the caller declared one; `sender` only for a send whose
+/// caller the Console authenticated (the unscoped Rust send API has none).
+fn user_input_payload(
+    request: &ConsoleSendRequest,
+    handling_mode: &str,
+    sender: Option<&ConsoleSender>,
+) -> Value {
     let mut payload = json!({
         "content": request.content,
         "origin": request.origin,
@@ -10315,6 +10613,11 @@ fn user_input_payload(request: &ConsoleSendRequest, handling_mode: &str) -> Valu
     });
     if let (Some(kind), Some(object)) = (request.origin_kind, payload.as_object_mut()) {
         object.insert("origin_kind".to_string(), Value::from(kind.as_str()));
+    }
+    if let (Some(sender), Some(object)) = (sender, payload.as_object_mut())
+        && let Ok(sender) = serde_json::to_value(sender)
+    {
+        object.insert("sender".to_string(), sender);
     }
     if !request.skill_refs.is_empty()
         && let (Ok(skills), Some(object)) = (
@@ -10586,6 +10889,7 @@ mod tests {
         scripted_reads: Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedHistoryRead>>>,
         scripted_application_reads:
             Arc<std::sync::Mutex<std::collections::VecDeque<ScriptedApplicationRead>>>,
+        refused_event_sessions: Arc<std::sync::Mutex<BTreeSet<String>>>,
     }
 
     #[derive(Clone)]
@@ -10645,7 +10949,24 @@ mod tests {
                 scripted_application_reads: Arc::new(std::sync::Mutex::new(
                     std::collections::VecDeque::new(),
                 )),
+                refused_event_sessions: Arc::new(std::sync::Mutex::new(BTreeSet::new())),
             }
+        }
+
+        /// Refuse every later event subscription of `session_id`, as a
+        /// session with no live actor (its store scope refused) is refused.
+        pub(super) fn refuse_session_events(&self, session_id: &SessionId) {
+            self.refused_event_sessions
+                .lock()
+                .expect("refused event sessions lock")
+                .insert(session_id.to_string());
+        }
+
+        fn session_events_refused(&self, session_id: &SessionId) -> bool {
+            self.refused_event_sessions
+                .lock()
+                .expect("refused event sessions lock")
+                .contains(&session_id.to_string())
         }
 
         pub(super) fn script_history(&self, reads: impl IntoIterator<Item = ScriptedHistoryRead>) {
@@ -10862,6 +11183,11 @@ mod tests {
             &self,
             id: &SessionId,
         ) -> Result<EventStream, StreamError> {
+            if self.session_events_refused(id) {
+                return Err(StreamError::NotFound(format!(
+                    "session {id} has no live actor"
+                )));
+            }
             SessionService::subscribe_session_events(self.inner.as_ref(), id).await
         }
 
@@ -11197,6 +11523,11 @@ mod tests {
             &self,
             session_id: &SessionId,
         ) -> Result<EventStream, StreamError> {
+            if self.session_events_refused(session_id) {
+                return Err(StreamError::NotFound(format!(
+                    "session {session_id} has no live actor"
+                )));
+            }
             meerkat_mob::MobSessionService::subscribe_session_events(
                 self.inner.as_ref(),
                 session_id,
@@ -15015,6 +15346,7 @@ comms = true
             &[],
             meerkat_core::types::HandlingMode::Steer,
             &accepted,
+            &ConsoleHumanAttribution::default(),
         )
         .await;
 
@@ -15430,7 +15762,8 @@ comms = true
                     binding: None,
                     placement: None,
                 })
-                .await;
+                .await
+                .expect("the identity registers");
             authority.materialize(&specialist).await?;
             runtime
                 .mob_handle()
@@ -15607,7 +15940,8 @@ comms = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         identity_runtime
             .materialize(&alpha)
             .await?

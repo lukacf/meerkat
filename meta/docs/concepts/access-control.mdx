@@ -33,6 +33,9 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.retire` | Retire / force-cancel / delete the agent |
 | `agent.reset` | Reset durable agent state |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
+| `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
+| `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
+| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`) |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
@@ -205,6 +208,26 @@ groups = ["release-managers"]
 
 Holders are read from the live configuration when a decision is made, so removing a subject from a binding or from a holding group revokes the identity for the next request. An approver id must not be empty or carry surrounding whitespace, must have at least one holder, and may only reference defined groups. A binding grants no permission by itself: deciding still requires `gating.decide`. Bindings apply only to console decisions by a signed-in person: on an open console a caller without a token decides nothing (`approver_unauthenticated`), and the host's stdio RPC gateway names the approver id itself. The console re-checks `gating.decide`, the request's origin and the held approver ids against the live configuration while it records the decision, so a revocation published while a decision waits is honored.
 
+The same map is the only approver source for durable decisions (see [durable decision methods](/api/rpc#durable-decision-methods)). Besides console subjects and groups, a binding lists the people a host channel attests and the stdio operator:
+
+```toml
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [
+  { ingress = "chat", subject = "U555" },   # a person the "chat" ingress attests
+]
+people = [
+  # One person: the stdio operator of the gateway and the chat identity U123.
+  { ingress_subjects = [{ ingress = "operator" }, { ingress = "chat", subject = "U123" }] },
+]
+```
+
+- `ingress_subjects` lists holders as a declared decision ingress attests them. An ingress must be declared in the launch's `runtime_options.decisions` (see [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); a configuration that names another ingress is refused at load (`unknown_ingress`), and so is a later edit from the Console. The built-in ingress `operator`, the operating-system user that started the stdio gateway, names no subject and decides only the decisions of the approver ids that list it.
+- `people` holds one entry per person, within this binding. An entry links the stdio operator and the declared-ingress identities it lists as one person: the person holds the approver id through any of them, and a decision one of them requested is the person's own, so its approval by any of them is refused as self approval. Linking is per binding, so link a person in every binding they hold. An identity appears in at most one entry of a binding; a configuration that lists one in two entries is refused at load and on a Console edit (`duplicate_person_identity`). Identities that no entry links cannot be recognised as one person.
+- An entry's `subjects` name the person's Console subjects. They hold the approver id for the Console's decision reads and the gating decide, but a decision requested from the Console is not matched to the person, since the Console decides no durable decision.
+- A Console caller who holds a decision's approver id reads the decision whole; see [On the Console](/api/rpc#on-the-console) for who else sees what.
+- `meta_gateway` keeps no durable decisions and declares no ingress, so it does not check the ingress names of the approver map. Edit an access file shared with an `rpc_gateway` through that `rpc_gateway`: it declares the ingresses and refuses an edit that names another.
+
 ## Live administration from the console
 
 ### Configure the owner and the connection
@@ -347,8 +370,11 @@ for example `"reason": "unknown_group"` with
 `enabled_without_admins`, `empty_rule_id`, `duplicate_rule_id`,
 `empty_actions`, `unknown_action`, `unknown_group`, `empty_approver_id`,
 `padded_approver_id`, `approver_without_holders`, `unknown_approver_group`,
-`unknown_rule` and `invalid_toml` (a configuration the owner could not write
-as TOML), and the list can grow. Map the reasons you know to your own words.
+`unknown_rule`, `invalid_ingress_name`, `operator_ingress_with_subject`,
+`invalid_ingress_subject`, `approver_person_without_identity`,
+`unknown_ingress`, `duplicate_person_identity` and `invalid_toml` (a
+configuration the owner could not write as TOML), and the list can grow. Map
+the reasons you know to your own words.
 Only an administrator receives this refusal, and `detail` names only entries
 of the configuration that was saved, so an access editor may show it, also
 for a reason it does not know.
@@ -438,6 +464,10 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 ## Relationship to authentication
 
 Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). With authentication optional, a valid voluntarily supplied token can still establish a named principal when trusted-token validation and access control are configured. Callers without one are anonymous: allow rules that name subjects or groups never match them, and deny rules that name subjects or groups always do, because the console cannot tell an anonymous caller from the person a deny names. For per-user deployments, require authentication rather than relying on optional identification.
+
+### Requesters on an open console
+
+A run's requester is the person the agent works for (Meerkat's `ToolDispatchContext::requester`): on a console that requires sign-in, a person's console send names that person. An open console's own sends name no requester, a verified token a person volunteered included, and its messages carry no sender label. Open means that no sign-in is required, not that a verified identity is dropped: the message's `sender` still names the person, and a host that governs console sends receives the verified person and may bind them as the requester of the work it binds (a governed send carries its association's requester). A send without a token, or with a token that does not verify, is an anonymous caller's and names no requester on either path.
 
 ## Timeline frames of members that changed or left
 

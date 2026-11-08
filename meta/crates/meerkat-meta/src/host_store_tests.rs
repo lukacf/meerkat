@@ -1419,7 +1419,7 @@ async fn a_takeover_of_a_paused_process_fences_it_out_at_its_next_write() {
 #[tokio::test]
 async fn held_completion_marks_survive_a_restart_and_a_failover() {
     use crate::identity_first::held_bootstrap::{
-        clear_host_store_mark, mark_host_store, read_host_store_marks,
+        clear_host_store_mark, mark_host_store, read_host_store_rollback_marks,
     };
     let fixture = Fixture::new();
     let (alice, bob) = (id(ALICE), id(BOB));
@@ -1433,7 +1433,7 @@ async fn held_completion_marks_survive_a_restart_and_a_failover() {
     fixture.lapse();
     {
         let provider = fixture.open(&fixture.process()).await.expect("restart");
-        let marked = read_host_store_marks(provider.realm.documents())
+        let marked = read_host_store_rollback_marks(provider.realm.documents())
             .await
             .expect("read the marks");
         assert_eq!(marked, BTreeSet::from([alice.clone(), bob.clone()]));
@@ -1444,7 +1444,7 @@ async fn held_completion_marks_survive_a_restart_and_a_failover() {
 
     fixture.lapse();
     let provider = fixture.open(&fixture.process()).await.expect("failover");
-    let marked = read_host_store_marks(provider.realm.documents())
+    let marked = read_host_store_rollback_marks(provider.realm.documents())
         .await
         .expect("read the marks");
     assert_eq!(marked, BTreeSet::from([bob]));
@@ -3023,6 +3023,19 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
         "the queue refused the write",
         1_700_000_000_001,
     );
+    // A compaction harvest's failure of the same incarnation: a document of
+    // its own, apart from the other failures' prefix.
+    let harvest_failure = LifecycleEffectFailure::new(
+        mob_id.clone(),
+        "incarnation-1",
+        40,
+        ALICE,
+        3,
+        LifecycleEffectKind::CompactionHarvest,
+        1,
+        "the harvest failed",
+        1_700_000_000_003,
+    );
     {
         let provider = fixture.open(&fixture.process()).await.expect("open");
         let store = SpiMetadataStore::new(provider.realm.documents().clone());
@@ -3049,6 +3062,10 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .record_lifecycle_effect_failure(&failure)
             .await
             .expect("record the failure");
+        store
+            .record_lifecycle_effect_failure(&harvest_failure)
+            .await
+            .expect("record the harvest's failure");
     }
 
     fixture.lapse();
@@ -3110,7 +3127,20 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
             .await
             .expect("list the failures"),
-        vec![failure]
+        vec![failure.clone(), harvest_failure],
+        "the listing holds the harvest's failure beside the exit interview's"
+    );
+    store
+        .clear_lifecycle_effect_failure(&mob_id, 3, LifecycleEffectKind::CompactionHarvest, ALICE)
+        .await
+        .expect("clear the harvest's failure");
+    assert_eq!(
+        store
+            .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
+            .await
+            .expect("list the failures"),
+        vec![failure],
+        "clearing the harvest's failure keeps the others"
     );
     assert_eq!(
         store
@@ -3134,12 +3164,16 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
     );
 }
 
-/// A build on another host's empty cache reads the held-completion marks
-/// the realm keeps: an identity a held pass left owing its host a fresh held
-/// completion is refused a wake outside a held pass, typed, while an
-/// unmarked identity takes its turn.
+/// A build on another host's empty cache never reads the held-completion
+/// marks the realm keeps: they are the mirror written for a rollback to
+/// 0.9.10. Held creation follows the host's hold in each process, and this
+/// build's host holds nothing, so an identity an earlier process's held pass
+/// left unpublished takes its turn as any other.
+///
+/// RED before the marks stopped being read: carol's wake was refused from
+/// the realm's mark (`HeldCompletionOwed`).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failover_build_reads_the_held_completion_marks_the_realm_keeps() {
+async fn a_failover_build_never_reads_the_held_completion_marks_the_realm_keeps() {
     use crate::identity_first::held_bootstrap::mark_host_store;
     let fixture = Fixture::new();
     let mob_id = unique_mob_id("held-marks-failover");
@@ -3166,23 +3200,14 @@ async fn a_failover_build_reads_the_held_completion_marks_the_realm_keeps() {
         .identity_bootstrap_mode(crate::identity_first::IdentityBootstrapMode::LazyMaterialize),
     )
     .await;
-    let before = model.count();
-    match runtime
-        .identity_runtime()
-        .expect("an identity-first runtime")
-        .send(
-            &id(CAROL),
-            &ContentInput::Text("a wake outside a held pass".to_string()),
-        )
-        .await
-    {
-        Err(crate::identity_first::IdentityRuntimeError::HeldCompletionOwed { identity }) => {
-            assert_eq!(identity, id(CAROL));
-        }
-        Err(other) => panic!("carol owes a held completion, not: {other}"),
-        Ok(_) => panic!("carol owes a held completion: her wake must be refused"),
-    }
-    assert_eq!(model.count(), before, "carol's turn reached nothing");
+    send(
+        &runtime,
+        &provider,
+        &model,
+        CAROL,
+        "an identity this build's host does not hold",
+    )
+    .await;
     send(
         &runtime,
         &provider,

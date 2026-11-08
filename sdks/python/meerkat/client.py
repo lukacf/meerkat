@@ -243,6 +243,7 @@ from .mob import (
     MobLifecycleAction,
     MobMember,
     MobMemberCustodyDeferral,
+    MobMemberPreviewUnavailableUnknown,
     MobMemberRef,
     MobMemberSnapshot,
     MobPeerConnectivity,
@@ -877,6 +878,17 @@ class MeerkatClient:
         A handler that declares a ``dedupe_key`` parameter also receives the
         call's :class:`ToolCallDedupeKey` (``None`` when the call has none). A
         resumed run that dispatches the same call again sends the same key.
+
+        A handler that declares a ``requester`` parameter receives the
+        :class:`ToolCallRequester` of the run the call serves (``None`` when
+        the run has none). The runtime sets it, never the arguments, so a tool
+        that acts in one person's name can refuse every other requester::
+
+            @client.tool("read_mail", description="Read the owner's mail")
+            async def read_mail(arguments: dict, requester=None) -> str:
+                if requester is None or requester.direct_principal != OWNER:
+                    raise PermissionError("this mailbox serves its owner only")
+                ...
         """
 
         def decorator(fn: Any) -> Any:
@@ -8610,25 +8622,31 @@ class MeerkatClient:
     @staticmethod
     def _parse_member_preview_unavailable(
         raw: dict[str, Any], context: str
-    ) -> WireMemberPreviewUnavailable | None:
+    ) -> WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | None:
         """Return the typed reason a status read carries no observed preview.
 
         Absent or ``null`` means ``output_preview``/``tokens_used`` are
-        observations; a value outside the closed vocabulary fails closed.
+        observations. The field is advisory and its vocabulary may grow: a
+        reason this SDK does not know is read as ``{"unknown": <the value>}``,
+        so a newer server never fails the read. A value that is not a string
+        is malformed and fails closed.
         """
         value = raw.get("preview_unavailable")
         if value is None:
             return None
-        if not isinstance(value, str) or value not in {
+        if not isinstance(value, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
+            )
+        if value in {
             "observation_deadline",
             "read_failed",
             "session_absent",
             "not_observed_while_retiring",
+            "store_refused",
         }:
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
-            )
-        return cast(WireMemberPreviewUnavailable, value)
+            return cast(WireMemberPreviewUnavailable, value)
+        return {"unknown": value}
 
     @staticmethod
     def _parse_member_registration_refusal(

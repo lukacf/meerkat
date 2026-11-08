@@ -68,7 +68,8 @@ pub mod agent;
 pub mod llm_client;
 pub mod tool_surface;
 pub use administration_entry::{
-    AdministrationEntry, AdministrationEntryRefusal, EnteredAdministration,
+    AdministeredChange, AdministeringPrincipal, AdministrationEntry, AdministrationEntryRefusal,
+    AdministrationOutcome, AdministrationRecord, AdministrationRecorder, EnteredAdministration,
 };
 pub use llm_client::{
     ControllerCredentialRequirement, ControllerFactsUnavailable, ControllerModelClient,
@@ -757,7 +758,7 @@ pub use types::{
     TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
     ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
     ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage,
     TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
@@ -772,10 +773,11 @@ pub use auth::{
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
     AuthRouteHints, AuthStatus, AuthStatusPhase, CredentialObservation, GoogleAuthMetadata,
     GoogleRouteHints, HttpAuthorizationContent, HttpAuthorizationReceipt, HttpAuthorizationRequest,
-    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer, OpenAiAuthMetadata,
-    OpenAiRouteHints, ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation,
-    ResolvedAuthEnvelope, ResolvedAuthKind, TokenLifecycleClearError,
-    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
+    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer,
+    HttpRequestInitiator, OpenAiAuthMetadata, OpenAiRouteHints, ProviderAuthMetadata,
+    PublishedAuthStatus, RefreshFailureObservation, ResolvedAuthEnvelope, ResolvedAuthKind,
+    TokenLifecycleClearError, lease_snapshot_expires_at_datetime,
+    mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker, persisted_auth_mode_is_directly_creatable,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,

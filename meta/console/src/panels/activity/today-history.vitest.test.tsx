@@ -18,6 +18,10 @@ const RUN = "01900000-0000-7000-8000-00000000c0a1";
 const TURN = "01900000-0000-7000-8000-00000000c0b1";
 const RETIRED_RUN = "01900000-0000-7000-8000-00000000c0a2";
 const RETIRED_TURN = "01900000-0000-7000-8000-00000000c0b2";
+// Today reads the local day from the clock, and these frames sit 8 to 12
+// minutes before NOW: pin Date (only) to a local midday, or a run just after
+// midnight moves them into yesterday.
+const NOW = new Date("2026-06-10T12:00:00").getTime();
 
 let serial = 0;
 function frame(identity: string, event: string, minutesAgo: number, data: Record<string, unknown>, extra: Partial<ConsoleFrame> = {}): ConsoleFrame {
@@ -27,7 +31,7 @@ function frame(identity: string, event: string, minutesAgo: number, data: Record
     event,
     identity,
     cursor: `console:${serial}`,
-    timestampMs: Date.now() - minutesAgo * 60_000,
+    timestampMs: NOW - minutesAgo * 60_000,
     sourceKind: "console_event",
     data,
     ...extra,
@@ -92,6 +96,8 @@ function transport(queries: ConsoleTimelineQueryInput[]): MetaConsoleTransport {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
   vi.stubGlobal("localStorage", window.localStorage);
   window.localStorage.clear();
   window.sessionStorage.clear();
@@ -108,6 +114,7 @@ afterEach(async () => {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 it("loads each agent's day into the ledger, the retired member's included", async () => {

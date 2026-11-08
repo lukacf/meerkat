@@ -29,7 +29,9 @@ pub(crate) const MCP_APP_CALL_TOOL_ROUTE: &str = "/console/mcp-apps/call-tool";
 
 /// Whether `method` is a console change the audit log records: every
 /// mutating console method but conversation traffic (sends and their
-/// recovery, voice and live media), whose record is the transcript.
+/// recovery, voice and live media), whose record is the transcript. A
+/// durable decision withdraw is a console change too, recorded where
+/// `POST /console/rpc` serves it ([`ConsoleAuditIntent::of_console_rpc`]).
 pub(super) fn is_audited_console_method(method: &str) -> bool {
     is_console_mutating_rpc_method(method)
         && !matches!(
@@ -69,6 +71,31 @@ impl ConsoleAuditIntent {
                 request.method.clone(),
                 audit_target(&request.params),
             )
+        })
+    }
+
+    /// The intent to record a `POST /console/rpc` request, as [`Self::of`],
+    /// and a durable decision change the Console serves the caller there
+    /// (the withdraw, while access control is enforced).
+    pub(super) fn of_console_rpc(
+        state: &ConsoleJsonState,
+        auth: &ConsoleHttpAuthContext,
+        request: &JsonRpcRequest,
+    ) -> Option<Self> {
+        Self::of(state, auth, request).or_else(|| {
+            let log = state.console_audit.as_ref()?;
+            crate::durable_decisions::console::is_served_decision_change(
+                &request.method,
+                &super::console_decision_caller(auth),
+            )
+            .then(|| {
+                Self::new(
+                    Arc::clone(log),
+                    auth,
+                    request.method.clone(),
+                    audit_target(&request.params),
+                )
+            })
         })
     }
 
@@ -162,7 +189,7 @@ pub(crate) fn status_json_rpc_row(
     target: Identifiers,
     answer: &(axum::http::StatusCode, Value),
 ) -> ConsoleAuditEntry {
-    ConsoleAuditEntry::answered(actor, method, target, &answer.1)
+    json_rpc_row(actor, method, target, &answer.1)
 }
 
 /// An MCP app tool call's answer, as the route gives it, and whether the

@@ -108,7 +108,13 @@ Admission remains durable per input, but there is no promise of one model call
 per input. Applications that require one side effect per admitted input must
 iterate the durable input records deterministically in a tool or host-owned
 worker. Do not rely on the model to notice and act once for every item in a
-batched prompt.
+batched prompt. Inputs of different original requesters never share a turn:
+the runtime coalesces only inputs that carry the same requester, or none, and
+a steer from another requester waits for a turn of its own instead of joining
+a running one. Steers keep the order they were admitted in across
+requesters: a steer waiting for a turn of its own keeps its place, so a later
+steer of the running turn's own requester waits behind it too rather than
+join the running turn.
 </Warning>
 
 ### Ordered System messages
@@ -1005,9 +1011,10 @@ session that commits each round durably) fails the
 completion waiters of the inputs it keeps with
 `CompletionWaitError::RequeuedAcrossStop`. Such an input is neither failed nor
 consumed: it stays durably queued, and the session's next start runs it, or
-ends it abandoned with reason `requeue_expired` when it is older than the
-Shutdown's max age by then. Every start that still finds it queued (after a
-crash before it ran, say) checks its age again. Retiring, archiving or
+ends it abandoned with reason `requeue_expired` when more than the
+Shutdown's max age has passed since the Shutdown kept it, however long before
+the Shutdown it was admitted. Every start that still finds it queued (after a
+crash before it ran, say) checks that age again. Retiring, archiving or
 destroying the session before a start runs it ends it as any other queued
 input: abandoned with reason `retired` (retire, archive) or `destroyed`. Do
 not resubmit it; after the restart, the same

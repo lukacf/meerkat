@@ -623,8 +623,14 @@ async fn bounded_read(path: &Path) -> Result<Vec<u8>, ConnectError> {
             "A retained integration document is unavailable. Service finalization did not start.",
         )
     };
-    let file = tokio::fs::File::open(path).await.map_err(|_| failed())?;
-    if !file.metadata().await.map_err(|_| failed())?.is_file() {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    // Refuse a leaf symlink and avoid waiting for a FIFO writer before fstat.
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    let file = options.open(path).await.map_err(|_| failed())?;
+    let metadata = file.metadata().await.map_err(|_| failed())?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
         return Err(failed());
     }
     let mut bytes = Vec::new();
@@ -637,6 +643,10 @@ async fn bounded_read(path: &Path) -> Result<Vec<u8>, ConnectError> {
     }
     Ok(bytes)
 }
+
+#[cfg(all(test, unix))]
+#[path = "plain_retained_read_tests.rs"]
+mod retained_read_tests;
 
 #[cfg(test)]
 mod selected_tests {

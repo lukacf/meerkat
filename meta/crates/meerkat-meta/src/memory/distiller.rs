@@ -737,6 +737,21 @@ pub struct DiscardEntry {
     pub range: Option<(u64, u64)>,
 }
 
+impl DiscardEntry {
+    /// The discard one published compaction memory record holds: its
+    /// content and its source range.
+    pub(crate) fn from_record(record: meerkat_core::memory::MemoryRecord) -> Self {
+        Self {
+            range: record
+                .metadata
+                .source
+                .source_range()
+                .map(|range| (range.start(), range.end())),
+            content: record.content,
+        }
+    }
+}
+
 /// Host-side read over a session's compaction discards.
 #[async_trait]
 pub trait CompactionDiscardSource: Send + Sync {
@@ -837,16 +852,7 @@ impl CompactionDiscardSource for HnswDiscardSource {
                 )
                 .await
                 .map_err(|err| DistillerError::Store(err.to_string()))?;
-            for record in page.records {
-                entries.push(DiscardEntry {
-                    range: record
-                        .metadata
-                        .source
-                        .source_range()
-                        .map(|range| (range.start(), range.end())),
-                    content: record.content,
-                });
-            }
+            entries.extend(page.records.into_iter().map(DiscardEntry::from_record));
             match page.next_offset {
                 Some(next) if entries.len() < limit => offset = next,
                 Some(_) => {
@@ -1531,7 +1537,22 @@ impl DistillerEngine {
         session_key: &str,
         cause: DistillCause,
     ) -> DistillOutcome {
-        let outcome = self.distill_inner(identity, session_key, cause).await;
+        self.distill_now_with(identity, session_key, cause, None)
+            .await
+    }
+
+    /// [`Self::distill_now`]; a compaction-cause run given `discards`
+    /// harvests them instead of reading the discard source.
+    async fn distill_now_with(
+        self: &Arc<Self>,
+        identity: &str,
+        session_key: &str,
+        cause: DistillCause,
+        discards: Option<Vec<DiscardEntry>>,
+    ) -> DistillOutcome {
+        let outcome = self
+            .distill_inner(identity, session_key, cause, discards)
+            .await;
         self.with_window(identity, session_key, |state| {
             state.in_flight = false;
         });
@@ -1579,6 +1600,7 @@ impl DistillerEngine {
         identity: &str,
         session_key: &str,
         cause: DistillCause,
+        discards: Option<Vec<DiscardEntry>>,
     ) -> DistillOutcome {
         // A transcript private to one person is never distilled, whatever
         // the cause: its memory would reach no one else, but nothing in it
@@ -1606,26 +1628,33 @@ impl DistillerEngine {
         // not burn a budgeted run.
         let (evidence_text, evidence_range, window_end, head_revision) = match cause {
             DistillCause::Compaction => {
-                let Some(compaction) = self.compaction.as_ref() else {
-                    return DistillOutcome::Skipped {
-                        reason: SKIP_NO_DISCARD_SOURCE.to_string(),
-                    };
-                };
-                let entries = match compaction
-                    .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
-                    .await
-                {
-                    Ok(entries) => entries,
-                    Err(err) => {
-                        tracing::warn!(
-                            identity,
-                            session_key,
-                            error = %err,
-                            "agent memory distiller: compaction harvest failed"
-                        );
-                        return DistillOutcome::Skipped {
-                            reason: format!("compaction harvest failed: {err}"),
+                let entries = match discards {
+                    // A batch Core's cold settle published and answered:
+                    // the discards are its records themselves.
+                    Some(entries) => entries,
+                    None => {
+                        let Some(compaction) = self.compaction.as_ref() else {
+                            return DistillOutcome::Skipped {
+                                reason: SKIP_NO_DISCARD_SOURCE.to_string(),
+                            };
                         };
+                        match compaction
+                            .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
+                            .await
+                        {
+                            Ok(entries) => entries,
+                            Err(err) => {
+                                tracing::warn!(
+                                    identity,
+                                    session_key,
+                                    error = %err,
+                                    "agent memory distiller: compaction harvest failed"
+                                );
+                                return DistillOutcome::Skipped {
+                                    reason: format!("compaction harvest failed: {err}"),
+                                };
+                            }
+                        }
                     }
                 };
                 if entries.is_empty() {
@@ -2009,6 +2038,70 @@ impl DistillerEngine {
         let session_key = session_key.to_string();
         tokio::spawn(async move {
             engine.distill_now(&identity, &session_key, cause).await;
+        });
+    }
+
+    /// A compaction-cause harvest of a session that ended owing a
+    /// compaction's projection. Its evidence is `discards`, the batch
+    /// Core's cold settle published and answered
+    /// (`OwedCompactionSettlement::Settled`), or, with none, the session's
+    /// compaction discards read from its memory, as the
+    /// `CompactionCompleted` harvest reads them. Bounded like the
+    /// pre-rotation distillation: answers the run's outcome, or the bound
+    /// it did not end within.
+    pub(crate) async fn harvest_compaction_within_bound(
+        self: &Arc<Self>,
+        identity: &str,
+        session_key: &str,
+        discards: Option<Vec<DiscardEntry>>,
+    ) -> Result<DistillOutcome, Duration> {
+        let timeout = self.pre_rotation_timeout;
+        let harvest =
+            self.distill_now_with(identity, session_key, DistillCause::Compaction, discards);
+        if let Ok(outcome) = tokio::time::timeout(timeout, harvest).await {
+            return Ok(outcome);
+        }
+        tracing::warn!(
+            identity,
+            session_key,
+            timeout_ms = timeout.as_millis() as u64,
+            "agent memory distiller: the settled compaction's harvest timed out; the step \
+             proceeds without it"
+        );
+        if let Some(sink) = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            sink.emit(
+                crate::memory::events::MemoryTimelineEvent::DistillationTimedOut {
+                    identity: identity.to_string(),
+                    session_key: session_key.to_string(),
+                    cause: DistillCause::Compaction.as_str().to_string(),
+                },
+            );
+        }
+        Err(timeout)
+    }
+
+    /// [`Self::harvest_compaction_within_bound`], detached: of an answered
+    /// batch, or, with none, of the session's compaction discards read from
+    /// its memory, for a session that goes on (Core refused the step that
+    /// would have ended it), off every critical path.
+    pub(crate) fn spawn_compaction_harvest(
+        self: &Arc<Self>,
+        identity: &str,
+        session_key: &str,
+        discards: Option<Vec<DiscardEntry>>,
+    ) {
+        let engine = self.clone();
+        let identity = identity.to_string();
+        let session_key = session_key.to_string();
+        tokio::spawn(async move {
+            engine
+                .distill_now_with(&identity, &session_key, DistillCause::Compaction, discards)
+                .await;
         });
     }
 }

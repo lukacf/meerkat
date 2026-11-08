@@ -68,7 +68,7 @@ const AFTER_CREATE_TEST: &str = "each_customized_build_tells_after_create_once";
 const AFTER_CREATE_FAILS_TEST: &str = "a_failing_after_create_leaves_the_build_standing";
 const SELF_SEND_TEST: &str =
     "an_after_create_that_sends_to_its_own_identity_does_not_wait_out_the_callback_window";
-const RESPAWN_BUILDS_TEST: &str = "a_respawn_of_a_built_member_customizes_and_builds_it_once";
+const RESPAWN_BUILDS_TEST: &str = "a_respawn_of_a_built_member_builds_it_once";
 /// How long the send made inside an `after_create` may take to answer. The
 /// gateway waits up to 130 seconds for a callback, so a send that waits for
 /// that callback's own identity lock answers only after this.
@@ -1169,31 +1169,27 @@ fn an_after_create_that_sends_to_its_own_identity_does_not_wait_out_the_callback
     );
 }
 
-/// A respawn of a built member asks the host's customizer once and builds
-/// the member once. Core keeps the retired member's session archived, so the
-/// respawn's seat revives the member on it; that revival stays live, and
-/// Core's wake finds the member live and prepares nothing.
+/// A respawn of a built member builds the member once. Core keeps the
+/// retired member's session archived, so the respawn's declaration revives
+/// the member on it, Dormant, building nothing: its seat records the build
+/// the declaration composed (the customizer's first call of the respawn).
+/// The respawn's wake then builds the member once on that session, and the
+/// build's preparation asks the customizer for the member's tools (its
+/// second call), as every build of a registered identity does.
 ///
 /// The first delivery builds the member (its wake asks the customizer once).
 /// From the respawn to the end of the run:
-/// - one `customize_build`, while the respawn runs, and none after it;
+/// - two `customize_build` calls, while the respawn runs (the declaration's
+///   composed seat build, then the build's preparation), and none after it;
 /// - one `after_create`, of the session the respawn keeps;
 /// - one build: the identity's tool record, which each build Core reports
 ///   writes again and a warm of the live member writes once more, reads
 ///   revision 3: the first delivery's build, the respawn's, then the warm;
-/// - the turn after the respawn is served by the handler scope of that one
-///   call: the driver names each call's tool after its scope, and the live
-///   member offers the tool of the respawn's call only.
-///
-/// This row fails on a respawn that builds the member twice only when Core
-/// accepts the release the seat step used to make right after the revival,
-/// as it usually does: when Core refuses that release (the member's runtime
-/// binding has not landed yet), such a respawn makes one call too, and this
-/// row passes. The deterministic RED legs are the seat step's rows
-/// (`identity_first::runtime::seat` tests), whose Core double always
-/// accepts the release.
+/// - the turn after the respawn is served by the handler scope of the
+///   build's call: the driver names each call's tool after its scope, and
+///   the live member offers the tool of the build's call only.
 #[test]
-fn a_respawn_of_a_built_member_customizes_and_builds_it_once() {
+fn a_respawn_of_a_built_member_builds_it_once() {
     serve_if_host_process();
     let ops = [
         "meta/send",
@@ -1234,8 +1230,9 @@ fn a_respawn_of_a_built_member_customizes_and_builds_it_once() {
         .collect();
     assert_eq!(
         respawn_calls.len(),
-        1,
-        "the respawn asks the customizer once: {:?}",
+        2,
+        "the respawn's declaration composes its seat's build, and its one build prepares the \
+         member's tools: {:?}",
         run.customize_calls
     );
     assert!(
@@ -1273,7 +1270,7 @@ fn a_respawn_of_a_built_member_customizes_and_builds_it_once() {
         .collect();
     assert_eq!(
         offered,
-        [scoped_tool(respawn_calls[0]).as_str()],
-        "the member after the respawn offers the tool of the respawn's one call: {warmed}"
+        [scoped_tool(respawn_calls[1]).as_str()],
+        "the member after the respawn offers the tool of its build's call: {warmed}"
     );
 }

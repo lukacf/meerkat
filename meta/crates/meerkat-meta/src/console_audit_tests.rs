@@ -726,7 +726,7 @@ async fn a_change_whose_caller_went_away_writes_its_row() -> TestResult {
             binding: None,
             placement: None,
         })
-        .await;
+        .await?;
     let provider = Arc::new(HeldProvider::default());
     identity_runtime
         .set_agent_memory(Some(AgentMemoryRuntimeInjector::new(
@@ -1188,7 +1188,7 @@ async fn a_panicked_change_writes_its_row() -> TestResult {
             binding: None,
             placement: None,
         })
-        .await;
+        .await?;
     identity_runtime
         .set_agent_memory(Some(AgentMemoryRuntimeInjector::new(
             Arc::new(PanickingProvider),

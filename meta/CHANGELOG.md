@@ -35,10 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answer `409` and `401`. `/console/mcp-apps/call-tool` answers `409`
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
-- Rust: `MemoryAuthor::Operator` is a struct variant with an optional
-  `principal`: `MemoryAuthor::Operator { principal: None }` is the former
-  value, and a match on it adds `{ .. }`. Its JSON form is unchanged when
-  no principal is named. `ConsoleSessionFence` gains `revoked_by`.
 
 - The console's `meta/gating/decide` decides as the signed-in person on the
   connection. A request that names `approver_id` is refused (`-32602`), and
@@ -86,6 +82,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the new refusal kind `unsupported_param` (with `param`); 0.9.10
   accepted and ignored them.
 
+- Rust: `ConsoleUiConfig` gains `sign_out` (`Option<ConsoleSignOutConfig>`,
+  `#[serde(default)]`). A host that builds the struct literally adds
+  `sign_out: None` to keep today's behaviour.
+
+- Forge: a single shared console account
+  (`{"authentication":"local-password"}`) no longer approves frontend
+  changes, answers the controller review or answers the Forge setup
+  bridge's prompts: each is refused with 403 `approver_unauthenticated`.
+  The native Toolkit setup panel's answers are refused by the console itself
+  (403). Reads stay open. Named accounts
+  (`{"authentication":"local-accounts"}`) sign each person in as themselves;
+  they need the Meta runtime, so on the MobKit runtime the console approves
+  nothing.
+
+- `IdentityRuntime::register` and `IdentityRuntime::update_spec` declare the
+  identity in Core's mob and return Core's answer for it,
+  `Result<DeclaredIdentityAnswer, IdentityRuntimeError>` (`register` returned
+  `()` and `update_spec` `Result<(), IdentityRuntimeError>`); a caller
+  handles the result. `register` can now fail: with the new
+  `IdentityRuntimeError::DeclarationNotApplied { retryable, detail }` (error
+  kind `identity_declaration_not_applied`) when Core answered nothing for the
+  identity, retryable when another declared apply of the mob stayed in
+  progress past a bounded wait; when the identity's first-boot row
+  contradicts Core's history; when the build its host composes fails; or
+  when the first-boot manifest or Core's member history cannot be read. A
+  `match` over every `IdentityRuntimeError` variant adds an arm for the new
+  one.
+
+- `SessionBridge` has a new method, `apply_declared_roster`: Core's declared
+  apply (`MobHandle::apply_declared_roster`) of a roster of
+  `DeclaredIdentity` values, answered with a `DeclaredRosterAnswer` (a
+  `DeclaredIdentityAnswer` per identity, the unlisted identities of a
+  complete roster, and the first-boot requests Core carried out). Its
+  default answers `BridgeError::Unsupported` and logs at error level, so a
+  registration through a bridge that does not implement it declares nothing
+  and is refused (`DeclarationNotApplied`). A host's own wrapper of a session
+  bridge forwards it to the bridge it wraps; a test double with no Core mob
+  can answer `DeclaredRosterAnswer::kept_for(&roster)`.
+
+- `RestoreFlowResult` has a new field, `unlisted`: what the host's whole
+  roster did with each identity Core held declared that the roster does not
+  list (`UnlistedIdentityAnswer`: its member retired, its declaration
+  removed, its retirement failed, or a legacy member left as it is). A struct
+  literal of `RestoreFlowResult` sets it; `restore_flow` and
+  `lazy_register_flow`, which declare part of the roster, answer it empty.
+
+- `add_member_held` (on the identity-first context): a held add's hold
+  lasts for the process. An add that aborted keeps its identity owed
+  (`HeldCompletionOwed`) for every other wake and reset in this process;
+  after a restart the host holds the identity again through its held
+  bootstrap or a re-add, and an identity the host no longer holds is seated
+  as any declared identity is. 0.9.10 kept the add's owed state across a
+  restart, read back from its durable mark.
+
+- The console send routes refuse the `origin_kind` values reserved for
+  Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
+  `system`): `POST /console/send` answers `400` `reserved_origin_kind`, and
+  `meta/console/send` (JSON and multipart RPC) answers invalid params
+  (`-32602`). Nothing is recorded for a refused send. `operator` and
+  `operator_probe` are accepted as before.
+
+- Rust: `BridgeDelivery` gains the public fields `requester` and
+  `sender_label`, so code that builds it literally sets them (`None` keeps
+  the previous behaviour).
+
+- Rust: `MemoryAuthor::Operator` is a struct variant with an optional
+  `principal`: `MemoryAuthor::Operator { principal: None }` is the former
+  value, and a match on it adds `{ .. }`. Its JSON form is unchanged when
+  no principal is named. `ConsoleSessionFence` gains `revoked_by`.
+
+- Durable decisions bring three access actions, `decisions.view`,
+  `decisions.decide` and `decisions.admin`, and an access rule whose actions
+  hold `*` or `decisions.*` grants them. Review such rules when access control
+  is enforced: `decisions.admin` reads every durable decision whole on the
+  Console and withdraws one.
+- `AccessApprover` has two new public fields, `ingress_subjects` and
+  `people`, so a struct literal of it needs them (or
+  `..Default::default()`). The TOML and JSON forms are unchanged when they
+  are empty.
+- `AccessConfigError` has six new variants, `InvalidIngressName`,
+  `OperatorIngressWithSubject`, `InvalidIngressSubject`,
+  `ApproverPersonWithoutIdentity`, `UnknownIngress` and
+  `DuplicatePersonIdentity`; an exhaustive match over it needs arms for them.
+
+- `SessionBridge` has a new method, `identity_entry`: Core's entry of an
+  identity's name (`MobHandle::identity_entry`, read from the machine state
+  the mob's actor published: no store read, no actor command, no wake; for
+  a member Core holds Broken, `MobSessionBridge` also reads the member's
+  durable resume hold, see Known limitations), as a
+  `CoreIdentityEntry`: how Core holds the name (`CoreNameKind`), the member
+  that holds it (`CoreMember`: generation, session, role, runtime mode,
+  retiring, and Core's Broken fact, `CoreBrokenMember`, with its durable
+  resume hold), the host preparation its entry owes and the session its last
+  member's retirement archived. Every view of an identity reads it (status,
+  statuses, member health, roster inspection, `is_active`, the bootstrap
+  snapshot), so does the choice of an identity's door and the memory
+  injection's runtime mode. Its default answers `BridgeError::Unsupported`:
+  over a bridge that does not implement it those reads refuse typed
+  (`-32052`), never stand in for Core's fact. A host's own wrapper of a
+  session bridge forwards it to the bridge it wraps.
+- `SessionBridge::broken_members` is removed: the views read Core's Broken
+  fact from `identity_entry`. An implementation drops the method.
+- `IdentityRuntime::is_active` returns `Result<bool, IdentityRuntimeError>`
+  and `IdentityRuntime::identity_bootstrap_member_ids` returns
+  `Result<Vec<meerkat_mob::AgentIdentity>, IdentityRuntimeError>`: a read
+  Core could not serve is typed (`IdentityHistoryUnavailable`,
+  `MemberHistoryUnavailable`), where it answered `false` and an empty list.
+  A caller handles the result.
+- `IdentityRuntimeError` gains `IdentityNameUnreadable { identity }`: a name
+  this runtime has not registered whose record Core cannot read (see
+  Changed), answered `-32014` with the new kind `identity_name_unreadable`.
+  The enum is exhaustive, so a downstream exhaustive match needs the new
+  arm, or a wildcard arm.
+
 - The labels only Meta writes are reserved: `side_chat_of`,
   `side_chat_of_session`, `side_chat_creator` and `console.private_to`.
   Member creation refuses each of them as invalid params naming the label:
@@ -95,12 +205,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (a console side chat fork, the host fork API) no longer inherits a side
   chat's lineage labels from its source; a fork Meerkat makes (`fork_off`,
   a council participant) still copies them, where they count for nothing.
+
 - Rust: `identity_creation::META_RESERVED_LABEL_KEYS` lists the four as
   well (`[&str; 11]`).
+
 - Rust: `MemoryStackSeams` gains `private_members`, the source of the
   members private to a person, whose memory no Steward dream covers. A host
   that builds the struct literally adds `private_members: None` to keep
   today's behaviour.
+
 - A console request that names a member hidden from the caller by its
   private owner is answered as one naming a member that does not exist:
   each method gives its own answer for an absent member (for example
@@ -111,10 +224,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   subscription, a schedule, a remembered fact, a topology edge, a WorkGraph
   goal or attention target), is refused as
   `-32001` `unknown identity: <id>` with no data.
+
 - A member seated exempt from the mob definition's wiring rules (every side
   chat) is outside the definition's role-wide flow steps (Meerkat): a
   role-wide `meta/run_flow` no longer reaches a side chat; role targets that
   name one still do.
+
 - The `/healthz` JSON summary counts broken members (`broken_member_count`)
   and names none: `broken_members` is gone from it (`meta/status` on the
   stdio gateway still names them).
@@ -135,9 +250,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so a page that rebinds its own name to the console's address cannot
   drive it.
 
-- A console side chat's `memory` tool writes to the side chat's own
-  identity: it no longer writes to the agent it was forked from, whose
-  tools it inherits.
 - Console approval decisions take the approver only from the signed-in
   person on the connection, checked again right before the decision is
   applied. Before, an open console decided as whatever approver a request
@@ -155,6 +267,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   against, so no edit lands over one its client never saw.
 - On a console without an access controller, a caller can no longer end
   another person's sessions.
+
+- A Flow Editor change on the console's listener re-checks, right before it
+  writes the draft store or writes a deploy's or a validation's archive and
+  runs `rkat`, that its caller's login is still current, and is refused with
+  `caller_not_current` otherwise; nothing is written or run.
+
+- Forge: logout also ends the login in the console
+  (`meta/console/sign_out`), so tokens minted for it stop working there;
+  when the console does not confirm, the front still ends its own session
+  and says so. Failed sign-ins are limited per account and per client
+  address, so one person's mistakes no longer lock out the others, and
+  login forms and sessions are bounded per address and per account. The
+  client address is the connection's peer, never a forwarded-for header;
+  an attempt counts before its password check, checks running at once are
+  capped, and every account costs the same scrypt check. Signing in over a
+  live session ends the earlier login, and a path with dot or empty
+  segments is refused.
+- Forge: with OIDC sign-in the console accepts only tokens the front
+  signed under its own issuer: not the provider's ID token, not another key
+  or issuer, not an unverified or missing email, and only the listed
+  people. A sign-in's state is spent once and bound to the browser that
+  started it; the provider's code exchange carries the PKCE verifier and
+  the client's credentials, and its tokens never reach the browser.
+
+- A console side chat's `memory` tool writes to the side chat's own
+  identity: it no longer writes to the agent it was forked from, whose
+  tools it inherits.
 
 ### Upgrade
 
@@ -176,9 +315,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `Host` serves the router on its own server instead;
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
-- An access configuration that names the new `audit.view` action is refused
-  by earlier releases (unknown action): keep it out of a configuration an
-  earlier gateway may still load.
 
 - Console clients stop sending `approver_id` to `meta/gating/decide`.
   People who decide approvals in the console sign in as themselves (an OIDC
@@ -211,6 +347,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   controller, call `meta/console/revoke_sessions` on the runtime's RPC
   surface, or install an access controller and revoke as an access admin.
 
+- Hosts that pass `storageNamespace` to the stock console: messages queued
+  under the namespace alone are offered once, as **Older queued messages**,
+  to the first user who loads the console after the upgrade; drafts kept
+  under it start empty.
+
+- Sign-outs live in the console session fence record
+  (`console-session-fences.json`) beside the revocations. A binary without
+  sign-out keeps them in the file but does not enforce them while it runs;
+  they apply again after the upgrade.
+
+- Forge: a product application set up with one shared console account
+  moves to named accounts on its next update. Every later Build of its
+  source declares `local-accounts`, and the installation's owner accepts
+  that one change and no other: the update changes only
+  `application/console.json` (`local-password` to `local-accounts`); the
+  private fields, the installation's own account and password, and the
+  operator stay as they are. The installation's own account then becomes
+  the operator's personal account and the first administrator: if others
+  know its Console password, change it (Change private settings) when you
+  switch. Add an account for each further person with
+  `.venv/bin/python setup.py` on the deployment computer.
+- Forge: named accounts need the Meta runtime. An application on the MobKit
+  runtime keeps one shared account, whose console approves nothing.
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console. To approve there,
+  build the application again on the product route.
+- Forge: the console keeps its access rules in
+  `.mobkit/console-access.toml`, copied once from `config/access.toml` at
+  the first start. An installation whose console already rewrote
+  `config/access.toml` needs its original bytes restored once. A rollback
+  to a package built by an earlier Forge leaves that copy as it is, but the
+  earlier package's console reads `config/access.toml`, so the
+  administrators added in the console are missing there and access fails
+  closed. Do not add them again in that console: it would rewrite
+  `config/access.toml`, and Forge would then refuse to start, change or
+  update the installation. Update forward instead; the console then reads
+  its kept copy again.
+- Forge: OIDC sign-in is an application's own choice, for a new
+  installation: no update moves an installation to it or from it. Forge's
+  normal build route always produces named accounts, so OIDC must come from
+  the application's own source. Register
+  `<Console address>/login/callback` as a redirect URI with the identity
+  provider (`http://127.0.0.1:<port>/login/callback` for the local
+  Console). Keep `.mobkit/console-oidc-issuer` and
+  `.mobkit/console-oidc-signing.pem` in the installation's backups, and keep
+  those backups private: the console knows each person by the issuer, so a
+  new one makes everyone new to the console, and the key signs the console
+  tokens of every person, administrators included.
+
+- The held-completion marks (`<state>/held-completion-owed/`, and the
+  host store's documents) and the identity rotation records are still
+  written for a rollback to 0.9.10 only, with the contents 0.9.10 writes:
+  a rotation's record is written after Core's answer (see Changed), and a
+  rotation Core finishes on its own (a reset or delete a stop interrupted,
+  which Core finishes at the next start) removes its record once the
+  lifecycle projection reads the rotation's end. Nothing online reads
+  them. The gateway's identity census
+  (`held_completion_owed`) and the offline `identity-reset` read the marks
+  as diagnostics until the mirror is removed (the reset only refuses on a
+  mark). A stale mark stays for a rollback's read, which drops it.
+- A host that added a member held and wants it held again after a restart
+  holds it through its held bootstrap or a re-add (see Breaking).
+
+- A detached callback job the gateway submits stores its requester as one
+  more optional field. A gateway rolled back to 0.9.10 while such a job runs
+  removes the field for good on the job's next write: after upgrading again,
+  the job's attempts name no requester (a person-scoped tool refuses them),
+  and a replay of the submitting call is refused as a submission conflict.
+  A host store's own `job_store` (`HostStoreMetaStores::job_store`) persists
+  the requester, compares it when it deduplicates a submission and keeps it
+  through compare-and-swap, as Core's notes describe.
+
+- An access configuration that names the new `audit.view` action is refused
+  by earlier releases (unknown action): keep it out of a configuration an
+  earlier gateway may still load.
+
+- An access configuration that names `decisions.view`, `decisions.decide`,
+  `decisions.admin` or `decisions.*` does not load in an earlier Meta, and
+  neither does an approver id whose only holders are `ingress_subjects` or
+  `people` entries (an earlier Meta ignores both fields and refuses an
+  approver without holders): it refuses to start with that configuration.
+  Before rolling back, remove those actions from the rules and give each
+  such approver id its `subjects` or `groups`, or restore the configuration
+  saved before the upgrade. An earlier `rpc_gateway` also refuses to start
+  with `runtime_options.decisions`, with an error that names the field
+  (`unsupported runtime_options fields: decisions`): leave it out of the
+  launch before rolling back.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -229,6 +453,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An access admin releases anyone's WorkGraph claim from the console. The
   release is bound to its revision, and the work graph's Released event
   records the admin and the claim released (`break_glass`).
+
+- The stock console's top bar names who the console acts as (the signed-in
+  person, a shared account, a service, or nobody on an open console), with
+  **Sign out** when the console configuration names `[sign_out]`: `href`, a
+  same-origin path, and `method`, `"get"` (a link, the default) or `"post"`
+  (a form, for a front whose sign-out takes a POST).
+- Approval cards in the stock console say whom a request waits for: **For
+  you**, or **Waiting for** the approver it names (with no decision offered).
+  A request for you that someone else decides keeps its card, saying how and
+  by whom, read from the gating audit.
+
+- `meta/console/sign_out` signs the caller out of one console login: the
+  login its token belongs to (the issuer's `sid`, or the token alone when it
+  carries none). The Console refuses that login's tokens from then on and
+  ends the streams and voice sessions they opened; the caller's other logins
+  and its schedules are untouched. A principal keeps at most 64 sign-outs,
+  and the next folds the oldest into one fence of all its logins older than
+  that sign-out, which stops no schedule. Revoking a principal still ends
+  every login of that principal.
+
+- The Flow Editor RPC on the console's listener takes
+  `expected_caller_scope` on its changes (draft writes, deploys with
+  `execute`, validations with `rkat_validate`) and refuses a change made for
+  another caller with `caller_changed`. Its `meta/capabilities` reports the
+  caller's scope as `auth.caller_scope`, and the stock Flow Editor sends it
+  back with every request; after a 401 or a refusal of its caller it reads
+  the capabilities again before it sends another request. The changes are
+  the ones a candidate launch refuses, read from one list as each handler
+  parses its request.
+
+- Forge: named console accounts (`{"authentication":"local-accounts"}`).
+  The installation's own account comes from the same two private fields;
+  further accounts, one per person, are kept on the deployment computer as
+  password hashes and managed with the application's setup. At sign-in an
+  empty account name is the installation's own account. Each person is
+  their own principal in the console, its access rules and its records.
+- Forge: the front forwards native consent reads and decisions
+  (`/host/toolkit/consent/read` and `/decide`) under the setup routes'
+  rules, so people decide native consent in the console as themselves.
+- Forge: OIDC sign-in for the console
+  (`{"authentication":"oidc","issuer":...,"client_id":...,"client_secret":{"env":NAME}}`,
+  or `{"file":PATH}` for the secret). People sign in at the application's
+  identity provider with the authorization code flow, PKCE, state and
+  nonce. The front verifies the provider's ID token (its signature through
+  the provider's published keys, fetched again for an unknown key at most
+  every 30 seconds; issuer, audience, authorized party, expiry and issue
+  time within a minute, and the sign-in's nonce) and admits a verified
+  email that is the operator's (`CONSOLE_USER_ID`) or listed in
+  `CONSOLE_ALLOWED_EMAILS`. It keeps none of the provider's tokens and signs
+  the console's tokens itself, as its own issuer recorded once per
+  installation (`.mobkit/console-oidc-issuer`), with an ES256 key kept in
+  `.mobkit/console-oidc-signing.pem`; each token's subject carries the
+  provider's issuer and subject. The console gets the front's issuer and
+  public key only (`provider: "oidc"`). The client secret is referenced, by
+  a declared secret private field or a private file, never written into
+  source. Needs the Meta runtime.
+
+- `MemberLifecycleFactRecord::recorded_at_ms`, with
+  `MemberLifecycleFactRecord::with_recorded_at_ms`: when Core appended the
+  fact's journal event, in Unix milliseconds. The session bridge over a Core
+  mob sets it from Core's journal; a bridge that builds its records with
+  `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
+  `#[non_exhaustive]`, so the field is additive.
+
+- `BridgeError::HostRejectedBuild`, and the resume refusal kind
+  `ResumeRejectionKind::HostRejectedBuild`: the member's host refused its
+  build, read typed from the data the gateway's session builder carries it
+  with (kind `meta_host_rejected_build`), never from text. A refused spawn,
+  create or resume is the variant; a member Core holds Broken for it (a
+  wake's, a delivery's) is the resume refusal of that kind. Both answer
+  `IdentityRuntimeError::HostRejectedBuild`, as before. Both enums are
+  `#[non_exhaustive]`.
+
+- `SessionBridge::members_holding_run_starts_for_published_tools`,
+  `SessionBridge::member_holds_run_starts_for_published_tools` and
+  `SessionBridge::resolve_member_build_preparation`, each a call of Core's
+  (`MobHandle::members_holding_run_starts` with `ToolsNotPublished`, the
+  same for one member with `MobHandle::member_holds_run_starts`, and
+  `MobHandle::resolve_member_build_preparation`). All have defaults: a
+  bridge without run-start holds holds none (the one-member read answers
+  from the list read), and one without build preparation records no
+  cause.
+
+- Console messages record their sender: each `user_input` frame a console
+  send makes names its `sender` (`kind`, `assurance`, `display_name` and
+  `caller_scope`, as `meta/console/whoami` reports the caller), set from the
+  caller the Console authenticated. A scheduled fire names the schedule's
+  sender. The senders survive a restart. Rust: the frame's sender is
+  `ConsoleSender`, its kind `ConsoleActorKind`.
+
+- On a console that requires sign-in, a person's console send, and a
+  schedule's fire for a person, carries the person's qualified principal
+  (the verified `sub` in its issuer's trust domain) to the agent's run as
+  its original requester, which Meerkat stores with the admitted input and
+  hands to tool dispatch. The stored frame keeps it, and a send replayed
+  after a restart carries the requester and the label its frame recorded.
+  No view returns it: Meta leaves it out of every transcript identity it
+  shows too, on the frames of the session history and of the run's events,
+  on `/agents/{id}/events`, the mob-wide stream, `meta/events/subscribe` and
+  the event log (`console_agent_event_payload` drops it). A schedule's fire
+  names its sender as that sender's live sends are named at the fire: a
+  person whose issuer's tokens are classified as shared accounts by then
+  (`shared_account_tokens`) is named as a token principal, and the fire
+  names no requester. A service's, a token principal's and an anonymous
+  caller's sends carry none, no ungoverned send on an Open console does (a
+  governed send carries its host-bound association's requester, which may
+  be a person who volunteered a verified token), and neither does a send to
+  an external member.
+
+- On a console that requires sign-in, the agent's model reads each person's
+  message with a sender label, "Message from" and the person's display name,
+  on an injected-context row of its own right before the message, a steer
+  included. A service's, a token principal's and an anonymous caller's
+  messages, a schedule's fire, every message on an Open console and a send
+  to an external member carry none.
+
+- `SessionBridge::wait_member_lifecycle_settled`, Core's
+  `MobHandle::wait_member_lifecycle_settled`: it waits, at most a timeout,
+  until Core holds no lifecycle operation of an identity's member in flight,
+  and answers `meerkat_mob::MemberLifecycleSettlement`. The doors wait on it
+  (see Changed). Its default answers `BridgeError::Unsupported`, so a door
+  through a bridge without it answers Core's deferral at once; a host's own
+  wrapper of a session bridge forwards it.
+
+- Rust: `SessionBridge::settle_owed_compaction_projections` (provided,
+  unsupported by default) settles the compaction projections an identity's
+  current session still owes, through Core's
+  `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
+  and the exported bridge implement it.
+
+- `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
+  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
+  step owed the session it ended failed. Its record has its own key, apart
+  from the retirement's distillation, and goes once the fallback read of
+  the session's memory harvested them. Earlier releases neither write nor
+  read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
+  (provided, removes nothing by default) removes such a record; the SQLite,
+  in-memory and host store placements implement it.
 
 - A console side chat records who opened it: `meta/fork_member` writes the
   caller's console principal (the one `meta/console/whoami` reports) into
@@ -277,9 +639,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
   who revoked.
 
+- Durable decisions on Meta: `meta/decisions/list`, `get`, `rendering`,
+  `present`, `withdraw` and `decide` over the decisions Meerkat holds in a
+  runtime's `approval_decisions.sqlite3`, beside its persistent state. A
+  runtime without a persistent state directory keeps none and answers
+  `no_decision_store`; a candidate launch reads them and refuses every write.
+  On the stdio gateway:
+  - a `meta/decisions/list` first writes one `meta/decisions/notice` for each
+    open decision of the page the connection has not noticed: `held`, showing
+    nothing of the decision, or `presented` with its whole rendering to the
+    stdio operator of an approver id that lists it, a presentation the
+    gateway records once the notice is on the pipe;
+  - a decide without an attestation is the stdio operator's (the
+    operating-system user that started the gateway, device trusted), eligible
+    only for a decision the connection presented to it and while the approver
+    map lists it;
+  - a decide with an `attestation` is the decision of the person a declared
+    ingress authenticated (`runtime_options.decisions`, with each ingress's
+    clock skew, at most one hour: a larger one is refused at launch). Each
+    attested event decides one decision, recorded in the runtime's metadata
+    store before the decide; an undeclared ingress, a reused event or a time
+    beyond the skew is refused `-32602`.
+  The approver map lists the people an ingress attests
+  (`ingress_subjects`), the stdio operator (`{ ingress = "operator" }`) and,
+  in `people`, one person per entry within a binding: the stdio operator and
+  the declared-ingress identities an entry links are one person, whose own
+  requests none of those identities may approve, also when the map links
+  them while a decide is in flight. An identity in two entries of one binding
+  is refused (`duplicate_person_identity`). An entry's Console `subjects`
+  now hold the approver id for the Console's decision reads and the gating
+  decide. The map is read again when a decision commits. A map that names an
+  undeclared ingress is refused at load and on a Console edit
+  (`unknown_ingress`).
+- The Console's refusal of an invalid access configuration
+  (`invalid_access_config`) has six new `reason` values for the approver
+  map's ingress identities: `invalid_ingress_name`,
+  `operator_ingress_with_subject`, `invalid_ingress_subject`,
+  `approver_person_without_identity`, `unknown_ingress` and
+  `duplicate_person_identity`. The reasons are
+  an open list: the Console names each in its own words and shows the
+  owner's `detail` for a reason it does not know, and the SDKs pass the
+  refusal's `data` through unchanged.
+- The Console lists the open durable decisions on the Approvals panel's
+  Pending tab, read only, a page at a time with Load more: a holder of the
+  approver id (or, while access control is enforced, a caller with
+  `decisions.admin`) sees the whole rendering and where it was presented,
+  the requester of most kinds sees only the status, and anyone else sees
+  nothing. A list pages over what the caller may see: a caller that does not
+  administer decisions learns of no other decision, and its cursor names
+  only rows it was given. `meta/decisions/list`, `get` and `rendering` on
+  `POST /console/rpc` need `decisions.view` while access control is
+  enforced; a caller that may see only a decision's status is refused its
+  rendering with `-32030` and `data.kind = "content_not_visible"`.
+  `meta/decisions/withdraw` needs `decisions.admin` while access control is
+  enforced, and with access control off, or without an access controller,
+  the Console serves no withdraw (`-32601`). The Console decides no durable
+  decision.
+- The SDKs call the decision methods (Python `MobHandle.decisions_list`,
+  `decisions_get`, `decisions_rendering`, `decisions_present`,
+  `decisions_withdraw` and `decisions_decide` with a `DecisionAttestation`;
+  TypeScript `decisionsList` and its siblings), receive notices
+  (`MetaRuntime.on_decision_notice` / `onDecisionNotice`) and declare the
+  ingresses (`.decision_ingresses(...)` / `.decisionIngresses(...)`). A
+  decide called from inside a tool callback raises
+  `DecideInsideToolCallbackError` and sends nothing.
+- `PersistentMetadataStore::bind_decision_event`, a provided method that
+  records which decision an attested event decided. The SQLite store
+  implements it; the in-memory store keeps the refusing default, so a
+  persistent runtime built with in-memory metadata refuses attested decides.
+- For Rust hosts, `meerkat_meta::durable_decisions`: `RuntimeDecisions`,
+  `StdioDecisionConnection`, `DecisionNoticeSink`,
+  `DecisionIngressDeclarations`, `DecisionIngressDeclaration`,
+  `DecisionIngressError` and `check_approver_ingresses`, with the
+  decision wire types (`MetaDecisionNoticeEvent` decodes an event it does
+  not know as `Unknown`); `UnifiedRuntime::durable_decisions`,
+  `decision_owner`, `set_durable_decisions` and
+  `decision_approver_currentness`; `UnifiedRuntimeBuilder::decision_ingresses`;
+  and the approver map's `AccessIngressSubject` and `AccessApproverPerson`.
+
+- Core's entry of a name, as `SessionBridge::identity_entry` answers it:
+  `CoreIdentityEntry` (built with `entry`, `not_an_entry`, `reserved` and
+  `removed` and the `with_*` setters; `is_declared_entry` and
+  `holds_role_migration` read it), `CoreNameKind` (`Entry`, `NotAnEntry`,
+  `Reserved` for a name whose record Core cannot read, `Removed` for a
+  removed identity's name), `CoreMember` and `CoreBrokenMember`. Each is
+  `#[non_exhaustive]`.
+
+- `-32014` gains the kind `identity_name_unreadable` (`{kind, identity,
+  remedy: "repair_or_upgrade", retryable: false}`): a send, a dispatch or a
+  member mutation by a name whose record Core cannot read
+  (`IdentityRuntimeError::IdentityNameUnreadable`). Both SDKs raise it as
+  `StorageResolutionError`, with `kind`, `identity` and `remedy` set.
+
 - The console experience's side chat rows carry `side_chat_audience`:
   `private_to_you`, `private_to_creator` (an access admin viewing another
   person's) or `shared`; the side chat's header names it.
+
 - Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
   `AccessView::hides_agent` and `AccessView::private_owner_key`;
   `ConsoleSendGateRefusal::UnknownIdentity`.
@@ -315,6 +770,185 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carry `can_manage_schedules`, and the stock Console offers schedule
   changes only where it is true.
 
+- A member whose session the host store refuses until its realm is reopened
+  reports `preview_unavailable: "store_refused"` (Core 0.9.11) in
+  `meta/member_status`, `meta/inspect_identity` and the console's per-member
+  progress, where it reported `read_failed`. The Meta SDKs pass the value
+  through, as they pass any reason they do not name.
+
+- The stock console reads `meta/console/whoami` once per console instance
+  and names that caller (`expected_caller_scope`) on every console request,
+  voice and MCP Apps tool calls included; a later answer for someone else
+  never changes whom it names. Its first change waits for that read. While
+  no read has answered, no console request that names a caller leaves: a
+  message sent then reads **Not sent**, a queued message stays queued, the
+  console commands that read (approvals and other panels) are refused too,
+  and the top bar shows no identity chip, so no **Sign out**. The console
+  reads its caller again with its next experience read, and loads again at
+  once when another tab of the console learns it. A change refused with
+  `caller_changed` reads **Not sent**, and the console loads again as the
+  caller the gateway now serves; a voice call, an MCP Apps tool call or a
+  blob upload refused that way, or with an ended login, does the same as a
+  send.
+- Console requests do not follow redirects (`redirect: "manual"`), and a
+  queued message the stock console sends on its own (when its agent becomes
+  idle) waits for a fresh read of the console experience first.
+- The stock console keeps a host's `storageNamespace` combined with the
+  server's `storage_scope` instead of in its place, so users of one browser
+  never share queued messages or drafts. Its display settings, the sidebar's
+  and the activity rail's collapse, and the agent list's category order and
+  collapse are kept per signed-in user; a value an earlier console kept for
+  everyone using the browser is read once, by the first user who loads it.
+- Importing **Older queued messages** removes the earlier copy (the first
+  console's unscoped queue, the predecessor console's queue, or a queue kept
+  under a host namespace alone), so no other user of the browser is offered
+  it. **Sign out** removes the user's queued messages and drafts from the
+  browser, in every tab of the console; preferences stay. Both also remove
+  the copy of a queue the storage lock keeps in IndexedDB on an origin
+  without Web Locks, and the browser leaves for the sign-out once that is
+  done, or after at most 1.5 seconds.
+
+- A candidate launch serves a `meta/mobpacks/validate` whose
+  `rkat_validate` is `false`, which runs no `rkat`, whatever `rkatValidate`
+  says; before, it refused it.
+
+- Forge builds new applications with named console accounts
+  (`local-accounts`). The operator signs in as before, with an empty account
+  name, and now signs in as a person.
+
+- Registering an identity (`IdentityRuntime::register`) or updating its spec
+  (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
+  MobMachine decides what becomes of the identity's member and Core realizes
+  it. Meta records the spec as the identity's registration whatever Core
+  answers: the registration is the host's declaration, and the identity's
+  doors declare it again and answer Core's typed refusal. An identity whose
+  declaration Core refused for good (a raw member holds its name, its name
+  is a removed entry's or unreadable, its first-boot `Resume` row names a
+  session Core holds no copy of, its host rejects its build every time)
+  reads `broken` in its status, the status list and its health, names no
+  member and is not active, until Core answers a later declaration
+  otherwise. An identity Core holds no member for is seated Dormant when it
+  is registered, on its archived
+  session or a fresh one, instead of at the next roster pass or its first
+  delivery. The host's customizer composes the member build only when Core
+  answers that the identity's verdict builds a member: an identity Core keeps
+  is declared with its lifecycle facts alone, and no customizer runs. A raw
+  member a host spawned under the identity's member id is adopted when its
+  spawn carries the durable-identity marker or the `agent_identity` label
+  naming the identity, and is refused (`NameHeldByWorker`) otherwise. A
+  runtime with no session bridge records the spec and answers
+  `DeclaredIdentityAnswer::RecordedOnly`.
+
+- The roster pass declares the host's roster in Core's mob through Core's
+  declared apply, and no longer seats, releases, respawns or retires members
+  itself. A bootstrap or a refresh declares the whole roster: Core seats,
+  keeps, restamps or moves each listed identity (MobMachine decides each
+  verdict), and unlists each identity it holds declared that the roster no
+  longer lists and retires its member, after which the identity leaves
+  Meta's registry. A send or a dispatch of an identity Core holds no member
+  for, or one whose first-boot row, held role move or host preparation is
+  still owed, and every materialization (a warm included), declares that
+  identity alone before it acts. Such a declaration that Core leaves to its
+  next apply, because a lifecycle operation of the identity's member is in
+  flight (the kickoff wake of the fresh life a reset seated, a delivery's
+  wake, its retirement), waits for that operation to end, up to 15 s, on
+  Core's machine state, and is declared again, so a warm right after a reset
+  answers the woken member. One still in flight then is refused retryable
+  (`-32052`, `identity_wake_retryable`). A roster pass leaves such an
+  identity to its next apply. A respawn of a built member is such a
+  declaration: Core seats the member again, Dormant, on the session it kept
+  archived, building nothing,
+  and the wake that follows builds it once, so the host's `customize_build`
+  runs twice (the seat's composed build, then the build's own), as for a
+  lazily seated identity, where the seat step revived the member live with
+  one call. One identity's refusal, held role move or failed retirement is that
+  identity's own typed outcome, and the pass goes on; a retirement that
+  failed is retried by the next complete roster. An identity refused before
+  Core is asked (its first-boot row contradicts Core's history) turns a
+  complete roster into a partial one for that pass, so nothing is unlisted
+  until every listed identity is declared. A placed or externally bound
+  identity Core holds no member of is created through its host (at the
+  default pass, or at its first use after a lazy one), and that creation
+  carries out its pending first-boot `Resume` row: the member is created on
+  the row's session, with its history, and the row is settled; a session
+  Core holds no durable copy of is the row's typed refusal, and nothing is
+  created in its place. An identity awaiting a held creation that no held
+  pass in progress covers is refused typed (`held_completion_owed`): it owes
+  its host a held completion.
+
+- A member whose spawn carries the `agent_identity` label but not the
+  durable-identity marker (the shape Meta 0.9.3 spawned) is no longer
+  respawned onto its session to gain the marker, and the roster pass no
+  longer retires it when the roster stops listing it: to Core such a member
+  is a host's raw member. Every Meta from 0.9.4 to 0.9.10 respawned these
+  members with the marker at its roster pass, so a state directory last run
+  by the previous matched release holds none.
+
+- Held creation follows the host's hold: the identities a host holds in
+  this process (a held bootstrap's roster, a held add's identity) are
+  declared held, and Core decides (it awaits the held creation of an
+  identity it never created). Meta no longer reads its held-completion
+  marks; it still writes them for a rollback (see Upgrade).
+
+- The identity reset and delete verbs no longer read the rotation
+  records: the record is written after Core's answer, for a rollback, and
+  a refused rotation leaves it as it was.
+
+- The members Core holds for unpublished customizer tools, and a build
+  preparation the host asked to retry, are read from Core: the composition
+  publishes and releases the members Core holds, and a wake Core refused
+  for the retry reports the customizer's failure, typed. A status sweep
+  (`statuses`, `roster_inspect`) reads Core's held members once for every
+  identity, and one identity's status and a delivery read that member's
+  hold alone. A read that fails is never "none held": a status read
+  fails typed (`MemberHistoryUnavailable` for a sweep,
+  `IdentityHistoryUnavailable` for one identity), a delivery is refused
+  retryable, and a publication keeps the identity pending. The door
+  retries the preparation once (`resolve_member_build_preparation`) and
+  wakes, or delivers, once more; a second refusal surfaces typed.
+
+- The door answers Core's host preparation: on Core's
+  `HostPreparationPending` refusal it declares the identity once and
+  retries the delivery once; a second refusal surfaces typed. Meta keeps no
+  copy of the members it handed the mob as host-pending. It still declares
+  first an identity whose first-boot row its own records hold, and refuses
+  every delivery while those records cannot be read.
+
+- The host's refusal of a member's build is read typed (see Added): the
+  gateway's session builder carries the host's error answer to its build
+  callback as structured data, and nothing matches the error's text. A
+  callback that never completed stays the retryable failure it was.
+
+- The stock console names each message's sender from the frame's recorded
+  sender: "You asked" for the caller's own messages in every tab (the
+  sender's `caller_scope` equals the one `meta/console/whoami` reports),
+  and the sender's display name for anyone else's. A frame from an older
+  gateway, which names no sender, keeps the earlier words. Every anonymous
+  caller of an Open console shares one caller scope, so an anonymous
+  message reads "You asked" only in the tab that sent it.
+
+- The SDK host's tool callbacks carry the original requester of the run
+  they serve, typed, so a host can refuse a person-scoped tool (one
+  person's mail, documents or accounts) for anyone but its owner:
+  `callback/call_tool` names it as `requester` (the principal, and
+  `carried` when the run's work reached its agent through another actor),
+  and a detached callback job's `callback/job/start` names the requester of
+  the run that submitted it, recorded with the job. A run without a
+  requester names none. Only the runtime sets it; a `requester` inside a
+  call's arguments is just an argument. The Python and TypeScript SDKs pass
+  it to a tool handler (`ToolCallRequester`, with `RequesterPrincipal`): in
+  Python to a handler that declares a `requester` parameter, in TypeScript
+  as the handler's optional second argument (`parseToolCallRequester` reads
+  one). A detached job's runner reads it as `DetachedJobContext.requester`.
+  A malformed requester reads as none, so a person-scoped tool fails
+  closed.
+
+- An MCP App's action from the console runs for its caller: on a console
+  that requires sign-in, a person's action carries that person as its
+  original requester; on an open console, and for a service or a token
+  principal, it carries none. It never borrows the requester of the model
+  run whose result the app shows.
+
 - The stock gateways keep the gating owner's state (pending approvals and
   the gating audit) in the realm's metadata store across restarts.
   `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
@@ -328,6 +962,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A console session revocation records who revoked (`revoked_by` in the
   fence record and the answer), and an access edit its author, time and
   revision (`last_edit` on `meta/access/get`).
+
+- An identity's views read Core's entry of its name: it is `active` while
+  Core holds its member (retiring, or during the runtime's shutdown too: the
+  views read no shutdown flag), `broken` while Core holds that member
+  Broken or refuses the identity's last declaration for good, or, while
+  Core holds no member of it, after Core refused its wake for good, and
+  `dormant` otherwise. `wake_refusal` is Core's: its durable resume hold of a
+  member it holds Broken, its role hold (`resolve_role_migration`), or its
+  last answer to a wake of the session it binds the identity to now. A
+  refusal of another session's wake (an incarnation a host replaced) is not
+  shown, and a member Core holds Broken without a hold shows none. Core
+  keeps no Broken verdict across a restart: under `member_restore =
+  "on_demand"` a member the previous process held Broken reads `active`,
+  with no `wake_refusal`, until its next wake fails again, while
+  `on_demand_verified` and `eager` derive the verdict again before ready.
+- The status `runtime_mode` is the mode Core runs the identity's member in,
+  `null` while Core holds no member of it, where it was the roster's
+  `runtime_mode_override`. Ambient memory follows the same mode, where it
+  followed the roster's override or profile table.
+- A name this runtime has not registered never reaches the member door when
+  Core holds it for an identity: nothing is delivered or changed for a
+  send, a dispatch, a member mutation, a console send, a cross-mob send or
+  a schedule fire by the name. The refusal is retryable only when this
+  runtime's next roster pass registers the name: an entry a host declared
+  answers `-32052` (`identity_history_unavailable`, retryable) until this
+  process's roster pass registers it, and so does a name whose read of
+  Core's entry Core could not serve. A name no roster pass of this runtime
+  registers is refused for good: an identity removed and an identity
+  created at runtime (a created entry, whose record the mob's identity
+  store owns; see Known limitations) answer `-32001` (unknown identity),
+  and a name whose record Core cannot read (written by a newer release, or
+  contradicted by the mob's journal) answers `-32014`
+  (`identity_name_unreadable`, `remedy: "repair_or_upgrade"`, not
+  retryable). `meta/send_message`, `meta/dispatch` and the RPC and console
+  member verbs answer these codes typed, where `meta/send_message` answered
+  the identity door's refusal as an untyped `-32000` and the console's
+  `meta/retire_member` answered some of them as an internal error; a
+  schedule fire ends typed on a final refusal and stays reclaimable on a
+  retryable one. Two surfaces carry less. A console send
+  (`meta/console/send`) is accepted first and fails in the background: its
+  frame turns `delivery_failed` beside a `message_delivery_failed` frame
+  whose payload carries the refusal's message and its structured data
+  (none for an unknown identity), and no code. A cross-mob send answers the
+  control code `unknown_identity` for an unknown identity and the generic
+  `identity_error` for every other refusal, so a retryable refusal there
+  reads like a final one.
+- A send, a dispatch, a member mutation or a schedule fire by the name of a
+  member seated before identity entries existed (a worker whose spawn row
+  carries the legacy identity label naming it, or the durable-identity
+  continuity marker) that this runtime has not registered is refused
+  `-32052` (`identity_history_unavailable`, retryable) until this runtime's
+  first roster pass has run, where a send took the raw member door as
+  external work, skipping the identity's guards, and a mutation acted on
+  the raw member: the pass adopts and registers the identity when its
+  roster lists the name, and the same request then goes through the
+  identity's door. After the first pass, a member it did not adopt is a
+  worker as before.
+- A schedule fire's refusal class reads Core's entry of the identity: a
+  member Core holds Broken ends the fire typed, and a read Core could not
+  serve leaves it reclaimable.
+- `IdentityRuntime::send_governed_with_turn_ticket` delivers the governed
+  input to a name Core holds as an identity entry as internal work, through
+  the entry's host: Core admits no external work to an identity entry. The
+  external door keeps Core's addressability rule for the entry's member: a
+  member whose runtime admits no external work is refused
+  (`NotExternallyAddressable`) before anything is submitted, as Core refused
+  it, and an `InternalOnly` identity is refused as before. A name that is no
+  entry takes the external door as external work, as before. The input is
+  submitted at the incarnation of the member the send read (its runtime id,
+  fence and session): a member rotated between that read and the submission
+  (by a host caller outside the identity runtime's verbs) is refused stale
+  (`MobError::StaleFenceToken`), nothing is admitted and the custody is
+  withdrawn, where the input went to the new incarnation.
+- The direct member doors (`send_message_on_mob`,
+  `send_message_on_mob_with_mode` and `UnifiedRuntime::start_member_turn`)
+  addressed to a name Core holds as an identity entry are refused
+  `MobRuntimeError::Mob(MobError::IdentityMember)`: Core admits no external
+  work to an entry. The identity runtime's doors reach the identity, and
+  `meta/send_message` routes a Core entry to them.
 
 - On a console with sign-in, a side chat is private to the person who
   opened it; access admins can also see it. It holds with or without an
@@ -343,12 +1056,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   definition's wiring rules, so no role-wide flow step reaches them). Side
   chats opened before this release keep their audience, and consoles
   without sign-in keep side chats shared.
+
 - A private member's memory stays its own: the memory distiller never
   reads its conversation, the memory steward never dreams over its memory,
   proposals or exit interview, and its `memory` tool proposes nothing to
   its mob (`propose_to_mob` is refused). A private member is built without
   WorkGraph tools, the voice preface names no private peer, and an
   announcement role template never takes a private member.
+
 - No console surface names a member hidden from the caller: the run
   records (`meta/flow_status` answers a run that reached one as a run that
   does not exist, and `meta/list_runs` leaves it out), wiring and operator
@@ -358,6 +1073,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   completion listings, the host send precheck, and a console with no local
   runtime, which reads its runtimes' members before it decides a timeline
   frame or a multipart send.
+
 - On a console with sign-in, a non-administrator is shown no memory scope,
   and attaches no session, of a member the console does not know (one
   that ended before this process read who its members are private to): it
@@ -365,26 +1081,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   background from the start, and read again until it is read; until then
   a spawn into a mob a member created before the restart is refused as
   retryable.
+
 - The SDK gateway's strict live voice authority decides with the
   configured access controller, primed from the roster, so its access rules
   and the private-owner rule apply to its configured principal; without an
   access configuration the stdio gateway stays the trusted host plane.
+
 - The host send precheck (`ConsoleSendPrecheck::check`) decides with the
   viewer's audience whether or not the console has an access controller, and
   refuses a target the runtime holds no member or registered identity for
   (`UnknownIdentity`), as `POST /console/send` refuses it.
+
 - A private owner on a member's own roster labels names its owner whatever
   made the member (Meta, or a host that declares it); it no longer counts
   only on a verified side chat.
+
 - A fork Meerkat makes of a private member (the member's own `fork_off`
   child, a temporary council's participant) takes the member's exemption
   from the definition's wiring rules as well as its private owner: no
   definition edge and no role-wide flow step reaches it.
+
 - A run's members are read from the mob's per-target dispatch records, so
   a role-wide run that reached a member hidden from the caller (one a host
   seats private to a person and leaves under the definition's wiring) is
   answered as a run that does not exist: `meta/flow_status`,
   `meta/cancel_flow`, `meta/list_runs` and the run's structural events.
+
 - A WorkGraph goal, reassignment or supervisor key that names a member
   hidden from the caller is refused as naming an unknown member in every
   target form (the identity, an owner key, a session), and an attention
@@ -393,12 +1115,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   too, its owner and access admins included (`-32602`,
   `private_member_workgraph_target`): a private member is built without
   WorkGraph tools, so no binding can serve it.
+
 - `meta/routing/routes/list`, `meta/delivery/history`,
   `meta/reconcile_edges` and `meta/storage/doctor` leave out every row
   that names a member hidden from the caller, payloads included; access
   admins and the member's owner read them whole.
+
 - A member private to a person convenes no council: its agent's `council`
   call is refused as a policy denial (`private_member_council`).
+
 - An agent's `mob_check_member` and `mob_retire_member`, and Meerkat's
   member tools (`member_status`, `retire_member`, `force_cancel_member`),
   naming a member private to a person the agent does not act for answer
@@ -412,6 +1137,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
+  tool's advertised page: at most `limit` rows (default 50, at most 200) of
+  bounded schedule summaries, with `page.has_more` and `page.next_cursor`.
+  The console gate that leaves console schedules out of the listing answered
+  the call itself: it ignored `limit` and `cursor` and returned every
+  non-console schedule whole (machine state, superseded acknowledgements and
+  the full action), so one list call could return hundreds of kilobytes. The
+  gate now lists through Core's page builder with console schedules filtered
+  out before the order, the cursor and the page cut, so pages stay full and a
+  cursor never lands on a console schedule. `meerkat_schedule_get` is
+  unchanged and still returns the whole schedule.
+
+- The event log no longer asks a failing store again for every event that
+  arrives. After a refused append it waits before it asks again: the flush
+  interval, doubled for each further refusal in a row, up to 30 seconds (or
+  the flush interval when that is longer). While events are being dropped
+  at the 4096-event limit, the wait is one flush interval, so a store that
+  recovers is asked again before many more are lost. The flush at shutdown
+  still runs at once. While it waits, events stay buffered in order, and the
+  oldest are dropped only past the 4096-event limit, as before.
+- The event log sends at most `batch_size` events per append, retries
+  included, oldest first. It used to send its whole retry buffer as one
+  append, so once an outage grew the buffer past what the store takes in one
+  request, the store refused every later flush and took no event again. A
+  refused append and every later event stay buffered in order for the next
+  flush.
+- The console no longer reads a member's status again on every change of
+  its team when it cannot follow that member's events (the member's session
+  has no live actor, for example after its store scope was refused). It
+  reads it again once the member's own state changes, and its periodic sweep
+  still covers it. Before, every change of any member, an answered status
+  read of another member included, read such a member's status again, so a
+  few such members kept the console reading their status without pause.
+- After a status read that does not answer, the console waits before it
+  reads that member's status again: 1 second, doubled for each further such
+  read in a row, up to 30 seconds, for its re-check and its periodic sweep
+  alike. An answered read ends the wait. Before, the re-check read the
+  status again on the next change of any member.
+
+- The event log and console status fixes above lift the two matching 0.9.10
+  Known limitations.
+
+- The console forwarder no longer attaches a member's event stream that
+  would attach only at the member's wake. A member released between the
+  forwarder's reconcile pass and its subscription, as a mob's teardown
+  releases its members, came back as a deferred stream that yielded nothing
+  until the member woke, or closed when the mob ended, and the pass tracked
+  it as attached. The pass now skips such a subscription, as it skips a
+  member it finds dormant, and the member's wake runs the pass again.
+
 - Concurrent console schedule edits no longer overwrite each other:
   `meta/schedule/update` and `meta/schedule/resume` take
   `expected_revision`, the stock Console sends the revision it showed, and
@@ -424,13 +1199,205 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   never on one read at the click; an action whose card showed none changes
   nothing, says so, and reads the item again.
 
+- Switching the signed-in user in one tab of the stock console clears the
+  previous user's views, approvals, host items and queued messages at once,
+  in every tab of that console in the browser. Before, other tabs noticed
+  at their next 15-second experience read, and could send the previous
+  user's queued message under the new login.
+- An ended login (a 401, `caller_not_current`, or a front that redirects a
+  console request to its sign-in page) shows one sign-in state instead of
+  stale data. Approvals are no longer marked denied for good and the
+  timeline stream no longer stops without a word; signing in again in
+  another tab, or coming back to the tab, brings the console back, with
+  the message the person was writing and its images.
+- A console send that a front redirected to its sign-in page reads
+  **Not sent** (the request never reached the gateway). Before, it read as
+  an unknown outcome that no check could settle.
+- Two tabs of the stock console on a plain-HTTP origin (no Web Locks) no
+  longer lose queued-message updates: the storage lock's IndexedDB fallback
+  waits until the other tab's queue write is visible before it changes the
+  queue.
+- Pins set in two tabs of the stock console are both kept, and every tab
+  follows them. A tab left open no longer rewrites the panel layout another
+  tab arranged each time it reloads the console experience.
+- **Needs you** and the sidebar's Approvals count only the approval
+  requests that wait for you, not the ones routed to another approver.
+  Before, they counted every pending request, and a request decided
+  elsewhere vanished at the next poll.
+
+- Forge: the controller review is open to every console administrator. It
+  starts at an administrator's first sign-in, or when an administrator
+  opens it if that start could not run, and stays open after that person
+  signs out, until their sign-in would have expired (8 hours).
+- Forge: the console keeps its access edits (a second administrator, rules,
+  groups) in its own live copy, `.mobkit/console-access.toml`, so they no
+  longer stop Forge from changing private settings, starting, updating,
+  downloading or supervising the installation. `config/access.toml` stays
+  the package's exact bytes and may list further admins after the
+  installation's own account. The copy is published only once complete,
+  and an empty copy, which only a start stopped while copying can leave, is
+  copied again with a warning, so access control stays on. A temporary file
+  that a start or setup stopped while writing leaves in `.mobkit` is removed
+  by a later one.
+- Forge: with a console that predates `meta/console/whoami` (Meta 0.9.10
+  and earlier), the controller review is no longer unavailable. Such a
+  console answers whoami with "method not found" and names no
+  administrator, so the review goes to the first person who signs in,
+  with a named account or through the identity provider, administrator or
+  not, and only that sign-in sees and answers it. With a console that
+  serves whoami the review stays an administrator's, and a whoami answer
+  the front cannot use (none, a timeout, a malformed answer or another
+  error) still opens nothing.
+
+- The exit interview a retirement no Meta verb asked for owes (Core's seal
+  unlisted the identity) is queued once when the process stops inside the
+  retirement's side effects and the next start delivers them again. Its
+  pending harvest was keyed by the time the side effect ran, so the replay
+  after the restart queued a second one; it is now keyed by the time Core
+  journaled the retirement, which the replay reads again. The harvest's
+  `retired_at_ms` stays a wall-clock time (the Console shows it as the
+  retirement's time, and the harvest queue reads oldest first by it). With
+  a session bridge whose journal records carry no time
+  (`MemberLifecycleFactRecord::recorded_at_ms` is `None`), the key stays
+  the time the side effect runs.
+
+- The roster pass no longer retires a member a host spawned under an
+  identity's member id and labelled with the identity when the roster never
+  declared that identity.
+
+- The first roster pass after a restart lets the previous role of an
+  identity the roster moved to another profile go: Core holds the member
+  under its previous role, or migrates it when the activation declared the
+  migration, and releases its materialization. The pass used to skip an
+  identity it had not registered yet in this process, so the member stayed
+  loaded under its previous role.
+
+- One identity whose member Core fails to retire no longer fails the whole
+  roster pass: its outcome is typed and its own, the other identities are
+  declared and unlisted as usual, and the next complete roster retires it
+  again.
+
+- A reset over a record store whose rotation records do not read starts
+  and finishes its rotation; it was refused, retryable.
+
+- Held creation without a state directory: a reset of an identity its
+  host holds and Core never created answers `HeldCompletionOwed` (it gave
+  the identity a fresh life), and a restart whose host holds the identity
+  again keeps it owed (it seated it). With a state directory or a host
+  store, an identity its host no longer holds is created as any other (its
+  mark refused it), a failover build included.
+
+- A build preparation the host asked to retry and a first-boot row are
+  told apart by Core (`BuildPreparationRetry`, `HostPreparationPending`): a
+  retry is no longer reported as Core's first-boot preparation, nor a
+  first-boot preparation as the customizer's failure.
+
+- A materialization, and every door that wakes a member itself (the
+  background warm, a compaction rebuild, a wake onto the last session, a
+  respawn), reads Core's refusal of the wake typed, as a delivery does: a
+  final refusal (a retiring incarnation, a host-owned member, a
+  composition that is not authoritative) answers `AdmissionFailed`
+  instead of `IdentityWakeRetryable`.
+
+- A delete, reset, role move or unlisting of an identity whose member was
+  stopped after it compacted inside a run, and has not woken since, now
+  harvests that compaction's discarded history into agent memory. The stop
+  had committed the run with the compaction's memory projection still owed,
+  a lazy start does not wake the member for it, and the distiller harvests
+  discards only when a live member finalizes them, so the identity's next
+  life lost them. The step now settles the projection in Core before it
+  asks Core to end the session, and the distiller reads the settled
+  discards before it distills the transcript (and, for a delete, before the
+  session's memory scope is dropped). When the settle answers no discards
+  (an earlier finalization published them), the distiller reads the
+  compaction's discards from the session's memory instead. When the
+  settle fails or is busy, it reads them there once Core ended the
+  session, which publishes them only for a reset, a role move or a delete
+  (Core's rotation settles the session it leaves) and only when that
+  settle succeeds; the roster's unlisting leaves them owed in Core, as
+  before, for the session's next settle or wake. A harvest that times out,
+  is denied by the realm's budget or fails is recorded as a failed
+  compaction harvest (`lifecycle_effect_failed`, effect
+  `compaction_harvest`) and attempted again through that read, bounded
+  like the other side effects; the record goes once that read harvested
+  the discards. A step Core refuses before any of it reaches Core harvests
+  the discards it settled, or those the session's memory already holds, as
+  the session's live compaction's would be.
+
 - The Approvals panel's Audit tab shows who decided and with what
   assurance ("Decided by alice@example.test (as Release manager) - person
   authenticated") when the record names the verified decider, not only
   the approver label, and says when the gateway keeps its records in
   memory, where decisions from before a gateway restart may be missing.
 
+- A status read over a bridge that cannot read Core's entry of the identity
+  refuses typed, where a member Core held Broken read `active`; `statuses`
+  and roster inspection refuse typed when one identity's read fails, where
+  they left the identity out. A final refusal of a wake no longer reads an
+  identity `broken` after a host seated its member again outside Meta, and a
+  status read during shutdown no longer reads a live member `dormant`.
+- The console's identity inspection, retire, resolved tools and routing
+  status refuse typed on a status read Core could not serve, where they left
+  the identity out of the match or answered from the member plane. The
+  roster pass refuses an identity typed (`-32052`) when Core's member history
+  cannot be read after its declaration, where it read the identity Dormant.
+
 ### Known limitations
+
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console: no frontend
+  changes, controller review or setup answers. Use the product route.
+- Forge: the same holds for an application on the MobKit runtime, since
+  named accounts need the Meta runtime.
+- Forge: OIDC sign-in needs the Meta runtime too. Signing out ends the
+  front's login and the console's tokens for it, not the person's session
+  at the identity provider: on a shared computer, **Continue to sign in**
+  can open the previous person's console without a prompt until they sign
+  out at the provider. A provider that does not send `email_verified: true`
+  signs nobody in. The front reaches the provider directly, not through a
+  proxy set in its environment.
+- Forge: sign-in forms and OIDC sign-ins waiting for the provider are
+  bounded per client address and in total; a full table drops its oldest
+  entry instead of refusing a new one, so one caller behind a shared address
+  cannot hold everyone else's sign-in off. A flood through one address can
+  still make other people's forms or waiting sign-ins expire early; put a
+  console that other computers reach behind a rate-limiting proxy.
+- Forge: with a console that predates `meta/console/whoami`, the controller
+  review belongs to the sign-in it opened at. If that sign-in ends early (a
+  sign-out, or a new sign-in in the same browser), the review stays open
+  but nobody can read or answer it, and a new one starts only after the
+  application restarts.
+
+- A rotation a host starts directly on the mob (`MobHandle::rotate_member`),
+  with no Meta verb behind it, finalizes a dormant member's owed compaction
+  projection, but its discards are not distilled into agent memory; use a
+  delete, reset, role move or the roster's unlisting to have them
+  distilled.
+
+- The compaction harvest a step owes the session it ends (the settled
+  batch, or the fallback read of the session's memory) is kept in process
+  until the retirement's side effects run: a restart in between leaves the
+  records searchable in the old session's memory but never distilled.
+
+- Meta does not register identities created at runtime yet (Core's created
+  entries, whose records the mob's identity store owns): no roster pass
+  lists them, so the identity runtime does not serve them. A send by name,
+  a dispatch, a member mutation or a schedule fire to one is refused
+  `-32001` (unknown identity), not retryable, and nothing reaches its
+  member, until Meta's verbs serve created identities. That depends on the
+  created-identity adopt work, which lands separately: once Meta registers
+  a created entry, a send to it goes through the identity's door, as for
+  any registered identity.
+- `MobSessionBridge::identity_entry` reads the durable resume hold of a
+  member Core holds Broken, and the session whose restore failed, from
+  Core's restore diagnostic, through `MobHandle::member`. In the gap
+  between Core holding the member Broken and recording that diagnostic (in
+  the same actor step, or, for a warm revival, until the revival's cleanup,
+  which runs off the actor, commits back), the read answers Broken without
+  the hold and without the failed session. The read issues no actor command
+  (`MobHandle::get_member` answers from the published state too), so
+  `meta/member_health` never waits for the mob's actor there. Carrying the
+  hold in Core's entry read is a tracked follow-up.
 
 - The console audit read numbers its rows (`seq`) over the rows it leaves
   out for a reader, and its `latest_seq` counts them: a reader sees gaps

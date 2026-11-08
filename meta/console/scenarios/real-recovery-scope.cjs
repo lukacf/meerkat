@@ -13,10 +13,17 @@ const { browserFailureMonitor } = require("./browser-failure-monitor.cjs");
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
 const identity = "router:main";
 
-async function timeline(fixture) {
-  const response = await fetch(`${fixture.backendUrl}/console/timeline?identity=${encodeURIComponent(identity)}&mode=recent&limit=1000`);
+async function timeline(fixture, scope = identity) {
+  const filter = scope ? `identity=${encodeURIComponent(scope)}&` : "";
+  const response = await fetch(`${fixture.backendUrl}/console/timeline?${filter}mode=recent&limit=1000`);
   assert.equal(response.status, 200);
   return response.json();
+}
+
+function cursorSeq(cursor) {
+  const match = /^console:(\d+)$/.exec(cursor ?? "");
+  assert(match, `owner frontier ${cursor} is a console cursor`);
+  return Number(match[1]);
 }
 
 async function modelRequests(fixture) {
@@ -24,16 +31,23 @@ async function modelRequests(fixture) {
   assert.equal(response.status, 200); return response.json();
 }
 
-async function seed(fixture, marker, turns) {
-  for (let turn = 0; turn < turns; turn++) {
-    const text = `${marker} ${turn + 1}.`;
+async function seed(fixture, marker, turns, first = 1) {
+  for (let turn = first; turn < first + turns; turn++) {
+    const text = `${marker} ${turn}.`;
     await fixture.control("model", { source: text, delay_ms: 0, chunk_chars: 1024 });
     const accepted = await rpc(fixture.baseUrl, "meta/console/send", {
       identity, content: `Record ${text}`, origin: "console:scope-acceptance", origin_kind: "operator",
       idempotency_key: randomUUID(), handling_mode: "queue",
     });
     assert.equal(accepted.status, 200); assert(accepted.body.result?.input_frame_id, JSON.stringify(accepted.body));
-    await eventually(async () => (await timeline(fixture)).frames.some(frame => frame.kind === "interaction_complete" && frame.interaction_id === accepted.body.result.interaction_id), "real owner seed completes");
+    // The turn settles once session history has reconciled it into the log:
+    // those rows land after interaction_complete and still move the frontier.
+    const interaction = accepted.body.result.interaction_id;
+    await eventually(async () => {
+      const frames = (await timeline(fixture)).frames.filter(frame => frame.interaction_id === interaction);
+      return frames.some(frame => frame.kind === "interaction_complete")
+        && frames.some(frame => frame.kind === "text_complete" && frame.source?.kind === "session_history");
+    }, "real owner seed completes and settles");
   }
 }
 
@@ -72,14 +86,24 @@ async function scopeCancellation(host, phase) {
     owners["scope-b"] = await startFixture({ stateDir: path.join(stateRoot, "b") });
     const oldMarker = `Private old authority ${randomUUID()}`;
     const replacementMarker = `Replacement authority ${randomUUID()}`;
-    // Different real history lengths avoid accidental equality of numeric
-    // owner cursors and make transferred-cursor assertions meaningful.
+    // Each owner numbers the rows of its own console log, where the other
+    // member's startup turn lands on its own schedule and holds about as many
+    // rows as two seeded turns: different history lengths alone can leave the
+    // two frontiers equal. Add replacement turns until its frontier passes
+    // every row of the settled old owner. Cursors only grow, so no old cursor
+    // can then name a replacement position, and the transferred-cursor
+    // assertions stay meaningful.
     await seed(owners["scope-a"], oldMarker, 1);
     await seed(owners["scope-b"], replacementMarker, 3);
+    let replacementHistory = await timeline(owners["scope-b"]);
+    for (let turn = 4; ; turn++) {
+      const oldFrontier = (await timeline(owners["scope-a"], null)).latest_cursor;
+      if (cursorSeq(replacementHistory.latest_cursor) > cursorSeq(oldFrontier)) break;
+      assert(turn <= 6, `replacement frontier ${replacementHistory.latest_cursor} does not pass old owner frontier ${oldFrontier}`);
+      await seed(owners["scope-b"], replacementMarker, 1, turn);
+      replacementHistory = await timeline(owners["scope-b"]);
+    }
     const before = await Promise.all(Object.values(owners).map(async owner => (await modelRequests(owner)).length));
-    const oldHistory = await timeline(owners["scope-a"]);
-    const replacementHistory = await timeline(owners["scope-b"]);
-    assert.notEqual(oldHistory.latest_cursor, replacementHistory.latest_cursor, "real owner frontiers differ");
     proxy = await startScopeProxy(owners);
     if (phase === "seed") proxy.holdHistory("scope-a", host);
     browser = await chromium.launch({ headless: true });

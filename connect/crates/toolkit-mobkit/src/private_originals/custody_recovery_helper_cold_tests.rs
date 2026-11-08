@@ -239,6 +239,9 @@ async fn exercise(case: Case) {
             assert_eq!(&receipt.input_id, input.id());
             assert!(!receipt.deduplicated);
             assert!(fixture.source.owner.has_admitted_source(&association).unwrap());
+            // Read A's durable binding while this host is open; after its close
+            // it is read again from the store, as the next opener reads it.
+            let a_association = fixture.binding().await.unwrap().unwrap();
             fixture.source.stop_custody_recovery();
             drop(release_round.take());
             let (native, source) = tokio::join!(close.as_mut().unwrap().join(), fixture.source.join_custody_recovery());
@@ -247,7 +250,14 @@ async fn exercise(case: Case) {
                 assert!(matches!(source, Err(PrivateOriginalError::Unavailable)));
                 assert!(wrapper.as_ref().unwrap().terminal_calls.load(Ordering::SeqCst) > 0);
             } else { assert!(source.is_ok(), "actual promoted close: {source:?}"); }
-            let row = fixture.store.get(&helper_key).await.unwrap().unwrap();
+            // The close released the store: read what it retained as the next
+            // opener does.
+            assert_eq!(
+                fixture.closed_binding().await.as_ref(),
+                Some(&a_association),
+                "A's binding survives the close"
+            );
+            let row = fixture.closed_store().get(&helper_key).await.unwrap().unwrap();
             assert!(attempt(&row).decision() == if fail_terminal { CustodyDecision::Pending } else { CustodyDecision::Promoted });
             assert_eq!(row.data.body["bound_input"], enrolled.data.body["bound_input"]);
             let native = acquisition_approved::native_history(history.as_ref().unwrap().as_ref(), &helper_session).await;
@@ -255,7 +265,6 @@ async fn exercise(case: Case) {
             assert!(native[0].seed.phase == InputLifecycleState::Consumed);
             assert!(native[0].state.persisted_input.is_none(), "actual Core retirement is required");
             verify_exact_replay(&native[0].state, &input).unwrap();
-            let a_association = fixture.binding().await.unwrap().unwrap();
             let a_before = acquisition_approved::native_history(history.as_ref().unwrap().as_ref(), &fixture.session).await;
             assert_eq!(a_before.len(), 1);
             let grants = std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl")).unwrap();

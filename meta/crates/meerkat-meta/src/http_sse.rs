@@ -161,9 +161,9 @@ pub(crate) type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// stays open. A stream whose caller a token identified ends once the
 /// Console's verifier no longer accepts that token: the moment a request
 /// with the token is refused, on its expiry or on a session fence set for
-/// its principal. It is built from the verifier's retained verification and
-/// asks the verifier itself, never reads the token, and does not depend on
-/// an access controller.
+/// its principal or its login (a sign-out). It is built from the verifier's
+/// retained verification and asks the verifier itself, never reads the
+/// token, and does not depend on an access controller.
 pub(crate) struct StreamAuthentication {
     verification: ConsoleCallerVerification,
     /// The first instant the verifier refuses the token, from its latest

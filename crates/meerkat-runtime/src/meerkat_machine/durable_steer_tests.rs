@@ -23,6 +23,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
 use crate::input_state::InputLifecycleState;
 
+mod requester;
+
 /// How long a test makes the runner's append record lag the boundary take.
 const APPEND_RECORD_LAG: Duration = Duration::from_millis(150);
 
@@ -727,6 +729,7 @@ fn steer_header(source: crate::input::InputOrigin) -> crate::input::InputHeader 
         idempotency_key: None,
         supersession_key: None,
         correlation_id: None,
+        requester: None,
     }
 }
 

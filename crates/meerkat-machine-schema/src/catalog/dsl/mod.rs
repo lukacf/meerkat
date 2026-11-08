@@ -2033,12 +2033,21 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum(
                 "RunStartHoldReason",
-                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+                &[
+                    "MobStop",
+                    "ToolsNotPublished",
+                    "HostPreparation",
+                    "HostRecovery",
+                ],
             ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",
                 &["Retire", "KeepServing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RetainedRunSettleVerdict",
+                &["Accepted", "Busy", "NotRetained"],
             ),
             NamedTypeBinding::string_enum(
                 "InputPhase",
@@ -3172,6 +3181,7 @@ runtime_internal_inputs!(
         BeginUnregisterUnservedAttachment,
         BindInputAuthority,
         BindInputContextTarget,
+        BindInputRequesterBatchKey,
         BindScopedContext,
         BindSupervisor,
         BoundaryComplete,
@@ -3526,6 +3536,14 @@ runtime_internal_inputs!(
         // request it staged: the switch-turn chain applies it beside
         // CompleteUntilChangedSwitchTurnReconfigure. No caller can ask for it.
         AbortUntilChangedSwitchTurnReconfigure,
+        // A host's settle of the run its session retained, applied directly
+        // by `MeerkatMachine::settle_retained_run`, which answers the
+        // machine's verdict.
+        SettleRetainedRun,
+        // A channel's close sweep closes its delegation intake under the
+        // channel's exact binding, so nothing is admitted on it past the
+        // close. No caller can ask for it.
+        CloseLiveDelegationIntake,
     ]
 );
 
@@ -4580,6 +4598,18 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "MobNotRunning",
                 ],
             ),
+            // A host's adoption over a declared identity entry (0.9.11).
+            NamedTypeBinding::string_enum(
+                "HostAdoptionEntryVerdict",
+                &[
+                    "Adopting",
+                    "Ended",
+                    "Deferred",
+                    "NotADeclaredEntry",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -4711,6 +4741,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "StaleFenceToken",
                     "NotExternallyAddressable",
                     "StaleSessionBinding",
+                    "IdentityMember",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -5215,6 +5246,7 @@ runtime_internal_inputs!(
         ClassifyPeerNotice,
         CommitDormantSeat,
         ResolveMemberHostPreparation,
+        ResolveMemberBuildPreparation,
         BeginMemberRotation,
         CommitMemberRotation,
         ClassifyMemberRelease,
@@ -5253,6 +5285,10 @@ runtime_internal_inputs!(
         // The one-entry unlist of a roster-owned identity, decided in the
         // actor's step for the handle's unlist. Not a surface command.
         UnlistIdentityEntry,
+        // A host's takeover of a declared entry, decided in the identity
+        // reconciler's step before it retires or materializes the member.
+        // Not a surface command.
+        TakeOverIdentityEntry,
     ]
 );
 

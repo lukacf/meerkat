@@ -2497,17 +2497,28 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             if let Some(identity_runtime) = identity_runtime {
                 for (field, alias) in raw_member_tool_arguments(call.name, &args) {
                     let alias = crate::member_comms_id::runtime_alias_str(&alias).into_owned();
-                    if identity_runtime
-                        .identity_for_member_mutation(&alias)
-                        .await
-                        .is_some()
-                    {
-                        return Err(meerkat_core::ToolError::invalid_arguments(
-                            call.name,
-                            format!(
-                                "{field} '{alias}' is owned by the attached IdentityRuntime; use the identity lifecycle/topology authority"
-                            ),
-                        ));
+                    match identity_runtime.identity_for_member_mutation(&alias).await {
+                        Ok(Some(_)) => {
+                            return Err(meerkat_core::ToolError::invalid_arguments(
+                                call.name,
+                                format!(
+                                    "{field} '{alias}' is owned by the attached IdentityRuntime; use the identity lifecycle/topology authority"
+                                ),
+                            ));
+                        }
+                        Ok(None) => {}
+                        // Core holds the name for an identity the runtime has
+                        // not registered, or its entry could not be read:
+                        // never the raw member tool on a read that could not
+                        // tell.
+                        Err(error) => {
+                            return Err(meerkat_core::ToolError::invalid_arguments(
+                                call.name,
+                                format!(
+                                    "{field} '{alias}' is held for a durable identity of the attached IdentityRuntime: {error}"
+                                ),
+                            ));
+                        }
                     }
                 }
                 if call.name == "mob_destroy"
@@ -4602,6 +4613,17 @@ macro_rules! delegate_mob_session_service {
                     .settle_durable_tail_before_cold_start_reporting(session_id)
                     .await
             }
+            // The wrapped persistent service settles a session's owed
+            // compaction projections cold; the trait default refuses it
+            // for a service that keeps durable sessions.
+            async fn settle_owed_compaction_projections(
+                &self,
+                session_id: &meerkat_core::types::SessionId,
+            ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+                self.inner
+                    .settle_owed_compaction_projections(session_id)
+                    .await
+            }
 
             // NOT cfg-gated on meta's own `experimental-gpt-live`. The trait
             // requires this method whenever MEERKAT's feature is on, and
@@ -6065,6 +6087,15 @@ impl MobSessionService for AfterCreateMobSessionService {
             .settle_durable_tail_before_cold_start_reporting(session_id)
             .await
     }
+    // Forwarded, as in `delegate_mob_session_service!`.
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+        self.inner
+            .settle_owed_compaction_projections(session_id)
+            .await
+    }
     async fn observe_session_resume_authority(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -6952,8 +6983,7 @@ pub struct MobBootstrapSpec {
     /// `MobBuilder::with_member_restore_policy`.
     pub(crate) member_restore: crate::identity_first::MemberRestore,
     /// Members the mob leaves to Meta's preparation when it starts (pending
-    /// first-boot rows, interrupted rotations), forwarded to
-    /// `MobBuilder::with_host_pending_members`.
+    /// first-boot rows), forwarded to `MobBuilder::with_host_pending_members`.
     pub(crate) host_pending_members: Vec<meerkat_mob::AgentIdentity>,
     /// The user-global root the member factory keeps the members' session
     /// comms identities under (`<root>/.rkat/session_comms_identity`), when
@@ -7968,7 +7998,7 @@ impl MobBootstrapSpec {
 
     /// Members the mob must leave to Meta's preparation when it starts: it
     /// materializes none of them and refuses each one's wake retryable until
-    /// Meta's seat step for it ends the mark.
+    /// the declaration that carries its first-boot row out ends the mark.
     #[must_use]
     pub(crate) fn with_host_pending_members(
         mut self,
@@ -12770,6 +12800,10 @@ pub async fn resolved_tools_for_member(
 ///   stable `reason_type` here, once; the report stays beside them.
 ///   `InteractionFailed` mirrors its typed reason's `Display` into `error`
 ///   the same way.
+/// - the requester a run serves (the person's qualified principal, on the
+///   transcript identity of the run's lifecycle events) is left out
+///   (`strip_transcript_requesters`): no view, stream or event log of an
+///   agent's events returns it.
 pub fn console_agent_event_payload(event: &meerkat_core::AgentEvent) -> Value {
     use meerkat_core::AgentEvent;
     use meerkat_core::event::agent_event_type;
@@ -12827,7 +12861,37 @@ pub fn console_agent_event_payload(event: &meerkat_core::AgentEvent) -> Value {
     {
         record.insert("error".to_string(), Value::String(reason.to_string()));
     }
+    strip_transcript_requesters(&mut payload);
     payload
+}
+
+/// Leave the requester out of every transcript identity in `value`: the
+/// `requester` of each `identity` object, at any depth (a run lifecycle
+/// event's own identity, a committed message's, the lineage a console event
+/// inherits, a nested frame's).
+///
+/// The requester is the person's qualified principal, which Core carries on
+/// a run's transcript identity (`TranscriptMessageIdentity::requester`). It
+/// stays privileged: a console send keeps it with its stored frame for a
+/// redispatch, and no view, stream or event log returns it. Every viewer
+/// reads the person's display name on the send's frame instead.
+pub(crate) fn strip_transcript_requesters(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(identity)) = map.get_mut("identity") {
+                identity.remove("requester");
+            }
+            for item in map.values_mut() {
+                strip_transcript_requesters(item);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_transcript_requesters(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn content_input_has_images(content: &meerkat_core::ContentInput) -> bool {
@@ -13236,7 +13300,10 @@ where
 
 /// Console-only local human submission pinned to the member snapshot resolved
 /// before accepting the request. External members retain the existing remote
-/// send protocol; that compatibility path makes no local transcript-role claim.
+/// send protocol; that compatibility path makes no local transcript-role claim
+/// and carries no requester or sender label. `attribution` is what the send
+/// carries for its person to the local member's run: the requester and the
+/// sender label its model reads.
 pub(crate) async fn send_console_human_on_mob(
     handle: &MobHandle,
     member: &meerkat_mob::runtime::MobMemberListEntry,
@@ -13244,6 +13311,7 @@ pub(crate) async fn send_console_human_on_mob(
     skill_references: &[meerkat_core::skills::SkillKey],
     handling_mode: meerkat_core::types::HandlingMode,
     accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+    attribution: &crate::console_aggregator::ConsoleHumanAttribution,
 ) -> Result<String, MobRuntimeError> {
     let (runtime_id, fence_token) = member.binding_atoms().ok_or(MobRuntimeError::InvalidInput(
         "console human target has no current runtime binding",
@@ -13290,8 +13358,14 @@ pub(crate) async fn send_console_human_on_mob(
     .map_err(MobError::from)?;
     // Addressability was already checked by the console policy. Internal
     // origin preserves support for console-addressable internal workers.
-    let spec = meerkat_mob::WorkSpec::new(content, meerkat_mob::WorkOrigin::Internal)
+    let mut spec = meerkat_mob::WorkSpec::new(content, meerkat_mob::WorkOrigin::Internal)
         .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
+    if let Some(requester) = attribution.requester.as_ref() {
+        spec = spec.with_requester(requester.clone());
+    }
+    if let Some(label) = attribution.sender_label.as_ref() {
+        spec = spec.with_sender_label(label.clone());
+    }
     let options = if skill_references.is_empty() {
         meerkat_mob::MemberTurnOptions::new()
     } else {
@@ -14648,7 +14722,8 @@ mod tests {
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         *dispatcher
             .identity_runtime
             .write()
@@ -20017,6 +20092,7 @@ comms = true
                         turn_tool_overlay: None,
                         typed_turn_appends: Vec::new(),
                         turn_metadata: None,
+                        requester: None,
                     },
                 };
                 let (sender, mut admitted) = tokio::sync::oneshot::channel();
@@ -23350,6 +23426,7 @@ image_generation = true
                         ..Default::default()
                     },
                 ),
+                requester: None,
             },
         };
 

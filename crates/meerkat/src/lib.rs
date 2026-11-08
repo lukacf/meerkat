@@ -361,7 +361,8 @@ pub use meerkat_schedule::{
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
-    TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call, schedule_tools_list,
+    TriggerSpec, UpdateScheduleRequest, dispatch_schedule_list_where, handle_schedule_tools_call,
+    schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -410,7 +411,11 @@ pub use meerkat_workgraph::{
 #[cfg(not(target_arch = "wasm32"))]
 mod command_hook_confinement;
 #[cfg(not(target_arch = "wasm32"))]
+mod hook_source_trust;
+#[cfg(not(target_arch = "wasm32"))]
 mod host_confinement;
+#[cfg(not(target_arch = "wasm32"))]
+pub use hook_source_trust::{HookSource, HookSourceDecision, HookSourceDigest, HookSourceTrust};
 #[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
 mod skill_stdio_confinement;
 #[cfg(not(target_arch = "wasm32"))]
@@ -623,8 +628,8 @@ pub use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 pub use meerkat_session::{
-    EphemeralSessionService, LiveSessionActorWitness, RuntimeContextAdmissionGuard, SessionAgent,
-    SessionAgentBuilder,
+    EphemeralSessionService, LiveSessionActorWitness, OwedCompactionSettlement,
+    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SettledCompactionProjection,
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that
 // refuses agent construction, composed with the persistent service to drive

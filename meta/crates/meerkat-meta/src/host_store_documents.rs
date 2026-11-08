@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
     IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
-    LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionCursor,
+    LifecycleEffectKind, LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionCursor,
     MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore, RecordRetention,
     decode_identity_record, encode_identity_record, lifecycle_effect_failure_order,
 };
@@ -76,6 +76,7 @@ const ROTATION_PREFIX: &str = "rotation/";
 const LIFECYCLE_PREFIX: &str = "lifecycle/";
 const EFFECT_PREFIX: &str = "effect/";
 const FAILURE_PREFIX: &str = "failure/";
+const HARVEST_FAILURE_PREFIX: &str = "harvest-failure/";
 
 /// The key prefix of the realm documents
 /// ([`PersistentMetadataStore::realm_document`]): the document's key follows.
@@ -149,22 +150,52 @@ fn lifecycle_effect_prefix(mob_id: &str) -> String {
     format!("{EFFECT_PREFIX}{}:{mob_id}", mob_id.len())
 }
 
-/// A lifecycle effect failure, injective over (mob id, generation, effect,
-/// identity) as [`lifecycle_effect_key`] is: the generation, a number, and
-/// the effect's wire name each end at a `/`.
+/// A lifecycle effect failure ([`lifecycle_failure_key_of`]).
 fn lifecycle_failure_key(failure: &LifecycleEffectFailure) -> String {
-    format!(
-        "{}{}/{}/{}",
-        lifecycle_failure_prefix(&failure.mob_id),
+    lifecycle_failure_key_of(
+        &failure.mob_id,
         failure.generation,
-        failure.effect.as_str(),
-        failure.identity
+        failure.effect,
+        &failure.identity,
     )
 }
 
-/// The prefix of every lifecycle effect failure of `mob_id`.
+/// The failure of `effect` owed to `identity`'s incarnation `generation` of
+/// `mob_id`, injective over (mob id, generation, effect, identity) as
+/// [`lifecycle_effect_key`] is: the generation, a number, and the effect's
+/// wire name each end at a `/`. A compaction harvest's is under a prefix of
+/// its own ([`lifecycle_harvest_failure_prefix`]).
+fn lifecycle_failure_key_of(
+    mob_id: &str,
+    generation: u64,
+    effect: LifecycleEffectKind,
+    identity: &str,
+) -> String {
+    match effect {
+        LifecycleEffectKind::CompactionHarvest => format!(
+            "{}{generation}/{identity}",
+            lifecycle_harvest_failure_prefix(mob_id)
+        ),
+        _ => format!(
+            "{}{generation}/{}/{identity}",
+            lifecycle_failure_prefix(mob_id),
+            effect.as_str()
+        ),
+    }
+}
+
+/// The prefix of every lifecycle effect failure of `mob_id` but its
+/// compaction harvests'.
 fn lifecycle_failure_prefix(mob_id: &str) -> String {
     format!("{FAILURE_PREFIX}{}:{mob_id}", mob_id.len())
+}
+
+/// The prefix of every compaction harvest failure of `mob_id`: apart from
+/// [`lifecycle_failure_prefix`], whose documents a build without
+/// [`LifecycleEffectKind::CompactionHarvest`] reads and decodes strictly,
+/// so such a build never reads one.
+fn lifecycle_harvest_failure_prefix(mob_id: &str) -> String {
+    format!("{HARVEST_FAILURE_PREFIX}{}:{mob_id}", mob_id.len())
 }
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1023,6 +1054,22 @@ impl PersistentMetadataStore for SpiMetadataStore {
         Ok(older)
     }
 
+    async fn clear_lifecycle_effect_failure(
+        &self,
+        mob_id: &str,
+        generation: u64,
+        effect: LifecycleEffectKind,
+        identity: &str,
+    ) -> Result<(), MetadataStoreError> {
+        self.documents
+            .write(
+                &lifecycle_failure_key_of(mob_id, generation, effect, identity),
+                None,
+            )
+            .await
+            .map_err(io_error)
+    }
+
     /// Documents of the host store realm: as durable as the realm.
     fn realm_document_retention(&self) -> Option<RecordRetention> {
         Some(RecordRetention::Durable)
@@ -1065,16 +1112,21 @@ impl PersistentMetadataStore for SpiMetadataStore {
 impl SpiMetadataStore {
     /// Every lifecycle effect failure of `mob_id`, each with its document
     /// key, in the order
-    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them.
+    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them:
+    /// the documents under both failure prefixes.
     async fn lifecycle_effect_failures_of(
         &self,
         mob_id: &str,
     ) -> Result<Vec<(String, LifecycleEffectFailure)>, MetadataStoreError> {
         let mut failures = Vec::new();
-        for key in self
-            .documents
-            .keys_with_prefix(&lifecycle_failure_prefix(mob_id))
-        {
+        let keys = [
+            lifecycle_failure_prefix(mob_id),
+            lifecycle_harvest_failure_prefix(mob_id),
+        ]
+        .iter()
+        .flat_map(|prefix| self.documents.keys_with_prefix(prefix))
+        .collect::<Vec<_>>();
+        for key in keys {
             let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
                 continue;
             };

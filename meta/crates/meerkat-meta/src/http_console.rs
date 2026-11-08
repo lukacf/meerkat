@@ -10836,7 +10836,7 @@ fn identity_hidden_by_policy_error(identity: &str) -> JsonRpcError {
 /// The answer to a request naming a member the console does not hold, also
 /// given for a member the caller may not know of
 /// ([`AccessView::hides_agent`]): the two cannot be told apart.
-fn unknown_identity_rpc_error(identity: &str) -> JsonRpcError {
+pub(crate) fn unknown_identity_rpc_error(identity: &str) -> JsonRpcError {
     JsonRpcError {
         code: -32001,
         message: format!("unknown identity: {identity}"),

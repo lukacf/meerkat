@@ -364,6 +364,110 @@ fn resolve_goal_target(
     }
 }
 
+/// The member of this runtime's mob `mob_id` an owner key names: an agent
+/// key `mob/<mob>/agent/<member>` of that mob. Any other key names none.
+fn owner_key_member(mob_id: &meerkat_mob::MobId, owner_key: &WorkOwnerKey) -> Option<String> {
+    if owner_key.kind != meerkat::WorkOwnerKind::Agent {
+        return None;
+    }
+    let (mob, member) = owner_key.id.strip_prefix("mob/")?.split_once("/agent/")?;
+    (mob == mob_id.as_str() && !member.is_empty() && !member.contains('/'))
+        .then(|| member.to_string())
+}
+
+/// The member a goal or attention target lowered by
+/// `lower_member_session_target` names: the owner forms carry the member's
+/// key, and a session form a member holds is lowered to that member's key.
+/// A session no member holds names none.
+fn target_member(mob_id: &meerkat_mob::MobId, target: &GoalAttentionTarget) -> Option<String> {
+    match target {
+        GoalAttentionTarget::Owner { owner_key } => owner_key_member(mob_id, owner_key),
+        GoalAttentionTarget::Session { .. } => None,
+    }
+}
+
+/// On the console, a member hidden from the caller
+/// ([`crate::access::AccessView::hides_agent`]) named by a target is refused
+/// as an unknown member's, as the console refuses one named in a target's
+/// identity form before the method runs: nothing is recorded for it, and
+/// nothing tells the caller it exists.
+fn refuse_hidden_member(
+    surface: &WorkgraphSurface<'_>,
+    member: Option<&str>,
+) -> Result<(), JsonRpcError> {
+    let (
+        WorkgraphSurface::Console {
+            access: Some(view), ..
+        },
+        Some(member),
+    ) = (surface, member)
+    else {
+        return Ok(());
+    };
+    if view.hides_agent(member) {
+        return Err(crate::http_console::unknown_identity_rpc_error(member));
+    }
+    Ok(())
+}
+
+/// [`refuse_hidden_member`] for the member a lowered target names.
+fn refuse_hidden_target(
+    surface: &WorkgraphSurface<'_>,
+    mob_id: &meerkat_mob::MobId,
+    target: &GoalAttentionTarget,
+) -> Result<(), JsonRpcError> {
+    refuse_hidden_member(surface, target_member(mob_id, target).as_deref())
+}
+
+/// [`refuse_hidden_member`] for the supervisor a completion policy names,
+/// in any form of its key.
+async fn refuse_hidden_supervisor(
+    surface: &WorkgraphSurface<'_>,
+    mob_id: &meerkat_mob::MobId,
+    admission: &WorkGraphAdmission,
+    policy: &meerkat::WorkCompletionPolicy,
+) -> Result<(), JsonRpcError> {
+    let meerkat::WorkCompletionPolicy::Supervisor { owner_key } = policy else {
+        return Ok(());
+    };
+    let supervisor = admission
+        .lower_member_session_target(GoalAttentionTarget::Owner {
+            owner_key: owner_key.clone(),
+        })
+        .await
+        .map_err(admission_error_to_rpc)?;
+    refuse_hidden_target(surface, mob_id, &supervisor)
+}
+
+/// An attention list filter that names a member hidden from the caller,
+/// swapped for a target no member holds: the list answers as it answers a
+/// name that does not exist.
+async fn absent_if_hidden(
+    surface: &WorkgraphSurface<'_>,
+    mob_id: &meerkat_mob::MobId,
+    admission: &WorkGraphAdmission,
+    target: meerkat::WorkAttentionTarget,
+) -> Result<meerkat::WorkAttentionTarget, JsonRpcError> {
+    let named = match &target {
+        meerkat::WorkAttentionTarget::Session { session_id } => GoalAttentionTarget::Session {
+            session_id: session_id.clone(),
+        },
+        meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => GoalAttentionTarget::Owner {
+            owner_key: owner_key.clone(),
+        },
+    };
+    let lowered = admission
+        .lower_member_session_target(named)
+        .await
+        .map_err(admission_error_to_rpc)?;
+    if refuse_hidden_target(surface, mob_id, &lowered).is_err() {
+        return Ok(meerkat::WorkAttentionTarget::Session {
+            session_id: meerkat::SessionId::new(),
+        });
+    }
+    Ok(target)
+}
+
 /// Synthesize the confirm evidence for an evidence-less wire call: the kind
 /// literal the goal's completion policy admits (mirrors the machine's
 /// `required_confirmation_evidence_kind` vocabulary), keyed on the binding.
@@ -650,7 +754,12 @@ pub(crate) async fn handle_workgraph_method(
             reject_non_default_namespace(service, &object)?;
             let mut object = object;
             normalize_attention_status_param(&mut object)?;
-            let request: AttentionListRequest = parse_request(object)?;
+            let mut request: AttentionListRequest = parse_request(object)?;
+            // A filter naming a member hidden from the caller lists what a
+            // name no member holds lists.
+            if let Some(target) = request.target.take() {
+                request.target = Some(absent_if_hidden(&surface, mob_id, admission, target).await?);
+            }
             let result = service
                 .list_attention(request)
                 .await
@@ -831,6 +940,8 @@ pub(crate) async fn handle_workgraph_method(
             let mut object = object;
             object.remove("binding_id");
             let params: PolicyEscalateParams = parse_request(object)?;
+            refuse_hidden_supervisor(&surface, mob_id, admission, &params.completion_policy)
+                .await?;
             let projection =
                 fetch_authority_projection(service, binding_id, params.namespace.clone()).await?;
             let item = service
@@ -857,10 +968,13 @@ pub(crate) async fn handle_workgraph_method(
                 .lower_member_session_target(target)
                 .await
                 .map_err(admission_error_to_rpc)?;
+            refuse_hidden_target(&surface, mob_id, &target)?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             object.insert("target".to_string(), to_result_value(&target));
             let request: GoalCreateRequest = parse_request(object)?;
+            refuse_hidden_supervisor(&surface, mob_id, admission, &request.completion_policy)
+                .await?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
             admission
                 .check_target_free(
@@ -982,6 +1096,7 @@ pub(crate) async fn handle_workgraph_method(
                 .lower_member_session_target(target)
                 .await
                 .map_err(admission_error_to_rpc)?;
+            refuse_hidden_target(&surface, mob_id, &target)?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
@@ -1082,6 +1197,7 @@ pub(crate) async fn handle_workgraph_method(
                 .lower_member_session_target(target)
                 .await
                 .map_err(admission_error_to_rpc)?;
+            refuse_hidden_target(&surface, mob_id, &target)?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;

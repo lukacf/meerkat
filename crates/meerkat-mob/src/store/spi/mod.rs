@@ -663,8 +663,14 @@ struct MobMetaV1 {
 
 /// A stored mob as the boot listing sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SpiStoredMob {
-    /// The storage key the host opened the storage with.
+    /// The storage key the host opened the storage with. A quarantined
+    /// storage whose key its scope names hash (a key over 200 bytes, or with
+    /// a control character), and that no other listed scope names, is
+    /// listed under the quarantined scope's name instead (`<tag>:h<hash>`):
+    /// the realm cannot tell the key, and opening that name refuses with
+    /// the quarantine.
     pub storage_key: String,
     /// The mob its creation record names, when it has one.
     pub mob_id: Option<MobId>,
@@ -673,6 +679,12 @@ pub struct SpiStoredMob {
     /// Why the pinned summary could not be read, when it could not: the
     /// storage exists, and opening it reports the same failure typed.
     pub unreadable: Option<String>,
+    /// Why a scope of the storage is quarantined, when one is: the store
+    /// reports a conflict for it (two batches hold one of its versions), and
+    /// opening the storage refuses typed until the scope is repaired in the
+    /// store and the realm is reopened. The cause names the conflict and the
+    /// repair.
+    pub quarantined: Option<String>,
 }
 
 /// Which scopes a call locks.
@@ -1866,6 +1878,11 @@ struct HostInner {
     stored: StdMutex<BTreeMap<String, SpiStoredMob>>,
     open: StdMutex<HashMap<String, Weak<Bundle>>>,
     opening: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The quarantined storages the claim could not name by their key (the
+    /// key is hashed in their scope names, and no listed scope names it),
+    /// by the quarantined scope's name, with the quarantine's cause: listed
+    /// under that name, which opens to the quarantine's refusal.
+    unnamed: BTreeMap<String, String>,
 }
 
 impl HostInner {
@@ -1881,22 +1898,33 @@ impl HostInner {
                 ))
             })?;
             for cell in cells {
-                let state = cell.lock().await;
+                let mut state = cell.lock().await;
                 let key = state.id().key.clone();
                 let entry = stored.entry(key.clone()).or_insert_with(|| SpiStoredMob {
                     storage_key: key,
                     mob_id: None,
                     finalized: false,
                     unreadable: None,
+                    quarantined: None,
                 });
+                // A quarantined scope of the storage: the store reports a
+                // conflict for it, and opening the storage refuses typed.
+                if let Some(cause) = state.quarantine() {
+                    entry.quarantined.get_or_insert_with(|| cause.to_string());
+                    continue;
+                }
                 if family.tag != MOB_FAMILY.tag {
                     continue;
                 }
-                let meta = match realm.pinned_values(&state).await {
+                let meta = match realm.pinned_values(&mut state).await {
                     Ok(pinned) => pinned
                         .get(G_META)
                         .map(|bytes| decode_single::<MobMetaV1>(bytes))
                         .transpose(),
+                    Err(SpiError::ScopeQuarantined { cause, .. }) => {
+                        entry.quarantined.get_or_insert(cause);
+                        continue;
+                    }
                     Err(error) => Err(read_error(error)),
                 };
                 match meta {
@@ -1911,12 +1939,76 @@ impl HostInner {
                 }
             }
         }
+        let unnamed = list_unnamed_quarantines(realm, &mut stored);
         Ok(Self {
             stored: StdMutex::new(stored),
             open: StdMutex::new(HashMap::new()),
             opening: StdMutex::new(HashMap::new()),
+            unnamed,
         })
     }
+
+    /// The refusal of `storage_key` when it names a quarantined storage the
+    /// claim could not name by its key: no storage opens or is removed
+    /// under that name.
+    fn unnamed_refusal(&self, storage_key: &str) -> Result<(), MobStoreError> {
+        match self.unnamed.get(storage_key) {
+            Some(cause) => Err(MobStoreError::ReadFailed(format!(
+                "host store mob storage {storage_key} is quarantined: {cause}"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Mark the quarantine of every mob storage scope whose store name hashes
+/// its storage key, which no cell of the claim carries: on the storage the
+/// claim found under its key (another scope of it is listed), or, when no
+/// listed scope names the key, as a storage of its own, listed by the
+/// quarantined scope's name. No quarantined storage is left out. Answers
+/// the storages listed by a scope's name, with their causes.
+fn list_unnamed_quarantines(
+    realm: &SpiRealm,
+    stored: &mut BTreeMap<String, SpiStoredMob>,
+) -> BTreeMap<String, String> {
+    let mut attributed: HashSet<Vec<String>> = HashSet::new();
+    for (key, entry) in stored.iter_mut() {
+        for family in FAMILIES {
+            if let Some(quarantine) = realm.quarantine_of(&ScopeId::new(family, key.clone())) {
+                attributed.insert(quarantine.names);
+                entry.quarantined.get_or_insert(quarantine.cause);
+            }
+        }
+    }
+    let mut unnamed = BTreeMap::new();
+    for quarantine in realm.quarantined_scopes() {
+        let of_a_mob_family = FAMILIES.iter().any(|family| {
+            quarantine
+                .scope
+                .strip_prefix(family.tag)
+                .is_some_and(|rest| rest.starts_with(':'))
+        });
+        if !of_a_mob_family || attributed.contains(&quarantine.names) {
+            continue;
+        }
+        tracing::error!(
+            scope = %quarantine.scope,
+            cause = %quarantine.cause,
+            "a quarantined mob storage scope names no storage key the claim found: it is listed \
+             by its scope's name"
+        );
+        stored
+            .entry(quarantine.scope.clone())
+            .or_insert_with(|| SpiStoredMob {
+                storage_key: quarantine.scope.clone(),
+                mob_id: None,
+                finalized: false,
+                unreadable: None,
+                quarantined: Some(quarantine.cause.clone()),
+            });
+        unnamed.insert(quarantine.scope, quarantine.cause);
+    }
+    unnamed
 }
 
 /// The one per-realm owner of the mob families: it claims them once, lists
@@ -1960,7 +2052,9 @@ impl SpiMobStoreHost {
     /// less every storage removed since. The summaries are the ones read at
     /// the claim (a storage first opened since has none): a mob created or
     /// destroyed in this process does not update them, and a reopened realm
-    /// reads them again.
+    /// reads them again. A storage with a quarantined scope is listed with
+    /// `quarantined` set, never left out: under its scope's name when the
+    /// realm cannot tell its key ([`SpiStoredMob::storage_key`]).
     #[must_use]
     pub fn stored_mobs(&self) -> Vec<SpiStoredMob> {
         lock_std(&self.inner.stored).values().cloned().collect()
@@ -1990,6 +2084,7 @@ impl SpiMobStoreHost {
             return Ok(SpiMobStores { bundle });
         }
         self.realm.check_realm().map_err(read_error)?;
+        self.inner.unnamed_refusal(storage_key)?;
         let bundle = Arc::new(Bundle::new(
             Arc::clone(&self.realm),
             storage_key.to_string(),
@@ -2003,6 +2098,7 @@ impl SpiMobStoreHost {
                 mob_id: None,
                 finalized: false,
                 unreadable: None,
+                quarantined: None,
             });
         Ok(SpiMobStores { bundle })
     }
@@ -2034,6 +2130,7 @@ impl SpiMobStoreHost {
                 "mob storage '{storage_key}' is open in this process"
             )));
         }
+        self.inner.unnamed_refusal(storage_key)?;
         self.realm.ensure_lease().await.map_err(write_error)?;
         let probe = Bundle::new(Arc::clone(&self.realm), storage_key.to_string());
         probe.load().await?;

@@ -66,6 +66,7 @@ fn configuration() -> meerkat_runtime::meerkat_machine::NativeGrantWorkConfigura
     );
     meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration {
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: false,
         grants,
         ingress: Arc::new(|_, _, _, _| {

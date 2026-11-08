@@ -15200,7 +15200,7 @@ impl MobActor {
                         %agent_identity,
                         bridge_session_id = %session_id,
                         error = %refusal,
-                        "member status session view read refused until the host store realm is reopened; later status reads answer from this refusal"
+                        "member status session view read refused by the host store (the error says what lifts it); later status reads answer from this refusal"
                     );
                 }
                 observation.preview_unavailable =

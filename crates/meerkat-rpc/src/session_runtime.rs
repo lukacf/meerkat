@@ -43735,6 +43735,7 @@ mod governed_host_original_tests {
             .expect("operation grant");
         let configuration = NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants,
             ingress: Arc::new(move |_, _, ingress: &NativeIngressContext, _| {

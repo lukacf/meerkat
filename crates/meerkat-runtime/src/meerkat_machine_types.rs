@@ -1383,6 +1383,12 @@ meerkat_machine_runtime_internal_inputs!(
     RunExecutionLifecycle => [
         SettleRetainedRun,
     ],
+    // The run marked resumable whose resumed-run admission could not decide,
+    // held until a later answer releases it.
+    RunExecutionLifecycle => [
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

@@ -469,6 +469,131 @@ them.
   identity and label: retire a member that uses them, and seat it under
   another identity, before upgrading.
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  a run marked resumable whose resumed-run admission could not decide is held
+  for a later answer (see Changed). `MeerkatMachineInput` and
+  `MeerkatMachineInputVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain
+  `HoldResumedRunForAdmission { run_id }` and
+  `ReleaseResumedRunAdmission { run_id }`, appended last. The kernel
+  `generated::meerkat::TransitionId` gains `HoldResumedRunForAdmissionIdle`,
+  `HoldResumedRunForAdmissionAttached`, `HoldResumedRunForAdmissionRunning`,
+  `HoldResumedRunForAdmissionRetired`, `HoldResumedRunForAdmissionStopped`,
+  `ReleaseResumedRunAdmissionIdle`, `ReleaseResumedRunAdmissionAttached`,
+  `ReleaseResumedRunAdmissionRunning`, `ReleaseResumedRunAdmissionRetired`
+  and `ReleaseResumedRunAdmissionStopped`, appended last. An exhaustive
+  match needs their arms. `MeerkatMachineState` (the same two modules) and
+  the kernel `generated::meerkat::State` gain the public field
+  `resumed_run_admission_hold: Option<RunId>`, so code that builds them
+  literally must set it (`None` holds no run).
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-session`, `meerkat-mob`: a host store commit whose batch is still
+  unsettled when its retry budget runs out, its writer's fence window open,
+  fails with `SpiError::UnsettledPastRetryBudget`, and through the runtime
+  store with `RuntimeStoreError::UnsettledPastRetryBudget`, for a write and
+  for a read that committed. Before, it failed with `SpiError::Host` carrying
+  the last answer (`RuntimeStoreError::WriteFailed`, or
+  `RuntimeStoreError::Unavailable` for a read whose last answer was
+  unavailable, which `meerkat-mob`'s host store reads answered as
+  `MobStoreError::Unavailable`; they now answer `ReadFailed`). Through the
+  session service, a checkpoint write (a round commit or a closing save)
+  that stops so answers the teardown class
+  (`AgentError::SessionDurableProjectionAuthorityUnknown`), as one stopped at
+  its fence window does, so the live actor is reloaded from what the store
+  holds; it answered `AgentError::InternalError`, which failed the run as an
+  internal error while the actor stayed loaded over a scope that refuses it.
+  The runtime then tells the waiters of the session's kept inputs that they
+  stay queued (`CompletionWaitError::RequeuedAcrossStop`), as at a lost
+  fence, since the store keeps them for the next start; they were told
+  `AuthorityUnavailable` ("runtime session unregistered before terminal
+  failure").
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a store that
+  answers a grant at or below the installed token, or at or below a grant of
+  the writer's own whose listing failed (an earlier grant of the realm), now
+  loses the realm (fail closed). The contract already required every grant
+  to answer a token above every earlier grant of the realm; Core now holds a
+  re-acquire's grant to it, the takeover of the writer's own recorded lease
+  included. A
+  grant that breaks the store's token order poisons the realm with a cause
+  that names the store, not another writer. Before, the writer installed the
+  token again and resumed, so two writers could carry one token. A store
+  that answers its own-lease takeover with its current token is outside the
+  contract and now loses its realm at its next re-acquire (see Upgrade
+  notes).
+
+- `meerkat-core`: `HeadPage` gains `conflicts` (`Vec<ScopeConflict>`) and is
+  `#[non_exhaustive]`. A host store builds its listing pages with
+  `HeadPage::new(heads, next)` and adds the scopes it reports conflicted
+  with `HeadPage::with_conflicts`; a `HeadPage` struct literal outside
+  `meerkat-core` no longer compiles (see Upgrade notes).
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a host store
+  that meets obligation 4 at load, failing the load of a scope two batches
+  hold one version of with a typed conflict, now lists such a scope per
+  scope: `list_heads` reports it in `HeadPage::conflicts`, with the version
+  that holds the two batches and their commit ids, never among the heads
+  and never by failing the page, and a page holds at most `limit` entries
+  across both lists. The load's `Conflict` names that version as `current`.
+  A store that must wait before it can decide what a lower token's batch
+  shows answers the page `Unavailable`, never a conflict. Before, the
+  contract said nothing of such a scope's listing, and a store that failed
+  the page for it kept the whole realm from opening (see Changed).
+
+- `meerkat-runtime`: `SpiRealm::pinned_values` takes the scope's state as
+  `&mut ScopeState` (it took `&ScopeState`): a chunk whose load answers a
+  typed conflict quarantines the scope there. A caller passes the scope
+  state it locked mutably.
+
+- `meerkat-mob`: `SpiStoredMob` gains `quarantined` (`Option<String>`) and is
+  `#[non_exhaustive]`: a struct literal outside `meerkat-mob` no longer
+  compiles.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-mob`, `meerkat-store-conformance`: a resumed-run admission
+  (`ResumedRunAdmissionDecision::Unavailable`), or a durable worker's resume
+  gate (`DurableResumeVerdict::Unavailable`), that cannot decide through
+  every attempt no longer ends the run as a refused resume. The run is
+  neither resumed nor settled: it stays marked, its inputs bound and none
+  ended, no `RunFailed` is published, and its waiters keep waiting; no other
+  run of the session starts meanwhile. The runtime asks again at the next
+  wake of the session's runtime loop or at the session's next registration,
+  never on a timer, and a kept run past its stop's max age is settled as
+  expired before it is asked again. Before, the run was settled
+  `ResumeRefused` after the third attempt. The `durable_worker` chapter's
+  `worker_gate_unavailable` row now expects the run kept at that restart and
+  resumed once at the next restart, with the gate recovered.
+
+- `meerkat-runtime`, `meerkat`: `NativeGrantWorkConfiguration` and
+  `ScopedGrantComposition` (meerkat-runtime) and `GovernedRealmBootstrap`
+  (meerkat) gain the public field `kept_original`
+  (`Option<Arc<NativeKeptOriginalCheck>>`), the check that supplies again
+  the controller client of a kept governed input (see Changed). A struct
+  literal of one of them outside its crate must set it: `kept_original:
+  None` keeps such an input ending as a refused resume, as before.
+  `ScopedGrantComposition::with_retained_resume` installs it with the
+  retained-resume check, and `ScopedRetainedResume::into_checks` builds both
+  over the same owners.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`, `meerkat`:
+  a governed input admitted under its own authority association (a governed
+  prompt, for example) that a graceful requeue stop keeps, or that a restart
+  finds in the store, now runs at its session's next registration when its
+  host supplies its controller client again
+  (`NativeWorkAuthorizationHost::authenticate_kept_original`; a composition
+  built with `ScopedGrantComposition::with_retained_resume` asks its
+  controller owner for the stored selection), and a run left open whose
+  first input it is resumes on that client. Before, every attachment ended
+  such an input as a refused resume (`Abandoned { ResumeRefused }`) before it
+  served, and such a prompt had to be submitted again with a fresh
+  authentication of its caller: a host that still submits it again runs it
+  twice (see Upgrade notes). A host without the check ends such inputs as
+  before, and so does the stock governed realm, whose controller pins do not
+  outlive their registration.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -1081,6 +1206,118 @@ them.
   `MobHandle::approval_branches` lists the open ones, by their recorded
   source.
 
+- `meerkat-runtime`: `MeerkatMachine::resumed_run_admission_held`, the run a
+  session's registration keeps marked while its resumed-run admission could
+  not decide. `MeerkatMachine` holds such a run in its machine
+  (`resumed_run_admission_hold`, with the runtime-internal inputs
+  `HoldResumedRunForAdmission` and `ReleaseResumedRunAdmission`): it does not
+  resume until a later answer releases it, and settling or releasing the run
+  drops the hold.
+
+- `meerkat-runtime`: `SpiError::UnsettledPastRetryBudget { attempts, last }`
+  and `RuntimeStoreError::UnsettledPastRetryBudget { cause }`: a host store
+  commit whose retry budget ran out with its outcome unknown, typed the same
+  way.
+
+- `meerkat-runtime`: `RuntimeStore::refuses_runtime_until_reopen`, whether a
+  store refuses every later call that needs a runtime until its realm is
+  reopened (`false` by default; a decorator forwards its inner store's
+  answer), and `SpiRealm::scope_poisoned`.
+
+- `meerkat-runtime`: `store::spi::writer_fence`, the production module of
+  `HostStoreWriterFenceMachine`, a new canonical machine that owns the writer
+  fence of a host store realm: the writer's phase (live, stopped, acquiring,
+  proving a grant, resuming, waiting out a holder, or lost), the token it
+  commits with, the grant it has not installed, the acquires it gave up on,
+  the holder it waits out, why it stopped or lost the realm, and which of
+  the realm's scopes are poisoned or quarantined, and why. The realm drives
+  it; the rules it keeps are unchanged except the token order (see
+  Breaking) and the containment of a conflicted scope (see Changed).
+
+- `meerkat-store-conformance`: the host store chapter's token order row:
+  every grant must answer a token above every earlier grant of the realm, a
+  takeover of the holder's own lease through the handle that holds it
+  included.
+
+- `meerkat-store-conformance`: three more host store chapter rows, each with
+  a canary store in the crate's tests that fails it.
+  `an_acquire_decides_the_cut`: what a new writer lists and loads right
+  after its acquire returned is what every later load shows once the
+  superseded writer's commit in flight settled; a batch the store ordered
+  before the acquire shows from that first listing on, and one ordered
+  after it never does. `reacquire_lists_another_writers_commits`: a process
+  that acquires again on its own handle, as Core's writer does after a
+  failed renew, lists every batch another process committed meanwhile, the
+  four kinds listed at once. `a_superseded_token_is_refused_at_commit`, the
+  chapter's last row: a commit under a superseded token answers `FencedOut`
+  naming the current token, every time, never `Ok`, and shows nowhere. Every
+  listing of the chapter also checks that names strictly increase across
+  pages.
+
+- `meerkat-core`: `ScopeConflict` (`#[non_exhaustive]`, built with
+  `ScopeConflict::new(name, version, commit_ids)`), a scope a host store
+  listing reports conflicted, in `HeadPage::conflicts`, with the
+  constructors `HeadPage::new` and `HeadPage::with_conflicts`.
+
+- `meerkat-runtime`: `SpiRealm::quarantined_scopes` and `QuarantinedScope`
+  (`scope`, `names`, `cause`): the scopes of a host store realm quarantined
+  because the store reports a conflict for them, each with its conflicted
+  incarnations and the cause its refusals carry. `SpiError::ScopeQuarantined`
+  answers a call on such a scope, and `SpiError::ScopesQuarantined` a read
+  across scopes while one of a family it reads is quarantined (naming the
+  poisoned ones too); both reach a runtime store's caller as
+  `RuntimeStoreError::ScopeRefused`. With them `SpiRealm::scope_refused`
+  (poisoned or quarantined), `SpiRealm::quarantine_of` (the quarantine of
+  one scope, named by the id the caller gives), `ScopeState::quarantine` and
+  `ScopeState::refusal`.
+
+- `meerkat-runtime`: `RuntimeStore::unnamed_refused_runtimes`, the runtime
+  scopes a store refuses that it cannot name by runtime id (a host store's
+  quarantined scope of a runtime whose id its scope names hash, before any
+  call named the runtime), each a `RefusedScope` naming the scope (none by
+  default; a decorator forwards its inner store's answer).
+  `RuntimeDeliveryAuthorityListing` gains `unnamed` (with
+  `RuntimeDeliveryAuthorityListing::with_unnamed`) and
+  `RuntimeDeliveryBacklog` gains `unnamed`, the same scopes, beside the
+  runtimes they name. `MeerkatMachine::unnamed_refused_runtimes` and
+  `MeerkatMachine::store_refuses_runtime` let a boot attribute them to the
+  members it plans, by each member's runtime ids.
+
+- `meerkat-runtime`: `RuntimeStore::quarantined_tool_grants`, the tool
+  grants whose scope a store quarantined (a host store reports a conflict
+  for it), each a `QuarantinedToolGrant` (`#[non_exhaustive]`: its
+  `grant_id` when the store can name it, and the `RefusedScope`; none by
+  default; a decorator forwards its inner store's answer). Their subject is
+  unknown, so `RuntimeStore::list_tool_grants` leaves them out of every
+  subject's listing; `ToolGrantService` reads them beside it.
+
+- `meerkat-store-conformance`: the host store chapter's
+  `a_conflicted_scope_is_listed_typed` row, after `same_version_twice`: a
+  scope whose load answers a typed conflict is listed under
+  `HeadPage::conflicts` with the version its load names and its commit ids
+  (ascending, without repeats, or none), a read of its rows answers the same
+  conflict, the other scopes of its kind are listed as usual, and listing it
+  again reports the same version and ids. A
+  store that refuses the second batch at commit, or picks one by a fixed
+  rule, holds no such scope, and the row checks nothing more. Two canary
+  stores in the crate's tests fail it: one that fails the page for such a
+  scope, and one that serves its rows.
+  `HostStoreFactory::fold_now` (it does nothing by default) runs the fold of
+  a store that decides between such batches only when it folds. Every
+  listing of the chapter takes both lists of each page: at most `limit`
+  entries a page across them, every name once.
+
+- `meerkat-runtime`: `NativeWorkAuthorizationHost::authenticate_kept_original`,
+  the host's answer for a kept governed input's controller: it re-attests
+  the original through the host's own custody record, decides the
+  requester's invocation and the controller admission again under the
+  current grants, and returns a client for the stored association's
+  selection. The default answers `Readiness(UnsupportedScope)`, a definite
+  refusal. With it `NativeKeptOriginalCheck` (the local grant host's check,
+  `NativeGrantWorkConfiguration::kept_original`) and the scoped
+  composition's `ScopedRetainedResume::check_kept_original` and
+  `ScopedRetainedResume::into_checks`.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -1238,6 +1475,71 @@ them.
   cap; when it fires, work the member still owes wakes it, which asks the
   host again, and a member that owes none stays Dormant until its next
   delivery.
+
+- `meerkat-runtime`: a host store realm lists the four scope kinds at once,
+  at the open and at a re-acquire, each kind's pages one after another, so
+  a listing waits for its slowest kind rather than for the sum of them. A
+  writer stopped on a slow store resumes sooner; the retry budget and the
+  fencing are unchanged. A store now sees up to four `list_heads` calls of
+  one realm at once, never two of one kind.
+
+- `meerkat-runtime`, `meerkat-mob`: a host store realm contains a scope the
+  store reports conflicted (two batches at one of its versions, its load
+  failing with a typed conflict) instead of failing. The open quarantines
+  each scope its listing reports in `HeadPage::conflicts`, logs it once at
+  error level, and opens the rest of the realm; a load that meets such a
+  conflict later quarantines its scope then (a chunk's, the scope that
+  refers to the chunk), and when a scope was deleted and created again, a
+  conflict on the deleted incarnation quarantines the live one too. A
+  quarantined scope refuses every call that needs it with a typed refusal
+  (`RuntimeStoreError::ScopeRefused`) whose cause names each conflicted
+  incarnation, its version and commit ids, and the repair; no run starts or
+  resumes on its runtime, and the inputs the store keeps for it stay
+  queued. The reads across scopes count it as they count a poisoned scope
+  of its family: the recovery-work scan lists its runtime as holding work,
+  the delivery authority listing per runtime names it unavailable (for a
+  runtime whose scope name keeps only a hash of its id and that no call
+  named yet, both answer every other runtime and report it by its scope's
+  name, `RuntimeStore::unnamed_refused_runtimes` and the listing's
+  `unnamed`, and a mob boot plans its member as holding work and leaves the
+  others dormant), and the session catalog listing, the controller custody
+  and the delivery backlog total refuse typed. A quarantined tool grant (its
+  subject and target unknown) is left out of every subject's grant listing
+  and reported (`RuntimeStore::quarantined_tool_grants`): the other grants
+  keep admitting, a call no known live grant admits is refused as
+  unavailable, naming it, and the subject's list reports it among the rows
+  it cannot read. Its
+  chunks are never swept, and a mob storage lists a mob whose scope is
+  quarantined as quarantined, never leaving it out (one whose key its scope
+  names hash and that no other listed scope names is listed under the
+  quarantined scope's name, which opens to the quarantine's refusal). A
+  re-acquire's listing must report each
+  recorded conflict unchanged (its version, and its commit ids where both
+  sides name them, in any order); a conflict on another scope, or a
+  recorded one at another version, with other ids, listed among the heads
+  or gone, is a batch this writer did not write and loses the realm. Only
+  a repair in the store, then a reopen, lifts a quarantine. Before, a store
+  that failed the listing page for such a scope kept the whole realm from
+  opening until the scope was repaired. A head Core cannot decode still
+  fails the open.
+
+- `meerkat-runtime`: a kept governed input whose host cannot say yet whether
+  it supplies its controller client (a `Readiness` answer other than
+  `UnsupportedScope`) waits for an answer: the machine holds it with its
+  attempts (`HoldInputController`), later work goes first, and a run left
+  open that it is bound to stays marked, with no other run of the session
+  starting before that run settles. It is asked again at each wake of the
+  session's runtime loop and at the session's next registration, never on a
+  timer, and is never refused for its time; a definite answer ends it as a
+  refused resume, with its runtime-termination receipt. While the machine
+  holds it without a client, it causes none of the machine-wide refusals of
+  work that waits without its client: controller grant mutations
+  (`NativeControllerGrantMutation::with_preserved_controllers`), credential
+  publications and auth lease releases and replacements proceed, as it has
+  no client to preserve and its pin decides again under the grants and
+  credentials current then. A held resume of retained work still causes
+  them, within its 30 s budget, and a revocation of a grant in a held
+  input's stored controller lineage is still refused as in use.
 
 ### Deprecated
 
@@ -1514,8 +1816,13 @@ them.
   until a reopen. While an acquire of its own timed out since its last
   grant, the writer now waits out such a holder's recorded lease and
   acquires again; it poisons the realm only when that holder renewed its
-  lease or the listing shows a batch it did not write. With no timed-out
-  acquire, a holder it does not know poisons the realm at once, as before.
+  lease (its lease moved later by more than one renew interval, its new end
+  read from when the acquire was sent, so a slow answer cannot move it; one
+  whose lease did not move, met early because the store rounded the
+  remaining lease down, is waited out again) or the listing shows a batch it
+  did not write. A remaining lease is capped at the declared lease. With no
+  timed-out acquire, a holder it does not know poisons the realm at once,
+  as before.
   Affects 0.9.5 through 0.9.10.
 
 - `meerkat-mob-mcp`: `mob_check_member` no longer tells the model to check
@@ -1566,6 +1873,34 @@ them.
   failed at its seat while the entry held that record. Without the entry's
   custody it is refused `MobError::IdentityMember` before anything is
   created.
+
+- `meerkat-runtime`: the waiters of a run torn down because its store refuses
+  the session's writes until the realm is reopened (a round commit whose
+  outcome stayed unknown) are told their inputs stay queued
+  (`CompletionWaitError::RequeuedAcrossStop`), as at a lost fence: the store
+  keeps those inputs for the next start. They were told
+  `AuthorityUnavailable` ("runtime session unregistered before terminal
+  failure"), as if their inputs had ended.
+
+- `meerkat-runtime`: a stopped host store writer no longer poisons its realm
+  when the listing of a re-acquire fails after the store granted its
+  acquire. The writer installs a granted token only once that listing shows
+  no batch it did not write; a listing that failed left the old token
+  installed while the store held the grant's lease, and the next re-acquire
+  met the grant as another holder and poisoned the realm until a reopen.
+  The writer now keeps such a grant as its own and the next re-acquire
+  takes its lease over, then lists again. Affects 0.9.5 through 0.9.10.
+
+- `meerkat-runtime`: a renew failure during a slow open no longer poisons
+  the host store realm. The open starts renewing the fence before it lists
+  every head, and a re-acquire compares its own listing with what the open
+  listed. A renew that failed while the open still listed stopped the
+  writer, and its re-acquire compared with a listing the open had not
+  installed yet, read the realm's own scopes as another writer's batches,
+  and poisoned the realm until a reopen ("another writer committed while
+  this one was stopped"). A re-acquire now waits for the open's listing, and
+  the realm of an open whose listing failed never re-acquires. Affects 0.9.5
+  through 0.9.10.
 
 ### Security
 
@@ -1686,6 +2021,72 @@ them.
   The archived session of a retired branch, which holds its approved
   work and its answer, stays as readable on 0.9.10 as any archived
   session.
+
+- Hosts with a resumed-run admission or a durable resume gate: an answer of
+  `Unavailable` through every attempt now keeps the run waiting instead of
+  ending it. A gate that can never decide keeps it waiting for good: answer
+  `Superseded`, or stop the run, to end it. An implementation of the
+  conformance crate's `DurableWorkerHarness` is restarted a second time over
+  the same store after a restart whose gate answered `Unavailable`.
+
+- Host store implementers: every grant must answer a token above every
+  earlier grant of the realm, in either acquire mode and to any caller, a
+  takeover of the caller's own recorded lease included. From this release a
+  grant at or below the token Core holds loses the realm. Run the
+  conformance chapter (its new token order row) against your store before
+  you upgrade.
+
+- Host store implementers: the host store chapter is stricter. Its new rows
+  fail a store that serves a listing it kept from an earlier acquire, a
+  store whose loads right after an acquire miss a batch it ordered before
+  the acquire, and a store that answers `Ok` to a commit under a superseded
+  token and only hides the batch at load (outside the contract, which the
+  chapter used to accept). `acquire_fence` returns only once every batch the
+  store orders before it is visible to every later load; a store that waits
+  only until its own fence row is visible meets this only when its
+  visibility follows its commit order. Against a remote store, passing
+  `an_acquire_decides_the_cut` is necessary, not proof: the chapter cannot
+  make a backend apply a request it accepted late, so the store's acquire
+  must meet the rule of `HostStore::acquire_fence` by its own argument. From
+  this release Core also lists the four scope kinds at once, so up to four
+  `list_heads` calls of one realm run concurrently. Run the chapter against
+  your store before you upgrade.
+
+- Host store implementers: build each listing page with
+  `HeadPage::new(heads, next)`; a `HeadPage` struct literal no longer
+  compiles. A store that meets obligation 4 by failing a scope's load with a
+  typed conflict reports that scope per scope in `HeadPage::conflicts`, as
+  `ScopeConflict::new(name, version, commit_ids)`: the version that holds the
+  two batches (the `current` its load's `Conflict` names) and their commit
+  ids, ascending, without repeats and the same each time it lists the
+  unchanged conflict, or none. Never list such a scope among the heads or
+  fail the page for it, keep a page to `limit` entries across both lists,
+  and answer a page you cannot decide yet (a pending acquire cut)
+  `Unavailable`, never with a conflict. A store that still fails the page
+  keeps the realm from opening and fails the chapter's new
+  `a_conflicted_scope_is_listed_typed` row; one that decides between such
+  batches only when it folds them implements `HostStoreFactory::fold_now`
+  for the chapter. Run the chapter against your store before you upgrade.
+
+- Hosts on a host store: a realm whose store reports a conflicted scope now
+  opens with that scope quarantined, and every call that needs it refuses
+  (see Changed). To lift it, repair the scope in your store (keep one of the
+  two batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  promptly and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines it
+  again.
+
+- Hosts with a governed composition whose controller owner supplies clients
+  again after a stop or a restart: a governed prompt kept across a graceful
+  requeue stop or a restart now resumes once the host supplies its
+  controller again, where it ended as a refused resume. Submit such a prompt
+  again only once it ended refused (`Abandoned { ResumeRefused }`), or it
+  runs twice. A custom `NativeWorkAuthorizationHost` answers
+  `authenticate_kept_original` synchronously from its own records, as
+  `authenticate_retained_resume`, and answers `Readiness` only while it
+  cannot say now: the input waits for a definite answer without a time
+  bound.
 
 ### Known limitations
 

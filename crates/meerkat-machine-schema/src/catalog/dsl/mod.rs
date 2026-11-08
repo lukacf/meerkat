@@ -38,6 +38,7 @@ pub mod detached_job;
 pub mod durable_decision;
 pub mod forked_participant_lifecycle;
 pub mod grant_authority;
+pub mod host_store_writer_fence;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
@@ -186,6 +187,8 @@ pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
 pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::mob_store_restore_lifecycle";
+pub const HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_MODULE: &str = "store::spi::writer_fence";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
@@ -3539,6 +3542,11 @@ runtime_internal_inputs!(
         // by `MeerkatMachine::settle_retained_run`, which answers the
         // machine's verdict.
         SettleRetainedRun,
+        // The run marked resumable whose resumed-run admission could not
+        // decide, held until a later answer releases it: the runtime loop
+        // applies them. No caller can ask for either.
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
     ]
 );
 
@@ -5685,6 +5693,112 @@ pub fn dsl_temporary_council_lifecycle_machine() -> MachineSchema {
 pub fn dsl_mob_store_restore_lifecycle_machine() -> MachineSchema {
     mob_store_restore_lifecycle_schema_metadata()
         .attach_to(mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema())
+}
+
+pub fn dsl_host_store_writer_fence_machine() -> MachineSchema {
+    host_store_writer_fence_schema_metadata()
+        .attach_to(host_store_writer_fence::HostStoreWriterFenceMachineState::schema())
+}
+
+pub fn dsl_host_store_writer_fence_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_host_store_writer_fence_machine(),
+        HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_CRATE,
+        HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the writer fence of one host store realm.
+pub fn host_store_writer_fence_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "HostStoreWriterFencePhase",
+                &[
+                    "Unopened",
+                    "Live",
+                    "Stopped",
+                    "Acquiring",
+                    "Proving",
+                    "Resuming",
+                    "WaitingOut",
+                    "Lost",
+                ],
+            ),
+            NamedTypeBinding::string_enum("WriterFenceAcquireStep", &["Exclusive", "TakeoverOwn"]),
+            NamedTypeBinding::string_enum(
+                "WriterFenceAcquireOutcome",
+                &["Granted", "Held", "Failed", "TimedOut"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceRenewOutcome",
+                &["Renewed", "FencedOut", "Failed", "TimedOut"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceListingOutcome",
+                &["Clean", "ForeignBatch", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceStopCause",
+                &[
+                    "RenewFailed",
+                    "RenewTimedOut",
+                    "WindowClosed",
+                    "WindowClosedBeforeRenew",
+                    "ReacquireFailed",
+                    "ReacquireTimedOut",
+                    "ListingFailed",
+                    "ResumeRenewFailed",
+                    "ResumeRenewTimedOut",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceLostCause",
+                &[
+                    "FencedOutRenew",
+                    "FencedOutCommit",
+                    "HeldByAnother",
+                    "HolderRenewed",
+                    "ForeignBatch",
+                    "FencedOutAfterReacquire",
+                    "TokenOrder",
+                    "AdapterRule",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceRefusal",
+                &[
+                    "NotOpened",
+                    "AlreadyOpened",
+                    "AlreadyLive",
+                    "AttemptInFlight",
+                    "WaitingOutHolder",
+                    "NotWaitingOut",
+                    "NotAcquiring",
+                    "NotProving",
+                    "NoRenewInFlight",
+                    "Lost",
+                    "OpenListingFailed",
+                    "Quarantined",
+                    "Poisoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ScopePoisonCause",
+                &[
+                    "PlanFailed",
+                    "Unsettled",
+                    "Refused",
+                    "Dropped",
+                    "PrepareFailed",
+                    "ImportFailed",
+                    "StrayTouch",
+                    "Adapter",
+                ],
+            ),
+        ],
+        vec![],
+    )
 }
 
 pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSchema {

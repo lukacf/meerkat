@@ -590,11 +590,13 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     ///   the registration (the bound a resumed run's admission has), the next
     ///   such answer ends it as refused. Answer `Readiness` only while the
     ///   host cannot say now (a contended or unavailable owner).
-    /// - While an input waits without its client, the machine refuses
+    /// - While such a resume waits without its client, the machine refuses
     ///   controller grant mutations, credential publications and auth lease
     ///   releases and replacements on every session it serves, so a host
     ///   whose answer waits on a credential publication must answer
-    ///   definitely instead.
+    ///   definitely instead. (A kept governed input admitted under its own
+    ///   association, [`Self::authenticate_kept_original`], causes none of
+    ///   these refusals while the machine holds it.)
     ///
     /// At a fresh admission `Readiness(UnsupportedScope)` stays retryable, as
     /// every `Readiness`.
@@ -606,6 +608,62 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
     {
         let _ = (runtime_id, input, evidence);
+        Err(crate::retained_work::RetainedResumeError::Readiness(
+            crate::traits::ControllerReadinessFailure::UnsupportedScope,
+        ))
+    }
+
+    /// Supply again the controller client of a kept governed input: one
+    /// admitted with an authority association of its own (a governed
+    /// prompt, for example), not as a resume of retained work, that a
+    /// graceful requeue stop kept, or a restart found, in the store, and
+    /// whose client did not survive it (a client never survives
+    /// persistence). The input is queued, or bound to the run its session
+    /// left open, whose resumed run executes with its client.
+    ///
+    /// `input` is the stored form (no ingress context survives the store)
+    /// and `association` the one stored with the admitted row. The host
+    /// supplies no principal: there is no new authentication of the caller,
+    /// and the host's own custody record of the original authentication is
+    /// the re-attestation. It re-attests the original through that custody,
+    /// decides the requester's invocation and the controller admission again
+    /// under the current grants, and returns the usable controller client it
+    /// supplies itself, whose selection must be the association's stored
+    /// `controller_model`; a client for another selection (another account,
+    /// credential or route) is a refusal. The run's work authorization is
+    /// built again at staging from the current grants.
+    ///
+    /// The runtime asks when the registration recovers the input and from
+    /// its runtime loop, under the same locks as
+    /// [`Self::authenticate_retained_resume`]'s re-ask, so the host answers
+    /// synchronously from its own records, without calling back into the
+    /// runtime. Answers are classified as for that re-ask, with one
+    /// difference: a host that cannot say now (`Readiness`, other than
+    /// `UnsupportedScope`) is never refused for its time. The machine holds
+    /// the input (and the run it is bound to stays marked) until a later
+    /// ask, at the next wake of the runtime loop or the session's next
+    /// registration, answers; nothing asks on a timer. While it is held and
+    /// has no client, the machine-wide refusal above for work without its
+    /// client skips it: controller grant mutations, credential publications
+    /// and auth lease changes proceed, as it has no client to preserve and
+    /// its pin decides again under the grants and credentials current then.
+    /// (A revocation of a grant in its stored controller lineage is refused
+    /// as in use, as for all unfinished work.) A definite
+    /// answer ends the input as a refused resume
+    /// (`InputAbandonReason::ResumeRefused`), with its runtime-termination
+    /// receipt; a run left open that it is bound to is settled the same way.
+    ///
+    /// The default answers `Readiness(UnsupportedScope)`, a definite
+    /// refusal: a host that does not implement it ends every such input as a
+    /// refused resume.
+    fn authenticate_kept_original(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input: &Input,
+        association: &InputAuthorityAssociation,
+    ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    {
+        let _ = (runtime_id, input, association);
         Err(crate::retained_work::RetainedResumeError::Readiness(
             crate::traits::ControllerReadinessFailure::UnsupportedScope,
         ))

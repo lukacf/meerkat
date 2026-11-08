@@ -580,6 +580,18 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SettleRetainedRunNotRetainedRetired",
     "SettleRetainedRunNotRetainedStopped",
     "SettleRetainedRunInertDestroyed",
+    // The run marked resumable whose resumed-run admission could not decide
+    // is held until a later answer releases it.
+    "HoldResumedRunForAdmissionIdle",
+    "HoldResumedRunForAdmissionAttached",
+    "HoldResumedRunForAdmissionRunning",
+    "HoldResumedRunForAdmissionRetired",
+    "HoldResumedRunForAdmissionStopped",
+    "ReleaseResumedRunAdmissionIdle",
+    "ReleaseResumedRunAdmissionAttached",
+    "ReleaseResumedRunAdmissionRunning",
+    "ReleaseResumedRunAdmissionRetired",
+    "ReleaseResumedRunAdmissionStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

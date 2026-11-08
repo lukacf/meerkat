@@ -212,6 +212,48 @@ identity the roster lists that Core holds unseated, so that Core seats it;
 an identity left unseated is seated again by the first roster pass after the
 next upgrade.
 
+### Host store implementers: token order and conflicted scopes
+
+Two rules of the host store SPI are new or newly enforced in 0.9.11, each
+with a row of the host store chapter in `meerkat-store-conformance`:
+
+- **Token order** (the `token_order` row). Every grant answers a token
+  above every earlier grant of the realm, in either acquire mode and to any
+  caller, a takeover of the caller's own recorded lease included. Core now
+  holds a re-acquire's grant to it: a grant at or below the token the
+  writer holds loses the realm until it is reopened, with a cause that
+  names your store's token order, not another writer.
+- **Conflicted scopes** (the `a_conflicted_scope_is_listed_typed` row). A
+  store that meets obligation 4 by failing a scope's load with a typed
+  conflict (two batches at one of its versions) reports that scope per
+  scope in its listings: `list_heads` answers it in `HeadPage::conflicts`
+  as `ScopeConflict::new(name, version, commit_ids)`, with the version that
+  holds the two batches (the `current` the load's `Conflict` names) and
+  their commit ids, ascending, without repeats and the same each time, or
+  none. It is never listed among the heads and never fails the page, and a
+  page holds at most `limit` entries across both lists. A page the store
+  cannot decide yet (a pending acquire cut) answers `Unavailable`, never a
+  conflict. Core quarantines such a scope and opens the rest of the realm
+  (see [A Conflicted Scope](/reference/host-store-spi#a-conflicted-scope));
+  a store that still fails the page keeps the realm from opening.
+  `HeadPage` is `#[non_exhaustive]`: a struct literal no longer compiles.
+
+**Do:**
+
+- Build each listing page with `HeadPage::new(heads, next)`, and add the
+  conflicted scopes with `HeadPage::with_conflicts`.
+- Answer every grant with a token above every earlier one.
+- Run the host store chapter against your store before you upgrade. A
+  store that decides between two batches for one version only when it
+  folds them implements `HostStoreFactory::fold_now`, so the conflict row
+  sees what its loads and listings show once it folded.
+- To lift a quarantine, repair the scope in your store (keep one of the two
+  batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines
+  the scope again.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

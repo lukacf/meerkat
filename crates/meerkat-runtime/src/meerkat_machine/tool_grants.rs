@@ -74,7 +74,8 @@ impl MeerkatMachine {
     }
 
     /// Every grant of `subject`, each due one settled as expired first, and
-    /// every row of the subject this binary cannot read
+    /// every row of the subject this binary cannot read, with every grant
+    /// whose scope the store quarantined
     /// ([`ToolGrantService::list`]). When the subject's session is served
     /// here, its deadline driver is armed with its next deadline.
     ///

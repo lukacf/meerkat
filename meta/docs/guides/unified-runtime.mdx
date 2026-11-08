@@ -330,7 +330,16 @@ found restored members without their comms identity on this host
 poisoned scope alone leaves `is_ready()` true: `scope_poisoned` says one
 exists and `poisoned_scopes` names each with its cause (a session's runtime
 scope is `rt:<runtime id>`). Alert on it, and restart at a planned point,
-after a drain, to recover those members and documents.
+after a drain, to recover those members and documents. A scope your store
+reports conflicted (two batches at one of its versions) is quarantined:
+the realm opens without it, it refuses the same way, `is_ready()` stays
+true and `quarantined_scopes` names it with its cause. A restart alone
+quarantines it again: repair it in your store first (keep one of the two
+batches, as your store's rule for one version picks it), then restart. A
+conflict on a scope of the root mob storage (the one storage that holds
+every mob Meta hosts) is the exception: the build fails typed, since the
+boot cannot open its mobs, so Meta does not start and readiness never runs.
+Repair that scope the same way, then restart.
 
 **Restart wait.** The SPI has no fence release: after a stop, the next open
 waits at most the lease the host declared in its `FenceTiming` (30 seconds by

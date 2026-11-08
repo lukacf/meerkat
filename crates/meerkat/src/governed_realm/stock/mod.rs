@@ -97,8 +97,9 @@ use meerkat_core::{
 };
 use meerkat_runtime::input::{ExternalEventInput, Input, InputDurability, InputOrigin};
 use meerkat_runtime::meerkat_machine::{
-    AuthenticatedOriginal, AuthenticatedOriginalSource, NativeRetainedResumeCheck,
-    RetainedInvocationOwner, ScopedInvocation, ScopedRetainedResume, bind_scoped_original,
+    AuthenticatedOriginal, AuthenticatedOriginalSource, NativeKeptOriginalCheck,
+    NativeRetainedResumeCheck, RetainedInvocationOwner, ScopedInvocation, ScopedRetainedResume,
+    bind_scoped_original,
 };
 use meerkat_runtime::{IdempotencyKey, LogicalRuntimeId, MeerkatMachine, RuntimeDriverError};
 use meerkat_store::RealmPaths;
@@ -768,6 +769,10 @@ impl StockGovernance {
             Arc::clone(&grants),
             Arc::clone(&policy) as Arc<dyn RetainedInvocationOwner>,
         );
+        let kept_original = self.kept_original_check(
+            Arc::clone(&grants),
+            Arc::clone(&policy) as Arc<dyn RetainedInvocationOwner>,
+        );
         Ok(meerkat_runtime::meerkat_machine::ScopedGrantComposition {
             grants,
             ingress_domain: self.principals.ingress_domain(),
@@ -775,7 +780,39 @@ impl StockGovernance {
             invocation: ScopedInvocation::from_policy(Arc::clone(&policy)),
             operation_owner: policy,
             retained_resume: Some(retained_resume),
+            kept_original: Some(kept_original),
         })
+    }
+
+    /// The composition's kept-original check: the same composition as
+    /// [`Self::retained_resume_check`], asked for a kept governed input's
+    /// controller from its stored association
+    /// ([`ScopedRetainedResume::check_kept_original`]). Its controller owner
+    /// is the session's pin, which never outlives its registration, so a
+    /// kept governed input, recovered by a later registration, ends refused
+    /// at once, as a kept resume does.
+    fn kept_original_check(
+        &self,
+        grants: Arc<LocalGrantAuthority>,
+        invocation: Arc<dyn RetainedInvocationOwner>,
+    ) -> Arc<NativeKeptOriginalCheck> {
+        let ingress_domain = self.principals.ingress_domain();
+        let originals = self.originals();
+        let pins = Arc::clone(&self.resume_pins);
+        Arc::new(
+            move |runtime: &LogicalRuntimeId,
+                  input: &Input,
+                  association: &InputAuthorityAssociation| {
+                ScopedRetainedResume::new(
+                    Arc::clone(&grants),
+                    ingress_domain.clone(),
+                    Arc::clone(&originals),
+                    Arc::clone(&invocation),
+                    pins.controller_owner(runtime),
+                )
+                .check_kept_original(runtime, input, association)
+            },
+        )
     }
 
     /// The composition's retained-resume check: the scoped original

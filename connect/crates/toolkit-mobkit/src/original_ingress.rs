@@ -744,6 +744,7 @@ impl ToolkitOriginalOwner {
             invocation,
             operation_owner,
             retained_resume,
+            kept_original: None,
         }
         .into_configuration()
     }

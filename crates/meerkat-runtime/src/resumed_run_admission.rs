@@ -7,7 +7,8 @@
 //! whether the run's work is still wanted. A host that tracks work outside
 //! the session (a work item claim, for example) answers that a run whose work
 //! moved on is superseded, and the runtime then settles the run the way a
-//! stop would, without running it.
+//! stop would, without running it. An admission that cannot decide leaves
+//! the run marked, and the runtime asks it again later.
 //!
 //! The admission is optional. A registration without one resumes its run.
 
@@ -19,7 +20,7 @@ use meerkat_core::types::SessionId;
 
 use crate::identifiers::LogicalRuntimeId;
 
-/// Attempts the runtime makes while an admission answers
+/// Attempts the runtime makes, each time it asks, while an admission answers
 /// [`ResumedRunAdmissionDecision::Unavailable`] or does not answer in time.
 pub const RESUMED_RUN_ADMISSION_ATTEMPTS: u32 = 3;
 
@@ -28,7 +29,9 @@ pub const RESUMED_RUN_ADMISSION_ATTEMPTS: u32 = 3;
 pub const RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// The pause between two attempts. With the attempt timeout, the runtime
-/// settles an admission that stays unavailable after about 30 seconds.
+/// stops asking an admission that stays unavailable after about 30 seconds,
+/// and asks it again at the next wake of the session's runtime loop or at
+/// the session's next registration.
 pub const RESUMED_RUN_ADMISSION_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// What the runtime asks before it resumes a run.
@@ -92,11 +95,14 @@ pub enum ResumedRunAdmissionDecision {
     },
     /// The admission cannot decide now, for example because the record it
     /// reads is unreachable. The runtime asks again, up to
-    /// [`RESUMED_RUN_ADMISSION_ATTEMPTS`] times, and then settles the run as
-    /// it settles a superseded one. An admission that cannot decide never
-    /// lets the run resume.
+    /// [`RESUMED_RUN_ADMISSION_ATTEMPTS`] times; when every attempt answers
+    /// so (or does not answer in time), the run is neither resumed nor
+    /// settled: it stays marked, its inputs bound and none ended, and the
+    /// runtime asks again at the next wake of the session's runtime loop or
+    /// at the session's next registration, never on a timer. An admission
+    /// that cannot decide never lets the run resume, and never ends it.
     Unavailable {
-        /// Why, for the run's terminal record when the attempts run out.
+        /// Why, for the runtime's log.
         detail: String,
     },
 }
@@ -107,7 +113,8 @@ pub enum ResumedRunAdmissionDecision {
 /// For each resume the runtime asks once per attempt, up to
 /// [`RESUMED_RUN_ADMISSION_ATTEMPTS`] attempts, after the session's executor
 /// is attached and before the run is authorized again, never while it holds
-/// the session's queue. An attempt that runs past
+/// the session's queue; a run whose attempts all went unanswered is asked
+/// about again later, the same way. An attempt that runs past
 /// [`RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT`] is cancelled (its future is
 /// dropped) and counts as unavailable, so an implementation must be
 /// cancellation-safe, and idempotent across the attempts for one resume. It
@@ -130,13 +137,18 @@ pub(crate) enum ResumedRunAdmissionVerdict {
     Refused {
         detail: String,
     },
+    /// Every attempt went unanswered: leave the run marked, held, and ask
+    /// again later. `detail` is the last reason the admission gave.
+    Undecided {
+        detail: String,
+    },
 }
 
 /// Ask `admission` about `request` within the bounded attempts.
 ///
 /// No admission resumes the run. `Superseded` settles it at once. An
 /// admission that stays unavailable, or does not answer in time, through
-/// every attempt settles it too, with the last reason it gave.
+/// every attempt leaves it undecided, with the last reason it gave.
 pub(crate) async fn ask_resumed_run_admission(
     admission: Option<&Arc<dyn ResumedRunAdmission>>,
     request: &ResumedRunAdmissionRequest,
@@ -180,10 +192,8 @@ pub(crate) async fn ask_resumed_run_admission(
             crate::tokio::time::sleep(RESUMED_RUN_ADMISSION_RETRY_DELAY).await;
         }
     }
-    ResumedRunAdmissionVerdict::Refused {
-        detail: format!(
-            "the resumed run admission stayed unavailable after {RESUMED_RUN_ADMISSION_ATTEMPTS} attempts: {last_detail}"
-        ),
+    ResumedRunAdmissionVerdict::Undecided {
+        detail: last_detail,
     }
 }
 
@@ -328,7 +338,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn unavailable_through_every_attempt_settles_with_the_last_reason() {
+    async fn unavailable_through_every_attempt_is_undecided_with_the_last_reason() {
         let scripted = Scripted::new(vec![
             ResumedRunAdmissionDecision::Unavailable {
                 detail: "first".into(),
@@ -343,19 +353,19 @@ mod tests {
         let admission: Arc<dyn ResumedRunAdmission> = scripted.clone();
         let verdict = ask_resumed_run_admission(Some(&admission), &request()).await;
         assert!(
-            matches!(&verdict, ResumedRunAdmissionVerdict::Refused { detail } if detail.contains("third")),
+            matches!(&verdict, ResumedRunAdmissionVerdict::Undecided { detail } if detail == "third"),
             "{verdict:?}"
         );
         assert_eq!(scripted.calls(), RESUMED_RUN_ADMISSION_ATTEMPTS);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_admission_that_never_answers_is_settled_after_the_bounded_attempts() {
+    async fn an_admission_that_never_answers_is_undecided_after_the_bounded_attempts() {
         let admission: Arc<dyn ResumedRunAdmission> = Arc::new(NeverAnswers);
         let started = crate::tokio::time::Instant::now();
         let verdict = ask_resumed_run_admission(Some(&admission), &request()).await;
         assert!(
-            matches!(&verdict, ResumedRunAdmissionVerdict::Refused { detail } if detail.contains("did not answer")),
+            matches!(&verdict, ResumedRunAdmissionVerdict::Undecided { detail } if detail.contains("did not answer")),
             "{verdict:?}"
         );
         let bound = RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT * RESUMED_RUN_ADMISSION_ATTEMPTS

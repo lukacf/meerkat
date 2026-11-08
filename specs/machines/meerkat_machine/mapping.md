@@ -8354,6 +8354,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SettleRetainedRunInertDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -9313,6 +9343,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `input_controller_holds_are_kept_unstaged_governed_inputs`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `resumed_run_admission_hold_names_the_marked_run`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_boundary_delivery_only_for_queued_steer`

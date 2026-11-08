@@ -670,6 +670,7 @@ impl Peers {
             MeerkatMachine::ephemeral()
                 .with_local_grant_authorization(NativeGrantWorkConfiguration {
                     retained_resume: None,
+                    kept_original: None,
                     require_scoped_destination: false,
                     grants: Arc::clone(&grants),
                     ingress: ingress_check,

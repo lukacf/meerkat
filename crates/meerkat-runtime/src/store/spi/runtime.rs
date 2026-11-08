@@ -28,13 +28,21 @@
 //!
 //! **Store-wide reads** answer from memory under the realm gate held
 //! exclusive (no commit in flight). Each depends only on the scope families
-//! it reads, so a poisoned scope of another family (a mob event log, a Meta
-//! document) refuses none of them. Where a read enumerates the runtimes, a
-//! poisoned runtime is never left out: the recovery scan lists it as holding
-//! work, the delivery authority listing per runtime names it unavailable,
-//! and the reads that cannot answer for it (the session catalog listing,
-//! the controller custody, the delivery authority listing as a whole)
-//! refuse typed while a runtime scope is poisoned.
+//! it reads, so a poisoned or quarantined scope of another family (a mob
+//! event log, a Meta document) refuses none of them. Where a read enumerates
+//! the runtimes, a poisoned or quarantined runtime is never left out: the
+//! recovery scan lists it as holding work, the delivery authority listing
+//! per runtime names it unavailable, and the reads that cannot answer for it
+//! (the session catalog listing, the controller custody, the delivery
+//! authority listing as a whole) refuse typed while a runtime scope is
+//! poisoned or quarantined. A quarantined runtime is one whose scope the
+//! store reports conflicted ([`SpiRealm::quarantined_scopes`]): the open
+//! skips it, and every call naming it refuses typed until it is repaired in
+//! the store and the realm is reopened. One whose store name hashes its id
+//! (an id over 200 bytes, or with a control character) and that no call
+//! named is known by that name only: the reads that list runtimes by id
+//! cannot name it, so they refuse typed, naming its scope, until a call
+//! names it.
 //!
 //! **One call, one batch.** Every change one in-memory call makes to a
 //! runtime lands in the same host batch. In particular a run boundary commit
@@ -63,9 +71,9 @@ use tokio::sync::RwLock;
 
 use super::SpiError;
 use super::realm::{
-    ArmedScopes, PoisonedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId,
-    ScopeState, SpiRealm,
+    ArmedScopes, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId, ScopeState, SpiRealm,
 };
+use super::writer_fence::ScopePoisonCause;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
@@ -83,13 +91,13 @@ use crate::store::{
     KeyedRuntimeDeliveryCasOutcome, MachineLifecycleCasOutcome, MachineLifecycleCommit,
     MachineLifecycleExpectedVersion, MachineLifecycleObservation, PreparedRecoveryInputSnapshot,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
-    PreparedWholeBlobSnapshotCas, RecoveryInputSetRevision, RecoveryInputStateMutation,
-    RefusedScope, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
-    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
-    RuntimeSessionAuthorityOps, RuntimeSessionAuthorityReadCost, RuntimeSessionCatalogEntry,
-    RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
-    SerializedSessionSnapshot, UnavailableRuntime, WholeBlobProvisionalTailAuthority,
-    WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority,
+    PreparedWholeBlobSnapshotCas, QuarantinedToolGrant, RecoveryInputSetRevision,
+    RecoveryInputStateMutation, RefusedScope, RuntimeDeliveryAuthorityCasOutcome,
+    RuntimeDeliveryAuthorityListing, RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord,
+    RuntimeSessionAuthority, RuntimeSessionAuthorityOps, RuntimeSessionAuthorityReadCost,
+    RuntimeSessionCatalogEntry, RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError,
+    RuntimeStoreWriteFence, SerializedSessionSnapshot, UnavailableRuntime,
+    WholeBlobProvisionalTailAuthority, WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority,
 };
 
 /// How often a cross-scope read waiting outside the gate's queue for a slow
@@ -423,26 +431,57 @@ struct RuntimeAtBoot {
 /// on it. Nothing goes to memory and the scope is not marked loaded, so a
 /// read that fails or is dropped leaves the scope as the listing left it.
 /// The scope stays locked across the host reads, as every call's does; no
-/// read here waits for another lock while it holds it.
+/// read here waits for another lock while it holds it. `None` for a
+/// quarantined runtime: the open's listing quarantined it (the read is
+/// skipped), or a read here met a typed conflict and quarantined it; its
+/// calls refuse typed, and the open goes on.
 async fn read_runtime_at_boot(
     realm: &SpiRealm,
     index: usize,
     cell: Arc<ScopeCell>,
-) -> Result<RuntimeAtBoot, SpiError> {
+) -> Result<Option<RuntimeAtBoot>, SpiError> {
     let mut state = cell.lock_owned().await;
-    let pinned = realm.pinned_values(&state).await?;
+    if state.quarantine().is_some() {
+        return Ok(None);
+    }
+    let pinned = match realm.pinned_values(&mut state).await {
+        Ok(pinned) => pinned,
+        Err(SpiError::ScopeQuarantined { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let (body, unfolded) = if needs_body_at_boot(&pinned)? {
-        (Some(realm.load_body(&mut state).await?), false)
+        match realm.load_body(&mut state).await {
+            Ok(body) => (Some(body), false),
+            Err(SpiError::ScopeQuarantined { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        }
     } else {
         (None, head_predates_ops_fold(&pinned)?)
     };
-    Ok(RuntimeAtBoot {
+    Ok(Some(RuntimeAtBoot {
         index,
         state,
         pinned,
         body,
         unfolded,
-    })
+    }))
+}
+
+/// The pinned entries of a realm record scope the open imports: `None` for
+/// a quarantined one (the open's listing quarantined it, or this read met a
+/// typed conflict), which every call naming it refuses typed.
+async fn record_at_boot(
+    realm: &SpiRealm,
+    state: &mut ScopeState,
+) -> Result<Option<BTreeMap<String, Arc<Vec<u8>>>>, SpiError> {
+    if state.quarantine().is_some() {
+        return Ok(None);
+    }
+    match realm.pinned_values(state).await {
+        Ok(pinned) => Ok(Some(pinned)),
+        Err(SpiError::ScopeQuarantined { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 impl SpiRuntimeStore {
@@ -455,23 +494,32 @@ impl SpiRuntimeStore {
     /// runtime's reads stay in order. Nothing is installed until every read
     /// succeeded, so a failed read fails the open with no runtime installed.
     ///
+    /// A quarantined scope (the store reports a conflict for it) is skipped
+    /// before it is read, and one whose read here answers a typed conflict
+    /// is quarantined and skipped: nothing of it is installed, every call
+    /// naming it refuses typed, and the open goes on.
+    ///
     /// # Errors
     /// Host failures and data that does not decode.
     pub async fn open(realm: Arc<SpiRealm>) -> Result<Self, SpiError> {
         realm.check_realm()?;
         let memory = InMemoryRuntimeStore::new_journaled();
         for cell in realm.claim(KEY_BINDING_FAMILY)? {
-            let state = cell.lock().await;
+            let mut state = cell.lock().await;
+            let Some(pinned) = record_at_boot(&realm, &mut state).await? else {
+                continue;
+            };
             let (owner, key) = split_binding_key(&state.id().key)?;
-            let pinned = realm.pinned_values(&state).await?;
             memory
                 .journal_import(&TouchScope::KeyBinding { owner, key }, &pinned)
                 .await
                 .map_err(memory_error)?;
         }
         for cell in realm.claim(MEMBER_HIGH_WATER_FAMILY)? {
-            let state = cell.lock().await;
-            let pinned = realm.pinned_values(&state).await?;
+            let mut state = cell.lock().await;
+            let Some(pinned) = record_at_boot(&realm, &mut state).await? else {
+                continue;
+            };
             memory
                 .journal_import(
                     &TouchScope::MemberHighWater(state.id().key.clone()),
@@ -486,8 +534,10 @@ impl SpiRuntimeStore {
             (MOB_HOST_REVOCATION_FAMILY, &mut records.revocations),
         ] {
             for cell in realm.claim(family)? {
-                let state = cell.lock().await;
-                let pinned = realm.pinned_values(&state).await?;
+                let mut state = cell.lock().await;
+                let Some(pinned) = record_at_boot(&realm, &mut state).await? else {
+                    continue;
+                };
                 if let Some(value) = pinned.get(RECORD_ENTRY) {
                     map.insert(state.id().key.clone(), Vec::clone(value));
                 }
@@ -498,8 +548,10 @@ impl SpiRuntimeStore {
         // use.
         let mut tool_grants = ToolGrantRecords::default();
         for cell in realm.claim(TOOL_GRANT_FAMILY)? {
-            let state = cell.lock().await;
-            let pinned = realm.pinned_values(&state).await?;
+            let mut state = cell.lock().await;
+            let Some(pinned) = record_at_boot(&realm, &mut state).await? else {
+                continue;
+            };
             match (
                 pinned.get(RECORD_ENTRY),
                 pinned.get(TOOL_GRANT_SUBJECT_ENTRY),
@@ -538,6 +590,7 @@ impl SpiRuntimeStore {
             .map(move |(index, cell)| read_runtime_at_boot(reader, index, cell));
         let mut runtimes: Vec<RuntimeAtBoot> = futures::stream::iter(reads)
             .buffer_unordered(BOOT_LOAD_CONCURRENCY)
+            .try_filter_map(|runtime| async move { Ok(runtime) })
             .try_collect()
             .await?;
         runtimes.sort_unstable_by_key(|runtime| runtime.index);
@@ -631,7 +684,8 @@ impl SpiRuntimeStore {
                 let touched: HashSet<ScopeId> = touches.scopes().iter().map(scope_id_of).collect();
                 for guard in scopes.guards_mut() {
                     if touched.contains(guard.id()) {
-                        self.realm.poison(guard, &cause);
+                        self.realm
+                            .poison_scope(guard, ScopePoisonCause::PrepareFailed, &cause);
                     }
                 }
                 scopes.disarm();
@@ -715,7 +769,7 @@ impl SpiRuntimeStore {
 
     /// A cross-scope read of the memory of `families`: exclusive gate (no
     /// commit in flight), and refused typed while the realm, or a scope of
-    /// one of those families, is poisoned
+    /// one of those families, is poisoned or quarantined
     /// ([`SpiRealm::check_cross_scope_read_of`]).
     async fn cross_scope_read<T, F>(
         &self,
@@ -734,24 +788,28 @@ impl SpiRuntimeStore {
     }
 
     /// A cross-scope read of the runtimes that answers per runtime:
-    /// exclusive gate (no commit in flight), refused only while the realm is
-    /// poisoned, and answered with the poisoned runtime scopes, read under
-    /// the same gate. The caller answers each poisoned runtime fail closed:
-    /// its memory may differ from the host, so what memory says of it is
-    /// never the answer, and it is never left out.
+    /// exclusive gate (no commit in flight), refused while the realm is
+    /// poisoned, and answered with the runtime scopes that refuse every
+    /// call, poisoned or quarantined, each with its refusal, read under the
+    /// same gate. The caller answers each of them fail closed: a poisoned
+    /// runtime's memory may differ from the host and a quarantined one is not
+    /// in memory, so what memory says of it is never the answer, and it is
+    /// never left out. A quarantined runtime the realm cannot name by its id
+    /// (its store name hashes the id, and no call named it yet) comes in the
+    /// third part, by its scope's name: the read answers every other runtime.
     async fn cross_scope_read_per_runtime<T, F>(
         &self,
         op: F,
-    ) -> Result<(T, Vec<PoisonedScope>), RuntimeStoreError>
+    ) -> Result<(T, Vec<(ScopeId, RefusedScope)>, Vec<RefusedScope>), RuntimeStoreError>
     where
         F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
         T: Send,
     {
         let _gate = self.exclusive_gate().await;
         self.realm.check_realm().map_err(SpiError::into_read)?;
-        let poisoned = self.realm.poisoned_scopes_of(RUNTIME_FAMILY);
+        let (refused, unnamed) = self.realm.refused_scopes_of(RUNTIME_FAMILY);
         let answer = Self::read_memory(op).await?;
-        Ok((answer, poisoned))
+        Ok((answer, refused, unnamed))
     }
 
     /// Run a read of memory, refused when it changed the store.
@@ -771,6 +829,8 @@ impl SpiRuntimeStore {
 
     /// Load a scope's body into memory when it is not resident yet. A body
     /// that does not import poisons the scope: memory may hold part of it.
+    /// A load that meets a typed conflict quarantines the scope instead
+    /// ([`SpiRealm::load_body`]): nothing of it reached memory.
     async fn ensure_loaded(&self, state: &mut ScopeState) -> Result<(), SpiError> {
         if state.is_loaded() {
             return Ok(());
@@ -783,7 +843,8 @@ impl SpiRuntimeStore {
         // whole or not at all, so a dropped call leaves the scope unloaded.
         if let Err(error) = self.memory.journal_import(&scope, &body).await {
             let cause = format!("its body did not import: {error}");
-            self.realm.poison(state, &cause);
+            self.realm
+                .poison_scope(state, ScopePoisonCause::ImportFailed, &cause);
             return Err(memory_error(error));
         }
         state.mark_loaded();
@@ -827,7 +888,10 @@ impl SpiRuntimeStore {
             );
             for id in &stray {
                 match self.realm.cell(id).try_lock() {
-                    Ok(mut state) => self.realm.poison(&mut state, &cause),
+                    Ok(mut state) => {
+                        self.realm
+                            .poison_scope(&mut state, ScopePoisonCause::StrayTouch, &cause);
+                    }
                     Err(_) => return Err(self.realm.poison_all(cause)),
                 }
             }
@@ -1363,6 +1427,37 @@ impl RuntimeStore for SpiRuntimeStore {
         Some(Arc::clone(&self.realm) as Arc<dyn meerkat_core::host_store::SelfFence>)
     }
 
+    /// The realm refuses every call until it is reopened, or the runtime's
+    /// scope does: it is poisoned, or quarantined.
+    fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        self.realm.realm_poisoned().is_some()
+            || self.realm.scope_refused(&runtime_id_scope(runtime_id))
+    }
+
+    /// Every quarantined runtime scope the realm cannot name by its runtime
+    /// id (its store name hashes the id, and no call named it yet), by its
+    /// scope's name, from the writer fence: no store read.
+    fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+        self.realm.refused_scopes_of(RUNTIME_FAMILY).1
+    }
+
+    /// A runtime the store refuses (its scope is poisoned or quarantined)
+    /// holds work, as the scan lists it, whether or not the scan can name
+    /// it; any other runtime answers by the scan.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        self.realm.check_realm().map_err(SpiError::into_read)?;
+        if self.realm.scope_refused(&runtime_id_scope(runtime_id)) {
+            return Ok(true);
+        }
+        Ok(self
+            .list_runtimes_with_recovery_work()
+            .await?
+            .contains(runtime_id))
+    }
+
     async fn commit_prepared_session_boundary_with_fence(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -1512,9 +1607,10 @@ impl RuntimeStore for SpiRuntimeStore {
     }
 
     /// Answered from memory as a cross-scope read of the runtimes: refused
-    /// typed while any runtime scope is poisoned, whose record cannot be
-    /// trusted. [`Self::list_runtime_delivery_authorities_or_unavailable`]
-    /// answers the others.
+    /// typed while any runtime scope is poisoned or quarantined, whose record
+    /// cannot be trusted or is not in memory.
+    /// [`Self::list_runtime_delivery_authorities_or_unavailable`] answers the
+    /// others.
     async fn list_runtime_delivery_authorities(
         &self,
     ) -> Result<Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>, RuntimeStoreError> {
@@ -1526,39 +1622,36 @@ impl RuntimeStore for SpiRuntimeStore {
     }
 
     /// Answered from memory as a cross-scope read of the runtimes, refused
-    /// only while the realm is poisoned: the record of every healthy
-    /// runtime, and every poisoned runtime as unavailable, whether or not
+    /// while the realm is poisoned: the record of every healthy runtime,
+    /// every poisoned or quarantined runtime as unavailable, whether or not
     /// its memory holds a record (the batch that poisoned it may have
-    /// written or removed one).
+    /// written or removed one, and a quarantined one is not in memory), and
+    /// every quarantined runtime it cannot name (its store name hashes the
+    /// id, and no call named it yet) in `unnamed`, by its scope's name.
     async fn list_runtime_delivery_authorities_or_unavailable(
         &self,
     ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
-        let (mut records, poisoned) = self
+        let (mut records, refused, unnamed) = self
             .cross_scope_read_per_runtime(
                 <InMemoryRuntimeStore as RuntimeStore>::list_runtime_delivery_authorities(
                     &self.memory,
                 ),
             )
             .await?;
-        let unavailable: HashSet<&str> =
-            poisoned.iter().map(|scope| scope.id.key.as_str()).collect();
+        let unavailable: HashSet<&str> = refused.iter().map(|(id, _)| id.key.as_str()).collect();
         records.retain(|(runtime_id, _)| !unavailable.contains(runtime_id.0.as_str()));
-        let unavailable = poisoned
+        let unavailable = refused
             .into_iter()
-            .map(|scope| {
-                UnavailableRuntime::new(
-                    LogicalRuntimeId::new(scope.id.key.clone()),
-                    RefusedScope::new(scope.id.to_string(), scope.cause),
-                )
-            })
+            .map(|(id, refusal)| UnavailableRuntime::new(LogicalRuntimeId::new(id.key), refusal))
             .collect();
-        Ok(RuntimeDeliveryAuthorityListing::new(records, unavailable))
+        Ok(RuntimeDeliveryAuthorityListing::new(records, unavailable).with_unnamed(unnamed))
     }
 
     /// Answered from memory, with no host read, as a cross-scope read (no
-    /// commit in flight), refused only while the realm is poisoned.
+    /// commit in flight), refused while the realm is poisoned.
     ///
-    /// The answer is complete. The open imported every runtime's pinned
+    /// The answer is complete for every runtime the realm can name. The open
+    /// imported every runtime's pinned
     /// entries, its catalog entry and its lifecycle among them, and loaded
     /// the body of every runtime the same predicate named. Every later
     /// change to a runtime is a call that loads its body before memory
@@ -1575,13 +1668,17 @@ impl RuntimeStore for SpiRuntimeStore {
     /// A poisoned runtime is listed as holding work too, whatever its memory
     /// says: the batch that poisoned it may have changed its facts in memory
     /// without the host, so they cannot be trusted either way, and leaving it
-    /// out would read as a runtime with nothing to recover. Every other
-    /// runtime answers from memory, so one poisoned scope never turns the
-    /// scan into a refusal.
+    /// out would read as a runtime with nothing to recover. So is a
+    /// quarantined runtime, which is not in memory at all. Every other
+    /// runtime answers from memory, so one such scope never turns the scan
+    /// into a refusal. A quarantined runtime the scan cannot name (its store
+    /// name hashes the id, and no call named it yet) is reported by
+    /// [`RuntimeStore::unnamed_refused_runtimes`] instead, and the scan
+    /// answers every other runtime.
     async fn list_runtimes_with_recovery_work(
         &self,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
-        let (mut listed, poisoned) = self
+        let (mut listed, refused, _unnamed) = self
             .cross_scope_read_per_runtime(
                 <InMemoryRuntimeStore as RuntimeStore>::list_runtimes_with_recovery_work(
                     &self.memory,
@@ -1596,7 +1693,7 @@ impl RuntimeStore for SpiRuntimeStore {
         let present: HashSet<String> = listed.iter().map(|runtime| runtime.0.clone()).collect();
         let extra: std::collections::BTreeSet<String> = unfolded
             .into_iter()
-            .chain(poisoned.into_iter().map(|scope| scope.id.key))
+            .chain(refused.into_iter().map(|(id, _)| id.key))
             .filter(|runtime| !present.contains(runtime))
             .collect();
         listed.extend(extra.into_iter().map(LogicalRuntimeId));
@@ -2304,7 +2401,8 @@ impl RuntimeStore for SpiRuntimeStore {
     }
 
     /// Every mob's binding record, read under the realm gate held exclusive:
-    /// refused typed only while a binding record scope is poisoned.
+    /// refused typed only while a binding record scope is poisoned or
+    /// quarantined.
     async fn list_mob_host_bindings(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
         let _gate = self.exclusive_gate().await;
         self.realm
@@ -2410,7 +2508,7 @@ impl RuntimeStore for SpiRuntimeStore {
 
     /// Every mob's revocation receipt, read under the realm gate held
     /// exclusive: refused typed only while a revocation record scope is
-    /// poisoned.
+    /// poisoned or quarantined.
     async fn list_mob_host_revocations(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
         let _gate = self.exclusive_gate().await;
         self.realm
@@ -2469,6 +2567,10 @@ impl RuntimeStore for SpiRuntimeStore {
             .map(|(_, record)| record.clone()))
     }
 
+    /// The subject's grants, from memory, under its audit scope. A grant
+    /// whose scope is quarantined is not in memory, and its head, and so
+    /// the subject it is filed under, is unknown: it is in no subject's
+    /// answer, and [`RuntimeStore::quarantined_tool_grants`] reports it.
     async fn list_tool_grants(
         &self,
         subject_key: &str,
@@ -2482,6 +2584,15 @@ impl RuntimeStore for SpiRuntimeStore {
             .filter(|(_, (subject, _))| subject == subject_key)
             .map(|(grant_id, (_, record))| (grant_id.clone(), record.clone()))
             .collect())
+    }
+
+    /// Every quarantined grant scope, from the writer fence: no store read.
+    fn quarantined_tool_grants(&self) -> Vec<QuarantinedToolGrant> {
+        self.realm
+            .quarantined_of(TOOL_GRANT_FAMILY)
+            .into_iter()
+            .map(|(id, refusal)| QuarantinedToolGrant::new(id.map(|id| id.key), refusal))
+            .collect()
     }
 
     async fn put_tool_grant_if_absent(

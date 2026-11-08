@@ -170,6 +170,7 @@ impl FixtureAuthorization {
             invocation_owner: owner.clone(),
             operation_owner: owner.clone(),
             retained_resume: None,
+            kept_original: None,
             // This single-session integration fixture supplies exact ingress
             // and checks native session/input coordinates at every use. It does
             // not claim the separate scoped-destination registration contract.

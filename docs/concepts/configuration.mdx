@@ -656,12 +656,17 @@ A launch the platform's backend cannot confine as required is refused at that
 launch with typed `confinement_refused` feedback; it never runs unconfined,
 and the rest of the run continues. At startup a host reports each launch
 kind's requested and effective confinement (the backend that enforces it, or
-that every launch of the kind is refused), what keeps the host's own inputs
-from its confined processes, and each convention source it does not trust.
+that every launch of the kind is refused, with any host setting the backend
+can tell it lacks, such as `vm.memfd_noexec`), what keeps the host's own
+inputs from its confined processes, and each convention source it does not
+trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
-user namespaces, and it refuses deny lists, Unix socket grants, nested grants,
-a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in them, and granted
-paths that do not exist or pass through a symbolic link. One link is accepted
+user namespaces (with pid and cgroup namespaces in them, and network
+namespaces for a launch without IP access) and memory files it may execute
+(`vm.memfd_noexec` below 2), and it refuses deny lists, Unix socket grants,
+nested grants, a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in
+them, and granted paths that do not exist or pass through a symbolic link.
+One link is accepted
 on Linux: the last component of a read-only literal file grant in a `custom`
 requirement, such as `{ kind = "literal", path = "/etc/resolv.conf" }` on a
 systemd-resolved host for name resolution with unrestricted `network`, when
@@ -684,6 +689,43 @@ receives only its configured environment, never the host's; a relative
 program name or a loader variable such as `LD_PRELOAD` refuses that launch. A
 confined stdio skill source starts in the kind's working directory, as an MCP
 stdio server does; its own `cwd` does not apply.
+
+On Linux each confined launch runs in a pid namespace of its own. Its first
+process, the one the host holds (the launch's PID and the leader of its
+process group), runs the setup, starts the command as pid 2 of the namespace
+and then runs a small init that the backend executes from a sealed memory
+file: it holds none of the host's memory, and the command cannot inspect it.
+When the command ends, the init reports the command's exit status (an exit
+code, or the signal that ended it), which is the launch's, and every other
+process of the launch ends with it; killing the launch's PID ends them all at
+once. A signal to the launch's process group reaches the command and every
+process it started; any signal other than SIGKILL or SIGSTOP sent to the
+launch's PID alone reaches only the init, which ignores it. Inside, `$$` and
+`getpid()` are 2, never the PID the host records. Each confined launch
+therefore counts as two processes toward a pids limit.
+
+The launch sees a read-only `/proc` of its own pid namespace with process
+entries only: `/proc/self/exe` resolves, which Rust toolchains need, while
+`/proc/sys`, `/proc/net` and other host-wide entries are absent, and only the
+launch's own processes are listed. A launch without IP access also gets a
+network namespace of its own, so `/proc/self/net` shows only its own loopback
+interface. With `network = "unrestricted"` the launch shares the host's
+network namespace, and `/proc/self/net` lists its connections and Unix socket
+names. Each launch also gets a cgroup namespace of its own, so
+`/proc/self/cgroup` shows the launch's cgroup as `/`, never the host's cgroup
+path, while `/proc/self/mountinfo` still names the source device, filesystem
+type and mount options of each path bound into the launch. A host that
+refuses the backend this mount, such as a container runtime that masks or
+overmounts `/proc`, or a kernel before 5.8, still runs confined launches,
+without `/proc`.
+
+With IP access, a confined process may create Unix stream and seqpacket
+socket pairs, which the Rust standard library uses to start processes; a
+datagram pair stays refused, since it can be addressed to another socket. A
+pair socket cannot connect to or serve anything outside the launch, but it
+can bind an abstract socket name in the shared network namespace, taking
+that name from other processes, and pass descriptors between processes of
+the launch.
 
 ### Composition
 

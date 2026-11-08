@@ -489,11 +489,6 @@ impl GatewayHostComposition for Driver {
             .lock()
             .map(|publication| publication.installed.clone())
             .map_err(|_| GatewayHostError::Unavailable);
-        // The selected source's custody recovery drains first, its final
-        // round after stop included, then the installed host's close is
-        // joined. Neither ends the native custody: the process's close
-        // releases it after every join.
-        let source_result = self.runtime.join_custody_close().await;
         let host_close = async {
             match host {
                 Ok(Some(host)) => host.join_close().await,
@@ -503,8 +498,13 @@ impl GatewayHostComposition for Driver {
         };
         // Meta calls this after native transport shutdown. A failed host lookup
         // cannot abandon either the selected source task or local guard owner.
-        let (host_result, local_result) = tokio::join!(host_close, self.join_local_round());
-        host_result.and(source_result).and(local_result)
+        join_driver_close(
+            toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND,
+            self.runtime.join_custody_close(),
+            host_close,
+            self.join_local_round(),
+        )
+        .await
     }
     async fn wait_closed(&self) {
         let mut changed = self.closed.subscribe();
@@ -525,6 +525,27 @@ struct RunningPrivate {
     private: PrivateHostConnection,
     presenters: Vec<tokio::task::JoinHandle<Result<(), crate::ConnectError>>>,
 }
+
+/// The driver's close order. The selected source's custody recovery drains
+/// first, its final round after stop included, within `bound`, the bound
+/// the gateway gives its own recovery join: a recovery that does not finish
+/// in time stays retained for a later join, and the close reports itself
+/// incomplete. The installed host's close is then joined beside the local
+/// round, whatever the recovery returned. Neither join ends the native
+/// custody: the process's close releases it after every join.
+async fn join_driver_close(
+    bound: Duration,
+    recovery: impl std::future::Future<Output = Result<(), GatewayHostError>>,
+    host_close: impl std::future::Future<Output = Result<(), GatewayHostError>>,
+    local_round: impl std::future::Future<Output = Result<(), GatewayHostError>>,
+) -> Result<(), GatewayHostError> {
+    let recovery = tokio::time::timeout(bound, recovery)
+        .await
+        .unwrap_or(Err(GatewayHostError::SettlementIncomplete));
+    let (host, local) = tokio::join!(host_close, local_round);
+    host.and(recovery).and(local)
+}
+
 impl RunningPrivate {
     async fn finish(self) -> Result<(), String> {
         let mut failures = Vec::new();
@@ -1016,6 +1037,72 @@ fn retain_presenter_channel(
     console: bool,
 ) -> bool {
     selected.is_none() || terminal || console
+}
+
+#[cfg(test)]
+mod close_order_tests {
+    use super::*;
+
+    /// The driver joins its custody recovery before the installed host:
+    /// while a recovery read is held, the host's join has not started; once
+    /// the read returns, the host is joined and the close completes.
+    #[tokio::test]
+    async fn driver_close_joins_recovery_before_the_host() {
+        let (release, held) = oneshot::channel::<()>();
+        let host_started = Arc::new(AtomicBool::new(false));
+        let started = host_started.clone();
+        let mut closing = tokio::spawn(join_driver_close(
+            Duration::from_secs(30),
+            async move { held.await.map_err(|_| GatewayHostError::Unavailable) },
+            async move {
+                started.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            async { Ok(()) },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut closing)
+                .await
+                .is_err(),
+            "the close waits for the held recovery read"
+        );
+        assert!(
+            !host_started.load(Ordering::SeqCst),
+            "the installed host's join waits for the recovery"
+        );
+        release.send(()).unwrap();
+        assert_eq!(closing.await.unwrap(), Ok(()));
+        assert!(host_started.load(Ordering::SeqCst));
+    }
+
+    /// A recovery that does not finish within the bound leaves the close
+    /// incomplete, and the installed host is joined anyway.
+    #[tokio::test]
+    async fn driver_close_bounds_its_recovery_join() {
+        let host_joined = Arc::new(AtomicBool::new(false));
+        let joined = host_joined.clone();
+        let closed = tokio::time::timeout(
+            Duration::from_secs(10),
+            join_driver_close(
+                Duration::from_millis(50),
+                std::future::pending(),
+                async move {
+                    joined.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                async { Ok(()) },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(closed, Ok(Err(GatewayHostError::SettlementIncomplete))),
+            "the recovery join is bounded and the close reports itself incomplete"
+        );
+        assert!(
+            host_joined.load(Ordering::SeqCst),
+            "the installed host is joined after the bound"
+        );
+    }
 }
 
 #[cfg(test)]

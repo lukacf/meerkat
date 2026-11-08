@@ -16400,6 +16400,18 @@ impl meerkat_core::AdministrationEntry for StdioConnectionEntry {
     }
 }
 
+/// The realm MCP administration the gateway serves: `installation`, entered
+/// through the stdio connection `closed` observes.
+fn stdio_realm_mcp_administration(
+    installation: crate::gateway_mcp_composition::GatewayRealmMcpInstallation,
+    closed: GatewayStdioObservation,
+) -> crate::rpc::realm_mcp_methods::RealmMcpAdministration {
+    crate::rpc::realm_mcp_methods::RealmMcpAdministration::new(
+        installation,
+        Arc::new(StdioConnectionEntry { closed }),
+    )
+}
+
 /// The stdio gateway's own realm MCP installation of `storage`'s realm, over
 /// `factory`'s credential store (the one the launch names, else the default
 /// store). A store that did not open holds no secret value here: the secret
@@ -20241,11 +20253,9 @@ external_addressable = true
     // The realm MCP administration the SDK host on this gateway's stdio
     // serves through (`meta/realm_mcp/*`), admitted while that connection
     // is open.
-    runtime.serve_realm_mcp(crate::rpc::realm_mcp_methods::RealmMcpAdministration::new(
+    runtime.serve_realm_mcp(stdio_realm_mcp_administration(
         realm_mcp_installation,
-        Arc::new(StdioConnectionEntry {
-            closed: realm_mcp_entry_observation,
-        }),
+        realm_mcp_entry_observation,
     ));
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
@@ -26828,5 +26838,32 @@ mod stdio_connection_entry_tests {
                 "{kind:?}: refused once closed"
             );
         }
+    }
+
+    /// The administration the gateway serves enters through the stdio
+    /// connection the helper is given: it admits while that connection is
+    /// open and refuses once it closed.
+    #[test]
+    fn the_served_administration_enters_through_the_given_stdio_connection() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let realm = meerkat_core::RealmId::parse("stdio-entry").expect("realm");
+        let installation = crate::gateway_mcp_composition::GatewayRealmMcpInstallation::for_gateway(
+            crate::gateway_mcp_composition::meerkat_level_realm_storage(temp.path(), &realm),
+            None,
+        );
+        let (stdio, observation) = GatewayStdioOwner::new(None);
+        let administration = stdio_realm_mcp_administration(installation, observation);
+        assert!(
+            administration.entry().enter().is_ok(),
+            "admitted while open"
+        );
+        stdio.close(GatewayStdioCloseKind::InputLost, None);
+        assert!(
+            matches!(
+                administration.entry().enter(),
+                Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated)
+            ),
+            "refused once the given connection closed"
+        );
     }
 }

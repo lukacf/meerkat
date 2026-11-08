@@ -92,6 +92,12 @@ impl RealmMcpAdministration {
             entry,
         }
     }
+
+    /// The entry a write of this administration runs.
+    #[cfg(test)]
+    pub(crate) fn entry(&self) -> &dyn AdministrationEntry {
+        self.entry.as_ref()
+    }
 }
 
 /// Serve `method` of the family: `None` for a method outside it.

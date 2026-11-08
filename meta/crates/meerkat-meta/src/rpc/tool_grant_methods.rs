@@ -504,20 +504,24 @@ async fn list(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, J
     })
 }
 
+/// The rows an audit page reads: the default without a limit, a limit of 0
+/// refused, any other limit capped at the largest page.
+fn audit_page_limit(limit: Option<u32>) -> Result<usize, JsonRpcError> {
+    match limit {
+        None => Ok(DEFAULT_AUDIT_PAGE),
+        Some(0) => Err(refused(
+            &ToolGrantRequestRefusal::InvalidPageLimit,
+            "an audit page limit must be at least 1",
+        )),
+        Some(limit) => Ok(usize::try_from(limit)
+            .unwrap_or(MAX_AUDIT_PAGE)
+            .min(MAX_AUDIT_PAGE)),
+    }
+}
+
 async fn audit(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, JsonRpcError> {
     let params: AuditParams = parse(params)?;
-    let limit = match params.limit {
-        None => DEFAULT_AUDIT_PAGE,
-        Some(0) => {
-            return Err(refused(
-                &ToolGrantRequestRefusal::InvalidPageLimit,
-                "an audit page limit must be at least 1",
-            ));
-        }
-        Some(limit) => usize::try_from(limit)
-            .unwrap_or(MAX_AUDIT_PAGE)
-            .min(MAX_AUDIT_PAGE),
-    };
+    let limit = audit_page_limit(params.limit)?;
     let owner = grant_owner(surface)?;
     let (subject, _serving) = identity_for_read(surface, &params.identity).await?;
     let page = owner
@@ -622,5 +626,32 @@ mod tests {
             CAPABILITY_UNAVAILABLE_CODE
         );
         assert_eq!(service_error(ToolGrantServiceError::Clock).code, -32603);
+    }
+
+    /// An audit page reads the default without a limit, refuses a limit of 0
+    /// and caps any other limit at the largest page.
+    #[test]
+    fn an_audit_page_limit_is_defaulted_refused_at_zero_and_capped() {
+        assert_eq!(
+            audit_page_limit(None).ok(),
+            Some(DEFAULT_AUDIT_PAGE),
+            "no limit reads the default page"
+        );
+        assert_eq!(
+            audit_page_limit(Some(0)).err().and_then(|error| error.data),
+            Some(json!({
+                "kind": "tool_grant_request_refused",
+                "tool_grant_request_refusal": {"kind": "invalid_page_limit"},
+            }))
+        );
+        assert_eq!(audit_page_limit(Some(1)).ok(), Some(1));
+        assert_eq!(audit_page_limit(Some(1_000)).ok(), Some(1_000));
+        for over in [1_001, u32::MAX] {
+            assert_eq!(
+                audit_page_limit(Some(over)).ok(),
+                Some(MAX_AUDIT_PAGE),
+                "{over} reads the largest page"
+            );
+        }
     }
 }

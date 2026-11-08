@@ -1317,7 +1317,8 @@ Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
 `session/stream_open` subscription, or reads only the run result, sends it so
 each event reaches it once. Absent or `true` keeps them. A turn that also
-carries the input of another request that wants them still writes them.
+carries the input of another request that wants them still writes them, to
+that request's connection (see [Notifications](#notifications)).
 `session/create` (for its first turn) and `mob/turn_start` take the same
 field. A server before 0.9.5 refuses it on `turn/start` and `mob/turn_start`,
 so the Python and TypeScript SDKs send it, from calls that do not stream
@@ -3575,6 +3576,21 @@ Inspect `params.event.payload.type` and (for text deltas)
 `params.event.payload.delta`, not `params.event.type`. `event_id`, typed
 `source`, `seq`, and `timestamp_ms` belong to the envelope; optional `mob_id`
 is envelope metadata.
+
+A turn's `session/event` notifications go to the connection whose request
+started it (`turn/start`, `session/create`, `mob/turn_start`, `help/ask`),
+unless that request sent `"session_events": false`; a turn that carries the
+inputs of several requests goes to each of their connections. A turn no
+request waits on (queued work such as `session/external_event`, comms,
+schedules, a resumed run) goes to the connection that holds the session: the
+one that created it or, once that one is gone, the next one that starts a
+turn on it. While the holder is gone the notifications are written nowhere;
+read the turn back with `session/history`, or watch the session with
+`session/stream_open`. No other connection receives them. On a server with
+several connections (`--tcp`), a session no connection holds (one the host or
+a mob created, or one from before a restart, that no connection has started a
+turn on) has its turns written to none of them; a stdio server writes them to
+its one client.
 
 Event types match the `AgentEvent` enum in `crates/meerkat-core/src/event.rs`
 (`agent_event_type` assigns each variant its stable wire name) and its schema

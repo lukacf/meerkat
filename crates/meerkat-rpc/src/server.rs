@@ -25,7 +25,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::callback_dispatcher::{CallbackRequestEnvelope, CallbackResponseHandoff};
 use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
-use crate::router::{MethodRouter, NotificationSink, RoutedRpcResponse};
+use crate::router::{MethodRouter, NotificationSink, ProcessDefaultRoute, RoutedRpcResponse};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{
     AdmittedJsonlMessage, BlockingWriter, JSONL_MAX_FRAME_BYTES, JSONL_SMALL_FRAME_BYTES,
@@ -1032,6 +1032,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ///
     /// The server reads JSON-RPC requests from `reader`, dispatches them
     /// via the `MethodRouter`, and writes responses/notifications to `writer`.
+    /// Its connection becomes the runtime's process-default `session/event`
+    /// route ([`MethodRouter::new`]): build one server per runtime with it, or
+    /// serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     pub fn new(
         reader: R,
         writer: W,
@@ -1042,12 +1046,37 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     /// Create a new RPC server with an optional skill runtime for introspection.
+    ///
+    /// As with [`Self::new`], build one server per runtime with it, or serve
+    /// several connections on one runtime with [`crate::serve_tcp_connection`].
     pub fn new_with_skill_runtime(
         reader: R,
         writer: W,
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    ) -> Result<Self, ServerError> {
+        Self::new_on_connection(
+            reader,
+            writer,
+            runtime,
+            config_store,
+            skill_runtime,
+            ProcessDefaultRoute::Install,
+        )
+    }
+
+    /// [`Self::new_with_skill_runtime`] for one connection of a server that
+    /// may hold several on the same runtime: `default_route` says whether
+    /// this connection also becomes the runtime's process-default
+    /// `session/event` route ([`MethodRouter::new`]).
+    fn new_on_connection(
+        reader: R,
+        writer: W,
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        default_route: ProcessDefaultRoute,
     ) -> Result<Self, ServerError> {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
@@ -1071,9 +1100,14 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             crate::callback_dispatcher::CallbackRoute::new(callback_request_tx.clone());
         let callback_id_counter = callback_route.id_counter();
 
-        let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)?
-            .with_skill_runtime(skill_runtime)
-            .with_callback_route(callback_route);
+        let router = MethodRouter::new_on_connection(
+            Arc::clone(&runtime),
+            config_store,
+            notification_sink,
+            default_route,
+        )?
+        .with_skill_runtime(skill_runtime)
+        .with_callback_route(callback_route);
         #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
@@ -1229,6 +1263,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     /// `SessionRuntime::init_callback_channel()`. This ensures the callback channel
     /// exists before mob resume (so `ExternalToolsProvider` closures can read it),
     /// while the server owns the receiver for the `tool/execute` dispatch loop.
+    /// Like the process-default callback route, its connection becomes the
+    /// runtime's process-default `session/event` route: build one server per
+    /// runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     pub fn new_with_skill_runtime_and_mob_state(
         reader: R,
         writer: W,
@@ -2161,7 +2199,10 @@ pub struct LiveWsConfig {
 ///
 /// The stream is split into read/write halves and wired directly into the
 /// generic `RpcServer`. The caller is responsible for the accept loop —
-/// this function handles exactly one connection lifetime.
+/// this function handles exactly one connection lifetime. The connection is
+/// one of the several a runtime may serve: it receives the `session/event`
+/// copies of the turns its own requests start and of the sessions it holds,
+/// and never becomes the runtime's process-default route.
 pub async fn serve_tcp_connection(
     stream: tokio::net::TcpStream,
     runtime: Arc<SessionRuntime>,
@@ -2207,12 +2248,17 @@ async fn serve_tcp_connection_with_options_and_admission(
 ) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
-    let mut server = RpcServer::new_with_skill_runtime(
+    // One of the connections a shared runtime serves: its turns' session/event
+    // copies reach it through its own requests and the sessions it holds,
+    // and it never becomes the runtime's process-default route, so another
+    // connection's turns never reach it.
+    let mut server = RpcServer::new_on_connection(
         reader,
         write_half,
         runtime,
         config_store,
         skill_runtime,
+        ProcessDefaultRoute::Leave,
     )?;
     if let Some(admission) = admission {
         server = server.with_rpc_request_admission(admission);

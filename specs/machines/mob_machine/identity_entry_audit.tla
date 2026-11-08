@@ -86,9 +86,10 @@
 \* identity_entry_audit.sh.
 EXTENDS model
 
-\* The positions of model_step_count and topology_epoch in the generated
-\* `vars` tuple; the runner reads them from model.tla.
-CONSTANTS AuditStepIndex, AuditEpochIndex
+\* The positions of model_step_count, topology_epoch and the identity life
+\* marker (identity_life_resets, identity_life_ends) in the generated `vars`
+\* tuple; the runner reads them from model.tla.
+CONSTANTS AuditStepIndex, AuditEpochIndex, AuditLifeResetsIndex, AuditLifeEndsIndex
 
 \* The values of the roster's listing (the adoption's `listed` observation)
 \* this run drives the legacy adoption with: {TRUE} in the listed run and
@@ -233,8 +234,10 @@ AuditSpec == Init /\ [][AuditNext]_vars
 \* The space is finite under the VIEW: no further bound.
 AuditStateConstraint == TRUE
 
-\* Every state variable but the two counters (see the header).
-AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads (see the header):
+\* the two above and the identity life marker.
+AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 (***************************************************************************)
 (* Properties.                                                             *)

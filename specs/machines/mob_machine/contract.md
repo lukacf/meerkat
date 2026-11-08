@@ -17,6 +17,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_runtime_fence_tokens`: `Map<AgentIdentity, FenceToken>`
 - `identity_generation_highwater`: `Map<AgentIdentity, Generation>`
 - `identity_generation_highwater_sealed`: `Bool`
+- `identity_life_resets`: `u64`
+- `identity_life_ends`: `Map<AgentIdentity, u64>`
 - `active_run_count`: `u64`
 - `flow_authority_schema_version`: `u64`
 - `run_status`: `Map<RunId, FlowRunStatus>`
@@ -702,6 +704,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveMemberInstructionRelease`(agent_identity: AgentIdentity, session_id: SessionId, disposal: MemberSessionDisposal)
 - `RecordMemberCustodyUnrestored`(agent_identity: AgentIdentity, restore: MemberCustodyRestoreKind, cause: MemberCustodyCauseKind)
 - `ResolveMemberCustodyRestored`(agent_identity: AgentIdentity)
+- `EndIdentityLife`(agent_identity: AgentIdentity)
+- `RecoverIdentityLifeResets`(resets: u64)
 
 ## Effects
 - `HoldMemberRunStarts`
@@ -20171,6 +20175,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveMemberCustodyRestored`(agent_identity)
 - Guards:
   - `custody_not_recorded`
+- To: `Destroyed`
+
+### `EndIdentityLifeRunning`
+- From: `Running`
+- On: `EndIdentityLife`(agent_identity)
+- To: `Running`
+
+### `EndIdentityLifeStopped`
+- From: `Stopped`
+- On: `EndIdentityLife`(agent_identity)
+- To: `Stopped`
+
+### `EndIdentityLifeCompleted`
+- From: `Completed`
+- On: `EndIdentityLife`(agent_identity)
+- To: `Completed`
+
+### `EndIdentityLifeDestroyed`
+- From: `Destroyed`
+- On: `EndIdentityLife`(agent_identity)
+- To: `Destroyed`
+
+### `RecoverIdentityLifeResetsRunning`
+- From: `Running`
+- On: `RecoverIdentityLifeResets`(resets)
+- Guards:
+  - `highwater_recovery_open`
+- To: `Running`
+
+### `RecoverIdentityLifeResetsStopped`
+- From: `Stopped`
+- On: `RecoverIdentityLifeResets`(resets)
+- Guards:
+  - `highwater_recovery_open`
+- To: `Stopped`
+
+### `RecoverIdentityLifeResetsCompleted`
+- From: `Completed`
+- On: `RecoverIdentityLifeResets`(resets)
+- Guards:
+  - `highwater_recovery_open`
+- To: `Completed`
+
+### `RecoverIdentityLifeResetsDestroyed`
+- From: `Destroyed`
+- On: `RecoverIdentityLifeResets`(resets)
+- Guards:
+  - `highwater_recovery_open`
 - To: `Destroyed`
 
 ## Coverage

@@ -324,8 +324,10 @@ EntryReplay(id, rid) ==
     \/ RecoverIdentityEntrySeatedRunning(id, rid, "Declared")
     \/ RecoverIdentityEntrySeatedStopped(id, rid, "Declared")
 
-\* Every state variable but the two counters.
-StateView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads: model_step_count,
+\* topology_epoch and the identity life marker.
+StateView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 Cause(id) == IF id \in DOMAIN member_host_preparation_causes THEN Some(member_host_preparation_causes[id]) ELSE None
 Unseated(id) == IF id \in DOMAIN identity_entry_unseated THEN Some(identity_entry_unseated[id]) ELSE None

@@ -40,6 +40,17 @@ macro_rules! mob_catalog_machine_dsl {
             // accepted only while this is false, and create and resume seal
             // it once before the actor runs.
             identity_generation_highwater_sealed: bool,
+            // An identity's life marker: the mob's resets over its whole
+            // journal (recovered at resume before the seal, and moved by
+            // every reset, which ends every identity), and per identity the
+            // ends of its lives since the last reset (the arms that name an
+            // end, IdentityEnded, and EndIdentityLife, the end of a
+            // retirement that ends the identity). It moves at every end of
+            // an identity and at nothing else, so a respawn keeps it. A tool
+            // grant request records it, and an approval executed after it
+            // moved issues nothing.
+            identity_life_resets: u64,
+            identity_life_ends: Map<AgentIdentity, u64>,
             active_run_count: u64,
             flow_authority_schema_version: u64,
             run_status: Map<RunId, Enum<FlowRunStatus>>,
@@ -855,6 +866,8 @@ macro_rules! mob_catalog_machine_dsl {
             identity_runtime_fence_tokens = EmptyMap,
             identity_generation_highwater = EmptyMap,
             identity_generation_highwater_sealed = false,
+            identity_life_resets = 0,
+            identity_life_ends = EmptyMap,
             active_run_count = 0,
             flow_authority_schema_version = 7,
             run_status = EmptyMap,
@@ -2476,6 +2489,16 @@ macro_rules! mob_catalog_machine_dsl {
             RecordMemberCustodyUnrestored { agent_identity: AgentIdentity, restore: Enum<MemberCustodyRestoreKind>, cause: Enum<MemberCustodyCauseKind> },
             // A re-attempt restored the member's custody.
             ResolveMemberCustodyRestored { agent_identity: AgentIdentity },
+            // The end of a retirement that ends its identity (the shell's
+            // read of the state before the terminal step,
+            // retirement_ends_identity), on that step, or the replay of a
+            // terminal row that recorded it: the identity's life marker
+            // moves.
+            EndIdentityLife { agent_identity: AgentIdentity },
+            // The mob's resets over its whole journal, before the epoch
+            // replay and the high-water seal: the reset part of every
+            // identity's life marker.
+            RecoverIdentityLifeResets { resets: u64 },
         }
 
         effect MobMachineEffect {
@@ -10990,6 +11013,12 @@ macro_rules! mob_catalog_machine_dsl {
                 self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
                 self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
                 self.topology_epoch += 1;
+                // The identity ends: its life marker moves.
+                if self.identity_life_ends.contains_key(agent_identity) == true {
+                    self.identity_life_ends.insert(agent_identity, self.identity_life_ends.get_copied(agent_identity).get("value") + 1);
+                } else {
+                    self.identity_life_ends.insert(agent_identity, 1);
+                }
             }
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
@@ -11031,6 +11060,12 @@ macro_rules! mob_catalog_machine_dsl {
             guard "abandonment_not_recorded" { self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) }
             update {
                 self.abandoned_respawn_topology.insert(agent_identity, generation);
+                // The identity ends: its life marker moves.
+                if self.identity_life_ends.contains_key(agent_identity) == true {
+                    self.identity_life_ends.insert(agent_identity, self.identity_life_ends.get_copied(agent_identity).get("value") + 1);
+                } else {
+                    self.identity_life_ends.insert(agent_identity, 1);
+                }
             }
             to Running
             // The abandoned incarnation is the identity's last and nothing
@@ -17399,6 +17434,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_runtime_modes = EmptyMap;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.topology_epoch += 1;
+                // A reset ends every identity the mob held: every life
+                // marker moves, and the ends since the last reset start over.
+                self.identity_life_resets += 1;
+                self.identity_life_ends = EmptyMap;
             }
             to Running
             emit AppendLifecycleJournal {
@@ -32348,6 +32387,12 @@ macro_rules! mob_catalog_machine_dsl {
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
+                // The identity ends: its life marker moves.
+                if self.identity_life_ends.contains_key(agent_identity) == true {
+                    self.identity_life_ends.insert(agent_identity, self.identity_life_ends.get_copied(agent_identity).get("value") + 1);
+                } else {
+                    self.identity_life_ends.insert(agent_identity, 1);
+                }
             }
             to Running
             emit IdentityEntryUnlisted { agent_identity: agent_identity, verdict: UnlistEntryVerdict::Removed }
@@ -33297,6 +33342,12 @@ macro_rules! mob_catalog_machine_dsl {
                 // Its role hold ends with it.
                 if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
                     self.member_host_preparation_causes.remove(agent_identity);
+                }
+                // The identity ends: its life marker moves.
+                if self.identity_life_ends.contains_key(agent_identity) == true {
+                    self.identity_life_ends.insert(agent_identity, self.identity_life_ends.get_copied(agent_identity).get("value") + 1);
+                } else {
+                    self.identity_life_ends.insert(agent_identity, 1);
                 }
             }
             to Running
@@ -35237,6 +35288,35 @@ macro_rules! mob_catalog_machine_dsl {
             on signal ResolveMemberCustodyRestored { agent_identity }
             guard "custody_not_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == false }
             update {}
+            to Running
+        }
+
+        // The end of a retirement that ends its identity (the shell reads it
+        // from the state before the terminal step and applies this on that
+        // step), or the replay of a terminal row that recorded it: the
+        // identity's life marker moves, in any phase.
+        transition EndIdentityLife {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal EndIdentityLife { agent_identity }
+            update {
+                if self.identity_life_ends.contains_key(agent_identity) == true {
+                    self.identity_life_ends.insert(agent_identity, self.identity_life_ends.get_copied(agent_identity).get("value") + 1);
+                } else {
+                    self.identity_life_ends.insert(agent_identity, 1);
+                }
+            }
+            to Running
+        }
+
+        // Resume recovers the mob's resets over its whole journal before it
+        // replays the last reset epoch, and only before the seal.
+        transition RecoverIdentityLifeResets {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal RecoverIdentityLifeResets { resets }
+            guard "highwater_recovery_open" { self.identity_generation_highwater_sealed == false }
+            update {
+                self.identity_life_resets = resets;
+            }
             to Running
         }
     }

@@ -1022,6 +1022,16 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // The seal refused while an unseated entry it does not list
             // remains, which the one-entry unlist ends first (0.9.11).
             "SealDeclaredRosterRefused",
+            // An identity's life marker (0.9.11): the end of a retirement
+            // that ends the identity, and the resets recovered at resume.
+            "EndIdentityLifeRunning",
+            "EndIdentityLifeStopped",
+            "EndIdentityLifeCompleted",
+            "EndIdentityLifeDestroyed",
+            "RecoverIdentityLifeResetsRunning",
+            "RecoverIdentityLifeResetsStopped",
+            "RecoverIdentityLifeResetsCompleted",
+            "RecoverIdentityLifeResetsDestroyed",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

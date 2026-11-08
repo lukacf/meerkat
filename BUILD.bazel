@@ -751,6 +751,7 @@ test_suite(
         "//crates/meerkat-machine-schema:live_context_readiness_guard_contract_test",
         "//crates/meerkat-machine-schema:meerkat_machine_schema_unit_test",
         "//crates/meerkat-machine-schema:member_residency_guard_phase_scan_test",
+        "//crates/meerkat-machine-schema:mob_machine_identity_life_test",
         "//crates/meerkat-machine-schema:mob_machine_member_custody_region_test",
         "//crates/meerkat-machine-schema:mob_machine_operator_instruction_region_test",
         "//crates/meerkat-machine-schema:mob_store_restore_lifecycle_machine_test",

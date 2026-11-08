@@ -10436,6 +10436,19 @@ impl MobHandle {
         })?
     }
 
+    /// `identity`'s life marker in this mob ([`super::IdentityLife`]), as the
+    /// actor last published MobMachine's state: it moves at every end of the
+    /// identity and at nothing else. Read as [`Self::identity_entry`] is: no
+    /// actor command, no wake, the [`crate::ControlScope::List`] scope.
+    ///
+    /// # Errors
+    /// The handle's principal lacks the list scope.
+    pub fn identity_life(&self, identity: &AgentIdentity) -> Result<super::IdentityLife, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            super::IdentityLife::of(state, identity)
+        })
+    }
+
     /// One page of this mob's identity entries, in identity order: the
     /// entries after `after` (from the first with `None`), at most `limit`
     /// of them, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`]. The page's

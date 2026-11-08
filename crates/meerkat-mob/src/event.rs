@@ -1616,6 +1616,11 @@ pub struct MemberRetiredFacts {
     /// The rotation whose terminal step retired the incarnation and seated
     /// the identity's next one.
     pub(crate) rotation: Option<crate::runtime::RetiredRotation>,
+    /// Whether the end of the retirement ended the identity itself (a plain
+    /// retire of a worker, or the end of an unlisted or removed entry's
+    /// retirement), as the terminal step read it: the replay moves the
+    /// identity's life marker again for such a row. Stored only when true.
+    pub(crate) identity_ended: bool,
 }
 
 impl MemberRetiredFacts {
@@ -1631,7 +1636,16 @@ impl MemberRetiredFacts {
             identity_entry,
             unknown_identity_entry: None,
             rotation,
+            identity_ended: false,
         }
+    }
+
+    /// These facts, recording whether the retirement's end ended the
+    /// identity.
+    #[must_use]
+    pub(crate) fn with_identity_ended(mut self, identity_ended: bool) -> Self {
+        self.identity_ended = identity_ended;
+        self
     }
 }
 
@@ -1686,6 +1700,9 @@ impl MemberRetiredFacts {
         if let Some(rotation) = &self.rotation {
             kind.insert("retired_rotation".to_string(), rotation.to_stored()?);
         }
+        if self.identity_ended {
+            kind.insert("retired_identity_ended".to_string(), Value::Bool(true));
+        }
         Ok(())
     }
 
@@ -1714,12 +1731,17 @@ impl MemberRetiredFacts {
         let rotation = kind
             .remove("retired_rotation")
             .and_then(|rotation| crate::runtime::RetiredRotation::from_stored(&rotation));
+        let identity_ended = kind
+            .remove("retired_identity_ended")
+            .and_then(|ended| ended.as_bool())
+            .unwrap_or(false);
         Self {
             session_id,
             cause,
             identity_entry,
             unknown_identity_entry,
             rotation,
+            identity_ended,
         }
     }
 }
@@ -3825,6 +3847,7 @@ mod tests {
                         Generation::new(1),
                         ProfileName::from("lead"),
                     )),
+                    identity_ended: true,
                 },
             },
         };
@@ -3835,6 +3858,7 @@ mod tests {
             "retired_cause",
             "retired_entry",
             "retired_rotation",
+            "retired_identity_ended",
         ] {
             assert!(
                 public["kind"].get(key).is_none(),
@@ -3854,6 +3878,11 @@ mod tests {
         assert_eq!(
             stored["event"]["kind"]["retired_rotation"],
             json!({"target": "fresh_session", "successor": 1, "successor_role": "lead"})
+        );
+        assert_eq!(
+            stored["event"]["kind"]["retired_identity_ended"],
+            json!(true),
+            "the stored row carries the end of the identity"
         );
         let decoded = decode_stored_mob_event(&encoded).expect("decode");
         assert_eq!(

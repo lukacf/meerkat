@@ -9733,6 +9733,8 @@ pub struct State {
     pub identity_runtime_fence_tokens: std::collections::BTreeMap<AgentIdentity, FenceToken>,
     pub identity_generation_highwater: std::collections::BTreeMap<AgentIdentity, Generation>,
     pub identity_generation_highwater_sealed: bool,
+    pub identity_life_resets: u64,
+    pub identity_life_ends: std::collections::BTreeMap<AgentIdentity, u64>,
     pub active_run_count: u64,
     pub flow_authority_schema_version: u64,
     pub run_status: std::collections::BTreeMap<RunId, FlowRunStatus>,
@@ -13126,6 +13128,14 @@ pub mod signals {
     pub struct ResolveMemberCustodyRestored {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndIdentityLife {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverIdentityLifeResets {
+        pub resets: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13235,6 +13245,8 @@ pub enum Signal {
     ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
     RecordMemberCustodyUnrestored(signals::RecordMemberCustodyUnrestored),
     ResolveMemberCustodyRestored(signals::ResolveMemberCustodyRestored),
+    EndIdentityLife(signals::EndIdentityLife),
+    RecoverIdentityLifeResets(signals::RecoverIdentityLifeResets),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -13380,6 +13392,8 @@ impl Signal {
             Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
             Self::RecordMemberCustodyUnrestored(_) => SignalKind::RecordMemberCustodyUnrestored,
             Self::ResolveMemberCustodyRestored(_) => SignalKind::ResolveMemberCustodyRestored,
+            Self::EndIdentityLife(_) => SignalKind::EndIdentityLife,
+            Self::RecoverIdentityLifeResets(_) => SignalKind::RecoverIdentityLifeResets,
         }
     }
 }
@@ -13486,6 +13500,8 @@ pub enum SignalKind {
     ResolveMemberInstructionRelease,
     RecordMemberCustodyUnrestored,
     ResolveMemberCustodyRestored,
+    EndIdentityLife,
+    RecoverIdentityLifeResets,
 }
 
 pub mod effects {
@@ -17019,6 +17035,14 @@ pub enum TransitionId {
     AdoptLegacyIdentityEntryAdoptedUnlisted,
     AdoptLegacyIdentityEntryRetireUnadopted,
     SealDeclaredRosterRefused,
+    EndIdentityLifeRunning,
+    EndIdentityLifeStopped,
+    EndIdentityLifeCompleted,
+    EndIdentityLifeDestroyed,
+    RecoverIdentityLifeResetsRunning,
+    RecoverIdentityLifeResetsStopped,
+    RecoverIdentityLifeResetsCompleted,
+    RecoverIdentityLifeResetsDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17102,6 +17126,8 @@ pub fn initial_state() -> State {
         identity_runtime_fence_tokens: Default::default(),
         identity_generation_highwater: Default::default(),
         identity_generation_highwater_sealed: false,
+        identity_life_resets: 0,
+        identity_life_ends: Default::default(),
         active_run_count: 0,
         flow_authority_schema_version: 7,
         run_status: Default::default(),

@@ -1742,8 +1742,9 @@ pub(crate) fn plain_retirement_facts(
 /// again later inherits none. A rotation's terminal, which seats the next
 /// incarnation, is not a plain retirement. The other ends of an identity are
 /// MobMachine's to name (its `IdentityEnded` effect), but for the reset's,
-/// which ends every identity the mob held.
-#[cfg(feature = "runtime-adapter")]
+/// which ends every identity the mob held. The end also moves the identity's
+/// life marker on the terminal step (MobMachine's `EndIdentityLife`), and its
+/// row records it for the replay.
 pub(crate) fn retirement_ends_identity(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,
@@ -1760,6 +1761,41 @@ pub(crate) fn retirement_ends_identity(
             stored_retirement_cause(state, identity),
             Some(MemberRetirementCause::Unlisted | MemberRetirementCause::Removed)
         )
+}
+
+/// An identity's life marker in its mob, MobMachine's: the mob's resets over
+/// its whole journal, and the ends of the identity's lives since the last
+/// reset. It moves at every end of the identity (the end of a retirement
+/// that ends it, the one-entry unlist or the removal of its entry, a respawn
+/// abandoned after its old member's archive, a reset of the mob) and at
+/// nothing else: a respawn keeps it. A tool grant request for a member
+/// identity records it ([`Self::token`]), and an approval executed after it
+/// moved issues nothing. Read through [`super::MobHandle::identity_life`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdentityLife {
+    resets: u64,
+    ends: u64,
+}
+
+impl IdentityLife {
+    /// `identity`'s marker in `state`.
+    pub(crate) fn of(state: &mob_dsl::MobMachineState, identity: &AgentIdentity) -> Self {
+        Self {
+            resets: state.identity_life_resets,
+            ends: state
+                .identity_life_ends
+                .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    /// The marker as a token, `{resets}.{ends}`: two equal tokens of one
+    /// identity in one mob incarnation name one life.
+    #[must_use]
+    pub fn token(&self) -> String {
+        format!("{}.{}", self.resets, self.ends)
+    }
 }
 
 /// What the row of `rotate_member`'s fresh life of an identity no member
@@ -2459,6 +2495,7 @@ mod tests {
                         identity_entry: Some(IdentityEntryOrigin::Declared),
                         unknown_identity_entry: None,
                         rotation: Some(rotation.clone()),
+                        identity_ended: false,
                     },
                 ),
             ),

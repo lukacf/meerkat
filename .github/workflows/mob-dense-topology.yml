@@ -62,7 +62,7 @@ jobs:
           echo "RUSTC_WRAPPER=" >> "${GITHUB_ENV}"
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

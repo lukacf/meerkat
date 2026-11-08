@@ -806,7 +806,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -979,7 +979,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1023,7 +1023,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1132,7 +1132,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1208,7 +1208,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1272,7 +1272,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1410,7 +1410,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1565,7 +1565,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1684,7 +1684,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1802,7 +1802,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1916,7 +1916,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2010,7 +2010,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2133,7 +2133,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2249,7 +2249,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2415,7 +2415,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2594,7 +2594,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2667,7 +2667,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2801,7 +2801,7 @@ jobs:
 
       - name: Setup mold linker
         if: ${{ github.event_name == 'push' }}
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         if: ${{ github.event_name == 'push' }}
@@ -2922,13 +2922,25 @@ jobs:
       - name: Install wasm-pack
         if: ${{ needs.changes.outputs.example_web_wasm == 'true' }}
         shell: bash
+        # Through the GitHub API with the job's token first, from the
+        # anonymous release URL only when there is no token or that fails
+        # (scripts/ci-release-asset-download).
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="0.13.1"
           archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
-            --output "/tmp/${archive}"
+          fetched=false
+          if scripts/ci-release-asset-download wasm-bindgen/wasm-pack "v${version}" "${archive}" "/tmp/${archive}"; then
+            fetched=true
+          fi
+          unset GH_TOKEN
+          if [[ "${fetched}" != true ]]; then
+            curl --fail --location --retry 5 --retry-delay 2 \
+              "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+              --output "/tmp/${archive}"
+          fi
           tar -xzf "/tmp/${archive}" -C /tmp
           install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
           wasm-pack --version
@@ -3042,13 +3054,25 @@ jobs:
 
       - name: Install wasm-pack
         shell: bash
+        # Through the GitHub API with the job's token first, from the
+        # anonymous release URL only when there is no token or that fails
+        # (scripts/ci-release-asset-download).
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="0.13.1"
           archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
-            --output "/tmp/${archive}"
+          fetched=false
+          if scripts/ci-release-asset-download wasm-bindgen/wasm-pack "v${version}" "${archive}" "/tmp/${archive}"; then
+            fetched=true
+          fi
+          unset GH_TOKEN
+          if [[ "${fetched}" != true ]]; then
+            curl --fail --location --retry 5 --retry-delay 2 \
+              "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+              --output "/tmp/${archive}"
+          fi
           tar -xzf "/tmp/${archive}" -C /tmp
           install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
           wasm-pack --version

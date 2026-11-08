@@ -359,6 +359,7 @@ ci-lanes-selftest:
 	@scripts/test-ci-non-rust-readers.sh
 	@scripts/test-ci-clippy-sccache-wrapper.sh
 	@scripts/test-setup-sccache-ci.sh
+	@scripts/test-ci-release-downloads.sh
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:

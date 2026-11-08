@@ -253,6 +253,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_steer_delivered_by_continuation`: `Map<String, Bool>`
 - `live_delegation_operation_by_interaction`: `Map<String, OperationId>`
 - `live_delegation_channel_by_operation`: `Map<OperationId, String>`
+- `live_delegation_member_turn_reasoning_by_operation`: `Map<OperationId, LiveMemberTurnReasoning>`
+- `live_delegation_intake_closed_channels`: `Set<String>`
 - `live_delegation_schedule_state_by_operation`: `Map<OperationId, LiveDelegationScheduleState>`
 - `live_delegation_active_worker_count_by_channel`: `Map<String, u64>`
 - `live_delegation_channel_worker_cap`: `u64`
@@ -917,6 +919,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `SettleRetainedRun`(run_id: Option<RunId>)
+- `CloseLiveDelegationIntake`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 
 ## Signals
 - `Initialize`
@@ -16571,6 +16574,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Idle`
 
@@ -16587,6 +16591,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Attached`
 
@@ -16603,6 +16608,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Running`
 
@@ -16618,6 +16624,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Idle`
 
@@ -16633,6 +16640,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Attached`
 
@@ -16648,6 +16656,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Running`
 
@@ -17757,6 +17766,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `schedule_state_is_queued`
   - `no_live_worker`
 - Emits: `LiveDelegationQueuedCancelled`
+- To: `Stopped`
+
+### `CloseLiveDelegationIntakeIdle`
+- From: `Idle`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Idle`
+
+### `CloseLiveDelegationIntakeAttached`
+- From: `Attached`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Attached`
+
+### `CloseLiveDelegationIntakeRunning`
+- From: `Running`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Running`
+
+### `CloseLiveDelegationIntakeRetired`
+- From: `Retired`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Retired`
+
+### `CloseLiveDelegationIntakeStopped`
+- From: `Stopped`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
 - To: `Stopped`
 
 ### `AuthorizeLiveDelegationNarrationIdle`

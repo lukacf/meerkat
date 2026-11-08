@@ -361,6 +361,27 @@ them.
   named here is exhaustive, so a downstream exhaustive match needs the new
   arms, or a wildcard arm.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine copies a GPT Live delegation's member-turn reasoning
+  preference per operation, and a channel's close closes its delegation
+  intake (see Fixed). `MeerkatMachineState` (meerkat-machine-schema and
+  meerkat-runtime) and the kernel `generated::meerkat` `State` gain the
+  public fields `live_delegation_member_turn_reasoning_by_operation` and
+  `live_delegation_intake_closed_channels`. `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel
+  `generated::meerkat` `Input` gain `CloseLiveDelegationIntake { channel_id,
+  runtime_id, fence_token, generation }`, and `MeerkatMachineInputVariant`
+  (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `InputKind` gain `CloseLiveDelegationIntake`. The kernel
+  `generated::meerkat::TransitionId` gains `CloseLiveDelegationIntakeIdle`,
+  `CloseLiveDelegationIntakeAttached`, `CloseLiveDelegationIntakeRunning`,
+  `CloseLiveDelegationIntakeRetired` and `CloseLiveDelegationIntakeStopped`.
+  Every new variant is appended last, so no existing variant's implicit
+  discriminant moves. Every enum named here is exhaustive, so a downstream
+  exhaustive match needs the new arms, or a wildcard arm, and a struct
+  literal of either state type needs the new fields.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -1234,6 +1255,81 @@ them.
   custody it is refused `MobError::IdentityMember` before anything is
   created.
 
+- `meerkat-mob-mcp`, `meerkat-runtime`: a GPT Live voice request that the
+  voice model had turned into a client delegation just before its channel
+  closed (Turbo S S107), or that was still waiting behind a running
+  delegation when the user ended the call (a channel whose own member
+  executes its delegations runs one at a time), now still runs after the
+  close. The close cancelled every admitted delegation whose worker had not
+  started as work that never started, so the spoken request was neither
+  executed nor recorded, and nothing said so. A delegation admitted before
+  the close now starts after it once a worker slot frees, on its operation's
+  own closed channel: the generated `ReconcileLiveDelegationTranscript*`,
+  `AuthorizeLiveDelegationWorkerStart`, `AuthorizeLiveConsequentialEffect`,
+  `RequeueUnstartedLiveDelegation` and steer (`AuthorizeLiveDelegationSteer`,
+  `ResolveLiveDelegationSteerDelivery`, `ReconcileLiveDelegationSteer*`)
+  guards also admit a channel that carries no runtime, fence or generation
+  binding at all, on the exact operation join and while the session is
+  still registered, as `ResolveLiveDelegationWorkerStart` now does too, and
+  a worker started that way takes no worker slot of the closed channel. The
+  words the user spoke to continue the request while it waited join its
+  task as on an open channel; a held continuation that cannot join retires
+  the start instead of running the request without it, recorded as failed.
+  The worker keeps the member-turn reasoning preference the channel sealed:
+  the machine copies it per operation at admission, so it outlives the
+  channel's own. It settles like a worker that was running at the close: an
+  owned fork's result merges into the source member exactly once, and an
+  existing member keeps the request, its executor input and its answer in
+  its own session. A blocked hand-back on the unbound channel settles
+  Cancelled in the machine, as do blocked work the close finds, a hand-back
+  the close finds mid-realization, and a blocked hand-back recorded while
+  the channel was still bound once it is reconciled after the close: a
+  requeue needs the channel's binding, so nothing could serve it again. A
+  delegation the channel loop had not claimed yet when a retirement
+  cancelled the loop is cancelled at the close in the machine instead of
+  staying admitted with no schedule (it cannot run: its control payload
+  never arrived). A delegation that reaches Meerkat after the close began
+  is refused admission: the close first closes the channel's delegation
+  intake in the machine (`CloseLiveDelegationIntake`), which
+  `AdmitLiveDelegation` and `AdmitLiveInteractionDelegation` now refuse,
+  and one admitted just before whose custody lands after the close is
+  cancelled. A start deferred after its spoken request was committed (a
+  busy source at the fork cut, or a WorkGraph claim refusal) now keeps that
+  commit for its retry; before, the retry committed the request again, the
+  session refused, and the request was retired. A start whose not-started
+  report the machine refuses is retired instead of reported again for good.
+  Affects 0.8.41 through 0.9.10.
+
+- `meerkat-mob-mcp`, `meerkat-runtime`: restart recovery of a GPT Live
+  delegation whose worker finished its turn no longer stops with recovery
+  debt when that turn was recorded as a blocked hand-back, or as Failed or
+  Cancelled because its work item failed or was cancelled. Restart recovery
+  passes the Mob's durable terminal, a completed turn, and the generated
+  `ReconcileRevokedLiveDelegationWorkerAfterRestart` refused it against the
+  recorded terminal, so the delegation was reported Broken and never
+  settled: a blocked hand-back stayed Blocked and its work item open. The
+  reconciliation now accepts a completed turn against a recorded Blocked,
+  Failed or Cancelled terminal, and the recorded terminal decides the
+  settlement, as the close settles it: a blocked hand-back is cancelled,
+  its work item too, and a failed or cancelled one keeps its state, each
+  late and never result-eligible. Voice work items now name their
+  operation in an evidence reference (`live_delegation_operation`), which
+  restart recovery reads to find the item; an item created before this
+  release names none, so recovery leaves it open. Affects 0.8.41 through
+  0.9.10.
+
+- `meerkat-mob-mcp`: words a GPT Live user spoke to continue a delegated
+  request while it waited for its worker are recorded delivered only once a
+  worker started with them. A start folded them into the worker's task
+  under generated steer authority and recorded them delivered before it
+  started; when that start met a busy source member at the fork cut, the
+  retry was refused and the request retired (the deferred-start fix above),
+  with the words recorded delivered although no worker had run with them.
+  A start that meets a busy source now keeps the folded words for its retry,
+  on an open channel as after the channel closed, and their delivery is
+  recorded once a worker started with them, or as not delivered when the
+  request is retired. Affects 0.8.50 through 0.9.10.
+
 ### Security
 
 - `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
@@ -1357,6 +1453,11 @@ them.
   realm is poisoned until it is reopened. A store that gives each acquire a
   server-side deadline below Core's acquire timeout
   (`SpiRealmConfig::renew_timeout`) avoids it.
+
+- `meerkat-mob-mcp`: when the machine refuses the report that a GPT Live
+  delegation's worker did not start, the start is retired without a
+  narration. The machine refuses that report only when the session or the
+  channel is gone or its binding is stale.
 
 ## [0.9.10] - 2026-11-04
 

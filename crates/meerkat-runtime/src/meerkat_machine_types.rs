@@ -1383,6 +1383,11 @@ meerkat_machine_runtime_internal_inputs!(
     RunExecutionLifecycle => [
         SettleRetainedRun,
     ],
+    // A channel's close sweep closes its delegation intake, so a delegation
+    // the lifecycle seam carries past the close is refused admission.
+    LiveExecutionLifecycle => [
+        CloseLiveDelegationIntake,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

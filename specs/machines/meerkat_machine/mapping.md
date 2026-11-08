@@ -4922,6 +4922,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelQueuedLiveDelegationStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationNarrationIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

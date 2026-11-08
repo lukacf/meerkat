@@ -14448,6 +14448,9 @@ pub struct State {
     pub live_delegation_steer_delivered_by_continuation: std::collections::BTreeMap<String, bool>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_delegation_member_turn_reasoning_by_operation:
+        std::collections::BTreeMap<OperationId, LiveMemberTurnReasoning>,
+    pub live_delegation_intake_closed_channels: std::collections::BTreeSet<String>,
     pub live_delegation_schedule_state_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationScheduleState>,
     pub live_delegation_active_worker_count_by_channel: std::collections::BTreeMap<String, u64>,
@@ -15454,6 +15457,14 @@ impl std::fmt::Debug for State {
             .field(
                 "live_delegation_channel_by_operation",
                 &self.live_delegation_channel_by_operation,
+            )
+            .field(
+                "live_delegation_member_turn_reasoning_by_operation",
+                &self.live_delegation_member_turn_reasoning_by_operation,
+            )
+            .field(
+                "live_delegation_intake_closed_channels",
+                &self.live_delegation_intake_closed_channels,
             )
             .field(
                 "live_delegation_schedule_state_by_operation",
@@ -19157,6 +19168,13 @@ pub mod inputs {
     pub struct SettleRetainedRun {
         pub run_id: Option<RunId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CloseLiveDelegationIntake {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19592,6 +19610,7 @@ pub enum Input {
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     SettleRetainedRun(inputs::SettleRetainedRun),
+    CloseLiveDelegationIntake(inputs::CloseLiveDelegationIntake),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20193,6 +20212,7 @@ impl Input {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
             Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
+            Self::CloseLiveDelegationIntake(_) => InputKind::CloseLiveDelegationIntake,
         }
     }
 }
@@ -20617,6 +20637,7 @@ pub enum InputKind {
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
     SettleRetainedRun,
+    CloseLiveDelegationIntake,
 }
 
 pub mod signals {
@@ -26190,6 +26211,11 @@ pub enum TransitionId {
     SettleRetainedRunNotRetainedRetired,
     SettleRetainedRunNotRetainedStopped,
     SettleRetainedRunInertDestroyed,
+    CloseLiveDelegationIntakeIdle,
+    CloseLiveDelegationIntakeAttached,
+    CloseLiveDelegationIntakeRunning,
+    CloseLiveDelegationIntakeRetired,
+    CloseLiveDelegationIntakeStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26509,6 +26535,8 @@ pub fn initial_state() -> State {
         live_delegation_steer_delivered_by_continuation: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
+        live_delegation_member_turn_reasoning_by_operation: Default::default(),
+        live_delegation_intake_closed_channels: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),
         live_delegation_active_worker_count_by_channel: Default::default(),
         live_delegation_channel_worker_cap: 4,

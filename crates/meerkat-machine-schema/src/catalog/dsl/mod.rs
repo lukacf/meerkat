@@ -3539,6 +3539,10 @@ runtime_internal_inputs!(
         // by `MeerkatMachine::settle_retained_run`, which answers the
         // machine's verdict.
         SettleRetainedRun,
+        // A channel's close sweep closes its delegation intake under the
+        // channel's exact binding, so nothing is admitted on it past the
+        // close. No caller can ask for it.
+        CloseLiveDelegationIntake,
     ]
 );
 

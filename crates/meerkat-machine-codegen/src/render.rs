@@ -580,6 +580,12 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SettleRetainedRunNotRetainedRetired",
     "SettleRetainedRunNotRetainedStopped",
     "SettleRetainedRunInertDestroyed",
+    // A channel's close sweep closes its delegation intake (0.9.11).
+    "CloseLiveDelegationIntakeIdle",
+    "CloseLiveDelegationIntakeAttached",
+    "CloseLiveDelegationIntakeRunning",
+    "CloseLiveDelegationIntakeRetired",
+    "CloseLiveDelegationIntakeStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

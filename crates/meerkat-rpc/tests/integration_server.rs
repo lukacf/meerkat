@@ -1191,6 +1191,33 @@ async fn unknown_method_returns_error() {
     server_handle.await.unwrap().unwrap();
 }
 
+/// 7b. Params a method cannot read are refused under the request's id, so a
+/// client that matches answers by id receives the refusal. A `cursor` is a
+/// field `mob/stream_open` does not take.
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn unreadable_params_are_refused_under_the_request_id() {
+    let (mut writer, mut reader, server_handle) = spawn_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "mob/stream_open",
+        "params": {"mob_id": "absent", "agent_identity": "w1", "cursor": "earliest"}
+    });
+    send_request(&mut writer, &req).await;
+
+    let response = read_response(&mut reader).await;
+    assert_eq!(response["error"]["code"], -32602, "{response}"); // INVALID_PARAMS
+    assert_eq!(
+        response["id"], 100,
+        "the refusal names the request it answers: {response}"
+    );
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
 /// Regression: mcp/add with persisted=true should NOT be rejected — the field
 /// is accepted as a real persistence request. This fake session never reaches
 /// config mutation because session validation fails first.

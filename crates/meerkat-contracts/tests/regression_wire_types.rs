@@ -1612,8 +1612,9 @@ fn a_session_create_grant_gate_refuses_an_unknown_field() {
 fn tool_grant_server_targets_and_member_gates_pin_their_field_names() {
     use meerkat_contracts::{
         GrantToolResult, ListToolGrantsResult, ToolGrantTargetRequest, WireGrantGatedTools,
-        WireMemberToolGrantGate, WireToolGrant, WireToolGrantApplies, WireToolGrantGateView,
-        WireToolGrantIssuer, WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
+        WireMemberToolGrantGate, WireToolGrant, WireToolGrantApplies, WireToolGrantGateEntries,
+        WireToolGrantGateView, WireToolGrantIssuer, WireToolGrantStatus, WireToolGrantSubject,
+        WireToolGrantTarget,
     };
     let gate: WireGrantGatedTools = serde_json::from_value(serde_json::json!({
         "mcp_servers": ["tickets"],
@@ -1702,11 +1703,11 @@ fn tool_grant_server_targets_and_member_gates_pin_their_field_names() {
         gate: Some(WireMemberToolGrantGate {
             running: None,
             next_build: WireToolGrantGateView {
-                gated: WireGrantGatedTools {
+                gated: WireToolGrantGateEntries {
                     mcp_servers: vec!["tickets".to_string()],
-                    ..WireGrantGatedTools::default()
+                    ..WireToolGrantGateEntries::default()
                 },
-                not_mounted: WireGrantGatedTools::default(),
+                not_mounted: WireToolGrantGateEntries::default(),
             },
         }),
     })

@@ -48,7 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   chosen, on the same credential: choosing `copilot_openai` for an Anthropic
   model runs on `copilot_anthropic`, so the chosen target's name is not the
   route the session runs on.
-- After a host loss, an access decision whose native issuance was still
-  pending stays pending: the next host does not settle it, and a fresh
-  approval of the same proposal is refused as a conflict. Make a new
-  proposal for that access instead.
+- After a host loss, or a close that ran out of its 30-second join bound, an
+  access decision whose native issuance was still pending stays pending: the
+  next host does not settle it, and a fresh approval of the same proposal is
+  refused as a conflict. Make a new proposal for that access instead.

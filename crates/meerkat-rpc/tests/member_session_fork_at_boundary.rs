@@ -439,19 +439,18 @@ async fn a_standalone_session_forks_at_a_message_boundary() {
     rig.assert_exact_prefix(&child, &source).await;
 }
 
-/// Today: none of the RPC routes forks a member's session at a boundary.
+/// `session/fork_at` refuses a member's session: a member's transcript
+/// belongs to its mob, which forks it at a message boundary with
+/// `mob/fork_member` ([`mob_fork_member_forks_a_member_into_a_new_member_at_a_boundary`]).
+/// The other mob routes take no boundary:
 ///
-/// Delete with the fix; [`a_member_session_forks_at_a_message_boundary`] is
-/// the intended behaviour.
-///
-/// - `session/fork_at` on the member's session is refused by the router.
 /// - `mob/fork_helper` with `LastMessages { count }` yields a fresh session
 ///   whose first user message is the source rendered as text plus the task:
 ///   prompt context, not the prefix.
 /// - `mob/spawn` with `launch_mode = resume` on the member's session (after
 ///   the member is retired) brings back the whole history.
 #[tokio::test]
-async fn today_a_member_session_cannot_be_forked_at_a_boundary_over_rpc() {
+async fn session_fork_at_refuses_a_member_session() {
     let rig = rig();
     let source = rig.seat_main(None).await;
     for prompt in PROMPTS {

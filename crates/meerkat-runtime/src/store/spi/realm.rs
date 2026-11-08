@@ -1558,22 +1558,20 @@ impl SpiRealm {
         Self::refuse_scopes(poisoned, quarantined)
     }
 
-    /// Refuse a read across the scopes of `families` while one of them is
-    /// quarantined (or the realm is poisoned), whatever is poisoned: for a
-    /// read that cannot tell which of those scopes it needs, since a
-    /// quarantined scope's head, and so what it holds, is unknown.
-    ///
-    /// # Errors
-    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesQuarantined`]
-    /// naming the quarantined scopes of `families`.
-    pub(crate) fn check_quarantined_of(&self, families: &[ScopeFamily]) -> Result<(), SpiError> {
-        self.check_realm()?;
-        let quarantined = self
-            .quarantined_where(Some(families))
+    /// The quarantined scopes of `family`, in key order, each with the id a
+    /// call names it by when the realm knows it (`None` while its store name
+    /// hashes its key and no call named it) and its refusal: for a read that
+    /// cannot tell which of those scopes it needs, since a quarantined
+    /// scope's head, and so what it holds, is unknown, and that answers
+    /// without them and reports them.
+    pub(crate) fn quarantined_of(
+        &self,
+        family: ScopeFamily,
+    ) -> Vec<(Option<ScopeId>, RefusedScope)> {
+        self.quarantined_where(Some(&[family]))
             .into_iter()
-            .map(|(scope, _)| scope)
-            .collect();
-        Self::refuse_scopes(Vec::new(), quarantined)
+            .map(|(scope, id)| (id, RefusedScope::of_quarantined(scope.scope, scope.cause)))
+            .collect()
     }
 
     /// The refusal of a cross-scope read that met these scopes.

@@ -315,7 +315,12 @@ instead of failing the realm:
   its scope's name (`RuntimeStore::unnamed_refused_runtimes`, and the
   listing's `unnamed`), and a mob boot plans the member it belongs to as
   holding work, found by the member's runtime ids
-  (`RuntimeStore::refuses_runtime_until_reopen`). Its chunks
+  (`RuntimeStore::refuses_runtime_until_reopen`). A quarantined tool grant's
+  subject and target are unknown: every subject's grant listing leaves it
+  out and reports it (`RuntimeStore::quarantined_tool_grants`), so the other
+  grants keep admitting, a call no known live grant admits is refused as
+  unavailable, naming it, and a list reports it among the rows it cannot
+  read. Its chunks
   are never swept as ownerless. `SpiRealm::quarantined_scopes` lists every
   quarantined scope, and a mob storage whose scope is quarantined is listed
   as quarantined (`SpiStoredMob::quarantined`).

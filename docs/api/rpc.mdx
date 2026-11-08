@@ -2119,7 +2119,9 @@ only: no method loads, registers or wakes the session.
 - **`tool_grants/list`** answers the session's grants, each due one settled as
   `expired` first. Ended grants (`expired`, `revoked`) are listed only with
   `include_ended`; `unreadable` names any stored grant this server cannot read
-  (written by a newer version, or damaged), which opens nothing.
+  (written by a newer version, or damaged), which opens nothing, and any grant
+  a host store quarantined (the store reports a conflict for its scope, so its
+  session and tools are unknown), whatever session it was granted to.
 - **`tool_grants/audit`** answers a page of the session's audit log, `granted`,
   `expired` (with the `driver` that observed it: `timer`, `boundary`,
   `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`

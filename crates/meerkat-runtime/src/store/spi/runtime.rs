@@ -91,13 +91,13 @@ use crate::store::{
     KeyedRuntimeDeliveryCasOutcome, MachineLifecycleCasOutcome, MachineLifecycleCommit,
     MachineLifecycleExpectedVersion, MachineLifecycleObservation, PreparedRecoveryInputSnapshot,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
-    PreparedWholeBlobSnapshotCas, RecoveryInputSetRevision, RecoveryInputStateMutation,
-    RefusedScope, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
-    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
-    RuntimeSessionAuthorityOps, RuntimeSessionAuthorityReadCost, RuntimeSessionCatalogEntry,
-    RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
-    SerializedSessionSnapshot, UnavailableRuntime, WholeBlobProvisionalTailAuthority,
-    WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority,
+    PreparedWholeBlobSnapshotCas, QuarantinedToolGrant, RecoveryInputSetRevision,
+    RecoveryInputStateMutation, RefusedScope, RuntimeDeliveryAuthorityCasOutcome,
+    RuntimeDeliveryAuthorityListing, RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord,
+    RuntimeSessionAuthority, RuntimeSessionAuthorityOps, RuntimeSessionAuthorityReadCost,
+    RuntimeSessionCatalogEntry, RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError,
+    RuntimeStoreWriteFence, SerializedSessionSnapshot, UnavailableRuntime,
+    WholeBlobProvisionalTailAuthority, WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority,
 };
 
 /// How often a cross-scope read waiting outside the gate's queue for a slow
@@ -2567,9 +2567,10 @@ impl RuntimeStore for SpiRuntimeStore {
             .map(|(_, record)| record.clone()))
     }
 
-    /// The subject's grants, from memory, under its audit scope: refused
-    /// typed while a grant scope is quarantined, whose head, and so the
-    /// subject it is filed under, is unknown.
+    /// The subject's grants, from memory, under its audit scope. A grant
+    /// whose scope is quarantined is not in memory, and its head, and so
+    /// the subject it is filed under, is unknown: it is in no subject's
+    /// answer, and [`RuntimeStore::quarantined_tool_grants`] reports it.
     async fn list_tool_grants(
         &self,
         subject_key: &str,
@@ -2577,15 +2578,21 @@ impl RuntimeStore for SpiRuntimeStore {
         let _scopes = self
             .mob_host_scopes(&[tool_grant_audit_scope(subject_key)], false)
             .await?;
-        self.realm
-            .check_quarantined_of(&[TOOL_GRANT_FAMILY])
-            .map_err(SpiError::into_read)?;
         Ok(lock_tool_grants(&self.tool_grants)
             .grants
             .iter()
             .filter(|(_, (subject, _))| subject == subject_key)
             .map(|(grant_id, (_, record))| (grant_id.clone(), record.clone()))
             .collect())
+    }
+
+    /// Every quarantined grant scope, from the writer fence: no store read.
+    fn quarantined_tool_grants(&self) -> Vec<QuarantinedToolGrant> {
+        self.realm
+            .quarantined_of(TOOL_GRANT_FAMILY)
+            .into_iter()
+            .map(|(id, refusal)| QuarantinedToolGrant::new(id.map(|id| id.key), refusal))
+            .collect()
     }
 
     async fn put_tool_grant_if_absent(

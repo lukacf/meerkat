@@ -770,6 +770,14 @@ them.
   `MeerkatMachine::store_refuses_runtime` let a boot attribute them to the
   members it plans, by each member's runtime ids.
 
+- `meerkat-runtime`: `RuntimeStore::quarantined_tool_grants`, the tool
+  grants whose scope a store quarantined (a host store reports a conflict
+  for it), each a `QuarantinedToolGrant` (`#[non_exhaustive]`: its
+  `grant_id` when the store can name it, and the `RefusedScope`; none by
+  default; a decorator forwards its inner store's answer). Their subject is
+  unknown, so `RuntimeStore::list_tool_grants` leaves them out of every
+  subject's listing; `ToolGrantService` reads them beside it.
+
 - `meerkat-store-conformance`: the host store chapter's
   `a_conflicted_scope_is_listed_typed` row, after `same_version_twice`: a
   scope whose load answers a typed conflict is listed under
@@ -937,9 +945,13 @@ them.
   named yet, both answer every other runtime and report it by its scope's
   name, `RuntimeStore::unnamed_refused_runtimes` and the listing's
   `unnamed`, and a mob boot plans its member as holding work and leaves the
-  others dormant), the session catalog listing, the
-  controller custody and the delivery backlog total refuse typed, and so
-  does the tool grant listing while a grant scope is quarantined. Its
+  others dormant), and the session catalog listing, the controller custody
+  and the delivery backlog total refuse typed. A quarantined tool grant (its
+  subject and target unknown) is left out of every subject's grant listing
+  and reported (`RuntimeStore::quarantined_tool_grants`): the other grants
+  keep admitting, a call no known live grant admits is refused as
+  unavailable, naming it, and the subject's list reports it among the rows
+  it cannot read. Its
   chunks are never swept, and a mob storage lists a mob whose scope is
   quarantined as quarantined. A re-acquire's listing must report each
   recorded conflict unchanged (its version, and its commit ids where both

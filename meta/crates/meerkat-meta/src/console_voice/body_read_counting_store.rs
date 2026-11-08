@@ -50,6 +50,10 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
         self.inner.unnamed_refused_runtimes()
     }
 
+    fn quarantined_tool_grants(&self) -> Vec<meerkat_runtime::store::QuarantinedToolGrant> {
+        self.inner.quarantined_tool_grants()
+    }
+
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
         self.inner.session_persistence_profile()
     }

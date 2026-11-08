@@ -3195,6 +3195,27 @@ impl UnavailableRuntime {
     }
 }
 
+/// A tool grant whose row the store refuses because it quarantined the
+/// grant's scope ([`RuntimeStore::quarantined_tool_grants`]): its subject
+/// and target are unknown, so it is in no subject's listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuarantinedToolGrant {
+    /// The grant's id, or `None` while the store names the grant's scope by
+    /// a hash of the id and no call named the grant.
+    pub grant_id: Option<String>,
+    /// The store's refusal of the grant's scope, naming the conflict and the
+    /// repair.
+    pub refusal: RefusedScope,
+}
+
+impl QuarantinedToolGrant {
+    #[must_use]
+    pub fn new(grant_id: Option<String>, refusal: RefusedScope) -> Self {
+        Self { grant_id, refusal }
+    }
+}
+
 /// The delivery authorities of a store, answered per runtime
 /// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]):
 /// the record of every runtime the store answers for, every runtime it
@@ -11516,13 +11537,30 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// Every grant row filed under `subject_key`, as `(grant_id, row)` in
-    /// grant id order. A subject with no grants reads as empty.
+    /// grant id order. A subject with no grants reads as empty. A grant whose
+    /// row the store refuses because it quarantined its scope (a host store
+    /// reports a conflict for it) has an unknown subject: no subject's
+    /// listing holds it, and [`Self::quarantined_tool_grants`] reports it.
     async fn list_tool_grants(
         &self,
         subject_key: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
         let _ = subject_key;
         Err(RuntimeStoreError::Unsupported("list_tool_grants".into()))
+    }
+
+    /// Every tool grant whose row the store refuses because it quarantined
+    /// the grant's scope (a host store reports a conflict for it, refused
+    /// until the scope is repaired in the store and the realm is reopened).
+    /// Its head, and so its subject and target, are unknown, so
+    /// [`Self::list_tool_grants`] leaves it out of every subject's listing:
+    /// the grant service reads these beside it, refuses a call no known live
+    /// grant admits as unavailable, naming them, and lists them among the
+    /// rows it cannot read. No store read. A store that quarantines nothing
+    /// answers none, the default. Decorators must forward their inner
+    /// store's answer.
+    fn quarantined_tool_grants(&self) -> Vec<QuarantinedToolGrant> {
+        Vec::new()
     }
 
     /// Insert `grant_id`'s row under `subject_key` iff no row has that id,

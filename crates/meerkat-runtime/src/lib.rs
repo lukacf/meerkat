@@ -1236,7 +1236,7 @@ pub use store::{
     PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
     PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobRunRebase,
-    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RefusedScope,
+    PreparedWholeBlobRunRebaseStoreParts, QuarantinedToolGrant, RecoveryCommitStatus, RefusedScope,
     RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,

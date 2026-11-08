@@ -48,6 +48,16 @@ fn probe_unnamed_refusals() -> Vec<RefusedScope> {
     )]
 }
 
+/// The tool grants the probe's store quarantined: the trait default reports
+/// none, so a decorator that keeps it admits nothing a quarantined grant
+/// may have admitted, and says so nowhere.
+fn probe_quarantined_grants() -> Vec<meerkat_runtime::store::QuarantinedToolGrant> {
+    vec![meerkat_runtime::store::QuarantinedToolGrant::new(
+        Some("forwarding-probe-grant".to_string()),
+        RefusedScope::new("tg:forwarding-probe-grant", "forwarding probe: quarantined"),
+    )]
+}
+
 /// The listing the probe answers per runtime: one unavailable runtime.
 fn probe_delivery_listing() -> RuntimeDeliveryAuthorityListing {
     RuntimeDeliveryAuthorityListing::new(
@@ -248,6 +258,12 @@ pub(crate) async fn assert_forwards_to(
          default reports none, so a boot never attributes them to their members"
     );
     assert_eq!(
+        store.quarantined_tool_grants(),
+        probe_quarantined_grants(),
+        "the inner store's quarantined tool grants: a decorator that keeps the default reports \
+         none, so a refused gated call never names them"
+    );
+    assert_eq!(
         store
             .load_continuation_key_binding("owner", "key")
             .await
@@ -389,6 +405,7 @@ pub(crate) async fn assert_forwards_to(
             "self_fence",
             "refuses_runtime_until_reopen",
             "unnamed_refused_runtimes",
+            "quarantined_tool_grants",
             "load_continuation_key_binding",
             "compare_and_swap_runtime_delivery_authority_with_key_binding",
             "load_continuation_admission",
@@ -504,6 +521,11 @@ mod store_impl {
         fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
             self.record("unnamed_refused_runtimes");
             probe_unnamed_refusals()
+        }
+
+        fn quarantined_tool_grants(&self) -> Vec<meerkat_runtime::store::QuarantinedToolGrant> {
+            self.record("quarantined_tool_grants");
+            probe_quarantined_grants()
         }
 
         async fn load_continuation_key_binding(

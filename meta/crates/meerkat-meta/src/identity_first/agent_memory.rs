@@ -985,7 +985,7 @@ selection reads when deciding whether to recall the record.\n\
 \"observed\" (default) for things you inferred or saw, \"verified_claim\" only when you actually \
 checked, with `verification_evidence` describing what you checked. When operator memory is on, \
 `remember` files an \"operator_said\" fact only in the operator memory of the person whose own \
-message started the run, never in your own memory.\n\
+message started the run, never in your own memory or a mob proposal.\n\
 - Convert relative dates to absolute at write time (\"2026-07-01\", never \"today\" or \
 \"next week\") — a future session cannot recover what \"today\" meant.\n\
 - An open_loop record must state its explicit resolution condition (\"resolved when X\") so \
@@ -997,18 +997,22 @@ write mob scope directly.";
 /// Why the `memory` tool refused a person's own fact (an `operator_said`
 /// fact while operator memory is on). Nothing is stored. The refusal is a
 /// typed tool error: `data.kind` is [`Self::kind`], which callers classify
-/// by (never the message), and the message names the alternative.
+/// by (never the message), and the message names what to do instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperatorFactRefusal {
-    /// No person's own message started this run (no requester, a request
-    /// carried from another agent, a principal that names no person, or a
-    /// governed run), so there is no person to file the fact for.
+    /// This run cannot file a person's fact: no person's own message
+    /// started it (no requester, a request carried from another agent, a
+    /// principal that names no person), or it is governed work, whose
+    /// authorization names only the call's own memory operation.
     WithoutAPerson,
     /// The memory store keeps no proposals, so a person's operator memory
     /// cannot be filed.
     OperatorMemoryUnavailable,
     /// `update` changes this agent's own memory, never a person's.
     Update,
+    /// `propose_to_mob` shares with the whole mob, never a person's own
+    /// fact.
+    MobProposal,
 }
 
 impl OperatorFactRefusal {
@@ -1018,6 +1022,7 @@ impl OperatorFactRefusal {
             Self::WithoutAPerson => "operator_fact_without_a_person",
             Self::OperatorMemoryUnavailable => "operator_memory_unavailable",
             Self::Update => "operator_fact_update_refused",
+            Self::MobProposal => "operator_fact_mob_proposal_refused",
         }
     }
 
@@ -1025,9 +1030,9 @@ impl OperatorFactRefusal {
         match self {
             Self::WithoutAPerson => {
                 "An \"operator_said\" fact is kept only in the operator memory of the person who \
-                 said it, and this run was not started by a person's own message: nothing was \
-                 stored. If it is this agent's own knowledge, remember it without epistemic \
-                 \"operator_said\"."
+                 said it, and this run cannot file one (no person's own message started it, or \
+                 it is governed work): nothing was stored. If it is this agent's own knowledge, \
+                 remember it without epistemic \"operator_said\"."
             }
             Self::OperatorMemoryUnavailable => {
                 "An \"operator_said\" fact is kept only in the operator memory of the person who \
@@ -1040,6 +1045,13 @@ impl OperatorFactRefusal {
                  kept only in the operator memory of the person who said it: nothing was \
                  stored. File the person's fact with \"remember\"; update this agent's own \
                  records without epistemic \"operator_said\"."
+            }
+            Self::MobProposal => {
+                "An \"operator_said\" fact is kept only in the operator memory of the person who \
+                 said it, and a mob proposal would share it with the whole mob: nothing was \
+                 stored. To keep the person's fact theirs, file it with \"remember\" and \
+                 epistemic \"operator_said\"; to share this agent's own knowledge with the mob, \
+                 use \"propose_to_mob\" without epistemic \"operator_said\"."
             }
         }
     }
@@ -1354,8 +1366,8 @@ impl MemoryRecorder {
     /// Whether this call files a person's own fact while operator memory is
     /// on: an `operator_said` fact then goes only to the operator memory of
     /// the person who said it, never into the agent's shared identity
-    /// memory. With operator memory off, an `operator_said` fact stays the
-    /// agent's own memory, as before.
+    /// memory or a mob proposal. With operator memory off, an
+    /// `operator_said` fact stays the agent's own memory, as before.
     fn files_person_fact(&self, args: &MemoryToolArgs) -> bool {
         args.epistemic.as_deref() == Some("operator_said")
             && self.config.operator_scope == AgentMemoryOperatorScope::Provisional
@@ -1394,9 +1406,10 @@ impl MemoryRecorder {
                 )
             })?;
         Ok(format!(
-            "Proposed to the operator memory of the person who said it as {proposal_id}; a \
-             steward or operator reviews it. It is not stored in this agent's own memory: a \
-             person's own facts stay theirs."
+            "Proposed to the operator memory of the person who said it as {proposal_id}; the \
+             memory steward reviews it, and it becomes their operator memory only when the \
+             steward accepts it. It is not stored in this agent's own memory: a person's own \
+             facts stay theirs."
         ))
     }
 
@@ -1527,6 +1540,11 @@ impl MemoryRecorder {
                     .map_err(|err| MemoryToolFailure::Failed(err.to_string()))
             }
             "propose_to_mob" => {
+                // A mob proposal shares with the whole mob: never a person's
+                // own fact, which only `remember` files, for them alone.
+                if self.files_person_fact(&args) {
+                    return Err(OperatorFactRefusal::MobProposal.into());
+                }
                 let scope = self.mob_scope().ok_or_else(propose_outside_mob)?;
                 let record = self.new_record(&args, "propose_to_mob")?;
                 // §10.1: the store consults the LLM write gate at propose

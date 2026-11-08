@@ -1721,6 +1721,13 @@ struct CachedCopilotToken {
     generation: u64,
     token: String,
     source_generation: u64,
+    /// In token mode, the publication time of the account lease publication
+    /// this entry serves: with `source_generation` it names that
+    /// publication. A lease that takes another process's stored record keeps
+    /// its own generation when the record's is not above it, so the
+    /// generation alone can name another record's publication. `None` for
+    /// the device sign-in, whose entry is keyed by its record's generation.
+    source_published_at_millis: Option<u64>,
     /// The expiry of the source credential's publication this entry serves,
     /// which the authorizer reports (`HttpAuthorizer::expires_at`): the
     /// device sign-in's GitHub token expiry, or in token mode the expiry
@@ -1752,6 +1759,10 @@ impl std::fmt::Debug for CachedCopilotToken {
             .field("generation", &self.generation)
             .field("token", &"<redacted>")
             .field("source_generation", &self.source_generation)
+            .field(
+                "source_published_at_millis",
+                &self.source_published_at_millis,
+            )
             .field("source_expires_at", &self.source_expires_at)
             .field("refresh_at", &self.refresh_at)
             .field("expires_at", &self.expires_at)
@@ -1791,6 +1802,7 @@ impl CachedCopilotToken {
             generation,
             token: String::new(),
             source_generation,
+            source_published_at_millis: None,
             source_expires_at,
             refresh_at: DateTime::<Utc>::MIN_UTC,
             expires_at: DateTime::<Utc>::MIN_UTC,
@@ -1882,7 +1894,7 @@ impl CopilotAuthorizer {
                         )
                     })?;
                     let now = (self.env.now)();
-                    if let Some(cached) = self.fresh_cached(source_generation, now)
+                    if let Some(cached) = self.fresh_cached(source_generation, None, now)
                         && !cached.model_discovery_due
                     {
                         return Ok(cached);
@@ -1964,7 +1976,7 @@ impl CopilotAuthorizer {
         source_generation: u64,
     ) -> Result<CachedTokenView, CopilotTokenError> {
         let now = (self.env.now)();
-        if let Some(cached) = self.fresh_cached(source_generation, now) {
+        if let Some(cached) = self.fresh_cached(source_generation, None, now) {
             if cached.model_discovery_due {
                 let models = self.fetch_models(&cached.api_base, &cached.token).await;
                 let discovery_now = (self.env.now)();
@@ -2161,6 +2173,7 @@ impl CopilotAuthorizer {
             generation,
             token: token.token,
             source_generation,
+            source_published_at_millis: None,
             source_expires_at: source.expires_at,
             refresh_at,
             expires_at,
@@ -2173,11 +2186,21 @@ impl CopilotAuthorizer {
         Ok(view)
     }
 
-    fn fresh_cached(&self, source_generation: u64, now: DateTime<Utc>) -> Option<CachedTokenView> {
+    /// The cached token, while it is fresh and was built for the source
+    /// credential's publication `source_generation`, published at
+    /// `source_published_at_millis` (`None` for the device sign-in).
+    fn fresh_cached(
+        &self,
+        source_generation: u64,
+        source_published_at_millis: Option<u64>,
+        now: DateTime<Utc>,
+    ) -> Option<CachedTokenView> {
         let cache = self.state.cache.read();
         let cached = cache.as_ref()?;
-        (cached.source_generation == source_generation && now < cached.refresh_at).then(|| {
-            CachedTokenView {
+        (cached.source_generation == source_generation
+            && cached.source_published_at_millis == source_published_at_millis
+            && now < cached.refresh_at)
+            .then(|| CachedTokenView {
                 generation: cached.generation,
                 token: cached.token.clone(),
                 api_base: cached.api_base.clone(),
@@ -2185,8 +2208,7 @@ impl CopilotAuthorizer {
                     .model_discovery_refresh_at
                     .is_some_and(|refresh_at| now >= refresh_at),
                 identity: cached.identity.clone(),
-            }
-        })
+            })
     }
 
     async fn load_source_tokens(&self) -> Result<PersistedTokens, ProviderAuthError> {
@@ -2439,13 +2461,15 @@ impl CopilotAuthorizer {
     /// The fast path, with no I/O. A cache exists only after a flight
     /// published or restored the account lease, so without one the flight
     /// reads the source. With one the AuthMachine decides: `Authorized` uses
-    /// the cache built for the current lease generation, and any other
-    /// verdict has the flight read the source again (through the paced check
-    /// for a source that runs something). `ReauthRequired` first drops the
-    /// cache built for the refused publication: the refusal may have come
-    /// from another account state on the same lease (another provider
-    /// registry, another credential store), and this one must still read its
-    /// source to heal when that source does.
+    /// the cache built for the lease's current publication (its generation
+    /// and its publication time: a lease that takes another process's stored
+    /// record can keep its generation), and any other verdict has the flight
+    /// read the source again (through the paced check for a source that runs
+    /// something). `ReauthRequired` first drops the cache built for the
+    /// refused publication: the refusal may have come from another account
+    /// state on the same lease (another provider registry, another
+    /// credential store), and this one must still read its source to heal
+    /// when that source does.
     fn observe_operator_lease(&self) -> Result<OperatorObservation, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
@@ -2457,15 +2481,21 @@ impl CopilotAuthorizer {
         }
         let now = (self.env.now)();
         let disposition = observe_credential_use(auth_lease, &lease_key, now)?;
-        let generation = auth_lease.snapshot(&lease_key).generation;
+        let publication = auth_lease.snapshot(&lease_key);
+        let generation = publication.generation;
+        let published_at_millis = publication.credential_published_at_millis;
         let flight = match disposition {
-            CredentialUseDisposition::Authorized => match self.fresh_cached(generation, now) {
-                Some(cached) if !cached.model_discovery_due => {
-                    return Ok(OperatorObservation::Cached(cached));
+            CredentialUseDisposition::Authorized => {
+                match self.fresh_cached(generation, published_at_millis, now) {
+                    Some(cached) if !cached.model_discovery_due => {
+                        return Ok(OperatorObservation::Cached(cached));
+                    }
+                    Some(_) => OperatorFlight::Rediscover {
+                        published_at_millis,
+                    },
+                    None => OperatorFlight::Reload,
                 }
-                Some(_) => OperatorFlight::Rediscover,
-                None => OperatorFlight::Reload,
-            },
+            }
             CredentialUseDisposition::ReauthRequired => {
                 self.drop_cache_for_source_generation(generation);
                 OperatorFlight::Reload
@@ -2495,8 +2525,11 @@ impl CopilotAuthorizer {
         flight: OperatorFlight,
         generation: u64,
     ) -> Result<CachedTokenView, ProviderAuthError> {
-        if flight == OperatorFlight::Rediscover
-            && let Some(cached) = self.fresh_cached(generation, (self.env.now)())
+        if let OperatorFlight::Rediscover {
+            published_at_millis,
+        } = flight
+            && let Some(cached) =
+                self.fresh_cached(generation, published_at_millis, (self.env.now)())
         {
             if !cached.model_discovery_due {
                 return Ok(cached);
@@ -2504,8 +2537,11 @@ impl CopilotAuthorizer {
             return self.rediscover_operator_models(cached, generation).await;
         }
         let material = self.load_operator_token().await?;
-        if let Some(cached) = self.fresh_cached(material.generation, (self.env.now)())
-            && cached.token == material.token
+        if let Some(cached) = self.fresh_cached(
+            material.generation,
+            material.published_at_millis,
+            (self.env.now)(),
+        ) && cached.token == material.token
         {
             // Another flight already built the account for this token.
             if !cached.model_discovery_due {
@@ -2542,7 +2578,7 @@ impl CopilotAuthorizer {
         {
             return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
         }
-        let (resolved, stored_generation) = match source {
+        let (resolved, stored_publication) = match source {
             // A stored token names the publication it was stored under: its
             // record's durable marker. A store write publishes before it
             // saves, so a lease snapshot read after the value can already
@@ -2552,16 +2588,17 @@ impl CopilotAuthorizer {
             // is another generation for a publication the lease adopted from
             // another process's record, so the lease snapshot taken with the
             // record translates it when it carries exactly that publication.
+            // The marker's publication time completes the name.
             CredentialSourceSpec::ManagedStore => {
                 let managed =
                     load_managed_store_tokens_with_lifecycle(&self.env, &self.binding).await?;
                 if managed.lifecycle == ManagedStoreLifecycle::RefreshRequired {
                     return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
                 }
-                let generation = meerkat_core::tokens_lifecycle_publication(&managed.tokens)
+                let publication = meerkat_core::tokens_lifecycle_publication(&managed.tokens)
                     .and_then(|marker| {
                         let marker_generation = marker.generation?;
-                        Some(match managed.lifecycle_snapshot.as_ref() {
+                        let generation = match managed.lifecycle_snapshot.as_ref() {
                             Some(lease)
                                 if lease.credential_present
                                     && lease.marker_generation() == marker_generation
@@ -2571,14 +2608,15 @@ impl CopilotAuthorizer {
                                 lease.generation
                             }
                             _ => marker_generation,
-                        })
+                        };
+                        Some((generation, marker.credential_published_at_millis))
                     });
                 let secret = managed.tokens.primary_secret.ok_or_else(|| {
                     ProviderAuthError::SourceResolutionFailed(
                         "managed_store credential has no primary_secret".to_string(),
                     )
                 })?;
-                (secret, generation)
+                (secret, publication)
             }
             _ => (
                 resolve_simple_secret(source, &self.env, &self.binding).await?,
@@ -2626,12 +2664,18 @@ impl CopilotAuthorizer {
         // A refusal of the token names this generation: the stored record's
         // publication for a managed store, else the publication the lease
         // carries now (a source this route reads publishes the value it read
-        // above, and the refusal also names the value's fingerprint).
+        // above, and the refusal also names the value's fingerprint). The
+        // account built for the token is keyed by that publication.
         let publication = auth_lease.snapshot(&lease_key);
+        let (generation, published_at_millis) = stored_publication.unwrap_or((
+            publication.generation,
+            publication.credential_published_at_millis,
+        ));
         Ok(OperatorTokenMaterial {
             token: token.to_string(),
             kind,
-            generation: stored_generation.unwrap_or(publication.generation),
+            generation,
+            published_at_millis,
             expires_at: publication.expires_at,
         })
     }
@@ -2814,6 +2858,7 @@ impl CopilotAuthorizer {
             generation,
             token: material.token,
             source_generation: material.generation,
+            source_published_at_millis: material.published_at_millis,
             source_expires_at,
             refresh_at: DateTime::<Utc>::MAX_UTC,
             expires_at: DateTime::<Utc>::MAX_UTC,
@@ -3226,17 +3271,18 @@ enum LeaderTask {
 /// The operator-token flight the fast path asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperatorFlight {
-    /// The cache is admitted for the current lease generation and only its
-    /// model list is due.
-    Rediscover,
+    /// The cache is admitted for the current lease publication (the observed
+    /// generation, published at `published_at_millis`) and only its model
+    /// list is due.
+    Rediscover { published_at_millis: Option<u64> },
     /// Read the source token again: there is no cache for the current lease
-    /// generation, or the AuthMachine did not admit the lease as it is.
+    /// publication, or the AuthMachine did not admit the lease as it is.
     Reload,
 }
 
 /// What one pass of the operator-token fast path decided.
 enum OperatorObservation {
-    /// The cache is admitted for the current lease generation and current.
+    /// The cache is admitted for the current lease publication and current.
     Cached(CachedTokenView),
     /// A flight must run for the lease generation observed.
     Flight {
@@ -3252,6 +3298,10 @@ struct OperatorTokenMaterial {
     kind: GitHubTokenKind,
     /// The account lease generation the token was admitted under.
     generation: u64,
+    /// That publication's time, read with its generation: the two name the
+    /// publication, since a lease that takes another process's stored record
+    /// can keep its generation.
+    published_at_millis: Option<u64>,
     /// The expiry that publication declares (epoch seconds), read with its
     /// generation.
     expires_at: Option<u64>,
@@ -4845,6 +4895,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: None,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -4989,6 +5040,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: None,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5147,6 +5199,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: None,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),

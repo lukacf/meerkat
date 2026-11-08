@@ -1991,6 +1991,12 @@ These methods maintain approval audit lifecycle records only. Creating or
 deciding a record does not automatically gate, authorize, or execute a shell
 command, tool call, device action, or any other side effect.
 
+Plain approval records emit no notification: a client polls `approval/list`
+or `approval/get` to see a request and its decision, and a host operation that
+needs its decision pushed holds a [durable decision](#durable-decisions)
+instead (`DurableDecisionService::hold`, through
+`SessionRuntime::decision_service`).
+
 <Warning>
 `requester` and the `actor` supplied to `approval/decide` are audit identities,
 not transport authentication proofs. `rkat-rpc` does not authenticate them.

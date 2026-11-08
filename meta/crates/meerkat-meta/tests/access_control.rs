@@ -3825,7 +3825,9 @@ async fn another_persons_operator_said_fact_needs_read_any() {
     let app = runtime.build_reference_app_router(decisions);
 
     // What the memory tool files for Alice: a proposal to her own operator
-    // memory, keyed by the caller scope `whoami` reports to her.
+    // memory, keyed by the caller scope `whoami` reports to her. A shared
+    // member the console knows files it: a proposal from an agent the
+    // console does not know is withheld from every non-administrator.
     let whoami = person_rpc(&app, ALICE, "meta/console/whoami", json!({})).await;
     let alice_scope = whoami["result"]["caller_scope"]
         .as_str()
@@ -3847,7 +3849,7 @@ async fn another_persons_operator_said_fact_needs_read_any() {
                 verification: None,
             },
             MemoryAuthor::Agent {
-                identity: "identity:shared".to_string(),
+                identity: "delivery".to_string(),
             },
         )
         .await

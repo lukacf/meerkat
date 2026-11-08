@@ -1201,18 +1201,23 @@ The new member takes the source member's profile and runtime mode unless
 restrictions, and records the source session as its fork source; the source
 member keeps its session and transcript. The host's fork instruction policy
 decides what the child does with the instruction activations it inherits, as
-for every member fork. A source whose turn is in flight, or that owes queued
-work, is refused with `SESSION_BUSY` and `data.kind` `fork_source_unavailable`
-(`source_member_id`, `cause` `running`), and nothing is seated: fork it again
-once it is idle. A source without a session (`cause` `no_session`) is refused
-with `-32602` and the same `data.kind`. An `agent_identity` that is already a
-member is refused with `-32602` before anything is forked. A fork that
-committed but could not seat its member is refused with `data.kind`
-`fork_member_provision_failed`, whose `fork_session_id` names the committed
-child session (`recovery` `resume_committed_fork_session`); a member seated
-under `agent_identity` between that check and the fork's own seat is answered
-this way. That session is bound to `agent_identity`: resume it under that
-identity once the identity is free, or archive it.
+for every member fork. A source that runs under the host's tool dispatch
+admission is forked only when the host's spawn customizer installs one for
+the child too, and the child then runs its tool calls under it; otherwise the
+call is refused with `-32602` and `data.kind` `dispatch_admission_required`
+(`member_id`), and nothing is forked. A source whose turn is in flight, or
+that owes queued work, is refused with `SESSION_BUSY` and `data.kind`
+`fork_source_unavailable` (`source_member_id`, `cause` `running`), and
+nothing is seated: fork it again once it is idle. A source without a session
+(`cause` `no_session`) is refused with `-32602` and the same `data.kind`. An
+`agent_identity` that is already a member is refused with `-32602` before
+anything is forked. A fork that committed but could not seat its member is
+refused with `data.kind` `fork_member_provision_failed`, whose
+`fork_session_id` names the committed child session (`recovery`
+`resume_committed_fork_session`); a member seated under `agent_identity`
+between that check and the fork's own seat is answered this way. That
+session is bound to `agent_identity`: resume it under that identity once the
+identity is free, or archive it.
 
 ### session/list
 

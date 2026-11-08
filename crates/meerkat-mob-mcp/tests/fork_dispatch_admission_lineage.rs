@@ -279,6 +279,44 @@ async fn a_member_fork_runs_its_tool_calls_under_the_host_admission() {
     fixture.teardown().await;
 }
 
+/// A fork of a gated member by `mob/fork_member` runs its tool calls under
+/// the admission the host's customizer derives for the child at its seat.
+/// The route parses its parameters and calls `MobMcpState::mob_fork_member`,
+/// which this row drives; the child takes the source's profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_fork_member_child_runs_its_tool_calls_under_the_host_admission() {
+    let host = Host::default();
+    let fixture = CouncilFixture::new_with(script, host.compose());
+    fixture.seed_source_mob(&["source"]).await;
+    let forked = fixture
+        .state
+        .mob_fork_member(
+            &fixture.source_mob_id(),
+            &identity("source"),
+            identity("route-child"),
+            None,
+            Some(MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("mob/fork_member forks the gated member");
+    assert_eq!(forked.agent_identity, identity("route-child"));
+    assert!(
+        host.was_asked("persisted_fork_resume", "route-child"),
+        "the host is asked for the child at its seat: {:?}",
+        host.asked.lock().unwrap()
+    );
+    run_turn(
+        &fixture.state,
+        &fixture.source_mob_id(),
+        "route-child",
+        "route-child-call",
+    )
+    .await;
+    host.assert_gated("route-child-call");
+    fixture.teardown().await;
+}
+
 /// A local temporary-council branch of gated members runs its discussion
 /// turn's tool calls under the admission the host's customizer derives for
 /// the branch when it is seated.

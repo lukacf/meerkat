@@ -186,12 +186,14 @@ def _fresh(directory, destination):
 def _host_source(host, source, files):
     from .artifact_binding import proposal_hash
     from .deployment_sources import read_package_source
+    from .forge_application_host import protected_source_matches
     host.require_current()
     provenance = read_package_source(files)
     if (host.guide_id != source.receipt["guide_id"] or host._target != source.origin
             or not _same_json_value(_json(files["blueprint.json"][0]), host._blueprint)
             or files["config/mob.toml"][0] != host._definition.encode("utf-8")
-            or any(pin.read() != files[name][0] for name, pin in host._protected)
+            or not all(protected_source_matches(host, name, files[name][0], pin.read())
+                       for name, pin in host._protected)
             or provenance["guide_version"] != source._context["guide_version"]
             or provenance["build_id"] != source.receipt["build_id"]
             or provenance["source_digest"] != source.receipt["source_digest"]

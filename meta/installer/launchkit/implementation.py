@@ -662,13 +662,24 @@ Preserve explicitly requested advanced configuration choices. Real credentials a
 external authorization still come from the person through their actual handoff.
 When the application must distinguish an authenticated human Console submission,
 read the generated README and protected console_auth.py contract. Opt in with
-application/console.json {"authentication":"local-password"}, declaring required
+application/console.json {"authentication":"local-accounts"}, declaring required
 CONSOLE_USER_ID (nonsecret) and CONSOLE_LOGIN_PASSWORD (secret), without defaults.
+They are the installation's own account; the operator adds a named account for
+each further person with the generated setup, and each signed-in person is their
+own principal. {"authentication":"local-password"} with the same fields is one
+account that everyone with its password shares: it chats but approves nothing.
+To sign people in at the organization's identity provider instead, declare
+{"authentication":"oidc","issuer":"<exact https issuer>","client_id":"<client id>",
+"client_secret":{"env":"<declared required secret field>"}} or
+{"file":"<absolute path>"} for the secret, with required nonsecret
+CONSOLE_USER_ID (the operator's email) and optional nonsecret
+CONSOLE_ALLOWED_EMAILS; never put the client secret itself in source. OIDC
+sign-in needs the Meta runtime.
 Optional on_console_input(event) receives a host-authenticated Console submission
 only after actual native admission. The native timeline does not retain the human
 principal. Neither an agent message nor a caller-controlled origin is approval.
 Use this channel hook only where it satisfies requested UI/authority scope; keep
-multi-user access and absent channel capabilities explicit. Enforce action-boundary
+absent channel capabilities explicit. Enforce action-boundary
 authorization and application-specific durable idempotency in ordinary application code.
 Keep missing external contracts visible, even if their credential fields are declared.
 The deployment still uses its existing native roster, peers, profiles and flow targets.

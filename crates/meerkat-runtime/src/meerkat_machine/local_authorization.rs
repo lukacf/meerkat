@@ -3046,6 +3046,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     mod scoped_retained_resume;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    mod peer_requester;
+
     // Exercise the actual ordinary constructor without wrapping a bundle or
     // replacing its runtime owner.
     fn memory_persistent_constructor_fixture()

@@ -392,6 +392,19 @@ fn fixture_builder(
     Arc<meerkat_store::JsonlStore>,
     std::path::PathBuf,
 ) {
+    fixture_builder_with_config(root, client, meerkat::Config::default())
+}
+
+/// [`fixture_builder`] whose builds read `config` as the realm's config.
+fn fixture_builder_with_config(
+    root: &std::path::Path,
+    client: Arc<dyn LlmClient>,
+    config: meerkat::Config,
+) -> (
+    meerkat::FactoryAgentBuilder,
+    Arc<meerkat_store::JsonlStore>,
+    std::path::PathBuf,
+) {
     let project_root = root.join("project-root");
     let context_root = root.join("context-root");
     for dir in [&project_root, &context_root] {
@@ -409,7 +422,7 @@ fn fixture_builder(
         .context_root(context_root)
         .builtins(false)
         .comms(true);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
     builder.default_llm_client = Some(client);
     let store = Arc::new(meerkat_store::JsonlStore::new(root.join("sessions-jsonl")));
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(store.clone())));
@@ -624,6 +637,27 @@ pub fn agent_mob_tools_state(
     configure: impl FnOnce(MobMcpState) -> MobMcpState,
 ) -> Arc<MobMcpState> {
     let (builder, store, _project_root) = fixture_builder(root, client);
+    agent_mob_tools_state_over(builder, store, configure)
+}
+
+/// [`agent_mob_tools_state`] whose builds read `config` as the realm's
+/// config (its `[models.<id>]` entries, for one).
+pub fn agent_mob_tools_state_with_config(
+    root: &std::path::Path,
+    client: Arc<dyn LlmClient>,
+    config: meerkat::Config,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> Arc<MobMcpState> {
+    let (builder, store, _project_root) = fixture_builder_with_config(root, client, config);
+    agent_mob_tools_state_over(builder, store, configure)
+}
+
+/// The runtime-backed composition of [`agent_mob_tools_state`] over `builder`.
+fn agent_mob_tools_state_over(
+    builder: meerkat::FactoryAgentBuilder,
+    store: Arc<meerkat_store::JsonlStore>,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> Arc<MobMcpState> {
     let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
     let (service, runtime) = meerkat::surface::build_runtime_backed_service(

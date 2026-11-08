@@ -151,8 +151,9 @@ kickoff open for the Shutdown to decide, while a plain Stop closes it; a run
 with no round commits is cancelled), and durable queued prompts that are
 neither directed nor bound to an objective (never a member's kickoff) are
 kept to run after it; their waiters get
-`BoundedTurnFailure::RequeuedAcrossStop`, or `RequeueExpired` when older than
-`max_age` at that start)
+`BoundedTurnFailure::RequeuedAcrossStop`, or `RequeueExpired` when kept
+longer than `max_age` at that start, counted from the Shutdown, not from
+admission)
 returns a `MobShutdownReport` with per-member `members`
 (`MemberShutdownOutcome`), `runs` and `run_starts`; `is_clean()` is true when
 every member is `Unregistered`. Since 0.9.4 `UnregisterPending { stage,

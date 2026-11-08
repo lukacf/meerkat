@@ -8,6 +8,21 @@ use serde_json::{Value, json};
 
 use crate::{AuthPolicy, AuthProvider, BigQueryNaming, ConsolePolicy, RuntimeDecisionState};
 
+/// Whether an `auth_config`'s tokens name a shared account (`true`) or a
+/// person (`false`): its `accounts` field, `"shared"` or `"personal"`, or
+/// `shared_by_default` when it states none.
+fn shared_account_tokens(
+    object: &serde_json::Map<String, Value>,
+    shared_by_default: bool,
+) -> Result<bool, String> {
+    match object.get("accounts") {
+        None | Some(Value::Null) => Ok(shared_by_default),
+        Some(Value::String(accounts)) if accounts == "shared" => Ok(true),
+        Some(Value::String(accounts)) if accounts == "personal" => Ok(false),
+        Some(_) => Err("auth_config.accounts must be \"personal\" or \"shared\"".to_string()),
+    }
+}
+
 pub fn parse_console_auth_config(value: &Value) -> Result<RuntimeDecisionState, String> {
     let object = value
         .as_object()
@@ -40,6 +55,10 @@ pub fn parse_console_auth_config(value: &Value) -> Result<RuntimeDecisionState, 
         .get("audience")
         .and_then(Value::as_str)
         .unwrap_or("persistent-gateway");
+    // A shared secret is held by the front that mints the tokens, and such a
+    // front may sign everyone in as one account. Its tokens name a person
+    // only when the configuration says so.
+    let shared_account_tokens = shared_account_tokens(object, true)?;
     let allowlist = object
         .get("email_allowlist")
         .or_else(|| object.get("emailAllowlist"))
@@ -75,6 +94,7 @@ pub fn parse_console_auth_config(value: &Value) -> Result<RuntimeDecisionState, 
         .to_string(),
         audience: audience.to_string(),
         require_verified_email: false,
+        shared_account_tokens,
     };
     Ok(decisions)
 }
@@ -177,6 +197,7 @@ fn parse_oidc_auth_config(
         jwks_json,
         audience: audience.to_string(),
         require_verified_email: true,
+        shared_account_tokens: shared_account_tokens(object, false)?,
     };
     Ok(decisions)
 }

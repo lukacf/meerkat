@@ -23,6 +23,10 @@ const REFUSAL: &str = "forwarding probe: controller mutation custody";
 /// refuses the scan, and a store that does not answer it boots every member
 /// eagerly.
 const RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-recovery-work";
+/// The runtime the probe's per-runtime read says holds recovery work. The
+/// probe's store-wide scan does not list it, so the trait default, which
+/// answers through that scan, says it holds none.
+const HELD_RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-held-recovery-work";
 /// The runtime the probe names as unavailable in its delivery authority
 /// listing: the trait default answers through the plain listing, which names
 /// none, and a store that does not answer per runtime refuses the whole
@@ -341,6 +345,14 @@ pub(crate) async fn assert_forwards_to(
         "the inner store's recovery-work scan: a decorator that keeps the refusing default makes \
          Core's boot plan restore every member"
     );
+    assert!(
+        store
+            .runtime_holds_recovery_work(&LogicalRuntimeId::new(HELD_RECOVERY_WORK_RUNTIME))
+            .await
+            .expect("the inner store's per-runtime recovery-work read"),
+        "the inner store's per-runtime recovery-work read: a decorator that keeps the default \
+         answers through the store-wide scan, which does not list this runtime"
+    );
     assert_eq!(
         store
             .list_runtime_delivery_authorities_or_unavailable()
@@ -371,6 +383,7 @@ pub(crate) async fn assert_forwards_to(
             "read_service_call_audit",
             "import_whole_blob_session",
             "list_runtimes_with_recovery_work",
+            "runtime_holds_recovery_work",
             "list_runtime_delivery_authorities_or_unavailable",
         ],
         "each method reaches the inner store exactly once"
@@ -427,6 +440,16 @@ mod store_impl {
         ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
             self.record("list_runtimes_with_recovery_work");
             Ok(vec![LogicalRuntimeId::new(RECOVERY_WORK_RUNTIME)])
+        }
+
+        // The trait default answers through the store-wide scan above, which
+        // does not list this runtime.
+        async fn runtime_holds_recovery_work(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, RuntimeStoreError> {
+            self.record("runtime_holds_recovery_work");
+            Ok(*runtime_id == LogicalRuntimeId::new(HELD_RECOVERY_WORK_RUNTIME))
         }
 
         async fn list_runtime_delivery_authorities_or_unavailable(

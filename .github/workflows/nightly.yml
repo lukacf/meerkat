@@ -8,13 +8,15 @@ name: Nightly
 #
 # Coverage rationale:
 #   workspace-unit    - `make test-unit`: every workspace unit test (PR CI
-#                       runs only the directly changed packages), plus
-#                       meerkat-rpc unit tests with all features
+#                       runs only the directly changed packages)
 #   workspace-int     - `make test-int`: every integration-fast test
 #   e2e-fast          - deterministic real-binary end-to-end lane
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
 #                       Linux (17-22 minutes; does not fit PR CI)
-#   machine-verify    - bounded TLC verification of the canonical machines
+#   machine-verify    - the canonical TLC lane's machine-verify part: the
+#                       bounded adaptive witness and the `machine-verify
+#                       --all` sweep (ci.yml runs the lane's audit shards on
+#                       every machine-authority change)
 #   machine-verify-deep - Deep-profile TLC (deep.cfg, witnesses, coverage
 #                       audit) over the compositions that fit the 900 s
 #                       per-run cap; a capped run fails as TLC INCOMPLETE
@@ -46,17 +48,25 @@ name: Nightly
 #      in parallel);
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
-#        release-packaging (140 min) > meta-docs-lag
-#        e2e-system (100) > sdk-web (24) > audit > machine-verify-deep
-#          (new, up to its 90-minute timeout)
-#        feature-matrix (89) > workspace-int (46)
-#        release-stack-budget (55) > minimal-and-modularity (42) > e2e-fast
-#          (18) > sdk-host (14)
-#        machine-verify (38) > workspace-unit (24) > clippy-full (24) >
-#          dense-topology (24) > wasm-contract (16)
-# Minutes are from the 2026-10-01 run. Each chain is at most about 145
-# minutes, so nightly takes about three hours instead of about two and a
-# half. A new job joins the shortest chain; a new chain is a new slot.
+#        release-packaging (143-304 min) > meta-docs-lag (2)
+#        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
+#          machine-verify-deep (3-8)
+#        feature-matrix (170-267) > workspace-int (134-180)
+#        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
+#          e2e-fast (3-34) > sdk-host (3-52)
+#        machine-verify (30-43) > workspace-unit (117-173) > clippy-full
+#          (30-63) > dense-topology (24-31) > wasm-contract (4-26)
+# Minutes are the range over the 2026-11-01 to 11-07 runs, a job that ran
+# out of time counted at its limit and a run that lost its runner left
+# out; most jobs swing several-fold from night to night. machine-verify's
+# and workspace-unit's are estimates for their current settings. The
+# longest chain, feature-matrix > workspace-int, takes up to about seven
+# and a half hours, and nightly took 4 h 46 min to 7 h 23 min. A new job
+# joins the shortest chain; a new chain is a new slot.
+#
+# A red run on main opens or updates the "Nightly failures" issue through
+# nightly-failure-issue.yml, which starts once this workflow's run has
+# completed, so no job here waits for the others.
 on:
   schedule:
     - cron: "17 2 * * *"
@@ -105,10 +115,16 @@ jobs:
     needs: machine-verify
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
-    # Measured ~91 min on 4 vCPU: make test-unit ~58 (38 compile + 20 run) + rpc all-features ~31.
-    timeout-minutes: 150
+    # At four Cargo jobs `make test-unit` took 60-79 minutes to compile and
+    # 27-31 to run its tests (2026-11-02 to 11-05). Two jobs compile for an
+    # estimated 1.5-1.8 times as long: 117-173 minutes in all.
+    timeout-minutes: 180
     env:
       RUSTC_WRAPPER: sccache
+      # At four Cargo jobs the 16 GB runner lost this job mid-compile (exit
+      # 143 after the log went silent, 2026-11-06 and 11-07), as it lost
+      # workspace-int below. Two jobs keep at most two rustc alive.
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -148,17 +164,13 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # meerkat-rpc's WebRTC router tests, which `live-webrtc` gates and this
+      # lane compiles out, run on every Rust-changing main push instead:
+      # ci.yml's "Main unit tests (rpc[openai-live])" row turns on every
+      # meerkat-rpc feature (experimental-gpt-live implies openai-live, which
+      # implies live-webrtc and mob).
       - name: Workspace unit tests
         run: make test-unit
-
-      # meerkat-rpc gates its WebRTC router tests on `live-webrtc`, which no
-      # default feature set enables, so `make test-unit` compiles them out.
-      - name: meerkat-rpc unit tests (all features)
-        run: |
-          # meerkat-rpc's MCP boundary tests spawn this exact fixture and fail without it.
-          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
-          export MEERKAT_MCP_TEST_SERVER
-          ./scripts/repo-cargo nextest run -p meerkat-rpc --all-features --lib --no-fail-fast --show-progress none --status-level none --final-status-level fail
 
   workspace-int:
     name: Workspace integration-fast tests
@@ -333,8 +345,15 @@ jobs:
         with:
           setup-java: "false"
 
-      - name: Canonical bounded machine verification
-        run: make machine-verify
+      # Only the lane's machine-verify part, which no per-change lane runs:
+      # the bounded adaptive witness, then `machine-verify --all`, an
+      # estimated 30-43 minutes with setup and the xtask build. The lane's
+      # twenty-four audit shards run in ci.yml's tlc-audits job on every
+      # change scripts/machine-authority-changed matches. The whole lane in
+      # one 4-vCPU job needs an estimated 218-260 minutes, and it hit this
+      # job's 90-minute limit every night from 2026-11-04.
+      - name: Adaptive witness and machine-verify --all sweep
+        run: make machine-verify MACHINE_VERIFY_PART=machine-verify
 
   machine-verify-deep:
     name: Deep TLC composition verification
@@ -950,32 +969,3 @@ jobs:
           python3 scripts/check-meta-docs-lag.py \
             --manifest docs/meta/_source.json \
             --max-lag 0
-
-  # A red nightly on main opens one tracking issue, or comments on it while
-  # it stays open (#1673). It follows the last chain and waits for the
-  # others there, since a nightly job may need only one job.
-  failure-issue:
-    name: Nightly failure issue
-    needs: wasm-contract
-    if: ${{ !cancelled() && !inputs.graph_only }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    permissions:
-      actions: read
-      issues: write
-    steps:
-      - name: Open or update the tracking issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          JOBS: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100
-        run: |
-          set -euo pipefail
-          others='[.jobs[] | select(.name != "Nightly failure issue")]'
-          until [[ "$(gh api "${JOBS}" --jq "${others} | map(select(.status != \"completed\")) | length")" == 0 ]]; do sleep 60; done
-          failed="$(gh api "${JOBS}" --jq "${others} | map(select(.conclusion == \"failure\" or .conclusion == \"timed_out\" or .conclusion == \"cancelled\") | .name) | join(\", \")")"
-          echo "failed jobs: ${failed:-none}"
-          [[ -n "${failed}" && "${GITHUB_REF}" == refs/heads/main ]] || exit 0
-          body="Run ${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID} failed: ${failed}"
-          issue="$(gh issue list --state open --search 'in:title "Nightly failures"' --json number,title --jq '[.[] | select(.title == "Nightly failures")][0].number // empty')"
-          if [[ -n "${issue}" ]]; then gh issue comment "${issue}" --body "${body}"; else gh issue create --title "Nightly failures" --body "${body}"; fi

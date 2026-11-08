@@ -1326,3 +1326,538 @@ fn an_ungoverned_row_is_admitted_only_under_its_own_key() {
     )));
     assert!(!stored.admitted_under_idempotency_key(&key));
 }
+
+/// Governed origins on the drain: an in-process delivery from governed work
+/// is offered with its origin, a binding of it must keep the original
+/// requester, and Core's own binder keeps it.
+mod governed_origin {
+    use super::*;
+    use crate::input_authority::{
+        GovernedPeerOrigin, OriginalRequesterPeerBinder, PeerServiceBasis, PeerServiceFuture,
+        PeerServiceGrant, PeerServiceRefusal, PeerServiceRequest,
+    };
+    use meerkat_authorization_contracts::constraints::{
+        AudienceRef, ExecutionRestrictions, ResourceDomain,
+    };
+    use meerkat_authorization_contracts::evidence::{EvidenceDigest, HistoricalEvidenceRef};
+    use meerkat_authorization_contracts::protocol::ContractRequirements;
+    use meerkat_authorization_contracts::resource::ResourceRef;
+    use meerkat_authorization_contracts::work_association::{
+        GrantLineageRef, InputAuthorityAssociation, InputAuthorityAssociationCandidate,
+        NativeWorkTarget, OriginalWorkRef, QualifiedIngressNamespace, WorkAuthorityBasis,
+    };
+
+    /// A principal in the domain the drain fixtures' host admits.
+    fn principal(value: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::ServiceAccount,
+            value,
+            meerkat_core::TrustDomainId::new("native-test").expect("domain"),
+        )
+        .expect("qualified")
+    }
+
+    fn id(value: &str) -> EvidenceId {
+        EvidenceId::new(value).expect("fixture id")
+    }
+
+    fn evidence(value: &str) -> HistoricalEvidenceRef {
+        HistoricalEvidenceRef {
+            resource: ResourceRef {
+                domain: ResourceDomain {
+                    authority: principal("owner"),
+                    namespace: "fixture".into(),
+                },
+                resource_id: value.into(),
+            },
+            revision: id("r1"),
+            digest: EvidenceDigest::from_array([7; 32]),
+        }
+    }
+
+    fn lineage(grant: &str) -> GrantLineageRef {
+        GrantLineageRef {
+            root_authority: principal("grant-owner"),
+            authority_namespace: id("controller"),
+            authority_generation: 1,
+            authority_incarnation: serde_json::from_value(serde_json::json!(
+                "00000000-0000-4000-8000-000000000001"
+            ))
+            .expect("fixture incarnation data"),
+            grant_id: id(grant),
+            issued_revision: 1,
+        }
+    }
+
+    fn work(name: &str) -> OriginalWorkRef {
+        OriginalWorkRef {
+            authority: principal("ingress"),
+            work: id(name),
+        }
+    }
+
+    /// The requester's admitted work on the sending agent. The fixtures'
+    /// host admits a peer work whose ingress actor is `ingress`, so the
+    /// sending agent is that principal here.
+    fn sender_association(
+        selection: &meerkat_core::ControllerModelSelection,
+    ) -> InputAuthorityAssociation {
+        InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
+            requester: principal("caller"),
+            ingress_actor: principal("chat"),
+            represented_subject: None,
+            original_authentication: evidence("caller-authentication"),
+            logical_executor: principal("ingress"),
+            target: NativeWorkTarget {
+                logical_owner: principal("native-owner"),
+                logical_runtime: id("sender-runtime"),
+                context: id("context"),
+                context_generation: 1,
+                audience: AudienceRef::Principal {
+                    principal: principal("audience"),
+                },
+            },
+            original_work: work("caller-question"),
+            root_event: evidence("caller-event"),
+            contributing_work: vec![work("caller-source")],
+            authority_basis: WorkAuthorityBasis::GrantLineage {
+                lineage: vec![lineage("caller-delegation")],
+            },
+            controller_grant_lineage: vec![lineage("controller-leaf")],
+            controller_model: Some(selection.clone()),
+            controller_ceiling: ExecutionRestrictions::unrestricted(),
+            admitted_ceiling: ExecutionRestrictions::unrestricted(),
+            source_observations: Vec::new(),
+            ingress_namespace: QualifiedIngressNamespace {
+                realm: meerkat_core::connection::RealmId::parse("native-test").expect("realm"),
+                ingress: ResourceDomain {
+                    authority: principal("ingress"),
+                    namespace: "prompts".into(),
+                },
+                occurrence_scope: id("caller-occurrence"),
+            },
+            contract: ContractRequirements::local_governed_v1(),
+        })
+        .expect("the sending work's claims")
+    }
+
+    fn sender_origin(selection: &meerkat_core::ControllerModelSelection) -> GovernedPeerOrigin {
+        GovernedPeerOrigin::from_associations([&sender_association(selection)])
+            .expect("one staged original")
+    }
+
+    /// A controller transport of `selection` that is never called.
+    struct Controller(meerkat_core::ControllerModelSelection);
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentLlmClient for Controller {
+        fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+            Some(self.0.clone())
+        }
+        async fn stream_response(
+            &self,
+            _: &[meerkat_core::Message],
+            _: &[Arc<meerkat_core::ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&meerkat_core::ProviderParamsOverride>,
+        ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
+            Err(meerkat_core::AgentError::ConfigError(
+                "drain fixture never calls a model".into(),
+            ))
+        }
+        fn provider(&self) -> meerkat_core::Provider {
+            self.0.provider()
+        }
+        fn model(&self) -> &str {
+            self.0.model()
+        }
+    }
+
+    /// The receiving side of the fixtures' host, over a first-writer-wins
+    /// custody of originals: the receiving agent (`executor`) serves the
+    /// requester under the basis grant it currently answers with.
+    struct ReceivingHost {
+        selection: meerkat_core::ControllerModelSelection,
+        basis: std::sync::Mutex<&'static str>,
+        enrolled: std::sync::Mutex<HashMap<String, InputAuthorityAssociation>>,
+    }
+
+    impl ReceivingHost {
+        fn new(selection: meerkat_core::ControllerModelSelection) -> Arc<Self> {
+            Arc::new(Self {
+                selection,
+                basis: std::sync::Mutex::new("owner-delegation"),
+                enrolled: std::sync::Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn enrolled(&self) -> Vec<InputAuthorityAssociation> {
+            self.enrolled
+                .lock()
+                .expect("enrolled")
+                .values()
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl PeerServiceBasis for ReceivingHost {
+        fn basis_for<'a>(&'a self, request: &'a PeerServiceRequest) -> PeerServiceFuture<'a> {
+            let basis = *self.basis.lock().expect("basis");
+            Box::pin(async move {
+                Ok(PeerServiceGrant::new(
+                    principal("executor"),
+                    WorkAuthorityBasis::GrantLineage {
+                        lineage: vec![lineage(basis)],
+                    },
+                    NativeWorkTarget {
+                        logical_owner: principal("native-owner"),
+                        logical_runtime: id(&request.runtime_id.to_string()),
+                        context: id("context"),
+                        context_generation: 1,
+                        audience: AudienceRef::Principal {
+                            principal: principal("audience"),
+                        },
+                    },
+                    vec![lineage("controller-leaf")],
+                    ExecutionRestrictions::unrestricted(),
+                    ExecutionRestrictions::unrestricted(),
+                    meerkat_core::ControllerModelClient::new(
+                        self.selection.clone(),
+                        Arc::new(Controller(self.selection.clone())),
+                    ),
+                ))
+            })
+        }
+
+        fn enroll(
+            &self,
+            request: &PeerServiceRequest,
+            association: &InputAuthorityAssociation,
+        ) -> Result<
+            Option<Box<dyn crate::input_admission_custody::NativeInputAdmissionCustody>>,
+            PeerServiceRefusal,
+        > {
+            let mut enrolled = self.enrolled.lock().expect("enrolled");
+            match enrolled.get(request.delivery_work.as_str()) {
+                Some(first) if first != association => Err(PeerServiceRefusal::EnrollmentConflict),
+                Some(_) => Ok(None),
+                None => {
+                    enrolled.insert(
+                        request.delivery_work.as_str().to_owned(),
+                        association.clone(),
+                    );
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// A storeless governed machine with Core's binder over `host`
+    /// installed, keeping its records `retention`.
+    fn core_bound(retention: Duration) -> (Arc<MeerkatMachine>, Arc<ReceivingHost>) {
+        let machine = MeerkatMachine::ephemeral();
+        let ingress = Arc::new(TestIngress::isolated(machine.generated_auth_lease_handle()));
+        let host = ReceivingHost::new(ingress.selection().clone());
+        let machine = machine
+            .with_native_work_authorization_host(ingress)
+            .expect("governed host");
+        machine
+            .install_peer_ingress_binder(Arc::new(
+                OriginalRequesterPeerBinder::new(Arc::clone(&host) as Arc<dyn PeerServiceBasis>)
+                    .with_custody_retention(retention),
+            ))
+            .expect("binder installs before any session");
+        (Arc::new(machine), host)
+    }
+
+    async fn governed_session(adapter: &MeerkatMachine) -> SessionId {
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        adapter.support_governed_work_for_test(&session_id).await;
+        session_id
+    }
+
+    async fn drain(
+        adapter: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        runtime: &Arc<OneShotPeerRequestRuntime>,
+        authentication: SenderAuthentication,
+    ) {
+        runtime.queue.authenticate_senders(authentication);
+        let drain = spawn_authorized_test_comms_drain(
+            adapter.clone(),
+            session_id.clone(),
+            runtime.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("the drain exits")
+            .expect("the drain task does not panic");
+    }
+
+    /// The association a session admitted input `input_id` under.
+    async fn admitted(
+        adapter: &MeerkatMachine,
+        session_id: &SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> InputAuthorityAssociation {
+        let stored = crate::service_ext::SessionServiceRuntimeExt::input_state(
+            adapter, session_id, input_id,
+        )
+        .await
+        .expect("input read")
+        .expect("admitted row");
+        stored
+            .state
+            .authority_contributors
+            .iter()
+            .find(|own| own.input_id() == input_id)
+            .expect("the row's own original")
+            .association()
+            .clone()
+    }
+
+    /// An in-process delivery that governed work sent is offered to the
+    /// binder with that work's origin. The fixture's binder binds every
+    /// delivery under a requester of its own: Core refuses that binding as
+    /// malformed, so nothing is admitted under another requester, and its
+    /// custody settles `NotAdmitted`.
+    #[tokio::test]
+    async fn an_in_process_delivery_offers_the_binder_its_governed_origin() {
+        let fixture = Governed::storeless(true);
+        let session_id = fixture.session().await;
+        let origin = sender_origin(&fixture.binder.selection);
+        let runtime = message_runtime(actionable_message_candidate(0));
+        runtime
+            .queue
+            .carry_governed_origin(Some(origin.to_send_origin()));
+
+        fixture
+            .drain(&session_id, &runtime, SenderAuthentication::InProcess)
+            .await;
+
+        let calls = fixture.binder.calls();
+        let [call] = calls.as_slice() else {
+            panic!("one offer: {calls:?}");
+        };
+        let PeerIngressOrigin::Comms(comms) = &call.origin else {
+            panic!("a comms origin: {:?}", call.origin);
+        };
+        assert_eq!(comms.sender_authentication, SenderAuthentication::InProcess);
+        assert_eq!(comms.governed_origin.as_ref(), Some(&origin));
+        assert_eq!(
+            fixture.input_count(&session_id).await,
+            0,
+            "a binding under another requester than the sending work's is never admitted"
+        );
+        assert!(
+            matches!(
+                runtime.queue.committed_outcomes().as_slice(),
+                [Some(Terminal::RuntimeRejected { .. })]
+            ),
+            "{:?}",
+            runtime.queue.committed_outcomes()
+        );
+        assert_eq!(fixture.binder.settlements(), vec![Settlement::NotAdmitted]);
+    }
+
+    /// Only an in-process sender carries a governed origin: what a queue
+    /// item names for a sender the listener verified is no origin, and its
+    /// delivery is bound and admitted as before.
+    #[tokio::test]
+    async fn a_governed_origin_is_offered_only_for_an_in_process_sender() {
+        let fixture = Governed::storeless(true);
+        let session_id = fixture.session().await;
+        let runtime = message_runtime(actionable_message_candidate(0));
+        runtime.queue.carry_governed_origin(Some(
+            sender_origin(&fixture.binder.selection).to_send_origin(),
+        ));
+
+        fixture
+            .drain(
+                &session_id,
+                &runtime,
+                SenderAuthentication::SignatureVerified,
+            )
+            .await;
+
+        let calls = fixture.binder.calls();
+        let [call] = calls.as_slice() else {
+            panic!("one offer: {calls:?}");
+        };
+        let PeerIngressOrigin::Comms(comms) = &call.origin else {
+            panic!("a comms origin: {:?}", call.origin);
+        };
+        assert_eq!(comms.governed_origin, None);
+        assert_eq!(fixture.input_count(&session_id).await, 1);
+    }
+
+    /// Core's binder admits a governed in-process delivery for the sending
+    /// work's requester, with the sending agent as ingress actor and every
+    /// work of the sending work as a contributor, and a delivery without an
+    /// origin is refused (`origin_unverifiable`), admitting nothing.
+    #[tokio::test]
+    async fn the_original_requester_binder_admits_a_governed_delivery_for_its_requester() {
+        let (adapter, host) = core_bound(crate::input_authority::DEFAULT_PEER_CUSTODY_RETENTION);
+        let session_id = governed_session(&adapter).await;
+        let origin = sender_origin(&host.selection);
+        let runtime = message_runtime(actionable_message_candidate(0));
+        runtime
+            .queue
+            .carry_governed_origin(Some(origin.to_send_origin()));
+        drain(
+            &adapter,
+            &session_id,
+            &runtime,
+            SenderAuthentication::InProcess,
+        )
+        .await;
+        let outcomes = runtime.queue.committed_outcomes();
+        let [Some(Terminal::RuntimeAccepted { input_id })] = outcomes.as_slice() else {
+            panic!("admitted: {outcomes:?}");
+        };
+        let claims = admitted(&adapter, &session_id, input_id)
+            .await
+            .candidate()
+            .clone();
+        assert_eq!(claims.requester, principal("caller"));
+        assert_eq!(claims.ingress_actor, principal("ingress"));
+        assert!(
+            claims.contributing_work == vec![work("caller-question"), work("caller-source")],
+            "every work of the sending work narrows the receiving work"
+        );
+
+        // The same session then gets a delivery over the network: a sender
+        // the listener verified, which carries no origin.
+        runtime.queue.carry_governed_origin(None);
+        runtime.queue.push(actionable_message_candidate(1));
+        drain(
+            &adapter,
+            &session_id,
+            &runtime,
+            SenderAuthentication::SignatureVerified,
+        )
+        .await;
+        assert!(
+            matches!(
+                runtime.queue.committed_outcomes().as_slice(),
+                [
+                    Some(Terminal::RuntimeAccepted { .. }),
+                    Some(Terminal::RuntimeRejected { .. })
+                ]
+            ),
+            "a delivery without an origin is refused: {:?}",
+            runtime.queue.committed_outcomes()
+        );
+        assert_eq!(
+            adapter
+                .meerkat_machine_spine_snapshot(&session_id)
+                .await
+                .expect("snapshot")
+                .ledger
+                .input_count,
+            1
+        );
+    }
+
+    /// A redelivery of an admitted delivery within the binder's custody
+    /// retention is bound verbatim and deduplicates onto the first admission.
+    /// After the record expired, a redelivery minted from changed delegation
+    /// differs from the first enrollment: the host's first-writer-wins
+    /// custody refuses it (`enrollment_conflict`), the redelivery ends
+    /// rejected, and the first admission and its enrollment stand unchanged.
+    #[tokio::test]
+    async fn rebind_after_custody_eviction_with_changed_delegation_leaves_the_first_admission_and_enrollment_unchanged()
+     {
+        for retention in [
+            crate::input_authority::DEFAULT_PEER_CUSTODY_RETENTION,
+            Duration::ZERO,
+        ] {
+            let (adapter, host) = core_bound(retention);
+            let session_id = governed_session(&adapter).await;
+            let candidate = actionable_message_candidate(0);
+            let runtime = message_runtime(candidate.clone());
+            runtime
+                .queue
+                .carry_governed_origin(Some(sender_origin(&host.selection).to_send_origin()));
+            drain(
+                &adapter,
+                &session_id,
+                &runtime,
+                SenderAuthentication::InProcess,
+            )
+            .await;
+            let outcomes = runtime.queue.committed_outcomes();
+            let [Some(Terminal::RuntimeAccepted { input_id })] = outcomes.as_slice() else {
+                panic!("{retention:?}: admitted: {outcomes:?}");
+            };
+            let input_id = input_id.clone();
+            let first = admitted(&adapter, &session_id, &input_id).await;
+            assert!(
+                host.enrolled() == vec![first.clone()],
+                "{retention:?}: the host enrolled exactly the admission"
+            );
+
+            // The receiver's delegation is reissued, and the same delivery
+            // arrives again.
+            *host.basis.lock().expect("basis") = "reissued-owner-delegation";
+            runtime.queue.push(candidate.clone());
+            drain(
+                &adapter,
+                &session_id,
+                &runtime,
+                SenderAuthentication::InProcess,
+            )
+            .await;
+            let outcomes = runtime.queue.committed_outcomes();
+            if retention.is_zero() {
+                assert!(
+                    matches!(
+                        outcomes.as_slice(),
+                        [
+                            Some(Terminal::RuntimeAccepted { .. }),
+                            Some(Terminal::RuntimeRejected { .. })
+                        ]
+                    ),
+                    "after eviction the differing re-bind is refused: {outcomes:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        outcomes.as_slice(),
+                        [
+                            Some(Terminal::RuntimeAccepted { .. }),
+                            Some(Terminal::RuntimeDeduplicated { existing_id, .. })
+                        ] if *existing_id == input_id
+                    ),
+                    "within retention the verbatim re-bind deduplicates: {outcomes:?}"
+                );
+            }
+            assert!(
+                admitted(&adapter, &session_id, &input_id).await == first,
+                "{retention:?}: the first admission is unchanged"
+            );
+            assert!(
+                host.enrolled() == vec![first.clone()],
+                "{retention:?}: the first enrollment is unchanged"
+            );
+            assert_eq!(
+                adapter
+                    .meerkat_machine_spine_snapshot(&session_id)
+                    .await
+                    .expect("snapshot")
+                    .ledger
+                    .input_count,
+                1,
+                "{retention:?}: one admission"
+            );
+        }
+    }
+}

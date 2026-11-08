@@ -250,6 +250,12 @@ cataloged models scale the token trigger to 80 percent of the smaller of their
 context window and separate input ceiling, when one is declared. For
 `gpt-6-astra`, the 922,000-token input ceiling gives a 737,600-token default
 trigger; its shared input-plus-output context window remains 1,050,000 tokens.
+When the selected account states a smaller prompt limit for the model (a
+GitHub Copilot account model's `max_prompt_tokens`, or its context window less
+the session's output budget, `max_tokens`), the trigger is 80 percent
+of that limit instead. An explicit `auto_compact_threshold`, or a per-build
+override, above the account's prompt limit is lowered to the limit, with a
+warning: the account refuses a longer prompt whatever the threshold.
 Built-in provider clients also attach the current provider's approximate
 request-byte cap to each lowered request; the byte trigger fires at 80 percent
 of that cap. `max_request_bytes` is an optional operator override, especially
@@ -571,6 +577,27 @@ the realm opens; a section that cannot be read or is malformed refuses the
 realm's governed work. Unknown or misspelled fields are refused, including
 inside the reviewer's identity.
 
+`[governance.decisions]` names the approver ids the operator of an `rkat-rpc`
+stdio connection acts for when the connection presents and decides
+[durable decisions](/api/rpc#the-operator-of-a-stdio-connection):
+
+```toml
+[governance.decisions]
+operator_approver_ids = ["operator", "team:owners"]
+```
+
+- `operator_approver_ids`: each entry an approver id (non-empty, at most 256
+  bytes, no whitespace or control characters). Without the key the operator
+  acts for `["operator"]`; an explicit empty list makes it act for none, so
+  the connection presents nothing and refuses every decide.
+
+A plain stdio connection reads the list from the realm's effective
+configuration each time it presents or decides, so a change applies to the
+next `decision/list` and `decision/decide`; a decision already presented is
+refused once its approver id is no longer listed. The stock governed pipe
+reads its host's configuration as the pipe started, so a change reaches it at
+its next start.
+
 Governance is administered by the realm's trusted host in the realm's own
 config document. An ordinary config write (`config/set`, `config/patch`,
 `PUT`/`PATCH /config`, the MCP config tool or the CLI) cannot change,
@@ -633,8 +660,23 @@ that every launch of the kind is refused), what keeps the host's own inputs
 from its confined processes, and each convention source it does not trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
 user namespaces, and it refuses deny lists, Unix socket grants, nested grants,
-and granted paths that do not exist or pass through a symbolic link. Other
-platforms refuse every confined launch. A confined process finds its program,
+a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in them, and granted
+paths that do not exist or pass through a symbolic link. One link is accepted
+on Linux: the last component of a read-only literal file grant in a `custom`
+requirement, such as `{ kind = "literal", path = "/etc/resolv.conf" }` on a
+systemd-resolved host for name resolution with unrestricted `network`, when
+the link's own text alone names its regular file (a link to a link is
+refused), that file is not in `/proc`, `/sys` or `/dev`, and only root or the
+host's user can replace the link or a directory above it. These checks trust
+the owners and modes the filesystem reports, so for a link on a FUSE or
+network filesystem they trust that filesystem's server. That file is bound
+read-only at the link's path. A file replaced under its name (a new file
+renamed into place, as systemd-resolved does when its DNS settings change) is
+checked again by the same rules at the next launch, which binds it. A link
+replaced with other text refuses the launch, even when it names the same
+file, and so does a file replaced by anything the same rules refuse. macOS
+refuses such a grant. Other platforms refuse every
+confined launch. A confined process finds its program,
 libraries and data only inside its granted subtrees and the platform
 baseline; grant anything else it needs with `read`. A confined command hook,
 MCP stdio server or stdio skill source names its program by absolute path and

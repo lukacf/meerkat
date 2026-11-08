@@ -2326,12 +2326,14 @@ impl McpConnection {
         let session_expiry = SessionExpiryRecorder::default();
         let recorder = recorder.unwrap_or_default();
         let egress = EgressGuard::new(http_egress.clone());
+        let abandoned = crate::transport::abandoned::AbandonedRequests::default();
         let mut http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
                 .with_protected_metadata(protected_metadata.clone())
                 .with_session_expiry(session_expiry.clone())
                 .with_first_request_entry(first_request.clone())
-                .with_egress(egress.clone());
+                .with_egress(egress.clone())
+                .with_abandoned_requests(abandoned.clone());
         let oauth_target = bearer.as_ref().map(|bearer| bearer.target().clone());
         let account = Arc::new(connection_account(config, bearer.as_ref()));
         if let Some(bearer) = bearer {
@@ -2356,7 +2358,7 @@ impl McpConnection {
                 egress: egress.recorded(),
                 shut_down: false,
             })?;
-        let service = client_custody
+        let mut service = client_custody
             .deposit(service, REMOTE_CLOSE_BOUND)
             .map_err(|_| StreamableConnectError {
                 reason: McpError::RouterShutDown.to_string(),
@@ -2365,6 +2367,9 @@ impl McpConnection {
                 egress: None,
                 shut_down: true,
             })?;
+        // The connection abandons requests through the registry its HTTP
+        // client ends their exchanges by.
+        service.abandoned = abandoned;
         Ok(Self {
             config: config.clone(),
             connection_id,
@@ -2885,18 +2890,32 @@ impl McpConnection {
         // transport result. Dropping the router's admitted read future would
         // skip its outcome observation and release its credential lease early.
         // A timeout is local unavailability, never proof the remote did no work.
-        let result = tokio::time::timeout_at(deadline, async {
-            self.service
-                .send_request_with_option(
+        // The deadline ends both the handoff and the wait for the response.
+        // A read it ends is abandoned: the server is told it is cancelled,
+        // from a task, so the caller is not held while that notice is sent
+        // (rmcp's own timeout would wait for it, and on a connection whose
+        // transport is still busy with this very read it could wait forever).
+        let result = async {
+            let handle = tokio::time::timeout_at(
+                deadline,
+                self.service.send_request_with_option(
                     request,
-                    rmcp::service::PeerRequestOptions::with_timeout(remaining),
-                )
-                .await?
-                .await_response()
-                .await
-        })
+                    rmcp::service::PeerRequestOptions::no_options(),
+                ),
+            )
+            .await
+            .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))?;
+            let abandoned = AbandonedRequest::arm(&self.service, handle.id.clone());
+            match tokio::time::timeout_at(deadline, handle.await_response()).await {
+                Ok(response) => {
+                    abandoned.settled();
+                    response
+                }
+                // Dropping the guard abandons the read.
+                Err(_) => Err(rmcp::ServiceError::Timeout { timeout: remaining }),
+            }
+        }
         .await
-        .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))
         .map_err(|error| {
             let disposition = dispatch.disposition();
             if matches!(disposition, Some(RequestDisposition::Sent) | None)
@@ -3280,6 +3299,7 @@ impl ClientCustody {
                 mcp_apps,
                 custody: self.clone(),
                 bound,
+                abandoned: Default::default(),
             });
         }
         // Closed first (its close index began its close): no client stays
@@ -3429,6 +3449,9 @@ pub(crate) struct HeldClient {
     custody: ClientCustody,
     /// How long a close started by this handle's drop waits for the service.
     bound: Duration,
+    /// The requests this connection abandons, whose HTTP exchange its
+    /// streamable-HTTP client ends (unused by other transports).
+    abandoned: crate::transport::abandoned::AbandonedRequests,
 }
 
 impl std::ops::Deref for HeldClient {
@@ -3448,6 +3471,7 @@ impl HeldClient {
             mcp_apps: client.supports_mcp_apps(),
             custody: custody.clone(),
             bound: REMOTE_CLOSE_BOUND,
+            abandoned: Default::default(),
         };
         *custody.slot() = ClientSlot::Held(client);
         held
@@ -3520,6 +3544,35 @@ struct CloseIndexShared {
     /// The router's attempt guards, cancelled with `RouterClosed` when the
     /// close begins, before any attempt is stopped.
     guards: std::sync::OnceLock<std::sync::Weak<crate::attempt_guard::RouterGuards>>,
+    /// The governed attachment controls the router retains for a re-add
+    /// after a sign-in, released when the close begins.
+    retained: std::sync::Mutex<RetainedControls>,
+}
+
+#[derive(Default)]
+struct RetainedControls {
+    /// Set when the close began: a control retained after it is released at
+    /// once.
+    released: bool,
+    cells: Vec<std::sync::Weak<RetainedControl>>,
+}
+
+/// One governed attachment control a router retains past its connection's
+/// physical entry, for the governed name's re-add after a sign-in: the
+/// name's own and its retry records' share it. Empty once the router's
+/// close began ([`CloseIndex::begin_close`]): no re-add is staged after it,
+/// so a router whose shutdown never runs keeps no control alive past its
+/// close.
+pub(crate) struct RetainedControl(std::sync::Mutex<Option<Arc<dyn McpAttachmentAuthority>>>);
+
+impl RetainedControl {
+    /// The retained control, unless the router's close released it.
+    pub(crate) fn control(&self) -> Option<Arc<dyn McpAttachmentAuthority>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[derive(Default)]
@@ -3600,6 +3653,48 @@ impl CloseIndex {
         let _ = self.0.guards.set(Arc::downgrade(guards));
     }
 
+    /// Retain `control` for a governed name's re-add after a sign-in, until
+    /// the close begins. Once it began, the cell is empty from the start.
+    pub(crate) fn retain_control(
+        &self,
+        control: Arc<dyn McpAttachmentAuthority>,
+    ) -> Arc<RetainedControl> {
+        let mut retained = self
+            .0
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retained.released {
+            return Arc::new(RetainedControl(std::sync::Mutex::new(None)));
+        }
+        retained.cells.retain(|cell| cell.strong_count() > 0);
+        let cell = Arc::new(RetainedControl(std::sync::Mutex::new(Some(control))));
+        retained.cells.push(Arc::downgrade(&cell));
+        cell
+    }
+
+    /// Release every retained control: nothing can be re-added once the
+    /// close began.
+    fn release_retained_controls(&self) {
+        let cells = {
+            let mut retained = self
+                .0
+                .retained
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retained.released = true;
+            std::mem::take(&mut retained.cells)
+        };
+        for cell in cells.iter().filter_map(std::sync::Weak::upgrade) {
+            let control = cell
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(control);
+        }
+    }
+
     /// Freeze admission and start, now, every close this index covers that
     /// has not started, without any router lock or in-flight call: a held
     /// stdio server's client is closed and then its process, under that
@@ -3608,13 +3703,18 @@ impl CloseIndex {
     /// holds nothing yet is retired, so its attempt stops and spawns or
     /// connects nothing more (a client it still connects is closed at
     /// once). A close already running is joined. A later call returns a
-    /// ticket over the same closes. Call it within a Tokio runtime.
+    /// ticket over the same closes. The governed attachment controls the
+    /// router retains for a re-add after a sign-in are released. Call it
+    /// within a Tokio runtime.
     pub(crate) fn begin_close(&self) -> McpCloseTicket {
         // The router is closing: its attempts' guards learn it first, so an
         // attempt stopped below is cancelled as `RouterClosed`.
         if let Some(guards) = self.0.guards.get().and_then(std::sync::Weak::upgrade) {
             guards.close(crate::McpAttemptCancelCause::RouterClosed);
         }
+        // Nothing is re-added once the close began, so no control is kept
+        // for it, whether or not the router's shutdown ever runs.
+        self.release_retained_controls();
         let now = tokio::time::Instant::now();
         let closes = {
             let mut state = self.state();
@@ -3905,7 +4005,7 @@ impl CallAdmission<'_> {
 // OAuth target) are passed separately so both callers share one path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call_tool_on(
-    service: &rmcp::service::Peer<rmcp::RoleClient>,
+    service: &HeldClient,
     server: &str,
     admission: CallAdmission<'_>,
     protected_metadata: &ProtectedMetadataState,
@@ -3958,7 +4058,7 @@ pub(crate) async fn call_tool_on(
         request.extensions.insert(custody);
     }
     let request = request.into();
-    let result = service.send_request(request).await.map_err(|error| {
+    let failure = |error: rmcp::ServiceError| {
         let disposition = dispatch.disposition();
         // An OAuth refusal (a 401, or no usable credential before
         // dispatch) is typed unless the request's own disposition already
@@ -3969,12 +4069,92 @@ pub(crate) async fn call_tool_on(
             return refused;
         }
         tool_call_failure(server, name, disposition, &error)
-    })?;
+    };
+    let handle = service
+        .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+        .await
+        .map_err(&failure)?;
+    // A caller that stops waiting (its deadline expired, or it was
+    // cancelled) drops this future: the server is told the request is
+    // abandoned, unless its response settled it first.
+    let abandoned = AbandonedRequest::arm(service, handle.id.clone());
+    let response = handle.await_response().await;
+    abandoned.settled();
+    let result = response.map_err(failure)?;
     match result {
         ServerResult::CallToolResult(result) => Ok(result),
         _ => Err(McpError::ProtocolError {
             message: "unexpected MCP tools/call response".into(),
         }),
+    }
+}
+
+/// Why a request this host stopped waiting for is cancelled.
+const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
+
+/// Tells the server about a request this host stops waiting for. Dropped
+/// before the request settled (the caller's future was dropped: its deadline
+/// expired or it was cancelled), the guard ends the request's HTTP exchange
+/// on a streamable-HTTP connection and sends `notifications/cancelled` for
+/// the request id, once, from a task: the caller is never held while the
+/// notice is sent. A request settled by its response or an error sends
+/// nothing.
+///
+/// Known limit: rmcp writes every outbound message from a task of its own, so
+/// a cancellation sent in the same tick as its request's handoff (a deadline
+/// that expires during a slow entry step, or one that had already expired)
+/// can reach the server before the request does. The server cannot match it
+/// and keeps working; this was seen in about 3 of 1500 immediate abandons on
+/// a multi-threaded runtime. Ordinary deadlines fire long after the request
+/// was written. On a streamable-HTTP connection this cannot happen: the
+/// guard abandons the request in the registry before it sends the notice, so
+/// a request not yet posted is never posted. Over stdio and legacy SSE it
+/// can; a real fix needs rmcp to write a request before later messages.
+/// Without this guard no cancellation is sent at all.
+struct AbandonedRequest {
+    peer: Option<rmcp::service::Peer<rmcp::RoleClient>>,
+    abandoned: crate::transport::abandoned::AbandonedRequests,
+    id: rmcp::model::RequestId,
+}
+
+impl AbandonedRequest {
+    fn arm(client: &HeldClient, id: rmcp::model::RequestId) -> Self {
+        Self {
+            peer: Some(rmcp::service::Peer::clone(client)),
+            abandoned: client.abandoned.clone(),
+            id,
+        }
+    }
+
+    /// The request settled: there is nothing to cancel.
+    fn settled(mut self) {
+        self.peer = None;
+    }
+}
+
+impl Drop for AbandonedRequest {
+    fn drop(&mut self) {
+        let Some(peer) = self.peer.take() else {
+            return;
+        };
+        // A server in stateless mode ignores notifications: it sees the
+        // request's own HTTP exchange end. A streamable-HTTP client ends it
+        // now, even while its transport is still waiting on another request.
+        self.abandoned.abandon(&self.id);
+        // A drop cannot wait for the send, so the notification goes from a
+        // task. Without a runtime the transport is shutting down with it and
+        // nothing can be sent.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let notification =
+            rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam {
+                request_id: self.id.clone(),
+                reason: Some(ABANDONED_REQUEST_REASON.to_owned()),
+            });
+        runtime.spawn(async move {
+            let _ = peer.send_notification(notification.into()).await;
+        });
     }
 }
 
@@ -7223,6 +7403,22 @@ mod pagination_tests;
 #[cfg(test)]
 #[path = "structured_result_tests.rs"]
 mod structured_result_tests;
+
+#[cfg(test)]
+#[path = "cancel_tests.rs"]
+mod cancel_tests;
+
+#[cfg(test)]
+#[path = "cancel_http_tests.rs"]
+mod cancel_http_tests;
+
+#[cfg(test)]
+#[path = "http_abandon_tests.rs"]
+mod http_abandon_tests;
+
+#[cfg(test)]
+#[path = "http_abandon_session_tests.rs"]
+mod http_abandon_session_tests;
 
 #[cfg(test)]
 #[path = "process_confinement_tests.rs"]

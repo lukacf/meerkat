@@ -7,14 +7,19 @@
 //! [`DecisionEvidence`], and the machine binds the decision to the digest of
 //! that evidence.
 
+use std::fmt;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ApproverId, DecisionContractError, DecisionIngress, DecisionPrincipalKey, DecisionReference,
-    PresentationRecord, Sha256Digest,
+    ApproverId, DecisionContractError, DecisionId, DecisionIngress, DecisionPrincipalKey,
+    DecisionReference, PresentationRecord, Sha256Digest,
 };
 use crate::approval::ApprovalAssurance;
-use crate::approval::consent::AuthenticatedApprover;
+use crate::approval::consent::{
+    AuthenticatedApprover, ConsentEligibility, HostAuthenticationScope,
+};
 use crate::{PrincipalKind, PrincipalRef, SessionId};
 
 /// Largest decision reason or review feedback, in bytes.
@@ -208,10 +213,11 @@ impl AttestedDecision {
             decider: self.decider.clone(),
             principal: self.approver.principal().clone(),
             assurance: self.approver.assurance(),
-            authentication_scope: self
+            authentication_scope: None,
+            authentication_scope_digest: self
                 .approver
                 .authentication_scope()
-                .map(|scope| scope.as_str().to_owned()),
+                .map(HostAuthenticationScope::digest),
             ingress: self.ingress.clone(),
             event_ref: self.event_ref.clone(),
             observed_at_ms: Some(self.observed_at_ms),
@@ -221,6 +227,62 @@ impl AttestedDecision {
             approve: self.approve,
             reason: self.reason.clone(),
         }
+    }
+}
+
+/// One authenticated human decision event on one durable decision, bound by
+/// the trusted host adapter that authenticated it: the decision it decides,
+/// the [`AttestedDecision`] it carries, and the eligibility owner's evidence
+/// that the decider may act for the decision's approver id, current as of
+/// that owner's publication. Not `Deserialize`: a transport builds it only
+/// after authenticating the actual event, never from a request body, and a
+/// host-only dispatch entry is the only way it reaches the decision owner.
+#[derive(Clone)]
+pub struct AuthenticatedDecisionEvent {
+    decision_id: DecisionId,
+    decision: AttestedDecision,
+    eligibility: Arc<dyn ConsentEligibility>,
+}
+
+impl AuthenticatedDecisionEvent {
+    /// The event deciding `decision_id` with `decision`. `eligibility` is
+    /// checked again when the decision commits.
+    #[must_use]
+    pub fn new(
+        decision_id: DecisionId,
+        decision: AttestedDecision,
+        eligibility: Arc<dyn ConsentEligibility>,
+    ) -> Self {
+        Self {
+            decision_id,
+            decision,
+            eligibility,
+        }
+    }
+
+    #[must_use]
+    pub fn decision_id(&self) -> &DecisionId {
+        &self.decision_id
+    }
+
+    #[must_use]
+    pub fn decision(&self) -> &AttestedDecision {
+        &self.decision
+    }
+
+    /// The evidence that the decider may act for the approver id.
+    #[must_use]
+    pub fn eligibility(&self) -> &dyn ConsentEligibility {
+        self.eligibility.as_ref()
+    }
+}
+
+impl fmt::Debug for AuthenticatedDecisionEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthenticatedDecisionEvent")
+            .field("decision_id", &self.decision_id)
+            .field("decision", &self.decision)
+            .finish_non_exhaustive()
     }
 }
 
@@ -339,9 +401,20 @@ pub enum DecisionEvidence {
         decider: DecisionPrincipalKey,
         principal: PrincipalRef,
         assurance: ApprovalAssurance,
-        /// The host authentication scope (login or session) of the event.
+        /// The host authentication scope (login or session) of the event,
+        /// as evidence recorded before the login digest kept it. Evidence
+        /// recorded since keeps `authentication_scope_digest` instead and
+        /// never writes this field; evidence that has it decodes, and keeps
+        /// its bytes and its digest.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         authentication_scope: Option<String>,
+        /// The digest of the host authentication scope (the login or
+        /// session) the decision event was authenticated in, when the host
+        /// named one ([`HostAuthenticationScope::digest`]): `sha256:` and 64
+        /// lowercase hex digits. Never the scope itself. Absent in evidence
+        /// recorded before the digest was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authentication_scope_digest: Option<Sha256Digest>,
         ingress: DecisionIngress,
         event_ref: DecisionReference,
         /// When the ingress observed the decision event, in UNIX

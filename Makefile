@@ -16,6 +16,13 @@ CARGO ?= ./scripts/repo-cargo
 # bare `--workspace` would compile Core's crates with the products' features.
 # Each product's own lanes select its packages (`--product NAME`).
 CORE_WORKSPACE = $(shell node scripts/core-workspace-args.mjs)
+# A lane that builds test targets without --all-features also passes the
+# selected members' test features (their [package.metadata.meerkat.standalone-tests]
+# features and `workspace-tests`): no dev-dependency turns them on, and a test
+# build without them fails to compile here. CORE_WORKSPACE_TESTS is Core's
+# whole workspace, $(call TEST_PACKAGES,-p NAME ...) the named packages.
+CORE_WORKSPACE_TESTS = $(shell node scripts/core-workspace-args.mjs --tests)
+TEST_PACKAGES = $(shell node scripts/core-workspace-args.mjs --tests $(1))
 # Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
 # hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
 # PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
@@ -34,7 +41,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest test-feature-canary-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -67,7 +74,7 @@ test-unit:
 # neighboring tests and opts the Linux-hosted case back in explicitly.
 test-mob-dense-topology:
 	@echo "$(GREEN)Running dense Mob topology stress lane...$(NC)"
-	$(CARGO) nextest run --profile mob-dense-topology -p meerkat-mob --lib --run-ignored all --no-tests=fail
+	$(CARGO) nextest run --profile mob-dense-topology $(call TEST_PACKAGES,-p meerkat-mob) --lib --run-ignored all --no-tests=fail
 
 # Linux positive confinement acceptance. These cases need a host whose kernel
 # policy allows the native backend, so on Linux they are ignored in ordinary
@@ -82,8 +89,8 @@ CONFINEMENT_MCP_POSITIVE := test(/^connection::process_confinement_tests::suppor
 CONFINEMENT_MCP_POSITIVE_COUNT := 9
 CONFINEMENT_HOOK_POSITIVE := test(=process_custody::tests::required_command_hook_enters_only_with_its_durable_custody_record) | test(=required_command_hook_enters_with_exact_argv_cwd_environment_and_custody)
 CONFINEMENT_HOOK_POSITIVE_COUNT := 2
-CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
-CONFINEMENT_SANDBOX_POSITIVE_COUNT := 21
+CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_resolves_a_host_name_through_a_symlinked_resolv_conf) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
+CONFINEMENT_SANDBOX_POSITIVE_COUNT := 22
 CONFINEMENT_SHELL_POSITIVE := test(/^builtin::shell::confinement_tests::platform::/)
 CONFINEMENT_SHELL_POSITIVE_COUNT := 4
 
@@ -231,7 +238,7 @@ test-minimal:
 	$(CARGO) check -p meerkat-tools --no-default-features
 	$(CARGO) check -p meerkat --no-default-features
 	$(CARGO) check -p rkat --no-default-features
-	$(CARGO) nextest run -p meerkat-core
+	$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat-core)
 
 # Library crate feature combinations
 test-feature-matrix-lib:
@@ -252,7 +259,7 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter
 	MEERKAT_MCP_TEST_SERVER="$$(scripts/mcp-test-server-fixture)" && \
 		export MEERKAT_MCP_TEST_SERVER && \
-		$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp
+		$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat) --features all-providers,comms,mcp
 
 # Surface crate feature combinations
 test-feature-matrix-surface:
@@ -545,10 +552,15 @@ machine-codegen: xtask-build
 # documented over-budget composition skips (meerkat_mob_seam,
 # adaptive_mob_bundle full ci.cfg sweeps) plus the bounded adaptive witness
 # proof; a bare `machine-verify --all` runs the full mob-seam sweep, which
-# does not fit any local or CI budget.
+# does not fit any local or CI budget. MACHINE_VERIFY_PART runs one part of
+# the lane: machine-verify (the bounded adaptive witness, then
+# `machine-verify --all` with those skips) or one audit shard
+# (audits-a..audits-o, audits-q..audits-y); without it every part runs.
+# Nightly runs the machine-verify part, and ci.yml's tlc-audits job runs the
+# audit shards on every machine-authority change.
 machine-verify: xtask-build
 	@echo "$(GREEN)Running machine-verify (canonical TLC lane)...$(NC)"
-	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN)
+	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN) $(if $(MACHINE_VERIFY_PART),--part $(MACHINE_VERIFY_PART))
 
 # Deep-profile TLC (deep.cfg, -coverage 1, every witness with its completion
 # proof, and the zero-hit route/scheduler audit) over the compositions whose
@@ -726,7 +738,7 @@ outdated:
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	$(CARGO) bench $(CORE_WORKSPACE)
+	$(CARGO) bench $(CORE_WORKSPACE_TESTS)
 
 # ── Version parity & release targets ────────────────────────────────────────
 
@@ -805,7 +817,15 @@ check-published-crates-standalone-guard:
 published-crates-standalone-selftest:
 	@$(PYTHON) scripts/test_published_crates_standalone.py
 
-STANDALONE_CENSUS_OUT ?= target/published-crates-standalone
+# The test-feature canary in each Core crate's lib.rs trips a test binary
+# built without the crate's test features and nothing else: a fixture crate
+# with the same canary, built on the pinned toolchain in a scratch directory.
+test-feature-canary-selftest:
+	@scripts/test-feature-canary-selftest.sh
+
+# Outside the repository: the standalone builds run in it, and must not read
+# the repository's Cargo configuration (the census refuses such a directory).
+STANDALONE_CENSUS_OUT ?= $(or $(TMPDIR),/tmp)/meerkat-published-crates-standalone
 published-crates-standalone-census:
 	@$(PYTHON) scripts/published_crates_standalone.py census --out $(STANDALONE_CENSUS_OUT) $(STANDALONE_CENSUS_ARGS)
 

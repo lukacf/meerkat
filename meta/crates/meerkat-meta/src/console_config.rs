@@ -38,6 +38,9 @@ pub struct ConsoleUiConfig {
     pub actions: ConsoleActionsUiConfig,
     #[serde(default, skip_serializing_if = "ConsoleAttentionUiConfig::is_default")]
     pub attention: ConsoleAttentionUiConfig,
+    /// The host's sign-out, which the console's identity chip offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_out: Option<ConsoleSignOutConfig>,
 }
 
 impl ConsoleUiConfig {
@@ -97,8 +100,42 @@ impl ConsoleUiConfig {
         self.agent_list = self.agent_list.normalized();
         self.actions = self.actions.normalized();
         self.attention = self.attention.normalized();
+        self.sign_out = self.sign_out.and_then(ConsoleSignOutConfig::normalized);
         self
     }
+}
+
+/// The host's sign-out. The console only takes the person there: the host's
+/// front (an auth proxy or a login app) ends the login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleSignOutConfig {
+    /// A same-origin path (the operator panel path rules), used as written.
+    /// Any other value drops the sign-out.
+    pub href: String,
+    /// How the console reaches `href`.
+    #[serde(default)]
+    pub method: ConsoleSignOutMethod,
+}
+
+impl ConsoleSignOutConfig {
+    fn normalized(self) -> Option<Self> {
+        if valid_operator_panel_path(&self.href) {
+            return Some(self);
+        }
+        tracing::warn!("console sign_out dropped: its href must be a same-origin path");
+        None
+    }
+}
+
+/// How the console reaches the host's sign-out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleSignOutMethod {
+    /// A link.
+    #[default]
+    Get,
+    /// A form post, for a front whose sign-out refuses a `GET`.
+    Post,
 }
 
 /// Host-provided attention items for the "Needs you" list.
@@ -615,6 +652,8 @@ struct ConsoleUiConfigPatch {
     #[serde(default)]
     attention: Option<ConsoleAttentionUiConfig>,
     #[serde(default)]
+    sign_out: Option<ConsoleSignOutConfig>,
+    #[serde(default)]
     realms: BTreeMap<String, ConsoleUiConfigPatch>,
 }
 
@@ -656,6 +695,11 @@ impl ConsoleUiConfigPatch {
         if let Some(attention) = &self.attention {
             // The configured list replaces the inherited one.
             config.attention = attention.clone().normalized();
+        }
+        if let Some(sign_out) = &self.sign_out {
+            // The configured sign-out replaces the inherited one, an invalid
+            // one included (normalization then drops it).
+            config.sign_out = Some(sign_out.clone());
         }
     }
 }
@@ -1371,6 +1415,60 @@ decide_href = "/host/../decide/{decision_id}"
             "/host/decide?decision={decision_id}"
         );
         assert!(json["attention"]["sources"][2].get("decide_href").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_sign_out_link_must_be_a_same_origin_path() -> Result<(), ConsoleConfigError> {
+        let json_of = |toml_text: &str| -> Result<serde_json::Value, ConsoleConfigError> {
+            let config = load_console_ui_config_from_toml(toml_text)?;
+            serde_json::to_value(&config)
+                .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))
+        };
+        // A front whose sign-out takes a POST names the method.
+        let posted = json_of("[sign_out]\nhref = \"/logout\"\nmethod = \"post\"\n")?;
+        assert_eq!(
+            posted["sign_out"],
+            serde_json::json!({ "href": "/logout", "method": "post" })
+        );
+        // A plain link is a GET.
+        let linked = json_of("[sign_out]\nhref = \"/oauth2/sign_out?rd=%2Fconsole\"\n")?;
+        assert_eq!(
+            linked["sign_out"],
+            serde_json::json!({ "href": "/oauth2/sign_out?rd=%2Fconsole", "method": "get" })
+        );
+        // Anything but a same-origin path drops the link, as an operator
+        // panel path would be.
+        for href in [
+            "https://evil.example/logout",
+            "//evil.example/logout",
+            "/a/../logout",
+            "logout",
+            "/log out",
+            "",
+        ] {
+            let dropped = json_of(&format!("[sign_out]\nhref = \"{href}\"\n"))?;
+            assert!(dropped.get("sign_out").is_none(), "{href:?} is not dropped");
+        }
+        // An unknown method fails the configuration instead of guessing one.
+        assert!(
+            load_console_ui_config_from_toml(
+                "[sign_out]\nhref = \"/logout\"\nmethod = \"delete\"\n"
+            )
+            .is_err()
+        );
+        // A realm can name its own sign-out.
+        let realm = load_console_ui_config_from_toml_for_realm(
+            "[sign_out]\nhref = \"/logout\"\n\n[realms.front.sign_out]\nhref = \"/front/logout\"\nmethod = \"post\"\n",
+            Some("front"),
+        )?;
+        assert_eq!(
+            serde_json::to_value(&realm)
+                .map_err(|error| ConsoleConfigError::Invalid(error.to_string()))?["sign_out"],
+            serde_json::json!({ "href": "/front/logout", "method": "post" })
+        );
+        // Absent: nothing is serialized.
+        assert!(json_of("title = \"Ops\"\n")?.get("sign_out").is_none());
         Ok(())
     }
 

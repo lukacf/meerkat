@@ -10313,6 +10313,26 @@ pub trait RuntimeStore: Send + Sync {
         ))
     }
 
+    /// Whether one runtime's durable state holds recovery work, by
+    /// the predicate [`Self::list_runtimes_with_recovery_work`] applies: the
+    /// per-runtime read a host asks of one session it holds dormant
+    /// ([`crate::MeerkatMachine::session_work_state`]). It loads no runtime
+    /// body. A runtime the store never held holds none.
+    ///
+    /// The default answers through the store-wide scan, so a store or a
+    /// decorator that implements the scan answers this too, and one that
+    /// does not answers [`RuntimeStoreError::Unsupported`]. A store answers
+    /// it for the one runtime when it can, with the same predicate.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        Ok(self
+            .list_runtimes_with_recovery_work()
+            .await?
+            .contains(runtime_id))
+    }
+
     /// The store's durable delivery generation (#1813): incremented in the
     /// same transaction as every delivery-authority commit, so another
     /// process that sees the store change learns, from one read, whether a

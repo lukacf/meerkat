@@ -348,3 +348,64 @@ test("unadvertised gating is unsupported, stops polling and cannot accept a deci
   assert.equal(calls, 1); assert.equal(writes, 0);
   resource.dispose();
 });
+
+test("a 401 read leaves approvals readable again later, never denied for good", async () => {
+  const c = clock();
+  let reads = 0;
+  const unauthenticated = Object.assign(new Error("meta/gating/pending request failed 401"), { httpStatus: 401 });
+  const resource = createPendingApprovalResource({ scopeKey: "a", environment: c.environment,
+    load: async () => { reads += 1; if (reads === 2) throw unauthenticated; return { pending: [row("p1")] }; },
+    decide: async () => accepted("p1"),
+  });
+  try {
+    await tick();
+    assert.equal(resource.getSnapshot().status, "ready");
+    await resource.refresh(); await tick();
+    // The login ended: the console's sign-in state owns that, so the
+    // approvals stay readable (stale), not forbidden.
+    assert.notEqual(resource.getSnapshot().status, "forbidden");
+    assert.equal(resource.getSnapshot().status, "stale");
+    await resource.refresh(); await tick();
+    assert.equal(resource.getSnapshot().status, "ready");
+    assert.deepEqual(resource.getSnapshot().requests.map((request) => request.pendingId), ["p1"]);
+  } finally { resource.dispose(); }
+});
+
+test("a request decided elsewhere leaves a tombstone that names who decided it, from one audit read", async () => {
+  const c = clock();
+  let pending = [row("p1"), row("p2"), row("p3")];
+  let audits = 0;
+  const resource = createPendingApprovalResource({ scopeKey: "a", environment: c.environment,
+    load: async () => ({ pending }),
+    decide: async () => accepted("p3"),
+    loadDecisions: async () => {
+      audits += 1;
+      return { entries: [
+        { pending_id: "p1", event_type: "approval_decided", detail: { decision: "approve", deciding_principal: "b@example.test", approver_id: "team:owners" } },
+        { pending_id: "p2", event_type: "rejection_decided", detail: { decision: "reject", deciding_principal: null, approver_id: "team:finance" } },
+      ] };
+    },
+  });
+  try {
+    await tick();
+    assert.equal(audits, 0, "nothing is read from the audit until a request leaves");
+    // This console decides p3 itself: it did not leave elsewhere.
+    pending = [row("p1"), row("p2")];
+    await resource.decide("p3", "approve");
+    await tick();
+    assert.deepEqual(resource.getSnapshot().departed, []);
+    pending = [];
+    await resource.refresh();
+    await tick();
+    assert.deepEqual((resource.getSnapshot().departed ?? []).map((item) => [item.request.pendingId, item.decided]), [
+      ["p1", { action: "approve", by: "b@example.test" }],
+      ["p2", { action: "reject", by: "team:finance" }],
+    ]);
+    assert.equal(audits, 1);
+    // A request listed again is pending again, not a tombstone.
+    pending = [row("p2")];
+    await resource.refresh();
+    await tick();
+    assert.deepEqual((resource.getSnapshot().departed ?? []).map((item) => item.request.pendingId), ["p1"]);
+  } finally { resource.dispose(); }
+});

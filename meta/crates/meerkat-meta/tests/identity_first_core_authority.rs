@@ -1116,13 +1116,26 @@ async fn wake_after_retire_resumes_the_same_session_at_cores_generation() {
         "retire keeps the identity's member seated at the same generation"
     );
     let alice_core = meerkat_meta::member_comms_id::roster_member_id_for_identity(alice.as_str());
-    assert_eq!(
-        boot.unified
+    // The retire answers once Core's runtime has closed the member's
+    // registration. MobMachine records the release when its actor applies
+    // the release the runtime routes to it, and this read is the state the
+    // actor last published (no actor round trip), so it can still show Live
+    // for a moment. Wait, within the file's 30 s bound, for Dormant.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let phase = boot
+            .unified
             .mob_handle()
-            .member_materialization_for_test(&alice_core),
-        Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant),
-        "retire releases the member's materialization"
-    );
+            .member_materialization_for_test(&alice_core);
+        if phase == Some(meerkat_mob::machines::mob_machine::MemberMaterializationPhase::Dormant) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retire releases the member's materialization: {phase:?}"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
     let (state_name, session, _) = boot.status_session(&alice).await;
     assert_eq!(
         state_name, "active",

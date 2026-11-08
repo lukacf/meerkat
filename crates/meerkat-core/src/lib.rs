@@ -5,14 +5,42 @@
 //! own the canonical config-store, config-runtime, path-layout, and maintenance
 //! fence primitives, so this crate is not a blanket no-I/O layer.
 
-// Without `workspace-tests` (the published package: `cargo package` strips
-// the self dev-dependency that enables it) the unit tests that need the
-// workspace compile out, and the test helpers only they use go unused. The
-// workspace build turns the feature on and keeps both lints.
+// Without `workspace-tests` (the published package, whose test command
+// leaves it off) the unit tests that need the workspace compile out, and
+// the test helpers only they use go unused. The workspace's test builds
+// turn the feature on and keep both lints.
 #![cfg_attr(
     all(test, not(feature = "workspace-tests")),
     allow(dead_code, unused_imports)
 )]
+
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-core`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(test, not(feature = "workspace-tests")))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-core: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-core --features workspace-tests` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
 
 // All WASM Tokio users share these host adapters. Time and cooperative yields
 // own cancellable JavaScript resources here; spawning retains the upstream
@@ -40,7 +68,8 @@ pub mod agent;
 pub mod llm_client;
 pub mod tool_surface;
 pub use administration_entry::{
-    AdministrationEntry, AdministrationEntryRefusal, EnteredAdministration,
+    AdministeredChange, AdministeringPrincipal, AdministrationEntry, AdministrationEntryRefusal,
+    AdministrationOutcome, AdministrationRecord, AdministrationRecorder, EnteredAdministration,
 };
 pub use llm_client::{
     ControllerCredentialRequirement, ControllerFactsUnavailable, ControllerModelClient,
@@ -316,8 +345,8 @@ pub use exact_operation::{
 };
 pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use governance_config::{
-    GovernanceConfig, StockConsentAssurance, StockReviewConfig, StockReviewRule, StockReviewTarget,
-    StockReviewTier, StockReviewerSelection,
+    DecisionGovernanceConfig, GovernanceConfig, StockConsentAssurance, StockReviewConfig,
+    StockReviewRule, StockReviewTarget, StockReviewTier, StockReviewerSelection,
 };
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,
@@ -349,6 +378,7 @@ pub use image_content::{
     hydrate_messages_for_execution,
 };
 pub use image_generation::*;
+pub use interaction::GovernedSendOrigin;
 pub use interaction::{
     InboxInteraction, InteractionContent, InteractionId, ObjectiveId, PeerIngressAdmission,
     PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision, PeerIngressAuthExemption,
@@ -743,10 +773,11 @@ pub use auth::{
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
     AuthRouteHints, AuthStatus, AuthStatusPhase, CredentialObservation, GoogleAuthMetadata,
     GoogleRouteHints, HttpAuthorizationContent, HttpAuthorizationReceipt, HttpAuthorizationRequest,
-    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer, OpenAiAuthMetadata,
-    OpenAiRouteHints, ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation,
-    ResolvedAuthEnvelope, ResolvedAuthKind, TokenLifecycleClearError,
-    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
+    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer,
+    HttpRequestInitiator, OpenAiAuthMetadata, OpenAiRouteHints, ProviderAuthMetadata,
+    PublishedAuthStatus, RefreshFailureObservation, ResolvedAuthEnvelope, ResolvedAuthKind,
+    TokenLifecycleClearError, lease_snapshot_expires_at_datetime,
+    mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker, persisted_auth_mode_is_directly_creatable,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,

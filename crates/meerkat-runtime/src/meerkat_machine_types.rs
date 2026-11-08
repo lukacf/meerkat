@@ -1373,6 +1373,16 @@ meerkat_machine_runtime_internal_inputs!(
         HoldInputController,
         ReleaseInputController,
     ],
+    // The failure arm of the until-changed switch-turn reconfigure, beside
+    // its completion arm: it withdraws the request the switch-turn staged.
+    LiveTopologyReconfiguration => [
+        AbortUntilChangedSwitchTurnReconfigure,
+    ],
+    // A host's settle of the run its session retained, applied directly by
+    // `MeerkatMachine::settle_retained_run`.
+    RunExecutionLifecycle => [
+        SettleRetainedRun,
+    ],
     // The run marked resumable whose resumed-run admission could not decide,
     // held until a later answer releases it.
     RunExecutionLifecycle => [

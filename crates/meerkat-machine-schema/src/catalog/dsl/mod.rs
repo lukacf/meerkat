@@ -2036,12 +2036,21 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum(
                 "RunStartHoldReason",
-                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+                &[
+                    "MobStop",
+                    "ToolsNotPublished",
+                    "HostPreparation",
+                    "HostRecovery",
+                ],
             ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",
                 &["Retire", "KeepServing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RetainedRunSettleVerdict",
+                &["Accepted", "Busy", "NotRetained"],
             ),
             NamedTypeBinding::string_enum(
                 "InputPhase",
@@ -3525,6 +3534,14 @@ runtime_internal_inputs!(
         // either.
         ReplaceToolGrantGate,
         ApplyToolGrantOpenSet,
+        // A failed until-changed switch-turn reconfigure withdraws the
+        // request it staged: the switch-turn chain applies it beside
+        // CompleteUntilChangedSwitchTurnReconfigure. No caller can ask for it.
+        AbortUntilChangedSwitchTurnReconfigure,
+        // A host's settle of the run its session retained, applied directly
+        // by `MeerkatMachine::settle_retained_run`, which answers the
+        // machine's verdict.
+        SettleRetainedRun,
         // The run marked resumable whose resumed-run admission could not
         // decide, held until a later answer releases it: the runtime loop
         // applies them. No caller can ask for either.
@@ -4390,6 +4407,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NotSeated",
                     "NonAuthoritative",
                     "MobNotRunning",
+                    "RetireUnadopted",
                 ],
             ),
             NamedTypeBinding::string_enum(

@@ -8916,6 +8916,60 @@ impl std::fmt::Display for RegistrationPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RetainedRunSettleVerdict {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Busy")]
+    Busy,
+    #[serde(rename = "NotRetained")]
+    NotRetained,
+}
+impl RetainedRunSettleVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Busy => "Busy",
+            Self::NotRetained => "NotRetained",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RetainedRunSettleVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Busy" => Ok(Self::Busy),
+            "NotRetained" => Ok(Self::NotRetained),
+            other => Err(format!("invalid RetainedRunSettleVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RetainedRunSettleVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RetainedRunSettleVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingApprovalParentKind {
     #[default]
     #[serde(rename = "SwitchTurn")]
@@ -10130,6 +10184,8 @@ pub enum RunStartHoldReason {
     ToolsNotPublished,
     #[serde(rename = "HostPreparation")]
     HostPreparation,
+    #[serde(rename = "HostRecovery")]
+    HostRecovery,
 }
 impl RunStartHoldReason {
     pub fn as_str(&self) -> &'static str {
@@ -10137,6 +10193,7 @@ impl RunStartHoldReason {
             Self::MobStop => "MobStop",
             Self::ToolsNotPublished => "ToolsNotPublished",
             Self::HostPreparation => "HostPreparation",
+            Self::HostRecovery => "HostRecovery",
         }
     }
 }
@@ -10147,6 +10204,7 @@ impl std::convert::TryFrom<&str> for RunStartHoldReason {
             "MobStop" => Ok(Self::MobStop),
             "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
             "HostPreparation" => Ok(Self::HostPreparation),
+            "HostRecovery" => Ok(Self::HostRecovery),
             other => Err(format!("invalid RunStartHoldReason value `{other}`")),
         }
     }
@@ -19104,6 +19162,14 @@ pub mod inputs {
     pub struct ApplyToolGrantOpenSet {
         pub open: std::collections::BTreeSet<ToolName>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortUntilChangedSwitchTurnReconfigure {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleRetainedRun {
+        pub run_id: Option<RunId>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19539,6 +19605,8 @@ pub enum Input {
     ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
+    SettleRetainedRun(inputs::SettleRetainedRun),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20138,6 +20206,10 @@ impl Input {
             Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
+                InputKind::AbortUntilChangedSwitchTurnReconfigure
+            }
+            Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
         }
     }
 }
@@ -20562,6 +20634,8 @@ pub enum InputKind {
     ReleaseResumedRunAdmission,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    AbortUntilChangedSwitchTurnReconfigure,
+    SettleRetainedRun,
 }
 
 pub mod signals {
@@ -22343,6 +22417,11 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InputControllerReleased {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetainedRunSettleResolved {
+        pub verdict: RetainedRunSettleVerdict,
+        pub run_id: Option<RunId>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22621,6 +22700,7 @@ pub enum Effect {
     RuntimeRegistrationReleased(effects::RuntimeRegistrationReleased),
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
+    RetainedRunSettleResolved(effects::RetainedRunSettleResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22886,6 +22966,7 @@ pub enum EffectKind {
     RuntimeRegistrationReleased,
     EmptyResumeRetirementResolved,
     InputControllerReleased,
+    RetainedRunSettleResolved,
 }
 
 pub mod command_capabilities {
@@ -26095,6 +26176,39 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    AbortUntilChangedSwitchTurnReconfigureIdle,
+    AbortUntilChangedSwitchTurnReconfigureAttached,
+    AbortUntilChangedSwitchTurnReconfigureRunning,
+    AbortUntilChangedSwitchTurnReconfigureRetired,
+    AbortUntilChangedSwitchTurnReconfigureStopped,
+    RequestUntilChangedSwitchTurnPendingConflictIdle,
+    RequestUntilChangedSwitchTurnPendingConflictAttached,
+    RequestUntilChangedSwitchTurnPendingConflictRunning,
+    CompleteUntilChangedSwitchTurnReconfigureRetired,
+    CompleteUntilChangedSwitchTurnReconfigureStopped,
+    SettleRetainedRunAcceptedIdle,
+    SettleRetainedRunAcceptedAttached,
+    SettleRetainedRunBusyRunCurrentInitializing,
+    SettleRetainedRunBusyRunCurrentIdle,
+    SettleRetainedRunBusyRunCurrentAttached,
+    SettleRetainedRunBusyRunCurrentRunning,
+    SettleRetainedRunBusyRunCurrentRetired,
+    SettleRetainedRunBusyRunCurrentStopped,
+    SettleRetainedRunBusyDrainingIdle,
+    SettleRetainedRunBusyDrainingAttached,
+    SettleRetainedRunBusyStaleRunIdle,
+    SettleRetainedRunBusyStaleRunAttached,
+    SettleRetainedRunBusyNotServingInitializing,
+    SettleRetainedRunBusyNotServingRunning,
+    SettleRetainedRunBusyNotServingRetired,
+    SettleRetainedRunBusyNotServingStopped,
+    SettleRetainedRunNotRetainedInitializing,
+    SettleRetainedRunNotRetainedIdle,
+    SettleRetainedRunNotRetainedAttached,
+    SettleRetainedRunNotRetainedRunning,
+    SettleRetainedRunNotRetainedRetired,
+    SettleRetainedRunNotRetainedStopped,
+    SettleRetainedRunInertDestroyed,
     HoldResumedRunForAdmissionIdle,
     HoldResumedRunForAdmissionAttached,
     HoldResumedRunForAdmissionRunning,

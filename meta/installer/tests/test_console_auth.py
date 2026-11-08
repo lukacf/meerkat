@@ -135,6 +135,23 @@ def managed_connect_factory(tmp_path, *, release=None, application_current=None,
     return factory, children, contexts, traces
 
 
+def named(handler=None):
+    """Front options where the installation's own account is a named account.
+
+    One person, so the account answers setup prompts and approves; the native
+    fixture answers the console's sign-out and hands every other request to
+    the test's handler, so recorders never see the sign-out.
+    """
+    def native(request):
+        if request.method == "POST" and request.url.path == "/console/rpc":
+            body = json.loads(request.content or b"{}")
+            if body.get("method") == "meta/console/sign_out":
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": body.get("id"),
+                    "result": {"login": "session", "accepts_tokens_issued_from": 0}})
+        return handler(request) if handler is not None else httpx.Response(200)
+    return {"accounts": {}, "runtime_namespace": "meta", "transport": httpx.MockTransport(native)}
+
+
 async def connect_ready(client, front):
     response = await client.post("/console/forge/connect/initialize", json={}, headers={"Origin": front.origin})
     assert response.status_code in (200, 202)
@@ -196,8 +213,9 @@ async def test_managed_connect_defaults_refuse_host_routes_without_native_proxy(
 async def test_managed_connect_real_peer_retains_one_login_binding_and_same_private_prompt(tmp_path):
     factory, children, contexts, traces = managed_connect_factory(tmp_path)
     observed, tasks = [], []
+    # Answering a setup prompt needs a person: a named account.
     front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory,
-        transport=httpx.MockTransport(lambda request: observed.append(request) or httpx.Response(200)))
+        **named(lambda request: observed.append(request) or httpx.Response(200)))
     app = front.application("http://127.0.0.1:61347")
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as client:
@@ -257,7 +275,7 @@ async def test_managed_connect_real_peer_retains_one_login_binding_and_same_priv
 
 async def test_managed_connect_startup_prompt_is_answerable_without_initialization_reply(tmp_path):
     factory, children, _, traces = managed_connect_factory(tmp_path, CONNECT_HOST_STARTUP_PROMPT="1")
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as client:
@@ -286,7 +304,7 @@ async def test_managed_connect_startup_prompt_is_answerable_without_initializati
 
 async def test_managed_connect_two_logins_refuse_foreign_prompt_and_exact_send_controls(tmp_path):
     factory, children, contexts, traces = managed_connect_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as alice, \
@@ -408,7 +426,7 @@ async def test_managed_connect_failed_retirement_stays_unconfirmed_and_private_t
 ])
 async def test_managed_connect_closed_requests_never_forward_browser_authority(tmp_path, path, raw):
     factory, children, _, traces = managed_connect_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=front.application("http://127.0.0.1:61347")),
                                      base_url=front.origin) as client:
@@ -427,7 +445,7 @@ async def test_managed_connect_closed_requests_never_forward_browser_authority(t
 
 async def test_managed_connect_lost_send_response_recovers_original_control_without_replay(tmp_path):
     factory, children, _, traces = managed_connect_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as client:
@@ -711,12 +729,14 @@ async def test_invalid_nonce_retry_preserves_one_hundred_live_token_cap(tmp_path
             assert len(live_tokens) == 100
             reply = await client.post("/login", data={"nonce": "unknown-nonce", "password": "correct-password-canary"},
                                       headers={"Origin": front.origin})
-            assert reply.status_code == 429 and "set-cookie" not in reply.headers
-            assert front.login_tokens == live_tokens and front.sessions == {}
+            # A retry with an unknown form gets a fresh form, and the cap holds:
+            # the address's oldest form goes, so a full table refuses no one.
+            assert reply.status_code == 403 and front.sessions == {}
+            assert len(front.login_tokens) == 100 and next(iter(live_tokens)) not in front.login_tokens
             assert front.cookie not in client.cookies and observed == [] and delivered == []
-            assert (await client.get("/login")).status_code == 429
+            assert (await client.get("/login")).status_code == 200 and len(front.login_tokens) == 100
             assert (await client.post("/console/rpc", json={}, headers={"Origin": front.origin})).status_code == 401
-            assert front.login_tokens == live_tokens and observed == [] and delivered == []
+            assert observed == [] and delivered == []
     finally:
         await front.close()
 
@@ -1458,8 +1478,10 @@ async def test_frontend_descriptor_outer_login_wait_preserves_exact_refusal(tmp_
 async def test_login_retirement_refuses_a_body_waiting_before_new_admission(tmp_path, frontend):
     observed, managed, tasks = [], [], []
     waiting, release = asyncio.Event(), asyncio.Event()
+    handler = lambda request: observed.append(request) or httpx.Response(200)
+    # A frontend proposal is prepared by a person: a named account.
     front = ConsoleFront(tmp_path, 8855, "owner", "local-password-123",
-        transport=httpx.MockTransport(lambda request: observed.append(request) or httpx.Response(200)))
+        **(named(handler) if frontend else {"transport": httpx.MockTransport(handler)}))
     front.frontend_host = lambda: {"application_id": "reading", "source_sha256": "a" * 64}
     front.frontend_management = managed.append
     async def body():

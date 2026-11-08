@@ -1564,13 +1564,14 @@ pub(super) enum MobCommand {
         >,
     },
     /// The adoption of one legacy member as an identity entry
-    /// (`MobHandle::adopt_legacy_identity_entry`). MobMachine decides it from
-    /// the handle's observation of the spawn row of the member's incarnation
-    /// at `generation`; an adoption's row is journaled before it commits.
+    /// (`MobHandle::adopt_legacy_identity_entry`, and a declared roster's
+    /// legacy members). MobMachine decides it from the handle's observation
+    /// of the member's incarnation at `generation`; an adoption's row is
+    /// journaled before it commits.
     AdoptLegacyIdentityEntry {
         agent_identity: crate::ids::AgentIdentity,
         generation: crate::ids::Generation,
-        legacy_roster_member: bool,
+        observation: super::identity_entry::LegacyMemberObservation,
         reply_tx:
             oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
     },
@@ -1802,6 +1803,14 @@ pub(super) enum MobCommand {
         run_id: meerkat_core::lifecycle::RunId,
         reason: String,
         reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
+    },
+    /// A host's settle of the run a local member's runtime retained, without
+    /// resuming it and without a model request: the member runtime's
+    /// machine decides (`SettleRetainedRun`). `Cancel`-scoped at chokepoint
+    /// (a); never wakes the member.
+    SettleMemberRetainedRun {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
     },
     /// Open a live channel on a member (§16 phase 6b, DEC-P6B-C2).
     /// Identity-addressed and placement-blind (DL3); `Live`-scoped at
@@ -2449,6 +2458,7 @@ impl MobCommand {
             Self::CompleteHostForkedParticipantSpawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::HardCancelMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StopMemberRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SettleMemberRetainedRun { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveOpen { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveClose { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveStatus { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2707,6 +2717,7 @@ impl MobCommand {
             Self::ForceCancel { .. } => "ForceCancel",
             Self::HardCancelMember { .. } => "HardCancelMember",
             Self::StopMemberRun { .. } => "StopMemberRun",
+            Self::SettleMemberRetainedRun { .. } => "SettleMemberRetainedRun",
             Self::MemberHistory { .. } => "MemberHistory",
             Self::CompleteHostForkedParticipantSpawn { .. } => "CompleteHostForkedParticipantSpawn",
             Self::CreateForkedParticipant { .. } => "CreateForkedParticipant",

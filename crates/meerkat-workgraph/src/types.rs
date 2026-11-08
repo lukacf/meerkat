@@ -2241,6 +2241,24 @@ pub struct BreakGlassAttentionReassignRequest {
     pub reason: String,
 }
 
+/// Break-glass release of a work item's claim (host-plane only, never on the
+/// agent tool surface or any wire catalog): an operator hands back a claim
+/// it does not own, such as one whose owner is gone or one with no lease to
+/// end. It carries mandatory attribution and is audit-logged in the
+/// workgraph event stream with the claim it released.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakGlassReleaseWorkItemRequest {
+    pub id: WorkItemId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
+    /// Authenticated principal performing the break-glass release. Recorded
+    /// in the audit event; must identify a human/host operator, not an agent.
+    pub principal: String,
+}
+
 /// Prune request for TERMINAL (superseded/stopped) attention bindings. The
 /// event stream keeps the full audit history; pruning removes only the
 /// binding rows, which otherwise grow monotonically with reassignment churn.

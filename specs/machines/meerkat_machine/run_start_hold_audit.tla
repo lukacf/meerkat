@@ -3,8 +3,9 @@
 \*
 \* A runtime's run starts are held while ANY reason holds them
 \* (`run_start_holds`, a set of RunStartHoldReason: a mob Stop's MobStop, a
-\* host's ToolsNotPublished, and the HostPreparation of a mob member whose
+\* host's ToolsNotPublished, the HostPreparation of a mob member whose
 \* host preparation is owed, which its registration stages and only its mob
+\* releases, and a host's HostRecovery, which only the host stages and
 \* releases), and each holder releases only its own reason.
 \* While held, an input admitted earlier stays queued and runs after the last
 \* release, instead of starting a run. The holds must stop every arm that
@@ -46,10 +47,12 @@
 \* AuditHoldAndReleaseOwnReasonOnlyEvery; the main run explores MobStop and
 \* ToolsNotPublished only, the reasons being alike in every other arm. The
 \* runner's
-\* --mutants mode also checks that five seeded model defects are refused
+\* --mutants mode also checks that seven seeded model defects are refused
 \* (a registration that ignores its holds, gates that test only MobStop, a
 \* release that clears every reason, a registration that ignores the
-\* HostPreparation hold, and a host's release that ends it).
+\* HostPreparation hold, a host's release that ends it, a registration that
+\* ignores the HostRecovery hold, and a tools release that ends the host's
+\* HostRecovery hold).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* run_start_hold_audit.sh. Run a deeper bound by hand with:
@@ -349,9 +352,14 @@ AuditWitnessStoppedHoldSurvivesResume == audit_refused_after_resume
 \* The reasons run: a mob member's HostPreparation, staged by its
 \* registration, holds beside the host's ToolsNotPublished.
 AuditWitnessHostPreparationHeld == run_start_holds = {"ToolsNotPublished", "HostPreparation"}
+\* The reasons run: the host's HostRecovery holds beside a mob Stop's MobStop
+\* and the host's ToolsNotPublished.
+AuditWitnessHostRecoveryHeld ==
+    run_start_holds = {"MobStop", "ToolsNotPublished", "HostRecovery"}
 
 NotAuditWitnessRefused == ~AuditWitnessRefused
 NotAuditWitnessHostPreparationHeld == ~AuditWitnessHostPreparationHeld
+NotAuditWitnessHostRecoveryHeld == ~AuditWitnessHostRecoveryHeld
 NotAuditWitnessReleasedRuns == ~AuditWitnessReleasedRuns
 NotAuditWitnessRunFinishesThenRefused == ~AuditWitnessRunFinishesThenRefused
 NotAuditWitnessRetiredDrainRefused == ~AuditWitnessRetiredDrainRefused

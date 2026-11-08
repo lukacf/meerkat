@@ -50,6 +50,7 @@ fn open_console_decisions() -> meerkat_meta::RuntimeDecisionState {
                 .to_string(),
             audience: "meerkat-console".to_string(),
             require_verified_email: false,
+            shared_account_tokens: false,
         },
         console: ConsolePolicy {
             require_app_auth: false,

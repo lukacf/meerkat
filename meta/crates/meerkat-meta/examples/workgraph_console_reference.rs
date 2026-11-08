@@ -24,10 +24,15 @@ use std::time::Duration;
 
 use meerkat_client::TestClient;
 use meerkat_meta::{
-    AuthPolicy, BigQueryNaming, ConsolePolicy, DiscoverySpec, MetaConfig, PreSpawnData,
-    RuntimeDecisionInputs, RuntimeOpsPolicy, TrustedOidcRuntimeConfig, UnifiedRuntime,
-    build_runtime_decision_state,
+    AccessControlConfig, AccessController, AuthPolicy, AuthProvider, BigQueryNaming, ConsolePolicy,
+    DiscoverySpec, MetaConfig, PreSpawnData, RuntimeDecisionInputs, RuntimeOpsPolicy,
+    TrustedOidcRuntimeConfig, UnifiedRuntime, build_runtime_decision_state,
 };
+
+/// The person the e2e seeds its WorkGraph claim as: the console owns a
+/// claim by its signed-in caller, so the seed volunteers this person's token
+/// (HS256, the development issuer of [`trusted_oidc`]).
+const SEED_PERSON: &str = "operator@fixture.test";
 use meerkat_mob::ids::AgentIdentity as MeerkatId;
 use meerkat_mob::{MobDefinition, ProfileName, SpawnMemberSpec};
 
@@ -48,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let definition = MobDefinition::from_toml(MOB_TOML)
         .map_err(|e| std::io::Error::other(format!("bad mob definition: {e}")))?;
 
-    let runtime = Box::pin(
+    let mut runtime = Box::pin(
         UnifiedRuntime::builder()
             .definition(definition)
             .default_llm_client(Arc::new(TestClient::default()))
@@ -75,6 +80,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("workgraph e2e fixture: workgraph service wired (ephemeral memory store)");
 
+    // The open console verifies a volunteered token only with an access
+    // controller wired; this one enforces nothing.
+    runtime.set_access_controller(
+        AccessController::new(AccessControlConfig::default())
+            .map_err(|err| std::io::Error::other(format!("access controller: {err:?}")))?,
+    );
+
     // A small roster so the sidebar and owner labels have real identities.
     runtime
         .reconcile(vec![
@@ -96,7 +108,10 @@ args = []
 restart_policy = "always"
 "#
         .to_string(),
-        auth: AuthPolicy::default(),
+        auth: AuthPolicy {
+            default_provider: AuthProvider::GoogleOAuth,
+            email_allowlist: vec![SEED_PERSON.to_string()],
+        },
         trusted_oidc: trusted_oidc(),
         console: ConsolePolicy {
             require_app_auth: false,
@@ -132,11 +147,12 @@ restart_policy = "always"
 fn trusted_oidc() -> TrustedOidcRuntimeConfig {
     TrustedOidcRuntimeConfig {
         discovery_json:
-            r#"{"issuer":"https://trusted.meta.local","jwks_uri":"https://trusted.meta.local/.well-known/jwks.json"}"#
+            r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
                 .to_string(),
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
             .to_string(),
         audience: "meerkat-console".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     }
 }

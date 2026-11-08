@@ -4928,6 +4928,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `successor_generation_differs`
 - To: `Running`
 
+### `ObserveRespawnTopologyAbandonedStaleEndedSuccessor`
+- From: `Running`
+- On: `ObserveRespawnTopologyAbandoned`(agent_identity, agent_runtime_id, fence_token, generation)
+- Guards:
+  - `identity_binding_absent`
+  - `generation_not_terminal_history`
+  - `later_generation_recorded`
+- To: `Running`
+
 ### `ObserveRespawnTopologyAbandonedDestroyed`
 - From: `Destroyed`
 - On: `ObserveRespawnTopologyAbandoned`(agent_identity, agent_runtime_id, fence_token, generation)

@@ -1260,6 +1260,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveRespawnTopologyAbandonedStaleSuccessor`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedStaleEndedSuccessor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveRespawnTopologyAbandonedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

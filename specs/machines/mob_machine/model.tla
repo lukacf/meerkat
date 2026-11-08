@@ -5991,6 +5991,16 @@ ObserveRespawnTopologyAbandonedStaleSuccessor(agent_identity, agent_runtime_id, 
     /\ UnchangedFrame_cfdef6b57e7dfed0
 
 
+ObserveRespawnTopologyAbandonedStaleEndedSuccessor(agent_identity, agent_runtime_id, fence_token, generation) ==
+    /\ phase = "Running"
+    /\ ((agent_identity \in DOMAIN identity_to_runtime) = FALSE)
+    /\ ((IF (agent_identity \in DOMAIN identity_runtime_generations) THEN Some((IF agent_identity \in DOMAIN identity_runtime_generations THEN identity_runtime_generations[agent_identity] ELSE "None")) ELSE None) # Some(generation))
+    /\ ((IF ~(((agent_identity \in DOMAIN identity_runtime_generations) = TRUE)) THEN TRUE ELSE (agent_identity \in DOMAIN identity_runtime_generations)) /\ (((agent_identity \in DOMAIN identity_runtime_generations) = TRUE) /\ ((identity_runtime_generations)[agent_identity] > generation)))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_cfdef6b57e7dfed0
+
+
 ObserveRespawnTopologyAbandonedDestroyed(agent_identity, agent_runtime_id, fence_token, generation) ==
     /\ phase = "Destroyed"
     /\ phase' = "Destroyed"
@@ -27198,6 +27208,7 @@ Next ==
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : ObserveRespawnTopologyAbandonedTerminalAlreadyRecorded(agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : ObserveRespawnTopologyAbandonedTerminalRecoveredFresh(agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : ObserveRespawnTopologyAbandonedStaleSuccessor(agent_identity, agent_runtime_id, fence_token, generation)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : ObserveRespawnTopologyAbandonedStaleEndedSuccessor(agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Destroyed") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : ObserveRespawnTopologyAbandonedDestroyed(agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : RecoverRemoteMemberRuntimeRetiredFreshRunning(agent_identity, agent_runtime_id, fence_token, generation)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : RecoverRemoteMemberRuntimeRetiredFreshStopped(agent_identity, agent_runtime_id, fence_token, generation)

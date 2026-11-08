@@ -217,9 +217,6 @@ them.
     `SurfaceStageGatedAddAttached` and `SurfaceStageGatedAddRunning`, and
     `MeerkatMachineRuntimeInternalInput` gains `ExtendToolGrantGate` and
     `SurfaceStageGatedAdd`, each after every released variant.
-  - `meerkat::resolve_grant_target` takes the servers the subject's build
-    configures ungated; `meerkat_mob::MemberGrantGate` gains
-    `ungated_servers`.
 - `meerkat_mob::DesiredMemberMaterial` gains `profile_source`
   (`DesiredProfileSource`): where a store-owned identity's desired material
   took its profile from, which decides its member's tool grant gate (struct

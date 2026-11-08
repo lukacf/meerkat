@@ -45,6 +45,7 @@ from .mob import (
     MobKickoffMemberSnapshot,
     MobMemberCustodyDeferral,
     MobMemberCustodyUnknown,
+    MobMemberPreviewUnavailableUnknown,
     MobMemberSnapshot,
     MobPeerConnectivity,
     MobPeerConnectivitySnapshot,
@@ -555,6 +556,7 @@ __all__ = [
     "MobMemberSnapshot",
     "MobMemberCustodyDeferral",
     "MobMemberCustodyUnknown",
+    "MobMemberPreviewUnavailableUnknown",
     # Operator instructions
     "InstructionAdvisoryUnknown",
     "InstructionTarget",

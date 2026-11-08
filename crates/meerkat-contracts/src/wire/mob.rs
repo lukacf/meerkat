@@ -3282,6 +3282,10 @@ pub enum WireMemberPreviewUnavailable {
     /// The member is retiring; a status read of a retiring member is answered
     /// without reading its session.
     NotObservedWhileRetiring,
+    /// The store refuses to read the member's session until its realm is
+    /// reopened (a host store whose scope of the session, or whose realm, is
+    /// poisoned). Later reads of the member answer the same until then.
+    StoreRefused,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -5476,10 +5480,16 @@ mod tests {
                 WireMemberPreviewUnavailable::NotObservedWhileRetiring,
                 "not_observed_while_retiring",
             ),
+            (WireMemberPreviewUnavailable::StoreRefused, "store_refused"),
         ] {
             assert_eq!(
                 serde_json::to_value(marker).expect("serialize marker"),
                 serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<WireMemberPreviewUnavailable>(serde_json::json!(wire))
+                    .expect("deserialize marker"),
+                marker
             );
         }
     }

@@ -29,7 +29,8 @@ This pack uses:
 - pairwise connect, durable de-peer through reconciliation, and permission-gated reconnect
 - no generic Connect All affordance in the stock console
 - replay after `Last-Event-ID` through the TypeScript helper
-- gating chain `pending -> escalate -> successor pending -> approve`
+- approvals read-only without a signed-in person: the console shows the
+  pending request and refuses its decision (`approver_unauthenticated`)
 
 ## Run
 

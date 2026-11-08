@@ -24,6 +24,7 @@ import {
   authoringOperationAvailability,
   authoringOperationFromIntent,
   callRpc,
+  configureCallerScope,
   rpcMethod,
 } from "./client";
 
@@ -32,7 +33,10 @@ export async function loadSchema(options = {}) {
 }
 
 export async function loadCapabilities(options = {}) {
-  return callRpc("meta/capabilities", {}, options);
+  const capabilities = await callRpc("meta/capabilities", {}, options);
+  // The caller the surface resolved; every later request names it.
+  configureCallerScope(capabilities);
+  return capabilities;
 }
 
 export async function loadCatalogs(options = {}) {

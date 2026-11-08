@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated composition model for meerkat_mob_seam.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CommsRuntimeIdValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ContentShapeValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InstructionEffectValues, InstructionTargetKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LiveWsEndpointUrlValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobIncarnationIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, NodeRunStatusValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OperatorInstructionRefusalValues, OutboundPeerRequestStateValues, PeerAddressValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerSigningKeyValues, PeerTerminalDispositionValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, ProviderValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredPresenceValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfRunStartHoldReasonValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StagedSessionPhaseValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StopInputDispositionValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnregisterQueuedInputsDispositionValues, UnseatedEntryCauseValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentLaneMemberAdmissionKindValues, AgentRuntimeIdValues, ArchivedSessionForgetReasonValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BootMaterializationKindValues, BranchIdValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, CommsRuntimeIdValues, CompositionAuthorityKindValues, ConstructionEndKindValues, ConstructionEndVerdictValues, ContentShapeValues, ControlScopeValues, CoordinationResourceRefValues, CreatedIdentityRecordVerdictValues, DeclaredApplyOpenVerdictValues, DeclaredRosterSealVerdictValues, DependencyModeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, EntryPlacementKindValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, ExternalRouteObligationValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, FirstBootRequestKindValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, HostPreparationCauseValues, IdentityAuthorityConditionValues, IdentityChangeAdmissionKindValues, IdentityChangeConsentKindValues, IdentityChangeReceiptKindValues, IdentityEntryChangeVerdictValues, IdentityEntryOriginValues, IdentityEntryVerdictValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InstructionEffectValues, InstructionTargetKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, KickoffIntentValues, KickoffPhaseValues, LegacyIdentityEntryAdoptionKindValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LiveWsEndpointUrlValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MemberAdmissionVerdictKindValues, MemberBootObligationCauseValues, MemberCustodyCauseKindValues, MemberCustodyRestoreKindValues, MemberHealthClassValues, MemberInstructionBlockValues, MemberInstructionDeferReasonValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberMaterializationLossCauseValues, MemberMaterializationPhaseValues, MemberMaterializationReleaseOutcomeValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRecoveryObligationKindValues, MemberReleaseVerdictValues, MemberRestorePolicyKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MemberWakeAbandonCauseValues, MemberWakeAbandonKindValues, MemberWakeCauseValues, MemberWakeFeedbackVerdictValues, MemberWakeRefusalKindValues, MemberWakeRetryableKindValues, MemberWakeVerdictKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobIncarnationIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, NodeRunStatusValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OperatorInstructionRefusalValues, OutboundPeerRequestStateValues, PeerAddressValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerInputClassValues, PeerNoticeDispositionValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerSigningKeyValues, PeerTerminalDispositionValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, PreparationConstructionVerdictValues, PreparationSettleVerdictValues, PrincipalIdValues, ProviderValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredPresenceValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnRefusalReasonValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RetainedRunSettleVerdictValues, RetireAtScopeVerdictKindValues, RotationTargetValues, RouteInstallObligationValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfExternalRouteObligationValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfRunStartHoldReasonValues, SetOfSessionIdValues, SetOfStepIdValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StagedSessionPhaseValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StopInputDispositionValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, TurnTimeoutDispositionValues, U32Values, UnlistEntryVerdictValues, UnregisterQueuedInputsDispositionValues, UnseatedEntryCauseValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -4051,7 +4051,7 @@ meerkat_RegisterSessionIdle(arg_session_id, arg_runtime_epoch_id, arg_initial_ru
        /\ meerkat_session_llm_reconfigure_committed_visible_set_changed' = FALSE
        /\ meerkat_session_llm_reconfigure_revision_bumped' = FALSE
        /\ meerkat_session_llm_reconfigure_active_visibility_revision' = 0
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
        /\ UnchangedFrame_f6dd28827319f095
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4090,7 +4090,7 @@ meerkat_RegisterSessionAttached(arg_session_id, arg_runtime_epoch_id, arg_initia
        /\ meerkat_session_llm_reconfigure_committed_visible_set_changed' = FALSE
        /\ meerkat_session_llm_reconfigure_revision_bumped' = FALSE
        /\ meerkat_session_llm_reconfigure_active_visibility_revision' = 0
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
        /\ UnchangedFrame_f6dd28827319f095
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4129,7 +4129,7 @@ meerkat_RegisterSessionRunning(arg_session_id, arg_runtime_epoch_id, arg_initial
        /\ meerkat_session_llm_reconfigure_committed_visible_set_changed' = FALSE
        /\ meerkat_session_llm_reconfigure_revision_bumped' = FALSE
        /\ meerkat_session_llm_reconfigure_active_visibility_revision' = 0
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
        /\ UnchangedFrame_f6dd28827319f095
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4168,7 +4168,7 @@ meerkat_RegisterSessionRetired(arg_session_id, arg_runtime_epoch_id, arg_initial
        /\ meerkat_session_llm_reconfigure_committed_visible_set_changed' = FALSE
        /\ meerkat_session_llm_reconfigure_revision_bumped' = FALSE
        /\ meerkat_session_llm_reconfigure_active_visibility_revision' = 0
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
        /\ UnchangedFrame_f6dd28827319f095
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4193,7 +4193,7 @@ meerkat_RegisterSessionIdempotentIdle(arg_session_id, arg_runtime_epoch_id, arg_
        /\ (meerkat_session_id = Some(packet.payload.session_id))
        /\ (meerkat_active_runtime_epoch_id = packet.payload.runtime_epoch_id)
        /\ meerkat_phase' = "Idle"
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
        /\ UnchangedFrame_5b7002ccd6374a6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4218,7 +4218,7 @@ meerkat_RegisterSessionIdempotentAttached(arg_session_id, arg_runtime_epoch_id, 
        /\ (meerkat_session_id = Some(packet.payload.session_id))
        /\ (meerkat_active_runtime_epoch_id = packet.payload.runtime_epoch_id)
        /\ meerkat_phase' = "Attached"
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
        /\ UnchangedFrame_5b7002ccd6374a6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4243,7 +4243,7 @@ meerkat_RegisterSessionIdempotentRunning(arg_session_id, arg_runtime_epoch_id, a
        /\ (meerkat_session_id = Some(packet.payload.session_id))
        /\ (meerkat_active_runtime_epoch_id = packet.payload.runtime_epoch_id)
        /\ meerkat_phase' = "Running"
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
        /\ UnchangedFrame_5b7002ccd6374a6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4268,7 +4268,7 @@ meerkat_RegisterSessionIdempotentRetired(arg_session_id, arg_runtime_epoch_id, a
        /\ (meerkat_session_id = Some(packet.payload.session_id))
        /\ (meerkat_active_runtime_epoch_id = packet.payload.runtime_epoch_id)
        /\ meerkat_phase' = "Retired"
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
        /\ UnchangedFrame_5b7002ccd6374a6a
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
@@ -4504,7 +4504,7 @@ meerkat_RegisterSessionResumesStopped(arg_session_id, arg_runtime_epoch_id, arg_
        /\ meerkat_active_runtime_epoch_id' = packet.payload.runtime_epoch_id
        /\ meerkat_runtime_stop_deferred' = FALSE
        /\ meerkat_registration_phase' = "Queuing"
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (meerkat_run_start_holds \cup {"MobStop"}) ELSE meerkat_run_start_holds
        /\ meerkat_live_media_health_requested_output_by_channel' = [x \in {} |-> None]
        /\ meerkat_live_media_health_judged_channels' = {}
        /\ meerkat_live_media_fault_reopen_recommended_by_channel' = [x \in {} |-> None]
@@ -4552,7 +4552,7 @@ meerkat_RegisterSessionNewBindingFromStopped(arg_session_id, arg_runtime_epoch_i
        /\ meerkat_session_llm_reconfigure_committed_visible_set_changed' = FALSE
        /\ meerkat_session_llm_reconfigure_revision_bumped' = FALSE
        /\ meerkat_session_llm_reconfigure_active_visibility_revision' = 0
-       /\ meerkat_run_start_holds' = IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+       /\ meerkat_run_start_holds' = IF ("HostRecovery" \in packet.payload.initial_run_start_holds) THEN ((IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in packet.payload.initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in packet.payload.initial_run_start_holds) THEN ((IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in packet.payload.initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
        /\ meerkat_live_media_health_requested_output_by_channel' = [x \in {} |-> None]
        /\ meerkat_live_media_health_judged_channels' = {}
        /\ meerkat_live_media_fault_reopen_recommended_by_channel' = [x \in {} |-> None]
@@ -81783,6 +81783,493 @@ meerkat_ReleaseInputControllerStopped(arg_input_id) ==
        /\ model_step_count' = model_step_count + 1
 
 
+meerkat_SettleRetainedRunAcceptedIdle(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ (meerkat_resumable_run_id = packet.payload.run_id)
+       /\ (meerkat_registration_phase # "Draining")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_run_stop_requested' = packet.payload.run_id
+       /\ UnchangedFrame_53154c98cea03ea0
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> packet.payload.run_id, verdict |-> "Accepted"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunAcceptedIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunAcceptedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunAcceptedAttached(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ (meerkat_resumable_run_id = packet.payload.run_id)
+       /\ (meerkat_registration_phase # "Draining")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_run_stop_requested' = packet.payload.run_id
+       /\ UnchangedFrame_53154c98cea03ea0
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> packet.payload.run_id, verdict |-> "Accepted"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunAcceptedAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunAcceptedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyRunCurrentInitializing(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ (meerkat_current_run_id # None)
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> meerkat_current_run_id, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyRunCurrentInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyRunCurrentInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyRunCurrentIdle(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_current_run_id # None)
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> meerkat_current_run_id, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyRunCurrentIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyRunCurrentIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyRunCurrentAttached(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_current_run_id # None)
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> meerkat_current_run_id, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyRunCurrentAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyRunCurrentAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyRunCurrentRunning(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_current_run_id # None)
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> meerkat_current_run_id, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyRunCurrentRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyRunCurrentRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyRunCurrentRetired(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_current_run_id # None)
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> meerkat_current_run_id, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyRunCurrentRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyRunCurrentRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyRunCurrentStopped(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_current_run_id # None)
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> meerkat_current_run_id, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyRunCurrentStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyRunCurrentStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyDrainingIdle(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ (meerkat_resumable_run_id = packet.payload.run_id)
+       /\ (meerkat_registration_phase = "Draining")
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyDrainingIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyDrainingIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyDrainingAttached(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ (meerkat_resumable_run_id = packet.payload.run_id)
+       /\ (meerkat_registration_phase = "Draining")
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyDrainingAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyDrainingAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyStaleRunIdle(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ (meerkat_resumable_run_id # packet.payload.run_id)
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyStaleRunIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyStaleRunIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyStaleRunAttached(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ (meerkat_resumable_run_id # packet.payload.run_id)
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyStaleRunAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyStaleRunAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyNotServingInitializing(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyNotServingInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyNotServingInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyNotServingRunning(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyNotServingRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyNotServingRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyNotServingRetired(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyNotServingRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyNotServingRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunBusyNotServingStopped(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id # None)
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "Busy"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunBusyNotServingStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunBusyNotServingStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunNotRetainedInitializing(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Initializing"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id = None)
+       /\ meerkat_phase' = "Initializing"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunNotRetainedInitializing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunNotRetainedInitializing", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Initializing"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunNotRetainedIdle(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id = None)
+       /\ meerkat_phase' = "Idle"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunNotRetainedIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunNotRetainedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunNotRetainedAttached(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id = None)
+       /\ meerkat_phase' = "Attached"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunNotRetainedAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunNotRetainedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunNotRetainedRunning(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id = None)
+       /\ meerkat_phase' = "Running"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunNotRetainedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunNotRetainedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunNotRetainedRetired(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id = None)
+       /\ meerkat_phase' = "Retired"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunNotRetainedRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunNotRetainedRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunNotRetainedStopped(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_current_run_id = None)
+       /\ (meerkat_resumable_run_id = None)
+       /\ meerkat_phase' = "Stopped"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunNotRetainedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunNotRetainedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_SettleRetainedRunInertDestroyed(arg_run_id) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "SettleRetainedRun"
+       /\ packet.payload.run_id = arg_run_id
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Destroyed"
+       /\ meerkat_phase' = "Destroyed"
+       /\ UnchangedFrame_a71dc3dcbb88c18d
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RetainedRunSettleResolved", payload |-> [run_id |-> None, verdict |-> "NotRetained"], effect_id |-> (model_step_count + 1), source_transition |-> "SettleRetainedRunInertDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "SettleRetainedRunInertDestroyed", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_d2e65ac0b2ee17fd
+       /\ model_step_count' = model_step_count + 1
+
+
 meerkat_live_delegation_steer_records_are_authorized_and_single == ((DOMAIN meerkat_live_delegation_steer_digest_by_continuation = DOMAIN meerkat_live_delegation_steer_operation_by_continuation) /\ (DOMAIN meerkat_live_delegation_steer_reconciliation_by_continuation = DOMAIN meerkat_live_delegation_steer_operation_by_continuation) /\ (\A continuation_id \in DOMAIN meerkat_live_delegation_steer_delivered_by_continuation : (continuation_id \in DOMAIN meerkat_live_delegation_steer_operation_by_continuation)))
 meerkat_live_media_health_budget_and_verdicts_are_consistent == ((\A budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session : ((IF "value" \in DOMAIN (IF (budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session) THEN Some((IF budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session THEN meerkat_live_media_fault_reopens_by_session[budget_session] ELSE 0)) ELSE None) THEN (IF (budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session) THEN Some((IF budget_session \in DOMAIN meerkat_live_media_fault_reopens_by_session THEN meerkat_live_media_fault_reopens_by_session[budget_session] ELSE 0)) ELSE None)["value"] ELSE None) <= 1)) /\ (\A verdict_channel \in DOMAIN meerkat_live_media_fault_reopen_recommended_by_channel : (IF (verdict_channel \in meerkat_live_media_health_judged_channels) THEN TRUE ELSE (verdict_channel \in DOMAIN meerkat_live_close_status_by_channel))) /\ (\A judged_channel \in meerkat_live_media_health_judged_channels : (judged_channel \in DOMAIN meerkat_live_media_health_requested_output_by_channel)) /\ (IF (meerkat_session_id # None) THEN TRUE ELSE ((meerkat_live_media_health_requested_output_by_channel = [x \in {} |-> None]) /\ (meerkat_live_media_health_judged_channels = {}) /\ (meerkat_live_media_fault_reopen_recommended_by_channel = [x \in {} |-> None]) /\ (meerkat_live_media_fault_reopens_by_session = [x \in {} |-> None]))))
 meerkat_fence_requires_bound_runtime == (IF (meerkat_active_fence_token = None) THEN TRUE ELSE (meerkat_active_runtime_id # None))
@@ -138933,6 +139420,29 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "ReleaseInputController") /\ (meerkat_phase = "Running") /\ ((packet.payload.input_id \in meerkat_input_controller_holds))
     \/ /\ (packet.variant = "ReleaseInputController") /\ (meerkat_phase = "Retired") /\ ((packet.payload.input_id \in meerkat_input_controller_holds))
     \/ /\ (packet.variant = "ReleaseInputController") /\ (meerkat_phase = "Stopped") /\ ((packet.payload.input_id \in meerkat_input_controller_holds))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Idle") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None)) /\ ((meerkat_resumable_run_id = packet.payload.run_id)) /\ ((meerkat_registration_phase # "Draining"))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Attached") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None)) /\ ((meerkat_resumable_run_id = packet.payload.run_id)) /\ ((meerkat_registration_phase # "Draining"))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Initializing") /\ ((meerkat_current_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Idle") /\ ((meerkat_current_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Attached") /\ ((meerkat_current_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Running") /\ ((meerkat_current_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Retired") /\ ((meerkat_current_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Stopped") /\ ((meerkat_current_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Idle") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None)) /\ ((meerkat_resumable_run_id = packet.payload.run_id)) /\ ((meerkat_registration_phase = "Draining"))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Attached") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None)) /\ ((meerkat_resumable_run_id = packet.payload.run_id)) /\ ((meerkat_registration_phase = "Draining"))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Idle") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None)) /\ ((meerkat_resumable_run_id # packet.payload.run_id))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Attached") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None)) /\ ((meerkat_resumable_run_id # packet.payload.run_id))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Initializing") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Running") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Retired") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Stopped") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id # None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Initializing") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id = None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Idle") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id = None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Attached") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id = None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Running") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id = None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Retired") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id = None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Stopped") /\ ((meerkat_current_run_id = None)) /\ ((meerkat_resumable_run_id = None))
+    \/ /\ (packet.variant = "SettleRetainedRun") /\ (meerkat_phase = "Destroyed")
 
 mob__entry_packet__operator_instruction_write_well_formed(revision, digest, kind, profile, member) == ((revision >= 1) /\ (digest # "") /\ (IF ((kind = "Mob") /\ (profile = "") /\ (member = None)) THEN TRUE ELSE (IF ((kind = "Profile") /\ (profile # "") /\ (member = None)) THEN TRUE ELSE ((kind = "Member") /\ (profile = "") /\ (member # None)))))
 
@@ -144882,6 +145392,29 @@ CoreNext ==
     \/ \E arg_input_id \in StringValues : meerkat_ReleaseInputControllerRunning(arg_input_id)
     \/ \E arg_input_id \in StringValues : meerkat_ReleaseInputControllerRetired(arg_input_id)
     \/ \E arg_input_id \in StringValues : meerkat_ReleaseInputControllerStopped(arg_input_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunAcceptedIdle(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunAcceptedAttached(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyRunCurrentInitializing(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyRunCurrentIdle(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyRunCurrentAttached(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyRunCurrentRunning(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyRunCurrentRetired(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyRunCurrentStopped(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyDrainingIdle(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyDrainingAttached(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyStaleRunIdle(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyStaleRunAttached(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyNotServingInitializing(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyNotServingRunning(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyNotServingRetired(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunBusyNotServingStopped(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunNotRetainedInitializing(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunNotRetainedIdle(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunNotRetainedAttached(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunNotRetainedRunning(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunNotRetainedRetired(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunNotRetainedStopped(arg_run_id)
+    \/ \E arg_run_id \in OptionRunIdValues : meerkat_SettleRetainedRunInertDestroyed(arg_run_id)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : mob_ClassifyFlowRunTerminalityTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : mob_ClassifyFlowRunTerminalityNonTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_step_id \in StepIdValues : \E arg_status \in StepRunStatusValues : mob_ClassifyFlowStepTerminalityTerminalRunning(arg_run_id, arg_step_id, arg_status)

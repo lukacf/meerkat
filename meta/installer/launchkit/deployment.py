@@ -25,7 +25,7 @@ from urllib.parse import quote, urlencode
 from .projects import DraftConflict, fingerprint
 from .templates.storage_setup import project_lock, write_private
 from .templates_v2.application_configuration import validate_application_fields, validate_configuration_values
-from .templates_v2.console_configuration import (console_configuration,
+from .templates_v2.console_configuration import (console_authentication_choice, console_configuration,
     console_authentication as declared_console_authentication, validate_console_configuration_values)
 from .artifact_binding import package_matches, report_brief_hash, matches as artifact_matches, current_version, proposal_hash
 from .deployment_deadlines import (WORKER_STOP_TIMEOUT, PROCESS_FORCE_REAP_TIMEOUT,
@@ -660,16 +660,23 @@ def package_console_scope(files, fields, state):
     entry = files.get("application/console.json")
     if entry is not None:
         try:
-            if len(entry[0]) > 4096 or json.loads(entry[0].decode("utf-8")) != {"authentication": "local-password"}:
+            declared_value = json.loads(entry[0].decode("utf-8")) if len(entry[0]) <= 4096 else None
+            # One shared account, named accounts besides the installation's
+            # own, or people signed in at an identity provider, whose client
+            # secret the source only ever references.
+            oidc = isinstance(declared_value, dict) and declared_value.get("authentication") == "oidc"
+            if oidc:
+                declared_console_authentication(declared_value, fields)
+            elif declared_value not in ({"authentication": "local-password"}, {"authentication": "local-accounts"}):
                 raise ValueError
         except (ValueError, UnicodeError):
             raise ValueError("The accepted package has invalid Console authentication metadata.") from None
         declared = {field["key"]: field for field in fields}
-        if any(key not in declared or declared[key].get("required") is not True
+        if not oidc and any(key not in declared or declared[key].get("required") is not True
                or declared[key].get("secret") is not secret or "default" in declared[key]
                for key, secret in [("CONSOLE_USER_ID", False), ("CONSOLE_LOGIN_PASSWORD", True)]):
             raise ValueError("Authenticated Console metadata needs its required private setup fields.")
-        authentication = "local-password"
+        authentication = declared_value["authentication"]
     interfaces = (state.get("brief") or {}).get("facts", {}).get("interfaces") or {}
     requested = interfaces.get("summary", "") if interfaces.get("source_message_ids") else ""
     return {"authentication": authentication, "health_scope": "native-bootstrap-and-console",
@@ -970,14 +977,19 @@ def prepare_private_settings(destination, fields, submitted, use_host, *, port=N
     validate_configuration_values(fields, values)
     if console_authentication is None:
         authenticated_console = console_configuration(destination, fields)
-    elif console_authentication in {"loopback-only", "local-password"}:
-        authenticated_console = console_authentication == "local-password"
+        if authenticated_console:
+            console_authentication = console_authentication_choice(destination, fields)
+    elif console_authentication in {"loopback-only", "local-password", "local-accounts"}:
+        authenticated_console = console_authentication != "loopback-only"
         if authenticated_console:
             declared_console_authentication({"authentication": console_authentication}, fields)
+    elif console_authentication == "oidc":
+        # The package's scope already checked its OIDC source and fields.
+        authenticated_console = True
     else:
         raise ValueError("The package has unsupported Console authentication metadata.")
     if authenticated_console:
-        validate_console_configuration_values(fields, values)
+        validate_console_configuration_values(fields, values, console_authentication)
     _serialized_private_configuration(values)
     return values
 
@@ -1072,9 +1084,10 @@ def private_settings(destination, fields, submitted, use_host, *, port=None):
 def validate_installed_console_settings(files, destination):
     """Check retained values against the verified package before restart admission."""
     fields = package_configuration_fields(json.loads(files["deployment.json"][0]), files)
-    if package_console_scope(files, fields, {})["authentication"] == "local-password":
+    authentication = package_console_scope(files, fields, {})["authentication"]
+    if authentication != "loopback-only":
         values, _ = private_configuration_snapshot(destination)
-        validate_console_configuration_values(fields, values)
+        validate_console_configuration_values(fields, values, authentication)
 
 
 def read_configuration_presence(path):

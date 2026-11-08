@@ -574,3 +574,151 @@ async def test_update_staged_before_the_first_setup_keeps_that_setup_available_o
     receipt = deployment.read_receipt(directory)
     assert receipt["build_id"] == installed["build_id"]
     assert (receipt["update"]["update_id"], receipt["update"]["status"]) == (update["update_id"], "staged")
+
+
+# Option (b): an installation set up with one shared console account
+# (`local-password`, as every installation built before named accounts is)
+# moves to named accounts (`local-accounts`) on its next update. The setup
+# owner accepts exactly that one change and nothing else.
+SHARED_CONSOLE = b'{"authentication":"local-password"}\n'
+NAMED_CONSOLE = b'{"authentication":"local-accounts"}\n'
+
+
+@pytest.fixture
+def built_with_one_shared_account(monkeypatch):
+    """An installation built and set up before named accounts.
+
+    Its source declares one shared console account, and its Builds kept that
+    declaration, as Forge did then. The returned function stands for this
+    Forge: its later Builds declare named accounts over the pinned source.
+    """
+    from launchkit import local_application_source
+    original = local_application_source._json_bytes
+
+    def earlier(value):
+        return original({"authentication": "local-password"} if value == {"authentication": "local-accounts"}
+                        else value)
+    monkeypatch.setattr(local_application_source, "_json_bytes", earlier)
+    current = getattr(updates, "named_console_accounts_source", None)
+    monkeypatch.setattr(updates, "named_console_accounts_source", lambda pinned: None, raising=False)
+
+    def this_forge():
+        monkeypatch.setattr(updates, "named_console_accounts_source", current, raising=False)
+    return this_forge
+
+
+def installed_console(f):
+    receipt = deployment.read_receipt(f.directory)
+    _, files = updates.checked_package(f.directory, "package.zip", receipt["package_sha256"])
+    return files["application/console.json"], (f.destination / "application/console.json").read_bytes()
+
+
+def edited_candidate(f, monkeypatch, build_id, edits):
+    """The candidate package carries other protected bytes, edited at the Stage boundary."""
+    original = f.implementation.package
+
+    async def package(guide_id, selected_build_id, *args, **kwargs):
+        payload, other = await original(guide_id, selected_build_id, *args, **kwargs)
+        if selected_build_id != build_id:
+            return payload, other
+        files = deployment.package_files(payload)
+        for name, content in edits.items():
+            files[name] = (content, files[name][1])
+        return packed(files), other
+
+    monkeypatch.setattr(f.implementation, "package", package)
+
+
+async def candidate_files(f, build_id):
+    payload, _ = await f.implementation.package(f.guide_id, build_id)
+    return deployment.package_files(payload)
+
+
+async def test_a_set_up_shared_account_moves_to_named_accounts_on_its_next_update(
+        built_with_one_shared_account, set_up, monkeypatch):
+    f = set_up
+    assert installed_console(f) == ((SHARED_CONSOLE, 0o644), SHARED_CONSOLE)
+    private = (f.destination / ".env").read_bytes()
+    access = (f.destination / "config/access.toml").read_bytes()
+    built_with_one_shared_account()
+    second = await continuation(f)
+    files = await candidate_files(f, second["build_id"])
+    # The follow-up Build writes named accounts over the pinned shared account.
+    assert files["application/console.json"] == (NAMED_CONSOLE, 0o644)
+    assert forge_application_host.owner_choices_match(f.host, files)
+    update = await stage(f, second["build_id"])
+    assert update["status"] == "staged" and update["blockers"] == []
+    assert {"path": "application/console.json", "change": "changed"} in update["changes"]
+    await apply(f, monkeypatch, update)
+    receipt = deployment.read_receipt(f.directory)
+    assert receipt["build_id"] == second["build_id"] and receipt["update"]["status"] == "completed"
+    assert installed_console(f) == ((NAMED_CONSOLE, 0o644), NAMED_CONSOLE)
+    assert (f.destination / ".env").read_bytes() == private
+    assert (f.destination / "config/access.toml").read_bytes() == access
+    # Change private settings, the next Start (Restore) and the owner's
+    # recovery after a Forge restart all accept the moved installation.
+    from launchkit.deployment_sources import read_package_source
+    _, installed = updates.checked_package(f.directory, "package.zip", receipt["package_sha256"])
+    await f.service.configure(f.guide_id, f.store.get(f.guide_id)["version"], f.directory.name,
+        receipt["build_id"], read_package_source(installed, receipt)["source_digest"], receipt["package_sha256"],
+        settings={}, application_settings_validator=f.registry.validate_installed_settings)
+    assert await start(f) == json.loads(f.restore.read())
+    stopped = await f.service.action(f.guide_id, f.directory.name, "stop", action_request_id=str(uuid4()))
+    assert stopped["action_request"]["outcome"] == "returned"
+    await f.implementation.shutdown()
+    restarted = reloaded(f, monkeypatch)
+    try:
+        assert await start(f, restarted.service) == json.loads(f.restore.read())
+        assert restarted.registry.selected_host(f.guide_id, f.directory.name) is not f.host
+    finally:
+        await restarted.implementation.shutdown()
+
+
+@pytest.mark.parametrize("console", [NAMED_CONSOLE, b'{\n  "authentication": "local-accounts"\n}\n'])
+async def test_the_setup_owner_accepts_the_one_console_move_however_it_is_written(
+        built_with_one_shared_account, set_up, monkeypatch, console):
+    f = set_up
+    built_with_one_shared_account()
+    second = await continuation(f)
+    edited_candidate(f, monkeypatch, second["build_id"], {"application/console.json": console})
+    assert forge_application_host.owner_choices_match(f.host, await candidate_files(f, second["build_id"]))
+    update = await stage(f, second["build_id"])
+    assert update["status"] == "staged" and update["blockers"] == []
+
+
+@pytest.mark.parametrize("variant", ["configuration", "access", "oidc", "extra-key", "unchanged-but-access"])
+async def test_the_setup_owner_refuses_every_other_console_or_protected_change(
+        built_with_one_shared_account, set_up, monkeypatch, variant):
+    f = set_up
+    built_with_one_shared_account()
+    second = await continuation(f)
+    files = await candidate_files(f, second["build_id"])
+    access = files["config/access.toml"][0]
+    configuration = json.loads(files["application/configuration.json"][0])
+    edits = {
+        "configuration": {"application/configuration.json": json.dumps({**configuration, "changed": True}).encode()},
+        "access": {"config/access.toml": access.replace(b"rules = []", b'rules = []\n# changed after setup')},
+        "oidc": {"application/console.json": json.dumps({"authentication": "oidc",
+            "issuer": "https://login.example.test", "client_id": "forge-console",
+            "client_secret": {"env": "CONSOLE_OIDC_CLIENT_SECRET"}}).encode()},
+        "extra-key": {"application/console.json": b'{"authentication":"local-accounts","accounts":[]}\n'},
+        "unchanged-but-access": {"application/console.json": SHARED_CONSOLE,
+                                 "config/access.toml": access + b"\n"},
+    }[variant]
+    edited_candidate(f, monkeypatch, second["build_id"], edits)
+    assert not forge_application_host.owner_choices_match(f.host, await candidate_files(f, second["build_id"]))
+    update = await stage(f, second["build_id"])
+    assert update["status"] == "blocked" and updates.SETUP_OWNER_BLOCKER in update["blockers"]
+    assert installed_console(f) == ((SHARED_CONSOLE, 0o644), SHARED_CONSOLE)
+
+
+async def test_named_accounts_never_move_back_to_one_shared_account(set_up, monkeypatch):
+    f = set_up
+    assert installed_console(f) == ((NAMED_CONSOLE, 0o644), NAMED_CONSOLE)
+    second = await continuation(f)
+    assert (await candidate_files(f, second["build_id"]))["application/console.json"] == (NAMED_CONSOLE, 0o644)
+    edited_candidate(f, monkeypatch, second["build_id"], {"application/console.json": SHARED_CONSOLE})
+    assert not forge_application_host.owner_choices_match(f.host, await candidate_files(f, second["build_id"]))
+    update = await stage(f, second["build_id"])
+    assert update["status"] == "blocked" and updates.SETUP_OWNER_BLOCKER in update["blockers"]
+    assert installed_console(f) == ((NAMED_CONSOLE, 0o644), NAMED_CONSOLE)

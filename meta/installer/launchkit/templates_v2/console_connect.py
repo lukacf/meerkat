@@ -30,7 +30,7 @@ COMPLETIONS = {"completed", "completed_without_result", "callback_pending",
 REFUSALS = {"unavailable", "busy", "invalid_message", "history_unavailable", "turn_uncertain",
             "stop_unavailable", "stop_uncertain", "invalid_binding", "binding_retired",
             "stale_prompt", "invalid_answer", "native_auth_required", "unsupported_presenter",
-            "required_context_missing", "shutdown_unconfirmed"}
+            "required_context_missing", "shutdown_unconfirmed", "approver_unauthenticated"}
 RETIRE_REASONS = {"logout", "login_expired", "realm_changed", "application_stopping", "bridge_lost"}
 _HOST_ID = re.compile(r"h:[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 _BROWSER_ASSOCIATION = re.compile(r"b:[0-9a-f]{32}\Z", re.ASCII)

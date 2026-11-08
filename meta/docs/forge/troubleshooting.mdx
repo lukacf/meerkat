@@ -349,6 +349,67 @@ Choose **Change private settings**, enter a replacement Console password and
 choose **Save private settings**; blank fields keep their saved values. Start
 the same installation again and use its current Console link.
 
+A named account's password is changed by the operator on the deployment
+computer: run `.venv/bin/python setup.py` in the project folder, press Enter to
+keep each saved setting, enter the account name and a new password, then
+restart the application.
+
+### Sign-in says "Too many login attempts"
+
+Failed sign-ins are limited per account and per client address for one
+minute. The address is the connection's own, so everyone who reaches the
+Console through one relay (an SSH or IAP tunnel, a TLS ingress) shares that
+relay's address limit. Wait a minute, then sign in again.
+
+Sign-in forms, and OIDC sign-ins waiting for the identity provider, are
+bounded per address and in total. A full table refuses no one: the oldest form
+or waiting sign-in goes first. A flood of sign-in attempts through one shared
+address can still make other people's forms expire early ("This sign-in form
+expired") or end their waiting sign-in. Put a Console that other computers
+reach behind a rate-limiting proxy.
+
+### OIDC sign-in is refused
+
+An application with OIDC sign-in sends people to its identity provider and
+admits only a verified email that is the operator's or on the
+`CONSOLE_ALLOWED_EMAILS` list. The refusal page says which:
+- no verified email: the provider did not confirm one for that account;
+  confirm it there, or use an account whose email the provider verifies. A
+  provider that does not send `email_verified: true` in its ID tokens signs
+  nobody in; some do not send it by default, so configure the provider to
+  send it;
+- not on the list: the operator adds the address to `CONSOLE_ALLOWED_EMAILS`
+  with **Change private settings**, then restarts the application;
+- the identity provider is unavailable: the Console could not read the
+  provider's settings or keys. Check that the provider is reachable from the
+  deployment computer and that its issuer is exactly the one in
+  `application/console.json`;
+- the identity provider did not answer in time (504), or sent an answer the
+  Console could not read (502): try again; if it keeps happening, check the
+  provider and its settings;
+- the sign-in expired or was started elsewhere: a sign-in lasts ten minutes
+  and finishes in the browser that started it. Sign in again.
+
+The provider must list the Console's `/login/callback` address as a redirect
+URI, or it refuses the sign-in before it reaches the Console.
+
+Signing out of the Console does not sign you out at the identity provider. On
+a shared computer, sign out at the provider too, or the next **Continue to
+sign in** opens your Console again without asking.
+
+### Administrators added in the Console after a rollback
+
+The Console keeps its access rules, the administrators and rules added in its
+Access panel included, in `.mobkit/console-access.toml`. Its first start
+copies that file from the package's `config/access.toml`, which stays as
+installed. A package built by an earlier Forge reads `config/access.toml`
+instead, so after a rollback to such a package the administrators added in
+the Console are missing there and access fails closed. Do not add them again
+in that Console: that rewrites `config/access.toml`, and Forge then refuses
+to start, change or update the installation. Update forward instead. The
+rollback leaves `.mobkit/console-access.toml` as it was, and the updated
+Console reads it again.
+
 ### An update crosses into Meta 0.9.4
 
 Meta 0.9.4 keeps sessions and identities in Core's own stores and refuses a

@@ -608,36 +608,26 @@ async fn incident_pack_gating_approval_notification_fires_from_async_context() {
     // teardown: the gated member turn stays parked (runtime session
     // "attached") while the decision is outstanding, and terminal shutdown
     // cannot interrupt a parked turn - the supervisor route would stay live
-    // and block the next stock-bundle bootstrap in this process.
-    let decided = json_response(
-        app,
-        Request::builder()
-            .method("POST")
-            .uri("/console/rpc")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": "incident-pack-gating-decide",
-                    "method": "meta/gating/decide",
-                    "params": {
-                        "pending_id": seeded["pending_id"],
-                        // The seeded pending pins its approver; a mismatched
-                        // principal is refused.
-                        "approver_id": seeded["requested_approver"]
-                            .as_str()
-                            .unwrap_or("incident-pack-test-operator"),
-                        "decision": "reject",
-                        "reason": "test teardown: settle the seeded pending action",
-                    },
-                })
+    // and block the next stock-bundle bootstrap in this process. This open
+    // console has no signed-in person to decide, so the host decides through
+    // its own trusted route, naming the pinned approver.
+    let decided = bundle
+        .runtime
+        .decide_gating_action(meerkat_meta::GatingDecideRequest {
+            pending_id: seeded["pending_id"]
+                .as_str()
+                .expect("seeded pending id")
                 .to_string(),
-            ))
-            .expect("gating decide request"),
-    )
-    .await;
+            approver_id: seeded["requested_approver"]
+                .as_str()
+                .unwrap_or("incident-pack-test-operator")
+                .to_string(),
+            decision: meerkat_meta::GatingDecision::Reject,
+            reason: Some("test teardown: settle the seeded pending action".to_string()),
+        })
+        .await;
     assert!(
-        decided["error"].is_null(),
+        decided.is_ok(),
         "seeded pending action must be decidable: {decided:#?}"
     );
     // Retire the roster through the ordinary reconcile path before terminal

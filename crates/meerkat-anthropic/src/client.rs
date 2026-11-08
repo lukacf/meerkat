@@ -1691,7 +1691,7 @@ impl AnthropicClient {
         &self,
         mut request: reqwest::RequestBuilder,
         url: &str,
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         request_betas: &mut Vec<String>,
     ) -> Result<
         (
@@ -1708,10 +1708,7 @@ impl AnthropicClient {
         };
         let mut extra = Vec::new();
         authorizer
-            .append_content_headers(
-                meerkat_core::HttpAuthorizationContent { has_images },
-                &mut extra,
-            )
+            .append_content_headers(content, &mut extra)
             .map_err(|error| LlmError::AuthenticationFailed {
                 message: error.to_string(),
             })?;
@@ -1746,7 +1743,7 @@ impl AnthropicClient {
         url: &str,
         body: &Value,
         betas: &[String],
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         prepared: Option<&meerkat_llm_core::PreparedLlmRequest>,
         diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
@@ -1814,7 +1811,7 @@ impl AnthropicClient {
         #[cfg(target_arch = "wasm32")]
         let http = self.http()?;
         #[cfg(target_arch = "wasm32")]
-        let _ = has_images;
+        let _ = content;
         #[cfg(not(target_arch = "wasm32"))]
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
@@ -1825,7 +1822,7 @@ impl AnthropicClient {
             .header("Content-Type", "application/json");
         #[cfg(not(target_arch = "wasm32"))]
         let (mut request, receipt) = self
-            .apply_authorization(request, url, has_images, &mut request_betas)
+            .apply_authorization(request, url, content, &mut request_betas)
             .await?;
         #[cfg(target_arch = "wasm32")]
         let mut request = request
@@ -2086,10 +2083,16 @@ impl AnthropicClient {
             }
 
             let url = self.messages_endpoint();
-            let has_images = request.has_images();
+            let content = meerkat_core::HttpAuthorizationContent {
+                has_images: request.has_images(),
+                initiator: prepared.map_or_else(
+                    || request.initiator(),
+                    meerkat_llm_core::PreparedLlmRequest::initiator,
+                ),
+            };
             let mut diagnostics = Vec::new();
             let response_with_receipt =
-                self.send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics).await;
+                self.send_messages_request(&url, &body, &betas, content, prepared, &mut diagnostics).await;
             for diagnostic in diagnostics.drain(..) { yield diagnostic; }
             let response_with_receipt = response_with_receipt?;
             #[cfg(not(target_arch = "wasm32"))]
@@ -2119,7 +2122,7 @@ impl AnthropicClient {
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
                 let retried = self
-                    .send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics)
+                    .send_messages_request(&url, &body, &betas, content, prepared, &mut diagnostics)
                     .await;
                 for diagnostic in diagnostics.drain(..) { yield diagnostic; }
                 let retried = retried?;
@@ -5556,6 +5559,130 @@ mod tests {
         server.abort();
     }
 
+    /// Records the initiator every request hands it and answers a 401 with a
+    /// retry.
+    #[derive(Default)]
+    struct InitiatorRecordingAuthorizer {
+        initiators: Mutex<Vec<meerkat_core::HttpRequestInitiator>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for InitiatorRecordingAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer recorded".to_string()));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "initiator-recording"
+        }
+
+        fn append_content_headers(
+            &self,
+            content: meerkat_core::HttpAuthorizationContent,
+            _headers: &mut Vec<(String, String)>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            self.initiators
+                .lock()
+                .expect("initiator record lock")
+                .push(content.initiator);
+            Ok(())
+        }
+    }
+
+    /// A Messages request tells its authorizer who initiated it, from its
+    /// last input: the agent after a tool result, the user after a user
+    /// message; a 401 retry tells the same.
+    #[tokio::test]
+    async fn messages_requests_name_who_initiated_them_on_every_attempt() {
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":1},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let tool_turn = vec![
+            Message::User(UserMessage::text("look it up")),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string())
+                        .expect("raw args"),
+                    meta: None,
+                }],
+                meerkat_core::StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![meerkat_core::ToolResult::new(
+                "toolu_1".to_string(),
+                "found".to_string(),
+                false,
+            )]),
+        ];
+        let cases = [
+            (
+                "a user message",
+                vec![Message::User(UserMessage::text("hello"))],
+                User,
+            ),
+            ("a tool result", tool_turn, Agent),
+        ];
+        for (case, messages, initiator) in cases {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let app = Router::new()
+                .route("/v1/messages", post(anthropic_auth_retry))
+                .with_state(AnthropicAuthRetryState {
+                    calls: Arc::clone(&calls),
+                    payload: payload.clone(),
+                });
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve test server");
+            });
+            let authorizer = Arc::new(InitiatorRecordingAuthorizer::default());
+            let client = AnthropicClient::builder(String::new())
+                .base_url(format!("http://{addr}"))
+                .authorizer(authorizer.clone())
+                .build()
+                .expect("client");
+            let request = LlmRequest::new("claude-sonnet-4-5", messages);
+            let _ = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{case}: the 401 is retried once"
+            );
+            assert_eq!(
+                *authorizer.initiators.lock().expect("initiator record lock"),
+                vec![initiator; 2],
+                "{case}: both attempts name the same initiator"
+            );
+        }
+    }
+
     /// Every Authorization value the canary authorizer signs with carries
     /// this canary.
     const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
@@ -5600,7 +5727,12 @@ mod tests {
         let url = client.messages_endpoint();
         let mut betas = Vec::new();
         let (builder, _) = client
-            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .apply_authorization(
+                reqwest::Client::new().post(&url),
+                &url,
+                meerkat_core::HttpAuthorizationContent::default(),
+                &mut betas,
+            )
             .await
             .expect("the authorizer signs the request");
         let request = builder.build().expect("the request builds");
@@ -5634,7 +5766,12 @@ mod tests {
         let url = client.messages_endpoint();
         let mut betas = Vec::new();
         let (builder, _) = client
-            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .apply_authorization(
+                reqwest::Client::new().post(&url),
+                &url,
+                meerkat_core::HttpAuthorizationContent::default(),
+                &mut betas,
+            )
             .await
             .expect("the key signs the request");
         let request = builder.build().expect("the request builds");

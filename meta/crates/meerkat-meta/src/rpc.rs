@@ -8445,6 +8445,39 @@ mod tests {
         }
     }
 
+    /// A candidate launch refuses the realm MCP writes (the realm's own
+    /// config document and its credential store are the authoritative
+    /// launch's) and serves the listing.
+    #[test]
+    fn a_candidate_launch_refuses_realm_mcp_writes_and_serves_the_listing() {
+        for method in [
+            "meta/realm_mcp/install",
+            "meta/realm_mcp/set_secret",
+            "meta/realm_mcp/remove_secret",
+        ] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+        }
+        assert!(
+            super::candidate_launch_refusal(
+                false,
+                None,
+                "meta/realm_mcp/servers",
+                &json!({}),
+                json!(7)
+            )
+            .is_none(),
+            "a candidate serves the listing"
+        );
+    }
+
     /// A candidate's refusal of a session revocation sends the operator to
     /// the authoritative launch.
     #[test]

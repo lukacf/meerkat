@@ -9708,3 +9708,97 @@ fn item_body<'a>(code: &'a str, header: &str) -> &'a str {
     }
     ""
 }
+
+/// A tool grant's seat of an identity Core holds a member of takes no Core
+/// step: the grant proceeds on the member Core keeps, and nothing wakes.
+#[tokio::test]
+async fn a_grant_seat_of_an_identity_core_holds_takes_no_core_step() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let seated = identity("personal:seated");
+    let outcomes = roster_pass(&runtime, &[spec(&seated)], None).await;
+    assert!(pass_refusal(&outcomes[&seated]).is_none(), "{outcomes:?}");
+    let applies = core.apply_calls.load(Ordering::SeqCst);
+
+    runtime
+        .seat_for_tool_grant(&seated)
+        .await
+        .expect("the grant proceeds on the member Core keeps");
+
+    assert_eq!(
+        core.apply_calls.load(Ordering::SeqCst),
+        applies,
+        "an identity Core holds takes no Core step"
+    );
+    assert_eq!(core.wakes.load(Ordering::SeqCst), 0, "nothing woke");
+}
+
+/// A grant never creates a member: an identity placed on a member host,
+/// which Core holds no member of, is answered hosted on its first use by the
+/// grant's one-identity declaration, and the grant's seat leaves it for that
+/// first use. Nothing is created through the host and Core holds no member
+/// of it, so the grant method then finds none (`subject_unknown`).
+#[tokio::test]
+async fn a_grant_seat_leaves_an_identity_hosted_on_its_first_use_for_it() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let placed_identity = identity("personal:placed");
+    let _ = roster_pass(&runtime, &[placed(&placed_identity)], None).await;
+
+    runtime
+        .seat_for_tool_grant(&placed_identity)
+        .await
+        .expect("the grant's seat answers");
+
+    assert_eq!(
+        core.creates.load(Ordering::SeqCst),
+        0,
+        "a grant creates no member through a host"
+    );
+    assert!(
+        runtime
+            .core_live_member(&placed_identity)
+            .await
+            .expect("Core's live member reads")
+            .is_none(),
+        "Core holds no member of the placed identity"
+    );
+}
+
+/// A seat Core refuses (a lifecycle refusal of the door's declaration)
+/// answers the door's typed refusal, the one a delivery to the identity
+/// answers, and binds nothing: a grant refusal kind is for the request's own
+/// faults, and this is the identity's lifecycle state with its own retry
+/// rule.
+#[tokio::test]
+async fn a_grant_seat_core_refuses_answers_the_typed_refusal_a_delivery_answers() {
+    let refused = identity("personal:refused");
+    let core = Arc::new(SeatCore {
+        refused: Some(refused.clone()),
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    let _ = roster_pass(&runtime, &[spec(&refused)], None).await;
+
+    let grant_seat = runtime
+        .seat_for_tool_grant(&refused)
+        .await
+        .expect_err("Core refuses the grant's seat");
+    let delivery = runtime
+        .materialize(&refused)
+        .await
+        .expect_err("Core refuses the delivery's seat");
+
+    assert_eq!(
+        (
+            crate::rpc::identity_error_code(&grant_seat),
+            grant_seat.structured_data()
+        ),
+        (
+            crate::rpc::identity_error_code(&delivery),
+            delivery.structured_data()
+        ),
+        "the grant answers the delivery's typed refusal: {grant_seat} / {delivery}"
+    );
+    assert_eq!(core.session_of(&refused), None, "nothing is bound");
+}

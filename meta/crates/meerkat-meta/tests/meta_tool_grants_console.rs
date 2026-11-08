@@ -372,3 +372,51 @@ async fn console_tool_grant_refusals_are_typed() {
     assert_eq!(refusal_kind(&not_found), "not_found");
     let _ = runtime.shutdown().await;
 }
+
+/// The Console serves the grant methods whole and advertises them, and
+/// serves neither the methods later parts add (`meta/tool_grants/attach`
+/// and `request`) nor any realm MCP method (host administration, served on
+/// the stdio gateway only): each of those is method not found here and
+/// absent from the capabilities.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_serves_the_grant_methods_whole_and_no_realm_mcp_method() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console(temp.path(), None).await;
+    let capabilities = rpc(&app, ADMIN, "meta/capabilities", json!({})).await;
+    let methods = capabilities["result"]["methods"]
+        .as_array()
+        .unwrap_or_else(|| panic!("methods: {capabilities:#?}"))
+        .clone();
+    for method in [
+        "meta/tool_grants/grant",
+        "meta/tool_grants/revoke",
+        "meta/tool_grants/list",
+        "meta/tool_grants/audit",
+    ] {
+        assert!(
+            methods.contains(&json!(method)),
+            "{method} is advertised: {methods:?}"
+        );
+    }
+    for method in [
+        "meta/tool_grants/attach",
+        "meta/tool_grants/request",
+        "meta/realm_mcp/servers",
+        "meta/realm_mcp/install",
+        "meta/realm_mcp/set_secret",
+        "meta/realm_mcp/remove_secret",
+        "meta/realm_mcp/remove",
+    ] {
+        assert!(
+            !methods.contains(&json!(method)),
+            "{method} is not advertised: {methods:?}"
+        );
+        let answer = rpc(&app, ADMIN, method, json!({})).await;
+        assert_eq!(
+            answer["error"]["code"],
+            json!(-32601),
+            "{method} is not served: {answer:#?}"
+        );
+    }
+    let _ = runtime.shutdown().await;
+}

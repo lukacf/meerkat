@@ -87,6 +87,40 @@ grant_gated = {{ {gate} }}
     .expect("parse the gated definition")
 }
 
+/// The identity a host placed on a member host: Core creates its member
+/// through that host at its first use, never before.
+const PLACED_IDENTITY: &str = "remote-b";
+
+/// The gated definition with a second profile, `remote`, that gates nothing
+/// (a member Core places on another host carries no gate).
+fn placed_definition(mob_id: &str) -> MobDefinition {
+    MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+builtins = true
+grant_gated = {{ tools = ["{GATED_TOOL}"] }}
+
+[profiles.remote]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.remote.tools]
+comms = true
+"#
+    ))
+    .expect("parse the placed definition")
+}
+
 fn fresh_mob_id() -> String {
     format!(
         "meta-tool-grants-{}-{}",
@@ -118,6 +152,16 @@ struct OneIdentityRoster;
 impl RosterProvider for OneIdentityRoster {
     async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
         Ok(vec![spec()])
+    }
+}
+
+/// A roster of the given specs.
+struct SpecsRoster(Vec<DurableAgentSpec>);
+
+#[async_trait]
+impl RosterProvider for SpecsRoster {
+    async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -224,6 +268,16 @@ async fn boot(state: &Path, mob_id: &str) -> Rig {
 
 /// Boot the gateway's runtime composition on `state` for `definition`.
 async fn boot_with(state: &Path, definition: MobDefinition) -> Rig {
+    boot_with_roster(state, definition, Arc::new(OneIdentityRoster)).await
+}
+
+/// Boot the gateway's runtime composition on `state` for `definition`, with
+/// `roster` as the host's roster.
+async fn boot_with_roster(
+    state: &Path,
+    definition: MobDefinition,
+    roster: Arc<dyn RosterProvider>,
+) -> Rig {
     let (results, probes) = mpsc::unbounded_channel();
     let client = ProbeClient {
         next_call: Arc::new(AtomicUsize::new(0)),
@@ -235,7 +289,7 @@ async fn boot_with(state: &Path, definition: MobDefinition) -> Rig {
         .continuity_from_state_dir(state)
         .await
         .expect("open the state-dir identity substrate")
-        .roster_provider(Arc::new(OneIdentityRoster))
+        .roster_provider(roster)
         .identity_runtime_instance_id("meta-tool-grants")
         .default_llm_client(Arc::new(client));
     let runtime = Box::pin(builder.build())
@@ -727,6 +781,89 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
         )
         .await;
     assert_eq!(refusal_kind(&refused), "subject_unknown");
+    rig.shutdown().await;
+}
+
+/// An identity the host placed on a member host, which Core holds no member
+/// of, is created through that host at its first use: the door answers it
+/// hosted on its first use, and a grant never creates a member, so the grant
+/// finds none and answers `subject_unknown`, and Core holds no member of it
+/// afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_to_an_identity_hosted_on_its_first_use_is_subject_unknown_and_creates_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let placed = DurableAgentSpec {
+        identity: AgentIdentity::parse(PLACED_IDENTITY).unwrap(),
+        profile: ProfileName::from("remote"),
+        placement: Some(meerkat_contracts::WireHostRef(
+            "remote-member-host".to_string(),
+        )),
+        ..spec()
+    };
+    let rig = boot_with_roster(
+        temp.path(),
+        placed_definition(&fresh_mob_id()),
+        Arc::new(SpecsRoster(vec![spec(), placed])),
+    )
+    .await;
+    let placed_member =
+        meerkat_meta::member_comms_id::roster_member_id_for_identity(PLACED_IDENTITY);
+
+    let refused = rig
+        .rpc(
+            "meta/tool_grants/grant",
+            json!({
+                "identity": PLACED_IDENTITY,
+                "target": tool_target(),
+                "duration_ms": TEN_MINUTES_MS,
+            }),
+        )
+        .await;
+    assert_eq!(refusal_kind(&refused), "subject_unknown");
+    assert_eq!(
+        rig.runtime
+            .mob_handle()
+            .member_materialization_for_test(&placed_member),
+        None,
+        "the grant created no member"
+    );
+    rig.shutdown().await;
+}
+
+/// Each part is served whole or not at all: the methods later parts add
+/// (`meta/tool_grants/attach` and `request`, `meta/realm_mcp/remove`) are
+/// neither served nor advertised, and a runtime the stdio gateway did not
+/// compose with its realm MCP administration (this in-process one) neither
+/// serves nor advertises a `meta/realm_mcp/*` method.
+#[tokio::test(flavor = "multi_thread")]
+async fn methods_this_runtime_does_not_serve_are_neither_dispatched_nor_advertised() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let capabilities = rig.rpc("meta/capabilities", json!({})).await;
+    let methods = capabilities["result"]["methods"]
+        .as_array()
+        .unwrap_or_else(|| panic!("methods: {capabilities:#?}"))
+        .clone();
+    for method in [
+        "meta/tool_grants/attach",
+        "meta/tool_grants/request",
+        "meta/realm_mcp/servers",
+        "meta/realm_mcp/install",
+        "meta/realm_mcp/set_secret",
+        "meta/realm_mcp/remove_secret",
+        "meta/realm_mcp/remove",
+    ] {
+        assert!(
+            !methods.contains(&json!(method)),
+            "{method} is not advertised: {methods:?}"
+        );
+        let answer = rig.rpc(method, json!({})).await;
+        assert_eq!(
+            answer["error"]["code"],
+            json!(-32601),
+            "{method} is not served: {answer:#?}"
+        );
+    }
     rig.shutdown().await;
 }
 

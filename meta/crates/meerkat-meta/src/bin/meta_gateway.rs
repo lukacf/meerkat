@@ -657,6 +657,36 @@ fn member_agent_builder(factory: AgentFactory, config: Config) -> FactoryAgentBu
     builder
 }
 
+/// The startup refusal of `config/mcp_accounts.toml` naming personal servers
+/// on a launch whose member factory keeps no provider credentials.
+fn personal_accounts_unavailable(error: meerkat::HostAuthError) -> anyhow::Error {
+    anyhow!(
+        "config/mcp_accounts.toml names personal servers, and this launch has no provider \
+         credential store to keep personal accounts in: {error}"
+    )
+}
+
+/// The account modes of `config/mcp_accounts.toml`, checked against the MCP
+/// servers `definition`'s profiles declare, as the owner check this launch's
+/// member factory installs; `None` without the file or when it names no
+/// personal server.
+fn load_personal_accounts(
+    paths: &ConventionalPaths,
+    definition: &meerkat_mob::MobDefinition,
+) -> anyhow::Result<Option<meerkat_meta::PersonalAccountOwnerCheck>> {
+    let Some(path) = &paths.mcp_accounts_toml else {
+        return Ok(None);
+    };
+    let config = meerkat_meta::McpAccountsConfig::load(path)
+        .map_err(|error| anyhow!("failed to load {}: {error}", path.display()))?;
+    config
+        .check_mob_definition(definition)
+        .map_err(|refusal| anyhow!("{}: {refusal}", path.display()))?;
+    Ok(config
+        .has_personal_servers()
+        .then(|| meerkat_meta::PersonalMcpAccounts::new(config).owner_check()))
+}
+
 /// Returns (session_service, runtime_adapter, binary_blob_store).
 ///
 /// The session service and explicit runtime adapter share the same runtime
@@ -675,6 +705,7 @@ fn build_persistent_session_service(
     compaction: Option<&meerkat_core::config::CompactionRuntimeConfig>,
     member_mcp_custody: &Arc<meerkat_meta::MemberMcpCustody>,
     provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
+    personal_accounts: Option<&meerkat_meta::PersonalAccountOwnerCheck>,
 ) -> anyhow::Result<PersistentSessionServiceParts> {
     let store_dir = layout.state_dir().to_path_buf();
     fs::create_dir_all(&store_dir)
@@ -736,6 +767,20 @@ fn build_persistent_session_service(
     // Member MCP routers go into the gateway's custody, which the runtime's
     // shutdown (and again the executor-exit boundary) closes and settles.
     factory = member_mcp_custody.install(factory);
+    // Personal accounts on MCP servers: the owner check on every member's
+    // MCP adapter, and the people's accounts in this factory's credential
+    // store. The members connect to every other server without OAuth.
+    if let Some(check) = personal_accounts {
+        check
+            .keep_accounts_in(
+                &factory,
+                adapter.provider_auth_runtime_authority(),
+                meerkat_realm.clone(),
+                None,
+            )
+            .map_err(personal_accounts_unavailable)?;
+        factory = check.install(factory, None);
+    }
 
     let config = gateway_agent_config(host_config, compaction)?;
     let live_factory = factory.clone();
@@ -3038,6 +3083,8 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .with_context(|| format!("failed to load {}", path.display()))?,
         None => meerkat_meta::GatingEscalationRoutes::default(),
     };
+    // Personal accounts on MCP servers (`config/mcp_accounts.toml`).
+    let personal_accounts = load_personal_accounts(&paths, &definition)?;
     for origin in [
         Some(http_base_url.as_str()),
         http_public_base_url.as_deref(),
@@ -3092,6 +3139,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             compaction_policy.as_ref(),
             &member_mcp_custody,
             provider_auth_persistence.clone(),
+            personal_accounts.as_ref(),
         )?;
         if let Some(options) = tool_grant_options {
             options.apply(&adapter);
@@ -3220,6 +3268,19 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             factory = factory.context_root(ctx.clone());
         }
         factory = member_mcp_custody.install(factory);
+        // As in the persistent arm: the owner check and the people's
+        // accounts in this factory's credential store.
+        if let Some(check) = &personal_accounts {
+            check
+                .keep_accounts_in(
+                    &factory,
+                    adapter.provider_auth_runtime_authority(),
+                    meerkat_meta::storage_provider::default_meerkat_level_realm(),
+                    None,
+                )
+                .map_err(personal_accounts_unavailable)?;
+            factory = check.install(factory, None);
+        }
         // Same producer as the persistent arm: host config first, the
         // compaction declaration on top.
         let config = gateway_agent_config(host_config.as_ref(), compaction_policy.as_ref())?;
@@ -3343,6 +3404,12 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         (spec, None, workgraph_service, None)
     };
     let (session_spec, schedule_host_inputs, workgraph_service, voice_inputs) = session_bootstrap;
+    // Every member build classifies the personal servers it carries, with
+    // the owner check installed on the member factory above.
+    let session_spec = match &personal_accounts {
+        Some(check) => session_spec.with_personal_mcp_accounts(check.clone()),
+        None => session_spec,
+    };
     let mob_spec = session_spec.with_options(MobBootstrapOptions {
         allow_ephemeral_sessions: !persistent_sessions,
         notify_orchestrator_on_resume: true,
@@ -3930,6 +3997,66 @@ mod tests {
         // A directory that conventional discovery reports at gating.toml is
         // refused too, never read as "no gating".
         assert!(load_gating_escalation_routes(dir.path()).is_err());
+        Ok(())
+    }
+
+    /// `config/mcp_accounts.toml` loads strictly, and a personal server that
+    /// cannot use personal accounts among the profiles' MCP servers refuses
+    /// startup.
+    #[test]
+    fn mcp_accounts_toml_loads_strictly_against_the_profiles() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let config = workspace.path().join("config");
+        std::fs::create_dir(&config)?;
+        let definition = MobDefinition::from_toml(
+            r#"
+[mob]
+id = "team"
+
+[profiles.assistant]
+model = "gpt-5.5"
+
+[[profiles.assistant.tools.mcp_servers]]
+name = "files"
+command = "files-server"
+"#,
+        )?;
+        let load = || load_personal_accounts(&conventional_paths(workspace.path()), &definition);
+        assert!(load()?.is_none(), "no file: every server is system");
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.notes]\naccounts = \"personal\"\n",
+        )?;
+        let Some(check) = load()? else {
+            anyhow::bail!("a personal server must compose personal accounts");
+        };
+        assert!(check.accounts().config().is_personal("notes"));
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.notes]\naccounts = \"system\"\n",
+        )?;
+        assert!(load()?.is_none(), "no personal server: nothing to compose");
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.files]\naccounts = \"personal\"\n",
+        )?;
+        let refused = match load() {
+            Ok(_) => anyhow::bail!("a stdio personal server must refuse startup"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            refused.contains("personal_accounts_unsupported"),
+            "{refused}"
+        );
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.notes]\naccounts = \"team\"\n",
+        )?;
+        assert!(load().is_err(), "an unknown mode refuses startup");
         Ok(())
     }
 

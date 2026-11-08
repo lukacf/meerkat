@@ -490,6 +490,7 @@ impl UnifiedRuntime {
             self.mob_announcements_slot(),
             self.durable_decisions().clone(),
             self.console_audit_log(),
+            self.console_attention(),
         )
     }
 

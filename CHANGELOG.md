@@ -1544,6 +1544,14 @@ them.
   request shape. Code that names either variant must drop it; the Images API
   route keeps the `GptImage` shape.
 
+- `meerkat-core`: `service::SessionBuildOptions` gains the public field
+  `mcp_auth_resolver_override` (see Added), so a struct literal needs it;
+  `Default` fills it with `None`, which keeps every existing build
+  unchanged. Behaviour-only (not measured by the gate): `meerkat`:
+  `AgentBuildConfig::apply_session_build_options` sets
+  `AgentBuildConfig::mcp_auth_resolver` from the options, as it sets the
+  other fields, so it is `None` after options without an override.
+
 ### Added
 
 - `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-mob-mcp`,
@@ -3197,6 +3205,36 @@ them.
   hold (`member_not_found`), for a caller with manage scope too, and do
   nothing to it. Without an audience every member is known to every
   member's tools, as before.
+
+- `meerkat-core`, `meerkat`: a session build can carry its own MCP
+  credential source, `SessionBuildOptions::mcp_auth_resolver_override`: an
+  `Arc<dyn McpAuthResolver>` erased as `llm_client_override` is, set with
+  `meerkat::encode_mcp_auth_resolver_override_for_service` and read with
+  `decode_mcp_auth_resolver_override_from_service`.
+  `AgentBuildConfig::from_create_session_request` places it in
+  `AgentBuildConfig::mcp_auth_resolver`, so every MCP connection of that
+  build reads its OAuth bearer and its stdio service secrets through it,
+  never through the factory's source. A payload that is not a credential
+  source refuses every credential and never falls back to the factory's.
+  It is process-local: never serialized, and session recovery leaves it
+  absent, so a host that needs it supplies it on every build of the
+  session.
+
+- `meerkat-mob`: a host checks the profile a placed spawn resolved before
+  the spawn compiles it into the member's portable spec:
+  `SpawnMemberCustomizer::check_placed_profile`, a provided method that
+  admits every profile. Every spawn and respawn placed on another host asks
+  it with the definition's inline profile, the realm profile its role
+  names, or the spawn's own override profile, with the spawn's model and
+  tool category overrides applied, before it asks the member host anything.
+  An error refuses the spawn and reaches its caller unchanged, with nothing
+  compiled, recorded or sent. A placed respawn asks it before it retires
+  anything, so a refused respawn keeps the member. The revival of a placed
+  member, which sends the member's stored spec to its host again, asks it
+  with the profile that spec carries, and a refusal fails the revival
+  before anything is sent: the member is broken
+  (`MobError::MemberRestoreFailed`). `SpawnMemberCustomizerChain` forwards
+  it.
 
 ### Changed
 

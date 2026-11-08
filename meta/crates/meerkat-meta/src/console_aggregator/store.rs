@@ -212,6 +212,20 @@ pub trait ConsoleLogStore: Send + Sync {
     async fn frame_by_dedupe_key(&self, dedupe_key: &str)
     -> ConsoleLogResult<Option<ConsoleFrame>>;
 
+    /// The send record of the console send whose interaction id is
+    /// `interaction_id`: its `user_input` frame, read newest first, so a
+    /// recent send is found after the frames written since. A send's
+    /// interaction id is unique (it is derived from the send's dedupe key).
+    /// Stores that cannot answer keep the default and report none: a reply
+    /// to such a send then has no thread to go to. A store that wraps
+    /// another must forward this method.
+    async fn send_frame_by_interaction(
+        &self,
+        _interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        Ok(None)
+    }
+
     /// Console sends that have not settled (`user_input` frames of a send,
     /// still accepted, dispatching, or redacted at acceptance), oldest first.
     /// Bounded: only the frames at the newest `window` cursors are examined,
@@ -629,6 +643,22 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
             return Ok(None);
         };
         Ok(state.frames.get(&seq).cloned())
+    }
+
+    async fn send_frame_by_interaction(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        Ok(state
+            .frames
+            .values()
+            .rev()
+            .find(|frame| is_send_record_of(frame, interaction_id))
+            .cloned())
     }
 
     async fn unsettled_send_frames(
@@ -1438,6 +1468,34 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         select_frame_by_dedupe(&conn, dedupe_key)
     }
 
+    async fn send_frame_by_interaction(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _fence = self.operation_fence()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        // Newest first, down the rowid: a recent send is found after the
+        // rows written since it, without reading older ones.
+        let frames = query_sql_frames(
+            &conn,
+            "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
+                    conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
+                    source_kind, source_cursor, source_event_id, interaction_id,
+                    parent_frame_id, caused_by_frame_id, turn_id, run_id, COALESCE(member_provenance_json,
+                    (SELECT payload_json FROM console_member_provenance WHERE id = member_provenance_id)), member_provenance_id, update_marker_shares_provenance
+             FROM console_frames
+             WHERE kind = 'user_input' AND source_kind = 'send' AND interaction_id = ?1
+             ORDER BY cursor_seq DESC LIMIT 1",
+            params![interaction_id],
+        )?;
+        Ok(frames
+            .into_iter()
+            .find(|frame| is_send_record_of(frame, interaction_id)))
+    }
+
     async fn unsettled_send_frames(
         &self,
         window: usize,
@@ -1887,6 +1945,14 @@ fn is_unsettled_send_frame(frame: &ConsoleFrame) -> bool {
                 | ConsoleFrameStatus::Submitted
                 | ConsoleFrameStatus::Redacted
         )
+}
+
+/// Whether `frame` is the send record of the console send whose interaction
+/// id is `interaction_id`.
+fn is_send_record_of(frame: &ConsoleFrame, interaction_id: &str) -> bool {
+    frame.kind == "user_input"
+        && frame.source.kind == ConsoleFrameSourceKind::Send
+        && frame.interaction_id.as_deref() == Some(interaction_id)
 }
 
 pub(crate) fn stable_frame_id(dedupe_key: &str) -> String {

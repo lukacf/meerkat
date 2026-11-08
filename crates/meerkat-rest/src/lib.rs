@@ -6035,6 +6035,7 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
+        mcp_auth_resolver_override: None,
         session_comms_runtime_override: None,
         prepared_controller: None,
         host_prompt_sections: Default::default(),
@@ -7337,6 +7338,7 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: Default::default(),

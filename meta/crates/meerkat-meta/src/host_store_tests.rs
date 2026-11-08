@@ -5119,6 +5119,7 @@ async fn host_store_spec(
         crate::mob_handle_runtime::PersistentAuthority::HostStore { cache_dir: None },
         None,
         None,
+        None,
     )
     .await;
     match composed {

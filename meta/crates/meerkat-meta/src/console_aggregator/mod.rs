@@ -33,6 +33,11 @@ mod send_recovery_tests;
 mod send_scope;
 mod state;
 mod store;
+// The thread a send records is used outside tests; the delivery into it is
+// not yet. The console's requester reply route, its first caller, removes
+// this allow.
+#[cfg_attr(not(test), allow(dead_code))]
+mod thread;
 mod types;
 
 use member_cut::{
@@ -81,6 +86,10 @@ use store::stable_frame_id;
 pub use store::{
     ConsoleLogError, ConsoleLogResult, ConsoleLogStore, ConsoleSendDedupeDurability,
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
+};
+pub(crate) use thread::{
+    ConsoleSendThread, ConsoleThreadAudience, ConsoleThreadReference, KeptReplyServing,
+    PrivateReplyAppend, RecordedThread,
 };
 pub(crate) use types::ConsoleHumanAttribution;
 pub use types::{
@@ -2853,7 +2862,8 @@ impl MetaConsoleAggregator {
     /// settles it delivered; an absent one is dispatched again under the
     /// send's own delivery identity, into the session it recorded. A fresh
     /// send's frame records its `sender`, and its dispatch carries the
-    /// sender's requester to the agent.
+    /// sender's requester to the agent. A scoped send also records its
+    /// thread ([`ConsoleSendThread`]): who may read the replies to it.
     pub(crate) async fn send_scoped(
         &self,
         request: ConsoleSendRequest,
@@ -3033,6 +3043,9 @@ impl MetaConsoleAggregator {
             }
             None => None,
         };
+        let thread = scope
+            .is_scoped()
+            .then(|| ConsoleSendThread::of_send(provenance.as_ref(), sender));
         let mut new_frame = NewConsoleFrame {
             id: Some(frame_id),
             dedupe_key,
@@ -3043,7 +3056,7 @@ impl MetaConsoleAggregator {
             session_id: session_id.clone(),
             kind: "user_input".to_string(),
             status: ConsoleFrameStatus::Accepted,
-            payload: user_input_payload(&request, &handling_mode_value, sender),
+            payload: user_input_payload(&request, &handling_mode_value, sender, thread.as_ref()),
             source: ConsoleFrameSource {
                 member_provenance: provenance,
                 kind: ConsoleFrameSourceKind::Send,
@@ -3513,7 +3526,8 @@ impl MetaConsoleAggregator {
     /// sending caller's `scope`. A scoped caller gets the dispatch claim of a
     /// fresh interaction, and owns the reconciliation of a replayed one that
     /// has not settled and whose dispatch has no live owner. A fresh
-    /// interaction's frame records its `sender`.
+    /// interaction's frame records its `sender`, and a scoped send its
+    /// thread, as [`Self::send_scoped`] says.
     pub(crate) async fn reserve_identity_first_interaction_scoped(
         &self,
         request: ConsoleSendRequest,
@@ -3617,6 +3631,9 @@ impl MetaConsoleAggregator {
         } else {
             None
         };
+        let thread = scope
+            .is_scoped()
+            .then(|| ConsoleSendThread::of_send(provenance.as_ref(), sender));
         let mut new_frame = NewConsoleFrame {
             id: Some(frame_id),
             dedupe_key,
@@ -3627,7 +3644,7 @@ impl MetaConsoleAggregator {
             session_id: session_id.map(ToString::to_string),
             kind: "user_input".to_string(),
             status: ConsoleFrameStatus::Accepted,
-            payload: user_input_payload(&request, &handling_mode_value, sender),
+            payload: user_input_payload(&request, &handling_mode_value, sender, thread.as_ref()),
             source: ConsoleFrameSource {
                 member_provenance: provenance,
                 kind: ConsoleFrameSourceKind::Send,
@@ -10944,11 +10961,13 @@ fn send_request_fingerprint(
 
 /// The `user_input` frame payload for a console send. `origin_kind` is
 /// written only when the caller declared one; `sender` only for a send whose
-/// caller the Console authenticated (the unscoped Rust send API has none).
+/// caller the Console authenticated (the unscoped Rust send API has none);
+/// and `thread` only for a console caller's send.
 fn user_input_payload(
     request: &ConsoleSendRequest,
     handling_mode: &str,
     sender: Option<&ConsoleSender>,
+    thread: Option<&ConsoleSendThread>,
 ) -> Value {
     let mut payload = json!({
         "content": request.content,
@@ -10971,6 +10990,11 @@ fn user_input_payload(
         )
     {
         object.insert("skill_refs".to_string(), skills);
+    }
+    if let (Some(thread), Some(object)) = (thread, payload.as_object_mut())
+        && let Ok(thread) = serde_json::to_value(thread)
+    {
+        object.insert(ConsoleSendThread::PAYLOAD_KEY.to_string(), thread);
     }
     payload
 }

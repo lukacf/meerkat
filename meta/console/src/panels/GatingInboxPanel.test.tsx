@@ -479,6 +479,50 @@ describe("GatingInboxPanel host-provided attention", () => {
   });
 });
 
+describe("GatingInboxPanel private replies", () => {
+  const reply = {
+    id: "reply-1",
+    kind: "private_reply" as const,
+    createdAtMs: Date.now() - 60_000,
+    text: "Your release is approved.",
+    redacted: false,
+    origin: { identity: "alpha", interactionId: "interaction-1", inputFrameId: "frame-1" },
+  };
+  const hostItem = { sourceId: "host", sourceLabel: "Host", id: "a", title: "Confirm a setting", href: "/host/items/a", details: [] };
+  it("lists the person's replies on Pending after the approvals and before the host's items", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}
+      consoleAttention={{ status: "ready", items: [reply] }}
+      hostAttention={{ status: "ready", items: [hostItem], failedSources: [] }} />);
+    const replies = view.getByTestId("console-attention-list");
+    expect(within(replies).getByText("Your release is approved.")).toBeTruthy();
+    expect(replies.classList.contains("gating-inbox__cards")).toBe(true);
+    expect(replies.compareDocumentPosition(view.getByText("Publish reviewed changes")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(replies.compareDocumentPosition(view.getByTestId("host-attention-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.queryByTestId("console-attention-list") === null).toBe(true);
+  });
+  it("keeps an empty approval list to one line while a reply shows", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("ready"), requests: [] }}
+      consoleAttention={{ status: "ready", items: [reply] }} />);
+    const empty = view.getByText("No pending approvals.").closest(".cc-panel-empty");
+    expect(empty?.classList.contains("cc-panel-empty--inline")).toBe(true);
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("ready"), requests: [] }}
+      consoleAttention={{ status: "ready", items: [] }} />);
+    expect(view.getByText("No pending approvals.").closest(".cc-panel-empty")?.classList.contains("cc-panel-empty--inline")).toBe(false);
+  });
+  it("dismisses through its handler and offers no Dismiss without one", () => {
+    const onDismiss = vi.fn();
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}
+      consoleAttention={{ status: "ready", items: [reply] }} onDismissAttention={onDismiss} />);
+    fireEvent.click(view.getByTestId("console-attention-dismiss:reply-1"));
+    expect(onDismiss).toHaveBeenCalledWith(reply);
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")} readOnly
+      consoleAttention={{ status: "ready", items: [reply] }} />);
+    expect(view.getByTestId("console-attention:reply-1")).toBeTruthy();
+    expect(view.queryByTestId("console-attention-dismiss:reply-1") === null).toBe(true);
+  });
+});
+
 describe("Approvals at a glance (v2)", () => {
   // The panel reads "today" and its day groups from the clock, and these
   // records sit up to 50 minutes before `now`: pin Date (only) to a local

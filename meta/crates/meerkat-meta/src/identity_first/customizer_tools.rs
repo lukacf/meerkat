@@ -594,9 +594,10 @@ impl CustomizerToolsSpawnCustomizer {
 
 /// Runs several spawn customizers in order: this crate's one composer.
 /// meerkat-mob has a single `SpawnMemberCustomizer` slot; composing keeps a
-/// later installer from silently replacing an earlier one. Both hooks reach
+/// later installer from silently replacing an earlier one. Every hook reaches
 /// every customizer, so a customizer's own `customize_resume` still runs when
-/// a member is rebuilt on its durable session.
+/// a member is rebuilt on its durable session, and its own
+/// `check_placed_profile` when a member is placed on another host.
 pub struct ComposedSpawnMemberCustomizer {
     chain: meerkat_mob::SpawnMemberCustomizerChain,
 }
@@ -634,6 +635,14 @@ impl SpawnMemberCustomizer for ComposedSpawnMemberCustomizer {
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
         self.chain.customize_resume(ctx, durable, spec)
+    }
+
+    fn check_placed_profile(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        profile: &meerkat_mob::Profile,
+    ) -> Result<(), MobError> {
+        self.chain.check_placed_profile(ctx, profile)
     }
 }
 

@@ -25225,6 +25225,98 @@ function parseConsoleContextMessage(content3) {
   }
 }
 
+// ../packages/console-core/src/console-attention.ts
+var CONSOLE_ATTENTION_LIMITS = {
+  /** The gateway answers at most this many items: the newest. */
+  items: 100,
+  /** A longer reply is cut, with an ellipsis. */
+  textLength: 2e4,
+  intervalMs: 3e4
+};
+function stringOf(value) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+function normalizeConsoleAttention(result) {
+  if (!result || typeof result !== "object") return null;
+  const raw = result.items;
+  if (!Array.isArray(raw)) return null;
+  const items = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of raw) {
+    if (items.length >= CONSOLE_ATTENTION_LIMITS.items) break;
+    if (!entry || typeof entry !== "object") continue;
+    const record10 = entry;
+    if (record10.kind !== "private_reply") continue;
+    const id = stringOf(record10.id);
+    const text14 = stringOf(record10.text);
+    const redacted = record10.redacted === true;
+    const origin = record10.origin && typeof record10.origin === "object" ? record10.origin : null;
+    const identity = stringOf(origin?.identity);
+    const interactionId = stringOf(origin?.interaction_id);
+    const inputFrameId = stringOf(origin?.input_frame_id);
+    const createdAtMs = typeof record10.created_at_ms === "number" && Number.isFinite(record10.created_at_ms) ? record10.created_at_ms : null;
+    if (!id || !text14 && !redacted || !identity || !interactionId || !inputFrameId || createdAtMs === null || seen.has(id)) continue;
+    seen.add(id);
+    items.push({
+      id,
+      kind: "private_reply",
+      createdAtMs,
+      text: text14 && text14.length > CONSOLE_ATTENTION_LIMITS.textLength ? "".concat(text14.slice(0, CONSOLE_ATTENTION_LIMITS.textLength - 1), "\u2026") : text14,
+      redacted,
+      origin: { identity, interactionId, inputFrameId }
+    });
+  }
+  return items;
+}
+function consoleAttentionUnavailable(error48) {
+  if (!error48 || typeof error48 !== "object") return false;
+  const record10 = error48;
+  return record10.kind === "console-capability-unavailable" || record10.rpcError?.code === -32601;
+}
+function startConsoleAttentionPolling(read, publish, environment, intervalMs = CONSOLE_ATTENTION_LIMITS.intervalMs) {
+  let stopped = false;
+  let current = null;
+  let timer3 = null;
+  let stopVisible = null;
+  const stop = () => {
+    stopped = true;
+    current?.abort();
+    if (timer3 !== null) environment.clearInterval(timer3);
+    stopVisible?.();
+  };
+  const load = async (force = false) => {
+    if (stopped || !force && !environment.visible()) return;
+    current?.abort();
+    const mine = new AbortController();
+    current = mine;
+    try {
+      const result = await read(mine.signal);
+      if (stopped || current !== mine) return;
+      const items = normalizeConsoleAttention(result);
+      if (items) publish({ status: "ready", items });
+    } catch (error48) {
+      if (stopped || current !== mine) return;
+      if (consoleAttentionUnavailable(error48)) {
+        publish({ status: "unavailable", items: [] });
+        stop();
+      }
+    }
+  };
+  timer3 = environment.setInterval(() => void load(), intervalMs);
+  stopVisible = environment.onVisible(() => void load());
+  void load();
+  return {
+    refresh: () => void load(true),
+    stop
+  };
+}
+var PRIVATE_REPLY_FRAME_EVENT = "private_reply";
+function privateReplyText(frame2) {
+  if (frame2.event !== PRIVATE_REPLY_FRAME_EVENT) return null;
+  const data = frame2.data && typeof frame2.data === "object" ? frame2.data : null;
+  return stringOf(data?.text);
+}
+
 // ../packages/console-core/src/adapters.ts
 var HIDDEN_EVENTS = /* @__PURE__ */ new Set([
   "subscribed",
@@ -25759,6 +25851,8 @@ var CONSOLE_RPC_METHODS = {
   gatingDecide: "meta/gating/decide",
   decisionsList: "meta/decisions/list",
   decisionsRendering: "meta/decisions/rendering",
+  consoleAttention: "meta/console/attention",
+  consoleAttentionDismiss: "meta/console/attention/dismiss",
   accessStatus: "meta/access/status",
   accessGet: "meta/access/get",
   accessSet: "meta/access/set",
@@ -26337,6 +26431,8 @@ var CONSOLE_COMMAND_NAMES = {
   decideGating: "decideGating",
   listDecisions: "listDecisions",
   getDecisionRendering: "getDecisionRendering",
+  listConsoleAttention: "listConsoleAttention",
+  dismissConsoleAttention: "dismissConsoleAttention",
   accessStatus: "accessStatus",
   getAccessConfig: "getAccessConfig",
   setAccessConfig: "setAccessConfig",
@@ -26493,6 +26589,16 @@ var CONSOLE_COMMAND_SPECS = {
   },
   [CONSOLE_COMMAND_NAMES.getDecisionRendering]: {
     method: CONSOLE_RPC_METHODS.decisionsRendering,
+    targetKinds: /* @__PURE__ */ new Set(["meta/gating"])
+  },
+  // The caller's own attention items, listed in the inbox beside the
+  // approvals.
+  [CONSOLE_COMMAND_NAMES.listConsoleAttention]: {
+    method: CONSOLE_RPC_METHODS.consoleAttention,
+    targetKinds: /* @__PURE__ */ new Set(["meta/gating"])
+  },
+  [CONSOLE_COMMAND_NAMES.dismissConsoleAttention]: {
+    method: CONSOLE_RPC_METHODS.consoleAttentionDismiss,
     targetKinds: /* @__PURE__ */ new Set(["meta/gating"])
   },
   [CONSOLE_COMMAND_NAMES.accessStatus]: {
@@ -32398,16 +32504,63 @@ function HostAttentionCard({ item }) {
     }
   );
 }
-function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }) {
+function PrivateReplyCard({ item, onDismiss }) {
+  const directory = useAgentDirectory();
+  const navigation = useConsoleNavigation();
+  const identity = item.origin.identity;
+  const name2 = agentDisplayName(identity, directory) || identity;
+  const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
+  return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
+    "article",
+    {
+      className: "cc-approval cc-private-reply",
+      "data-kind": "private-reply",
+      "data-redacted": item.redacted ? "true" : void 0,
+      "data-testid": "console-attention:".concat(item.id),
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("header", { className: "cc-approval__header", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", children: "Reply from ".concat(name2) }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { className: "cc-private-reply__audience", title: "Only you can see this reply", children: "Only you" })
+        ] }),
+        item.text === null ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-private-reply__text cc-private-reply__text--hidden", children: "Content hidden by policy" }) : /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-private-reply__text", children: item.text }),
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-approval__asked", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(RelativeTime, { value: item.createdAtMs, prefix: "Answered" }) }),
+        openChat || onDismiss ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
+          openChat ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+            Button,
+            {
+              size: "sm",
+              onClick: openChat,
+              "aria-label": "Open ".concat(name2, "'s chat"),
+              "data-testid": "console-attention-open:".concat(item.id),
+              children: "Open the chat"
+            }
+          ) : null,
+          onDismiss ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+            Button,
+            {
+              size: "sm",
+              onClick: () => onDismiss(item),
+              "aria-label": "Dismiss the reply from ".concat(name2),
+              "data-testid": "console-attention-dismiss:".concat(item.id),
+              children: "Dismiss"
+            }
+          ) : null
+        ] }) : null
+      ]
+    }
+  );
+}
+function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0 }) {
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
   const viewer = useApprovalViewer();
-  if (!approvalsShown && hostItems === 0) return null;
+  if (!approvalsShown && hostItems === 0 && replies === 0) return null;
   const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled" && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
   const hostStatus = hostItems ? "".concat(hostItems, " item").concat(hostItems === 1 ? "" : "s", " from the host") : "";
-  const status = [approvalStatus, hostStatus].filter(Boolean).join(", ");
-  const count2 = requests.length + hostItems;
+  const replyStatus = replies ? "".concat(replies, " ").concat(replies === 1 ? "reply" : "replies", " for you") : "";
+  const status = [approvalStatus, hostStatus, replyStatus].filter(Boolean).join(", ");
+  const count2 = requests.length + hostItems + replies;
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("section", { className: "cc-approval-attention", "aria-label": "Needs you", "data-testid": "approval-attention", "data-state": approvalsShown ? snapshot?.status : "ready", "data-pending": ready && count2 > 0, children: [
     /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
       "button",
@@ -54749,6 +54902,8 @@ var CONSOLE_RPC_METHODS2 = {
   gatingDecide: "meta/gating/decide",
   decisionsList: "meta/decisions/list",
   decisionsRendering: "meta/decisions/rendering",
+  consoleAttention: "meta/console/attention",
+  consoleAttentionDismiss: "meta/console/attention/dismiss",
   accessStatus: "meta/access/status",
   accessGet: "meta/access/get",
   accessSet: "meta/access/set",
@@ -58971,6 +59126,22 @@ function createTimelineFold(agent, frames, options) {
       entries.push(entry);
       return;
     }
+    if (frame2.event === PRIVATE_REPLY_FRAME_EVENT) {
+      const text14 = privateReplyText(frame2);
+      if (!text14) return;
+      flushPendingReasoning(true);
+      flushPendingText();
+      const blocks = messageTextBlocks(text14, textMode);
+      entries.push({
+        kind: "message",
+        id: entryId,
+        identity: agentIdentity(agent),
+        variant: blocks.length > 0 ? "rich" : "plain",
+        createdAt: isoFromTimestampMs(frame2.timestampMs),
+        ...blocks.length > 0 ? { blocks } : { text: text14 }
+      });
+      return;
+    }
     if (frame2.runId?.trim() && frame2.sourceKind !== "session_history" && (frame2.event === "tool_call_requested" || frame2.event === "tool_call" || frame2.event === "tool_execution_started" || frame2.event === "tool_result_received" || frame2.event === "tool_execution_completed" || frame2.event === "tool_execution_timed_out" || frame2.event === "turn_completed" || frame2.event === "turn_started")) {
       if (sameTextStreamOwner(streamedOwner, frame2)) flushPendingText();
       completeOwnedStream(frame2);
@@ -60578,6 +60749,8 @@ var CONSOLE_COMMAND_NAMES2 = {
   decideGating: "decideGating",
   listDecisions: "listDecisions",
   getDecisionRendering: "getDecisionRendering",
+  listConsoleAttention: "listConsoleAttention",
+  dismissConsoleAttention: "dismissConsoleAttention",
   accessStatus: "accessStatus",
   getAccessConfig: "getAccessConfig",
   setAccessConfig: "setAccessConfig",
@@ -60735,6 +60908,16 @@ var CONSOLE_COMMAND_SPECS2 = {
   },
   [CONSOLE_COMMAND_NAMES2.getDecisionRendering]: {
     method: CONSOLE_RPC_METHODS2.decisionsRendering,
+    targetKinds: /* @__PURE__ */ new Set(["meta/gating"])
+  },
+  // The caller's own attention items, listed in the inbox beside the
+  // approvals.
+  [CONSOLE_COMMAND_NAMES2.listConsoleAttention]: {
+    method: CONSOLE_RPC_METHODS2.consoleAttention,
+    targetKinds: /* @__PURE__ */ new Set(["meta/gating"])
+  },
+  [CONSOLE_COMMAND_NAMES2.dismissConsoleAttention]: {
+    method: CONSOLE_RPC_METHODS2.consoleAttentionDismiss,
     targetKinds: /* @__PURE__ */ new Set(["meta/gating"])
   },
   [CONSOLE_COMMAND_NAMES2.accessStatus]: {
@@ -67949,6 +68132,8 @@ function GatingInboxPanel({
   selectedPendingId,
   hostAttention,
   hostDecideSources,
+  consoleAttention,
+  onDismissAttention,
   showPending,
   decisions: durableDecisions,
   decisionsNextAfter,
@@ -68005,11 +68190,13 @@ function GatingInboxPanel({
   const highRisk = queue.filter((request) => request.riskTier === "r3" || request.riskTier === "r4").length;
   const oldest = queue.reduce((min, request) => request.createdAtMs !== void 0 && (min === null || request.createdAtMs < min) ? request.createdAtMs : min, null);
   const toggle = (key) => setExpandedId((current) => current === key ? null : key);
+  const replyItems = tab2 === "pending" ? consoleAttention?.items ?? [] : [];
   const hostItems = tab2 === "pending" ? hostAttention?.items ?? [] : [];
   const hostFailedSources = tab2 === "pending" ? hostAttention?.failedSources ?? [] : [];
   const decisionCards = tab2 === "pending" ? durableDecisions ?? [] : [];
   const decisionCursor = tab2 === "pending" && onLoadMoreDecisions ? decisionsNextAfter : void 0;
-  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0 || decisionCursor !== void 0;
+  const hostCardsShown = hostItems.length > 0 || hostFailedSources.length > 0;
+  const hostShown = replyItems.length > 0 || hostCardsShown || decisionCards.length > 0 || decisionCursor !== void 0;
   const hostList = hostShown ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)(import_jsx_runtime91.Fragment, { children: [
     decisionCards.length || decisionCursor !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(
       DecisionCardList,
@@ -68021,7 +68208,8 @@ function GatingInboxPanel({
         loadingMore: decisionsLoadingMore
       }
     ) : null,
-    hostItems.length > 0 || hostFailedSources.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: "gating-inbox__cards gating-inbox__host", "data-testid": "host-attention-list", children: [
+    replyItems.length ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)("div", { className: "gating-inbox__cards", "data-testid": "console-attention-list", children: replyItems.map((item) => /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(PrivateReplyCard, { item, onDismiss: onDismissAttention }, item.id)) }) : null,
+    hostCardsShown ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: "gating-inbox__cards gating-inbox__host", "data-testid": "host-attention-list", children: [
       hostItems.map((item) => /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(HostAttentionCard, { item }, "".concat(item.sourceId, ":").concat(item.id))),
       hostFailedSources.length ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(Notice, { tone: "warn", role: "status", className: "gating-inbox__host-note", children: "Could not read: ".concat(hostFailedSources.join(", ")) }) : null
     ] }) : null
@@ -84390,6 +84578,7 @@ var Sidebar = import_react94.default.memo(function Sidebar2({
   approvals,
   onOpenApproval,
   hostAttentionCount = 0,
+  attentionReplyCount = 0,
   density = "comfortable",
   activeControl = null,
   openControls,
@@ -85037,7 +85226,7 @@ var Sidebar = import_react94.default.memo(function Sidebar2({
         children: orderAnnouncement
       }
     ),
-    approvals || hostAttentionCount ? /* @__PURE__ */ (0, import_jsx_runtime119.jsx)(ApprovalAttention, { snapshot: approvals, hostItems: hostAttentionCount, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
+    approvals || hostAttentionCount || attentionReplyCount ? /* @__PURE__ */ (0, import_jsx_runtime119.jsx)(ApprovalAttention, { snapshot: approvals, hostItems: hostAttentionCount, replies: attentionReplyCount, onOpen: onOpenApproval || (() => onOpenControl("gating")) }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime119.jsxs)("div", { className: "sidebar__head cc-reveal-host", children: [
       /* @__PURE__ */ (0, import_jsx_runtime119.jsxs)("div", { className: "sidebar__mast", children: [
         /* @__PURE__ */ (0, import_jsx_runtime119.jsxs)("div", { className: "sidebar__mast-text", children: [
@@ -94318,6 +94507,53 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       clearInterval: (handle2) => window.clearInterval(handle2)
     });
   }, [hostAttentionSources, approvalScope]);
+  const [consoleAttentionState, setConsoleAttentionState] = import_react103.default.useState();
+  const consoleAttention = consoleAttentionState?.scope === approvalScope ? consoleAttentionState.snapshot : void 0;
+  const consoleAttentionPollingRef = import_react103.default.useRef(null);
+  import_react103.default.useEffect(() => {
+    setConsoleAttentionState(void 0);
+    if (!experience) return;
+    const scope = approvalScope;
+    const target = controlWorkbenchTarget("gating");
+    const polling = startConsoleAttentionPolling(
+      async (signal) => (await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES2.listConsoleAttention,
+        target,
+        signal
+      })).result,
+      (snapshot) => setConsoleAttentionState({ scope, snapshot }),
+      {
+        visible: () => document.visibilityState !== "hidden",
+        onVisible: (callback) => {
+          const listener = () => {
+            if (document.visibilityState === "visible") callback();
+          };
+          document.addEventListener("visibilitychange", listener);
+          return () => document.removeEventListener("visibilitychange", listener);
+        },
+        setInterval: (callback, ms) => window.setInterval(callback, ms),
+        clearInterval: (handle2) => window.clearInterval(handle2)
+      }
+    );
+    consoleAttentionPollingRef.current = polling;
+    return () => {
+      polling.stop();
+      if (consoleAttentionPollingRef.current === polling) consoleAttentionPollingRef.current = null;
+    };
+  }, [approvalScope, Boolean(experience), consoleController]);
+  async function dismissConsoleAttention(item) {
+    const polling = consoleAttentionPollingRef.current;
+    try {
+      await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES2.dismissConsoleAttention,
+        target: controlWorkbenchTarget("gating"),
+        params: { item_id: item.id }
+      });
+    } catch (error49) {
+      setActionError("Could not dismiss the reply: ".concat(errorMessage(error49)));
+    }
+    if (consoleAttentionPollingRef.current === polling) polling?.refresh();
+  }
   function openApproval(pendingId) {
     setSelectedApprovalId(pendingId);
     setApprovalOpens((count2) => count2 + 1);
@@ -96731,7 +96967,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (target.kind === "identity-inspect") {
       return renderInspectPanel(target);
     }
-    if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface && hostAttentionSources?.length) {
+    if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface && (hostAttentionSources?.length || consoleAttention?.items.length)) {
       return /* @__PURE__ */ (0, import_jsx_runtime126.jsx)(
         GatingInboxPanel,
         {
@@ -96742,6 +96978,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           },
           readOnly: true,
           hostAttention: hostAttention || { status: "loading", items: [], failedSources: [] },
+          consoleAttention,
+          onDismissAttention: consoleReadOnly ? void 0 : (item) => void dismissConsoleAttention(item),
           showPending: approvalOpens
         }
       );
@@ -96796,6 +97034,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly: consoleReadOnly,
           hostAttention,
           hostDecideSources: hostAttentionSources,
+          consoleAttention,
+          onDismissAttention: consoleReadOnly ? void 0 : (item) => void dismissConsoleAttention(item),
           showPending: approvalOpens,
           decisions: decisionCards,
           decisionsNextAfter: decisionNextAfter,
@@ -96912,6 +97152,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly: consoleReadOnly,
           hostAttention,
           hostDecideSources: hostAttentionSources,
+          consoleAttention,
+          onDismissAttention: consoleReadOnly ? void 0 : (item) => void dismissConsoleAttention(item),
           showPending: approvalOpens,
           decisions: decisionCards,
           decisionsNextAfter: decisionNextAfter,
@@ -97150,6 +97392,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                   approvals: activeApprovals,
                   onOpenApproval: openApproval,
                   hostAttentionCount: hostAttention?.items.length || 0,
+                  attentionReplyCount: consoleAttention?.items.length || 0,
                   density: display.settings.density,
                   activeControl: sidebarActiveControl,
                   openControls: sidebarOpenControls,

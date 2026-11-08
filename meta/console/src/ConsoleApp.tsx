@@ -46,12 +46,16 @@ import type {
   HostAttentionSnapshot,
   HostAttentionSourceConfig,
   ApprovalViewer,
+  ConsoleAttentionItem,
+  ConsoleAttentionPolling,
+  ConsoleAttentionSnapshot,
 } from "@console-core";
 import {
   collectConsoleDockPanelIds,
   consoleMobStatus,
   createPendingApprovalResource,
   identityStateLabel,
+  startConsoleAttentionPolling,
   startHostAttentionPolling,
   migrateConsoleWorkbenchTarget,
   normalizeConsoleDockState,
@@ -3281,6 +3285,57 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       clearInterval: (handle) => window.clearInterval(handle as number),
     });
   }, [hostAttentionSources, approvalScope]);
+  // The signed-in person's own attention items (replies meant for them
+  // alone, `meta/console/attention`), read like the host's items: every 30 s
+  // while the page is visible. The gateway answers the caller's items only;
+  // the console keeps each read for the scope (principal and runtime) that
+  // made it, so a scope change hides the previous person's items before
+  // effects run, and a read that started before the change is never shown.
+  const [consoleAttentionState, setConsoleAttentionState] = React.useState<{ scope: string; snapshot: ConsoleAttentionSnapshot }>();
+  const consoleAttention = consoleAttentionState?.scope === approvalScope ? consoleAttentionState.snapshot : undefined;
+  const consoleAttentionPollingRef = React.useRef<ConsoleAttentionPolling | null>(null);
+  React.useEffect(() => {
+    setConsoleAttentionState(undefined);
+    if (!experience) return;
+    const scope = approvalScope;
+    const target = controlWorkbenchTarget("gating");
+    const polling = startConsoleAttentionPolling(
+      async (signal) => (await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES.listConsoleAttention, target, signal,
+      })).result,
+      (snapshot) => setConsoleAttentionState({ scope, snapshot }),
+      {
+        visible: () => document.visibilityState !== "hidden",
+        onVisible: (callback) => {
+          const listener = () => { if (document.visibilityState === "visible") callback(); };
+          document.addEventListener("visibilitychange", listener);
+          return () => document.removeEventListener("visibilitychange", listener);
+        },
+        setInterval: (callback, ms) => window.setInterval(callback, ms),
+        clearInterval: (handle) => window.clearInterval(handle as number),
+      },
+    );
+    consoleAttentionPollingRef.current = polling;
+    return () => {
+      polling.stop();
+      if (consoleAttentionPollingRef.current === polling) consoleAttentionPollingRef.current = null;
+    };
+  }, [approvalScope, Boolean(experience), consoleController]);
+  // Dismiss one of the person's items, then read the list again. A failed
+  // dismissal keeps the item listed and says why.
+  async function dismissConsoleAttention(item: ConsoleAttentionItem) {
+    const polling = consoleAttentionPollingRef.current;
+    try {
+      await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES.dismissConsoleAttention,
+        target: controlWorkbenchTarget("gating"),
+        params: { item_id: item.id },
+      });
+    } catch (error) {
+      setActionError(`Could not dismiss the reply: ${errorMessage(error)}`);
+    }
+    if (consoleAttentionPollingRef.current === polling) polling?.refresh();
+  }
   function openApproval(pendingId?: string) {
     setSelectedApprovalId(pendingId);
     setApprovalOpens((count) => count + 1);
@@ -6429,9 +6484,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return renderInspectPanel(target);
     }
     if ((target.kind === "gating" || target.kind === "gates") && !hasMobControlSurface
-      && hostAttentionSources?.length) {
+      && (hostAttentionSources?.length || consoleAttention?.items.length)) {
       // No gating surface here (an aggregate console), but "Needs you" counts
-      // host-provided items: show them, with approvals marked unavailable.
+      // host-provided items and the person's own replies: show them, with
+      // approvals marked unavailable.
       return (
         <GatingInboxPanel
           pending={[]}
@@ -6440,6 +6496,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onDecide={() => {}}
           readOnly
           hostAttention={hostAttention || { status: "loading", items: [], failedSources: [] }}
+          consoleAttention={consoleAttention}
+          onDismissAttention={consoleReadOnly ? undefined : (item) => void dismissConsoleAttention(item)}
           showPending={approvalOpens}
         />
       );
@@ -6495,6 +6553,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
+          consoleAttention={consoleAttention}
+          onDismissAttention={consoleReadOnly ? undefined : (item) => void dismissConsoleAttention(item)}
           showPending={approvalOpens}
           decisions={decisionCards}
           decisionsNextAfter={decisionNextAfter}
@@ -6613,6 +6673,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           readOnly={consoleReadOnly}
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
+          consoleAttention={consoleAttention}
+          onDismissAttention={consoleReadOnly ? undefined : (item) => void dismissConsoleAttention(item)}
           showPending={approvalOpens}
           decisions={decisionCards}
           decisionsNextAfter={decisionNextAfter}
@@ -6872,6 +6934,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           approvals={activeApprovals}
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
+          attentionReplyCount={consoleAttention?.items.length || 0}
           density={display.settings.density}
           activeControl={sidebarActiveControl}
           openControls={sidebarOpenControls}

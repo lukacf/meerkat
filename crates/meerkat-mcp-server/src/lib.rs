@@ -4686,6 +4686,7 @@ async fn handle_meerkat_run_with_help_tools(
                 recoverable_tool_defs: (!input.tools.is_empty())
                     .then(|| recoverable_callback_tool_defs(&input.tools)),
                 llm_client_override: None,
+                mcp_auth_resolver_override: None,
                 session_comms_runtime_override: None,
                 prepared_controller: None,
                 host_prompt_sections: Default::default(),
@@ -5179,6 +5180,7 @@ async fn handle_meerkat_resume(
             recoverable_tool_defs: (!input.tools.is_empty())
                 .then(|| recoverable_callback_tool_defs(&input.tools)),
             llm_client_override: None,
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: Default::default(),

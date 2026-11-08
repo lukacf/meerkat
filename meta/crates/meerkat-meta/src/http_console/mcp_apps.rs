@@ -767,6 +767,7 @@ mod tests {
             mob_announcements: Default::default(),
             durable_decisions: Default::default(),
             console_audit: None,
+            console_attention: None,
         }
     }
 

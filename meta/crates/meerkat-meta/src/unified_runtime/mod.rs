@@ -545,6 +545,11 @@ pub struct UnifiedRuntimeCore {
     /// every console router this runtime builds; `None` when that store
     /// keeps no realm documents.
     console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The console's person-addressed attention items
+    /// ([`crate::console_replies`]), kept in `persistent_metadata` and shared
+    /// by every console router this runtime builds; `None` when that store
+    /// keeps no realm documents.
+    console_attention: Option<Arc<crate::console_replies::ConsoleAttention>>,
     /// The gating owner's state kept in `persistent_metadata`, once the
     /// composition keeps it (`keep_gating_state_in_realm`).
     gating_persistence: tokio::sync::Mutex<Option<GatingPersistence>>,
@@ -886,6 +891,9 @@ impl UnifiedRuntime {
             crate::console_audit::ConsoleAuditLimits::default(),
         )
         .map(Arc::new);
+        let console_attention =
+            crate::console_replies::ConsoleAttention::over(Arc::clone(&persistent_metadata))
+                .map(Arc::new);
         Self::assemble(
             UnifiedRuntimeCore {
                 mob_runtime,
@@ -971,6 +979,7 @@ impl UnifiedRuntime {
                 metadata_table,
                 persistent_metadata,
                 console_audit,
+                console_attention,
                 gating_persistence: tokio::sync::Mutex::new(None),
             },
             public_owner,
@@ -2019,13 +2028,18 @@ impl UnifiedRuntime {
     /// one the runtime holds a record with no file, which refuses to set a
     /// fence. On a candidate launch the record writes nothing: the
     /// principals it accepts a token without `exp` for are kept in this
-    /// process only.
+    /// process only. The composition's personal accounts on MCP servers read
+    /// the same record: a revocation suspends the revoked person's accounts
+    /// in the private members opened before it.
     pub fn set_console_session_fences(
         &mut self,
         fences: crate::auth::session_fence::ConsoleSessionFences,
     ) {
         if !self.speaks_for_composition() {
             fences.keep_non_expiring_notes_in_process();
+        }
+        if let Some(accounts) = self.mob_runtime().personal_mcp_accounts() {
+            accounts.bind_session_fences(fences.clone());
         }
         self.console_session_fences = fences;
     }
@@ -2337,6 +2351,31 @@ impl UnifiedRuntime {
     /// and read; `None` when the metadata store keeps no realm documents.
     pub(crate) fn console_audit_log(&self) -> Option<Arc<crate::console_audit::ConsoleAuditLog>> {
         self.console_audit.clone()
+    }
+
+    /// The person-addressed attention items the console routers this runtime
+    /// builds read (`meta/console/attention`); `None` when the metadata store
+    /// keeps no realm documents.
+    pub(crate) fn console_attention(
+        &self,
+    ) -> Option<Arc<crate::console_replies::ConsoleAttention>> {
+        self.console_attention.clone()
+    }
+
+    /// Person-addressed delivery of replies to console requests
+    /// ([`crate::console_replies::ConsoleReplies`]): what a host's reply route
+    /// calls for a request made on the console. `None` until the runtime's
+    /// console projection exists (its first console router is built).
+    // No caller outside tests yet: the console's requester reply route, its
+    // first caller, removes this allow.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn console_replies(&self) -> Option<crate::console_replies::ConsoleReplies> {
+        self.console_projection.get().map(|projection| {
+            crate::console_replies::ConsoleReplies::new(
+                projection.clone(),
+                self.console_attention.clone(),
+            )
+        })
     }
 
     /// Replace the label set associated with this mob.

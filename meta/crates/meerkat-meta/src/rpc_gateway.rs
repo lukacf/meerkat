@@ -128,6 +128,10 @@ struct GatewayRuntimeOptions {
     /// `runtime_options.decisions`: the decision ingresses whose attested
     /// people decide durable decisions on this stdio host.
     decision_ingresses: Option<crate::durable_decisions::DecisionIngressDeclarations>,
+    /// `runtime_options.mcp_accounts`: the account modes of MCP servers
+    /// ([`crate::McpAccountsConfig`]); absent, every server's account is the
+    /// system's.
+    mcp_accounts: Option<crate::McpAccountsConfig>,
     demo_llm: bool,
     /// Bind each locally hosted member to a signed loopback TCP endpoint so
     /// peer-only external members in another process can return traffic.
@@ -492,6 +496,7 @@ impl Default for GatewayRuntimeOptions {
             console_fetch_timeout_ms: None,
             access: None,
             decision_ingresses: None,
+            mcp_accounts: None,
             demo_llm: false,
             member_comms_address: None,
             contacts: None,
@@ -5216,6 +5221,43 @@ actions = ["agent.view"]
     }
 
     #[test]
+    fn gateway_runtime_options_parse_mcp_accounts() {
+        let params = json!({
+            "runtime_options": {
+                "mcp_accounts": { "servers": { "notes": { "accounts": "personal" } } }
+            }
+        });
+        let options = parse_gateway_runtime_options(&params, None).expect("runtime options");
+        assert!(
+            options
+                .mcp_accounts
+                .expect("account modes")
+                .is_personal("notes")
+        );
+
+        for invalid in [
+            json!({ "servers": { "notes": { "accounts": "team" } } }),
+            json!({ "servers": { "notes": { "accounts": "personal", "owner": "someone" } } }),
+            json!({ "personal": ["notes"] }),
+            json!("personal"),
+        ] {
+            let params = json!({ "runtime_options": { "mcp_accounts": invalid.clone() } });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("refused: {invalid}"),
+                Err(err) => err,
+            };
+            assert!(err.contains("runtime_options.mcp_accounts"), "{err}");
+        }
+
+        let params = json!({ "runtime_options": { "mcp_accounts": null } });
+        let options = parse_gateway_runtime_options(&params, None).expect("runtime options");
+        assert!(
+            options.mcp_accounts.is_none(),
+            "null keeps every account the system's"
+        );
+    }
+
+    #[test]
     fn gateway_runtime_options_can_disable_console_auth_for_local_console() {
         let params = json!({
             "runtime_options": {
@@ -9683,6 +9725,15 @@ fn gateway_experimental_live_operator(
     Ok(operator)
 }
 
+/// The init refusal of `runtime_options.mcp_accounts` naming personal servers
+/// on a launch whose member factory keeps no provider credentials.
+fn personal_accounts_unavailable(error: &meerkat::HostAuthError) -> String {
+    format!(
+        "runtime_options.mcp_accounts names personal servers, and this launch has no provider \
+         credential store to keep personal accounts in: {error}"
+    )
+}
+
 fn parse_gateway_runtime_options(
     params: &Value,
     persistent_state: Option<&std::path::Path>,
@@ -9701,6 +9752,7 @@ fn parse_gateway_runtime_options(
         "gating_config_path",
         "auth_config",
         "access_config_path",
+        "mcp_accounts",
         "console_config_path",
         "console_require_app_auth",
         "console_read_only",
@@ -9926,6 +9978,17 @@ fn parse_gateway_runtime_options(
         &parsed.decision_ingresses.clone().unwrap_or_default(),
     )
     .map_err(|err| format!("runtime_options.access_config_path is invalid: {err}"))?;
+    // The account modes of MCP servers; absent or null keeps every server's
+    // account the system's.
+    match runtime_options.get("mcp_accounts") {
+        None | Some(Value::Null) => {}
+        Some(value) => {
+            parsed.mcp_accounts = Some(
+                crate::McpAccountsConfig::from_json_value(value.clone())
+                    .map_err(|error| format!("runtime_options.mcp_accounts: {error}"))?,
+            );
+        }
+    }
     if let Some(value) = runtime_options.get("console_require_app_auth") {
         parsed.console_require_app_auth = Some(value.as_bool().ok_or_else(|| {
             "runtime_options.console_require_app_auth must be a boolean".to_string()
@@ -18113,6 +18176,25 @@ external_addressable = true
         persistent_state.is_some(),
     )
     .map_err(|message| fail_init(&request_id, -32602, message))?;
+    // Personal accounts on MCP servers, checked against the MCP servers the
+    // definition's profiles declare before anything durable is touched.
+    let personal_accounts = match gateway_options.mcp_accounts.take() {
+        Some(config) => {
+            config
+                .check_mob_definition(&definition)
+                .map_err(|refusal| {
+                    fail_init(
+                        &request_id,
+                        -32602,
+                        format!("runtime_options.mcp_accounts: {refusal}"),
+                    )
+                })?;
+            config
+                .has_personal_servers()
+                .then(|| crate::PersonalMcpAccounts::new(config).owner_check())
+        }
+        None => None,
+    };
     // The members' configuration from the native realm, read once with
     // Core's native reader and nothing written, then the members' binding
     // checked against that configuration and the definition. Both run before
@@ -18744,6 +18826,7 @@ external_addressable = true
         let crate::gateway_mcp_composition::ComposedGatewayMemberFactory {
             factory,
             consent_notice_issuer,
+            host_composer,
         } = crate::gateway_mcp_composition::compose_gateway_member_factory(
             host,
             crate::gateway_mcp_composition::GatewayFactoryKind::Persistent,
@@ -18754,6 +18837,21 @@ external_addressable = true
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
         realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
+        // Personal accounts on MCP servers: the owner check over the host's
+        // composer, and the people's accounts in this factory's store.
+        let factory = match personal_accounts.as_ref() {
+            Some(check) => crate::gateway_mcp_composition::compose_personal_accounts(
+                check,
+                factory,
+                host_composer,
+                &adapter,
+                &composition_storage,
+            )
+            .map_err(|error| {
+                fail_init(&request_id, -32602, personal_accounts_unavailable(&error))
+            })?,
+            None => factory,
+        };
         // Live (realtime) needs the SAME factory shape for its per-open
         // credential-resolving realtime session factory; clone before
         // the builder consumes it.
@@ -19199,6 +19297,7 @@ external_addressable = true
         let crate::gateway_mcp_composition::ComposedGatewayMemberFactory {
             factory,
             consent_notice_issuer,
+            host_composer,
         } = crate::gateway_mcp_composition::compose_gateway_member_factory(
             host,
             crate::gateway_mcp_composition::GatewayFactoryKind::ProcessLocal,
@@ -19209,6 +19308,20 @@ external_addressable = true
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
         realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
+        // As in the persistent arm: personal accounts on MCP servers.
+        let factory = match personal_accounts.as_ref() {
+            Some(check) => crate::gateway_mcp_composition::compose_personal_accounts(
+                check,
+                factory,
+                host_composer,
+                &adapter,
+                &composition_storage,
+            )
+            .map_err(|error| {
+                fail_init(&request_id, -32602, personal_accounts_unavailable(&error))
+            })?,
+            None => factory,
+        };
         let runtime_delivery = runtime_delivery.with_consent_notice_issuer(consent_notice_issuer);
         let member_agent_config = gateway_agent_config(&gateway_options);
         let mut inner_builder = crate::gateway_mcp_composition::gateway_member_builder(
@@ -19456,6 +19569,12 @@ external_addressable = true
         has_roster_provider,
     );
     let mob_spec = member_build_wiring.install(mob_spec);
+    // Every member build classifies the personal servers it carries, with
+    // the owner check installed on the member factory above.
+    let mob_spec = match personal_accounts.as_ref() {
+        Some(check) => mob_spec.with_personal_mcp_accounts(check.clone()),
+        None => mob_spec,
+    };
     // Core records a member's binding under the realm that owns it, so the
     // binding's checks accept that form too: declared first, as the checks
     // below are built with it.

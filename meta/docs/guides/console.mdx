@@ -526,6 +526,14 @@ as they were.
   steward never dreams over its memory or promotes any of it. A private
   side chat's `memory` tool proposes nothing to its mob, and no one else is
   shown a proposal it wrote.
+- A private side chat is where personal accounts on MCP servers are used:
+  a server the operator marked personal acts with the account of the person
+  who opened the side chat, for that person's own messages only (see
+  [Personal accounts on MCP servers](/reference/configuration#personal-accounts-on-mcp-servers)).
+  An access admin who revokes a person's sessions suspends that person's
+  accounts in the side chats they opened before the revocation, while a side
+  chat opened after a fresh sign-in uses them again and the credentials are
+  kept.
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,
@@ -576,6 +584,41 @@ as they were.
 
 The fork takes the agent's conversation as it is now. Side chats are
 `meta/fork_member` on the console RPC.
+
+### Private replies
+
+Some replies are meant for the one person who asked, such as an answer that
+a data owner released after reviewing it. Such a reply never lands in a
+shared conversation:
+
+- A request made in a conversation private to the person (their own side
+  chat on a console with sign-in, or a member such a side chat created) gets
+  the reply in that conversation, which only they and the access admins see.
+- A request made in a shared agent gets the reply as an item of the person's
+  own attention list (`meta/console/attention`), which only that person
+  reads and dismisses (`meta/console/attention/dismiss`). Nothing is added to
+  the agent's conversation, and no other viewer's stream carries it. So does
+  a request whose private conversation is gone by the time the reply comes.
+
+The console counts the person's items in **Needs you** and lists them in its
+inbox after the approvals. Each names the agent that answered and opens the
+chat it answers, and **Dismiss** takes it off the list (a read-only console
+offers no Dismiss). A reply whose text a payload policy hid reads
+**Content hidden by policy** and is dismissed the same way. A reply in the
+person's own conversation reads there as the agent's message.
+
+An item shows no more of its reply than the conversation would: the
+console's payload policy applies as the list is read, and an item is listed
+only while the person may view the agent it came from.
+
+Each console send records where it came from (its `user_input` frame's
+`thread`): the agent, the interaction, and who may read the replies to it.
+Only a person signed in on a console with sign-in can receive private
+replies: a request from an open console, a service or a token that names no
+person has no private reply route, and a reply to it is refused. The
+attention list is kept in the realm's metadata store, as the console audit
+log is: across restarts for `rpc_gateway` over a state directory or a host
+store realm, and for the life of the process on `meta_gateway`.
 
 ### Schedules
 
@@ -1234,6 +1277,9 @@ Primary RPC methods on `/console/rpc`:
   an agent's console schedules (see [Schedules](#schedules)); the list is
   gated by `agent.view` and the writes by `agent.send` and `schedule.manage`
   for the agent, and each send is a Console send by the schedule's sender
+- `meta/console/attention` and `meta/console/attention/dismiss` - the
+  caller's own attention items (see [Private replies](#private-replies)); a
+  caller reads and dismisses only its own
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

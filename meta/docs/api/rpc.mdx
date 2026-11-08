@@ -286,7 +286,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32044` | A mob announcement method on a gateway that did not enable mob announcements (see [Mob announcements](#mob-announcements-optional)). `MobAnnouncementsUnavailableError` in both SDKs. | `{kind: "mob_announcements_unavailable"}` |
 | `-32045` | Mob announcement conflict: a source key already bound to other content, a stale subscription or source revision, a collector step from a cursor version another step already moved, a reused operation id, a batch that moved. `AnnouncementConflictError` in both SDKs; a source's stale revision is `SourceStaleRevisionError` and a moved cursor `SourceVersionConflictError`, both carrying the source's current position. | `{kind: "announcement_conflict", existing}`, `{kind: "stale_revision", current_revision}` (a subscription), `{kind: "stale_revision", current_revision, current_version, generation, cursor}` (a source), `{kind: "source_version_conflict", current_version, cursor, state, revision}`, `{kind: "operation_reused"}` or `{kind: "batch_moved", current}` |
 | `-32046` | `meta/mob_announcements/subscriptions/put` start frontier outside a mob's announcements: older than what is retained, or beyond its head (a mob that has announced nothing yet is at head 0). `AnnouncementFrontierError` in both SDKs. | `{kind: "gap", mob_id, earliest_retained}` or `{kind: "frontier_beyond_head", mob_id, head}` |
-| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), the scoped tool grant writes (`meta/tool_grants/grant` and `meta/tool_grants/revoke`), the realm MCP writes (`meta/realm_mcp/install`, `meta/realm_mcp/set_secret` and `meta/realm_mcp/remove_secret`), the operator instruction writes (`meta/set_instruction` and `meta/revoke_instruction`), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/console/sign_out`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
+| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), the scoped tool grant writes (`meta/tool_grants/grant` and `meta/tool_grants/revoke`), the realm MCP writes (`meta/realm_mcp/install`, `meta/realm_mcp/set_secret` and `meta/realm_mcp/remove_secret`), the operator instruction writes (`meta/set_instruction` and `meta/revoke_instruction`), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/console/sign_out`, `meta/console/attention/dismiss`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
 | `-32048` | A mob announcement method names a subscription, delivery, source or mob that does not exist here. `AnnouncementNotFoundError` in both SDKs. | `{kind: "unknown_subscription"}`, `{kind: "unknown_delivery"}`, `{kind: "unknown_source"}` or `{kind: "unknown_mob", mobs}` |
 
 A send to an identity whose host governs its input answers its host's refusal
@@ -1271,6 +1271,21 @@ and on an Open console no ungoverned send does. The agent's model reads a
 person's message on a console that requires sign-in with a sender label, an
 injected-context row "Message from" and the display name right before it.
 
+The `user_input` frame of a console caller's send also records the send's
+thread, `thread`, which the console sets from the caller and the agent and
+no param names. `thread.audience` is `person` when the agent is private to
+the sender (their own side chat on a console with sign-in, or a member such
+a side chat created) and `shared` otherwise. The replies to a send are for
+its sender when the sender names a requester (a person on a console that
+requires sign-in; a schedule's fire: the schedule's sender). A reply meant
+for that person alone reaches them in that thread when it is `person`, and
+as an item of their attention list when it is `shared` (see
+`meta/console/attention`); nothing is appended to a shared conversation. A
+send whose sender names no requester (an open console's caller, a service,
+a token that names no person) has no private reply route, and neither has a
+send whose `user_input` frame a host's payload policy redacted (the
+redaction takes the `sender` and the `thread` with it).
+
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 
 `origin` and `idempotency_key` are required, non-empty strings after trimming.
@@ -1484,6 +1499,81 @@ rows; an embedder sets other bounds with
 `UnifiedRuntimeBuilder::console_audit_limits` (both sets) and
 `UnifiedRuntimeBuilder::console_tool_call_audit_limits` (the tool calls
 apart), each at least one row.
+
+### `meta/console/attention`
+
+The caller's own attention items: replies meant for the caller alone that
+no private thread of theirs took, such as an answer to a request the caller
+made in a shared agent (see `meta/console/send`). Takes no params.
+Read-only, and served on the console route only. A verified person reads
+the items addressed to them, by their own identity (issuer and subject), on
+every console that keeps an attention list; every other caller (an open
+console's caller without a token, a service, a token that names no person)
+reads none, and no param names whose items are read. A console that keeps
+no attention list (a router built without a runtime, or one whose metadata
+store keeps no realm documents) answers `-32601`.
+
+| Result field | Type | Description |
+|--------------|------|-------------|
+| `items` | `object[]` | The caller's items not dismissed that the caller may see, newest first: at most 100, from the newest 200 not dismissed (below) |
+| `retention` | `string` | How long the items are kept, from the metadata store the gateway opened: `durable` (across restarts) or `process` (for the life of the gateway process) |
+
+An item:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Opaque and stable; names the item to dismiss it |
+| `created_at_ms` | `integer` | When the item was delivered, in milliseconds since the epoch |
+| `kind` | `string` | `private_reply`: a reply to the caller's own request, made in a conversation that is not private to them. Other kinds may be added; a client shows what it knows and skips the rest |
+| `text` | `string` | The reply, as this console shows the reply's frame in a thread; absent when the payload policies left no text |
+| `redacted` | `boolean` | `true` when a payload policy rewrote the reply: the host's before the item was stored, or this console's as it is read; absent otherwise |
+| `origin.identity` | `string` | The agent the request was sent to |
+| `origin.interaction_id` | `string` | The request's interaction |
+| `origin.input_frame_id` | `string` | The request's `user_input` frame |
+
+A reply to a request made in the caller's own private thread is appended to
+that thread instead, as a `private_reply` frame (`payload.text`, and
+`payload.in_reply_to` with the request's `interaction_id` and
+`input_frame_id`; the frame's `caused_by_frame_id` is the request's frame),
+which only the caller and the access admins see. A reply is delivered once:
+the same reply again changes nothing.
+
+An item shows no more of its reply than a thread would show the reply's
+frame. It is stored in the form a host's payload policy gives that frame
+before it is stored, and each read shows it as the reading console shows
+the frame: under that console's own payload policy and visibility, and only
+while the caller may view the agent the request was sent to (`agent.view`,
+decided on the request's captured lineage as for the agent's own frames).
+An item the console or the caller's access hides is left out, and listed
+again once that changes. An item whose text a policy left none of is
+listed without `text`, with `redacted: true`, and is dismissed like any
+other.
+
+The items are kept in the realm's metadata store, as the console audit log
+is, and are never pruned: a dismissed item stays stored, so its reply stays
+delivered. The list grows by one stored item per reply delivered as an
+item; the audit log's bounds do not apply to it. A read lists only the
+items not dismissed and reads at most the newest 200 of them; an item
+hidden from the caller still takes its place among those 200. An item the
+gateway cannot read (one a later version wrote, or a damaged one) is left
+out of the list and logged by its key.
+
+### `meta/console/attention/dismiss`
+
+Dismiss one of the caller's own attention items. A console change: it takes
+`expected_caller_scope`, checks its caller again right before it is made,
+and a read-only console refuses it (`-32010`).
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `item_id` | `string` | The item's `id` |
+
+The result is `{ "item_id": ..., "dismissed": true }` when the item is the
+caller's (dismissed now or before), and `"dismissed": false` when the
+caller holds no such item, another person's included. A dismissed item is
+no longer listed; the reply stays delivered. A candidate launch refuses it
+(`-32047` `candidate_launch`): the items are kept in the metadata store the
+authoritative launch reads.
 
 ### `meta/console/recover_send`
 

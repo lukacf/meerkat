@@ -30,6 +30,11 @@ pub mod console_auth_config;
 pub mod console_config;
 pub mod console_contracts;
 pub mod console_governed_ingress;
+// Person-addressed delivery has no caller in this crate yet: outside tests
+// the delivery chain is unused. The console's requester reply route, its
+// first caller, removes this allow.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod console_replies;
 pub(crate) mod console_schedules;
 pub(crate) mod console_spawn;
 pub mod console_voice;
@@ -76,6 +81,7 @@ pub mod mobpack;
 pub mod mocks;
 pub(crate) mod native_realm;
 pub mod native_startup;
+pub mod personal_accounts;
 pub(crate) mod private_owners;
 pub mod process;
 pub mod protocol;
@@ -278,6 +284,12 @@ pub use mobpack::{
     with_host_path_skill_reads,
 };
 pub use mocks::{MockModuleProcess, MockProcessError};
+pub use personal_accounts::{
+    APPROVAL_BRANCH_LABEL, McpAccountMode, McpAccountsConfig, McpAccountsConfigError,
+    McpServerAccounts, PersonalAccountCredentials, PersonalAccountOwnerCheck,
+    PersonalAccountRefusal, PersonalMcpAccounts, UnsupportedPersonalServer, personal_server_shape,
+    private_owner_key, private_owner_key_of_principal,
+};
 pub use process::{ProcessBoundaryError, run_process_json_line};
 pub use protocol::{ProtocolParseError, parse_module_event_line, parse_unified_event_line};
 pub use rpc::{

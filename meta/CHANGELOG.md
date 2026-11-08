@@ -263,6 +263,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and names none: `broken_members` is gone from it (`meta/status` on the
   stdio gateway still names them).
 
+- New refusals for personal accounts on MCP servers. A refused tool call
+  ends with a policy denial whose code is `personal_account_shared_thread`,
+  `personal_account_not_owner` or `personal_account_suspended`.
+  `personal_accounts_unsupported` refuses a configuration at startup
+  (`rpc_gateway` initialization answers `-32602`), and the placement,
+  respawn or wake of a member on another host, whose error names the kind
+  and the server.
+- Rust: `ConventionalPaths` gains `mcp_accounts_toml` (the conventional
+  `config/mcp_accounts.toml`), so a struct literal needs it.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -478,6 +488,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   person who wrote it (`"author": "operator"` with a `principal`) as
   written by the operator: it shows no name, and the record keeps the
   name. Nothing needs doing first.
+
+- A downgrade to 0.9.10 leaves the attention items stored and unread, and
+  shows a private reply in a person's side chat there as a runtime event to
+  whoever may view that side chat: 0.9.10 has no private side chats, so
+  that is everyone who may view the agent it was forked from.
 
 ### Added
 
@@ -875,6 +890,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
   `AccessView::hides_agent` and `AccessView::private_owner_key`;
   `ConsoleSendGateRefusal::UnknownIdentity`.
+
+- Personal accounts on MCP servers. An operator marks a server as using
+  personal accounts (`config/mcp_accounts.toml` for `meta_gateway`,
+  `runtime_options.mcp_accounts` for `rpc_gateway`, or
+  `UnifiedRuntimeBuilder::mcp_accounts`). Such a server acts with the
+  account of the person who opened a private console side chat, only there
+  and only for that person's own messages. Every other member's build leaves
+  it out, and no system account is ever used for it. Each person's
+  credential lives in a credential realm of their own below the
+  installation's. An access admin's revocation of a person's sessions
+  suspends their accounts in the side chats they opened before it. Only a
+  streamable HTTP server whose account the person proves at sign-in can be
+  personal; connector OAuth, stdio servers and environment tokens stay
+  system level. A member placed on another host is refused when the profile
+  it resolves (one of the mob definition's, a realm profile, its own, or a
+  profile of a child mob an agent creates) declares a server under a
+  personal server's name, since that host would serve it with its own
+  credentials; so is its respawn, before anything is retired. A member
+  placed before the server was marked personal is refused when it is woken
+  again from its stored profile (the member is broken): retire it and spawn
+  it again on this host, or mark the server `system` again.
+- Rust: `McpAccountsConfig`, `McpAccountMode`, `McpServerAccounts`,
+  `McpAccountsConfigError`, `PersonalMcpAccounts`,
+  `PersonalAccountOwnerCheck`, `PersonalAccountCredentials`,
+  `PersonalAccountRefusal`, `UnsupportedPersonalServer`,
+  `personal_server_shape`, `private_owner_key`,
+  `private_owner_key_of_principal`, `APPROVAL_BRANCH_LABEL` and
+  `MobBootstrapSpec::with_personal_mcp_accounts`. Each member factory of a
+  composition gets an owner check of its own, which the spec of that
+  factory's members takes; a member another factory builds gets no person's
+  credential.
+
+- A reply meant for one person (for example an answer released after a
+  review) reaches only that person: in their own private conversation when
+  they asked there, else as an item of their own attention list, never in
+  a shared conversation or on another viewer's stream. A console send's
+  `user_input` frame records its `thread` (who may read the replies to it:
+  `person` or `shared`). `meta/console/attention` lists the caller's own
+  items and `meta/console/attention/dismiss` dismisses one; a reply in a
+  private conversation is a `private_reply` frame there. A request from an
+  open console, a service or a token that names no person has no private
+  reply route. An item shows no more of its reply than a thread would show
+  the reply's frame: a host's payload policy applies before the item is
+  stored, the reading console's own policy as it is read, and an item is
+  listed only while its person may view the agent it came from. Items,
+  dismissed ones too, are kept for good, one per reply delivered as an
+  item; a read considers the newest 200 not dismissed and answers at most
+  100. The Console counts the person's items in **Needs you** and lists
+  them in its inbox, where each opens the chat it answers and can be
+  dismissed; a reply whose text a policy hid reads
+  **Content hidden by policy**. A private reply reads as the agent's
+  message in the person's own conversation.
+- Rust: `ConsoleLogStore` gains the provided
+  `send_frame_by_interaction`. A store outside Meta answers none unless it
+  implements it, so no reply reaches the senders of the sends it holds
+  privately.
 
 ### Changed
 
@@ -1667,6 +1738,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The console audit read numbers its rows (`seq`) over the rows it leaves
   out for a reader, and its `latest_seq` counts them: a reader sees gaps
   where rows naming a member hidden from them sit, never their content.
+
+- Personal accounts on MCP servers: in a private side chat, an MCP App
+  that a personal server serves cannot read its resources or call its tools
+  from the console yet. The console's app path does not carry the person as
+  the requester, so the owner check refuses those uses
+  (`personal_account_not_owner`).
+- Personal accounts on MCP servers: a member placed on another host before
+  a server in its profile was marked personal keeps that server on its host
+  until the member is retired: while its host keeps it running, and when
+  its host revives it on its own after a restart of that host. A wake that
+  this host refuses stops nothing there.
+
+- `meta_gateway` keeps its console log and its metadata store for the life
+  of the process, so a restart forgets the console's requests and the
+  private replies delivered to them: a reply to a request made before the
+  restart is refused (its thread is unknown), never delivered twice, and
+  the attention list starts empty.
+- No route delivers a private reply yet. A console send records its
+  thread, and the attention list (`meta/console/attention` and its
+  dismissal), the `private_reply` frame and the Console's reply cards are
+  in place, but nothing in this release answers a console request
+  privately: every person's attention list stays empty, and no
+  `private_reply` frame is appended to any conversation.
 
 ## [0.9.10] - 2026-11-04
 

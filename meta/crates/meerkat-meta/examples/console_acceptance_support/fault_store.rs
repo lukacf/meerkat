@@ -129,6 +129,14 @@ impl ConsoleLogStore for FaultStore {
     async fn frame_by_dedupe_key(&self, key: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
         self.inner.frame_by_dedupe_key(key).await
     }
+    // The send record lookup passes through too: the trait's default finds
+    // none, and a reply to a console request would then have no thread.
+    async fn send_frame_by_interaction(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.send_frame_by_interaction(interaction_id).await
+    }
     async fn latest_cursor(&self) -> ConsoleLogResult<Option<ConsoleCursor>> {
         if self.fault.load(Ordering::SeqCst) == 2 {
             return Err(std::io::Error::other("private fixture latest-cursor failure").into());

@@ -405,18 +405,77 @@ impl std::fmt::Debug for GatewayRealmMcpInstallation {
 /// too: `None` for the reserved `global` realm without a user-global
 /// document.
 fn realm_document(storage: &ResolvedStorage) -> Option<PathBuf> {
+    realm_config_source(storage).map(|source| source.config_doc_path(&storage.locator.realm))
+}
+
+/// The realm config source of `storage` by the facade's projection: `None`
+/// for the reserved `global` realm without a user-global document.
+fn realm_config_source(
+    storage: &ResolvedStorage,
+) -> Option<meerkat_store::FilesystemRealmConfigSource> {
     let global = storage.layout.global_config_path();
     if storage.locator.realm.is_global() && global.is_none() {
         return None;
     }
-    Some(
-        meerkat_store::FilesystemRealmConfigSource::new(
-            storage.locator.state_root.clone(),
-            global.unwrap_or_default(),
-            meerkat_models::canonical(),
-        )
-        .config_doc_path(&storage.locator.realm),
-    )
+    Some(meerkat_store::FilesystemRealmConfigSource::new(
+        storage.locator.state_root.clone(),
+        global.unwrap_or_default(),
+        meerkat_models::canonical(),
+    ))
+}
+
+/// Compose a gateway member factory with personal accounts on MCP servers
+/// (see [`crate::personal_accounts`]): the members' credential source for
+/// every other server is the realm's default MCP credential owner, installed
+/// here so that it serves no personal server's target (the builder wraps it
+/// in the realm's service-secret custody, `gateway_member_builder`); `check`,
+/// the owner check the gateway gives its spec, is installed over `host`, the
+/// host's own composer if any; and the people's accounts are kept in the
+/// factory's own provider-auth persistence.
+pub(crate) fn compose_personal_accounts(
+    check: &crate::PersonalAccountOwnerCheck,
+    factory: AgentFactory,
+    host: Option<Arc<dyn McpAdapterComposer>>,
+    runtime: &MeerkatMachine,
+    storage: &ResolvedStorage,
+) -> Result<AgentFactory, HostAuthError> {
+    let realm = storage.locator.realm.clone();
+    let persistence = factory
+        .resolution_provider_auth_persistence()
+        .map_err(HostAuthError::Factory)?;
+    let default_owner = meerkat::default_mcp_auth_resolver_in_realm(
+        persistence.clone(),
+        runtime.provider_auth_runtime_authority(),
+        realm.clone(),
+    );
+    let (factory, system) = match default_owner {
+        Some(owner) => {
+            let no_fallback = check.accounts().member_credential_source(owner);
+            let factory = factory.mcp_auth_resolver(Arc::clone(&no_fallback));
+            // The members private to an owner read every other server's
+            // credential, and its service secrets, as the others do.
+            let system = match (persistence, realm_config_source(storage)) {
+                (Some(persistence), Some(source)) => {
+                    meerkat::RealmMcpServiceSecrets::from_realm_source(
+                        Arc::new(source),
+                        realm.clone(),
+                        persistence.token_store(),
+                    )
+                    .serve_for(no_fallback)
+                }
+                _ => no_fallback,
+            };
+            (factory, Some(system))
+        }
+        None => (factory, None),
+    };
+    check.keep_accounts_in(
+        &factory,
+        runtime.provider_auth_runtime_authority(),
+        realm,
+        system,
+    )?;
+    Ok(check.install(factory, host))
 }
 
 /// The installation's meerkat-level realm as the meerkat realm storage its
@@ -535,6 +594,10 @@ impl GatewayMcpComposition {
 pub(crate) struct ComposedGatewayMemberFactory {
     pub(crate) factory: AgentFactory,
     pub(crate) consent_notice_issuer: Option<Arc<meerkat_core::ApprovalService>>,
+    /// The MCP adapter composer the host installed, which a composition with
+    /// personal accounts on MCP servers composes under its owner check
+    /// ([`compose_personal_accounts`]).
+    pub(crate) host_composer: Option<Arc<dyn McpAdapterComposer>>,
 }
 
 /// Offer a freshly constructed gateway member factory to the host. This is
@@ -565,6 +628,7 @@ pub(crate) fn compose_gateway_member_factory(
         return Ok(ComposedGatewayMemberFactory {
             factory,
             consent_notice_issuer: None,
+            host_composer: None,
         });
     };
     let construction = GatewayFactoryConstruction::new(kind, &factory, runtime, storage, custody);
@@ -588,6 +652,9 @@ pub(crate) fn compose_gateway_member_factory(
     let consent_notice_issuer = review
         .as_ref()
         .and_then(|review| review.consent_notice_issuer());
+    let host_composer = composition
+        .as_ref()
+        .map(|composition| Arc::clone(&composition.composer));
     let factory = match composition {
         Some(composition) => composition.install(factory),
         None => factory,
@@ -602,6 +669,7 @@ pub(crate) fn compose_gateway_member_factory(
             None => factory,
         },
         consent_notice_issuer,
+        host_composer,
     })
 }
 

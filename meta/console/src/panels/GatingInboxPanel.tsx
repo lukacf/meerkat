@@ -1,7 +1,8 @@
 import React from "react";
-import { ApprovalCard, DepartedApprovalCard, HostAttentionCard, deadlineWords, useApprovalClock, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
+import { ApprovalCard, DepartedApprovalCard, HostAttentionCard, PrivateReplyCard, deadlineWords, useApprovalClock, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
 import { approvalAudience } from "../../../packages/console-core/src/pending-approvals";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
+import type { ConsoleAttentionItem, ConsoleAttentionSnapshot } from "../../../packages/console-core/src/console-attention";
 import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import {
@@ -89,6 +90,12 @@ interface GatingInboxPanelProps {
   hostAttention?: HostAttentionSnapshot;
   /** Attention sources whose `decide_href` a read-only session links to. */
   hostDecideSources?: readonly HostAttentionSourceConfig[];
+  /** The signed-in person's own attention items (replies meant for them
+   *  alone), listed on Pending after the approvals, before the host's. */
+  consoleAttention?: ConsoleAttentionSnapshot;
+  /** Dismisses one of the person's items; absent on a read-only console,
+   *  which offers no Dismiss. */
+  onDismissAttention?: (item: ConsoleAttentionItem) => void;
   /** Grows by one each time Needs you opens the inbox: each new value shows
    *  the Pending tab, also in an inbox that is already open on another tab. */
   showPending?: number;
@@ -468,6 +475,8 @@ export function GatingInboxPanel({
   selectedPendingId,
   hostAttention,
   hostDecideSources,
+  consoleAttention,
+  onDismissAttention,
   showPending,
   decisions: durableDecisions,
   decisionsNextAfter,
@@ -527,17 +536,20 @@ export function GatingInboxPanel({
 
   const toggle = (key: string) => setExpandedId((current) => (current === key ? null : key));
 
-  // Host-provided attention items follow the approvals on Pending: link cards
-  // that the host decides on its own page, then the sources that could not be
-  // read. Neither hides an approval. While they show, an empty approval list
-  // says so in one line, so the items stay in view.
+  // The person's own replies follow the approvals on Pending, then the
+  // host-provided attention items: link cards that the host decides on its
+  // own page, then the sources that could not be read. None hides an
+  // approval. While any show, an empty approval list says so in one line, so
+  // the items stay in view.
+  const replyItems = tab === "pending" ? consoleAttention?.items ?? [] : [];
   const hostItems = tab === "pending" ? hostAttention?.items ?? [] : [];
   const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
   // Durable decisions follow the approvals too, read only: each one is
   // decided where it was presented. "Load more" follows the list's cursor.
   const decisionCards = tab === "pending" ? durableDecisions ?? [] : [];
   const decisionCursor = tab === "pending" && onLoadMoreDecisions ? decisionsNextAfter : undefined;
-  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0
+  const hostCardsShown = hostItems.length > 0 || hostFailedSources.length > 0;
+  const hostShown = replyItems.length > 0 || hostCardsShown || decisionCards.length > 0
     || decisionCursor !== undefined;
   const hostList = hostShown ? (
     <>
@@ -550,7 +562,14 @@ export function GatingInboxPanel({
           loadingMore={decisionsLoadingMore}
         />
       ) : null}
-      {hostItems.length > 0 || hostFailedSources.length > 0 ? (
+      {replyItems.length ? (
+        <div className="gating-inbox__cards" data-testid="console-attention-list">
+          {replyItems.map((item) => (
+            <PrivateReplyCard key={item.id} item={item} onDismiss={onDismissAttention} />
+          ))}
+        </div>
+      ) : null}
+      {hostCardsShown ? (
         <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
           {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}
           {hostFailedSources.length ? (

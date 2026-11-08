@@ -9,6 +9,7 @@ import { canonicalAssistantToolCounterparts, reconcileAssistantMessageFrames } f
 import { loadedTimelineStartMs, reconcileAssistantHistoryPositions, reconcileRuntimeAppendFrames, runtimeAppendNoticeKey } from "./runtime-append-projection";
 import { settledToolCompletion, toolCompletionFromFrame, unknownToolCompletion, type ToolCompletionEvidence } from "./tool-completion";
 import { parseConsoleContextMessage } from "./context-record";
+import { PRIVATE_REPLY_FRAME_EVENT, privateReplyText } from "./console-attention";
 import { memberKickoffNotice, memberKickoffPhaseLabel } from "./member-kickoff";
 import {
   decodeMemberAlias,
@@ -3891,6 +3892,26 @@ export function mapFramesToTimelineEntries(
       flushPendingReasoning(true);
       flushPendingText();
       entries.push(entry);
+      continue;
+    }
+
+    // A reply meant for this thread's person alone, appended after the turn
+    // that asked: the agent's message, never a runtime event. One without
+    // text shows nothing.
+    if (frame.event === PRIVATE_REPLY_FRAME_EVENT) {
+      const text = privateReplyText(frame);
+      if (!text) continue;
+      flushPendingReasoning(true);
+      flushPendingText();
+      const blocks = messageTextBlocks(text, textMode);
+      entries.push({
+        kind: "message",
+        id: entryId,
+        identity: agentIdentity(agent),
+        variant: blocks.length > 0 ? "rich" : "plain",
+        createdAt: isoFromTimestampMs(frame.timestampMs),
+        ...(blocks.length > 0 ? { blocks } : { text }),
+      });
       continue;
     }
 

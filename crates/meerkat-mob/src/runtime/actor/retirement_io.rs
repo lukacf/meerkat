@@ -5903,9 +5903,17 @@ impl MobActor {
                         });
                     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
                     if replacement.placement.is_some() {
+                        // The replacement's profile is checked as every placed
+                        // spawn's is (`check_placed_profile`), again after the
+                        // respawn checked it before the retirement.
+                        let placed_profile_check = self.placed_profile_check_context(
+                            super::super::handle::SpawnSource::Respawn,
+                            replacement.role_name.clone(),
+                        );
                         boxed_arm_future(|| {
                             self.enqueue_spawn_remote(
                                 *replacement,
+                                placed_profile_check,
                                 None,
                                 None,
                                 origin,

@@ -15817,6 +15817,7 @@ async fn run_agent(
             refused_mcp_servers: governed_refused_mcp,
             recoverable_tool_defs: None,
             llm_client_override: None,
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: Default::default(),

@@ -88,6 +88,13 @@ pub const CONSOLE_AUDIT_METHOD: &str = "meta/console/audit";
 /// tokens opened; the caller's other logins and its schedules are untouched.
 /// Served on the Console route only.
 pub const CONSOLE_SIGN_OUT_METHOD: &str = "meta/console/sign_out";
+/// The caller's own person-addressed attention items, newest first: replies
+/// meant for the caller that no private thread of theirs took. Served on the
+/// Console route only; a caller who is not a verified person reads none.
+pub const CONSOLE_ATTENTION_METHOD: &str = "meta/console/attention";
+/// Dismiss one of the caller's own attention items. Served on the Console
+/// route only.
+pub const CONSOLE_ATTENTION_DISMISS_METHOD: &str = "meta/console/attention/dismiss";
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";
@@ -2104,6 +2111,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/access/groups/delete",
     CONSOLE_REVOKE_SESSIONS_METHOD,
     CONSOLE_SIGN_OUT_METHOD,
+    // A person's dismissal of one of their attention items, in the realm's
+    // metadata store the authoritative launch reads.
+    CONSOLE_ATTENTION_DISMISS_METHOD,
     "meta/blob/upload",
     "meta/cancel_flow",
     "jobs/cancel",

@@ -226,6 +226,8 @@ pub struct UnifiedRuntimeBuilder {
     /// The bounds of the log's MCP app tool calls, when set apart (see
     /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)).
     console_tool_call_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
+    /// See [`Self::mcp_accounts`].
+    mcp_accounts: Option<crate::McpAccountsConfig>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1416,6 +1418,19 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// Set the account modes of the MCP servers the members use
+    /// ([`crate::McpAccountsConfig`], as `config/mcp_accounts.toml` sets them
+    /// for `meta_gateway`). A server marked personal is used only in the
+    /// private members of the person who connected their account on it, and
+    /// only for that person; every other server keeps one account per server
+    /// and realm. A personal server that cannot use personal accounts, among
+    /// the MCP servers the definition's inline profiles declare, refuses the
+    /// build. Absent, every server's account is the system's.
+    pub fn mcp_accounts(mut self, config: crate::McpAccountsConfig) -> Self {
+        self.mcp_accounts = Some(config);
+        self
+    }
+
     /// Let the Flow Editor on the reference app router run `rkat` on this
     /// host for callers that no enforced access controller governs. Off by
     /// default; see [`UnifiedRuntime::allow_flow_editor_host_deploy`].
@@ -1496,6 +1511,12 @@ impl UnifiedRuntimeBuilder {
         if self.mob_spec.is_some() && self.provider_auth_persistence.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
                 "a provider credential store (provider_auth_persistence()) requires builder-owned session services; mob_spec() is already erased".into(),
+            ));
+        }
+
+        if self.mob_spec.is_some() && self.mcp_accounts.is_some() {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "MCP account modes (mcp_accounts()) require builder-owned session services; mob_spec() is already erased: declare them with MobBootstrapSpec::with_personal_mcp_accounts on a spec whose member factories carry the owner check".into(),
             ));
         }
 
@@ -3484,6 +3505,24 @@ impl UnifiedRuntimeBuilder {
         };
         caps.image_generation |=
             crate::mob_handle_runtime::mob_definition_may_use_image_generation(&definition);
+        // Personal accounts on MCP servers, checked against the MCP servers
+        // the definition's profiles declare: the owner check the spec's
+        // member factory installs below.
+        let personal_accounts = match self.mcp_accounts.as_ref() {
+            Some(config) => {
+                config
+                    .check_mob_definition(&definition)
+                    .map_err(|refusal| {
+                        UnifiedRuntimeBuilderError::ConflictingConfiguration(format!(
+                            "mcp_accounts(): {refusal}"
+                        ))
+                    })?;
+                config
+                    .has_personal_servers()
+                    .then(|| crate::PersonalMcpAccounts::new(config.clone()).owner_check())
+            }
+            None => None,
+        };
         // Declared-versus-resolved capability invariant. This is the ONLY
         // sound place for it: on the definition path `self.schedule_store`
         let max_sessions = self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS);
@@ -3611,6 +3650,7 @@ impl UnifiedRuntimeBuilder {
                 authority,
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
+                personal_accounts.clone(),
             )
             .await
             .map_err(storage_resolution_builder_error)?
@@ -3640,6 +3680,7 @@ impl UnifiedRuntimeBuilder {
                 self.operation_refusal_observer.clone(),
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
+                personal_accounts.clone(),
             )
             .map_err(storage_resolution_builder_error)?
         } else {
@@ -3667,6 +3708,7 @@ impl UnifiedRuntimeBuilder {
                 self.operation_refusal_observer.clone(),
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
+                personal_accounts.clone(),
             )
             .map_err(storage_resolution_builder_error)?;
             spec._ephemeral_dir = Some(Arc::new(temp_dir));
@@ -3674,6 +3716,11 @@ impl UnifiedRuntimeBuilder {
         };
 
         spec = spec.with_mob_storage_provenance(mob_storage_provenance);
+        // Every member build classifies the personal servers it carries, with
+        // the owner check the composition installed on its member factory.
+        if let Some(check) = personal_accounts {
+            spec = spec.with_personal_mcp_accounts(check);
+        }
         // One place for all three compositions above.
         if let Some(policy) = self.fork_instruction_policy {
             spec = spec.with_fork_instruction_policy(policy);

@@ -160,6 +160,11 @@ pub struct ConsoleJsonState {
     /// built without a runtime, or over a metadata store that keeps no realm
     /// documents.
     pub(crate) console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The person-addressed attention items (`crate::console_replies`) that
+    /// `meta/console/attention` reads and `meta/console/attention/dismiss`
+    /// dismisses, each caller its own. `None` on a router built without a
+    /// runtime, or over a metadata store that keeps no realm documents.
+    pub(crate) console_attention: Option<Arc<crate::console_replies::ConsoleAttention>>,
 }
 
 #[derive(Debug, Clone)]
@@ -674,6 +679,7 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         mob_announcements: Default::default(),
         durable_decisions: Default::default(),
         console_audit: None,
+        console_attention: None,
     })
 }
 
@@ -721,6 +727,7 @@ pub fn console_json_router_with_aggregator_and_access(
         mob_announcements: Default::default(),
         durable_decisions: Default::default(),
         console_audit: None,
+        console_attention: None,
     })
 }
 
@@ -788,6 +795,7 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         Default::default(),
         Default::default(),
         None,
+        None,
     )
 }
 
@@ -818,6 +826,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     mob_announcements: crate::mob_announcements::AnnouncementSlot,
     durable_decisions: crate::durable_decisions::RuntimeDecisions,
     console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    console_attention: Option<Arc<crate::console_replies::ConsoleAttention>>,
 ) -> Router {
     let console_aggregator = shared_aggregator.or_else(|| {
         console_events.clone().map(|events| {
@@ -882,6 +891,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         mob_announcements,
         durable_decisions,
         console_audit,
+        console_attention,
     })
 }
 
@@ -1380,6 +1390,104 @@ fn console_whoami_rpc(
     )
 }
 
+/// `meta/console/attention` and `meta/console/attention/dismiss` on the
+/// console route: the caller's own person-addressed attention items
+/// ([`crate::console_replies`]), newest first, and the dismissal of one of
+/// them. Only a verified person holds items, read by the person's
+/// private-owner key; every other caller reads none and dismisses none, and
+/// no param names whose items are read. Each item is shown as this console
+/// shows the reply's frame in a thread: under its own payload policy and
+/// visibility, and only while the caller may view the agent the request
+/// went to, as the live roster describes that agent at the read. A console
+/// that keeps no attention list answers that the methods are not found.
+/// Dismissing is a console change: a read-only console refuses it, and the
+/// caller is checked again right before the dismissal is made.
+async fn console_attention_rpc(
+    state: &ConsoleJsonState,
+    auth: &ConsoleHttpAuthContext,
+    read_only: bool,
+    request: &JsonRpcRequest,
+) -> Value {
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let (Some(attention), Some(view)) = (
+        state.console_attention.as_ref(),
+        state.console_aggregator.as_ref(),
+    ) else {
+        return response_value(
+            response_id,
+            None,
+            Some(JsonRpcError::new(-32601, "Method not found")),
+        );
+    };
+    let addressee = auth.human.as_ref().map(console_person_private_owner_key);
+    if request.method == crate::rpc::CONSOLE_ATTENTION_METHOD {
+        let items = match &addressee {
+            Some(addressee) => {
+                // The list decides each item's agent by the caller's audience:
+                // refresh the access attributes the audience reads from the
+                // live roster first, as the RPC dispatch does before any
+                // per-agent decision. This answer comes before that dispatch,
+                // and no earlier read has to have refreshed them.
+                if let Some(runtime) = state.runtime.as_ref() {
+                    prime_access_cache_from_runtime(runtime, &auth.audience.controller()).await;
+                }
+                match attention.list(addressee, view, &auth.audience).await {
+                    Ok(items) => items,
+                    Err(error) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(JsonRpcError::new(
+                                -32603,
+                                format!("the attention list could not be read: {error}"),
+                            )),
+                        );
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+        return response_value(
+            response_id,
+            Some(json!({ "items": items, "retention": attention.retention() })),
+            None,
+        );
+    }
+    if read_only {
+        return console_read_only_rpc_error(response_id);
+    }
+    let Some(item_id) = request.params.get("item_id").and_then(Value::as_str) else {
+        return invalid_params(response_id, "item_id must be a string");
+    };
+    // The change checks its caller again right before it is made.
+    if let Err(refusal) =
+        ConsoleSendGovernance::for_request(state, auth).refuse_unless_caller_current()
+    {
+        return response_value(response_id, None, Some(refusal.json_rpc_error()));
+    }
+    let dismissed = match &addressee {
+        Some(addressee) => match attention.dismiss(addressee, item_id).await {
+            Ok(dismissed) => dismissed,
+            Err(error) => {
+                return response_value(
+                    response_id,
+                    None,
+                    Some(JsonRpcError::new(
+                        -32603,
+                        format!("the attention item could not be dismissed: {error}"),
+                    )),
+                );
+            }
+        },
+        None => false,
+    };
+    response_value(
+        response_id,
+        Some(json!({ "item_id": item_id, "dismissed": dismissed })),
+        None,
+    )
+}
+
 /// An opaque, stable digest of the caller the Console resolved for a
 /// request, from its send scope: the verified human (issuer and subject),
 /// the principal with its trust source, or the open Console's one anonymous
@@ -1463,6 +1571,7 @@ pub async fn console_rpc_handler(
         auth_context.access_view.as_ref(),
     );
     let audit_offered = audit::audit_read_offered(&state, &auth_context);
+    let attention_methods = console_attention_methods(&state);
     // A console change and its row in the console audit log run on the
     // server, a refusal included (`crate::console_audit`): a caller that
     // goes away cuts neither short.
@@ -1482,6 +1591,9 @@ pub async fn console_rpc_handler(
         };
     if method == "meta/capabilities" && audit_offered {
         advertise_console_audit(&mut response);
+    }
+    if method == "meta/capabilities" {
+        advertise_console_attention(&mut response, attention_methods);
     }
     crate::side_chat::clear_unseen_side_chat_creators(&mut response, viewer);
     (status, Json::<Value>(response))
@@ -1510,6 +1622,35 @@ fn advertise_console_audit(response: &mut Value) {
             .any(|method| method.as_str() == Some(crate::rpc::CONSOLE_AUDIT_METHOD))
     {
         methods.push(json!(crate::rpc::CONSOLE_AUDIT_METHOD));
+    }
+}
+
+/// The attention methods `meta/capabilities` on the console route lists
+/// where the console keeps an attention list ([`crate::console_replies`]):
+/// the read always, the dismissal on a console that takes changes; none
+/// where it keeps no list.
+fn console_attention_methods(state: &ConsoleJsonState) -> &'static [&'static str] {
+    if state.console_attention.is_none() || state.console_aggregator.is_none() {
+        &[]
+    } else if state.decisions.console.read_only {
+        &[crate::rpc::CONSOLE_ATTENTION_METHOD]
+    } else {
+        &[
+            crate::rpc::CONSOLE_ATTENTION_METHOD,
+            crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD,
+        ]
+    }
+}
+
+/// Add the console's attention methods ([`console_attention_methods`]) to
+/// a `meta/capabilities` answer's methods.
+fn advertise_console_attention(response: &mut Value, attention_methods: &[&str]) {
+    if let Some(methods) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("methods"))
+        .and_then(Value::as_array_mut)
+    {
+        methods.extend(attention_methods.iter().map(|method| json!(method)));
     }
 }
 
@@ -1586,6 +1727,15 @@ async fn console_rpc_answer(
         return (
             StatusCode::OK,
             audit::console_audit_rpc(state, auth_context, &parsed_request).await,
+        );
+    }
+    if matches!(
+        request_method.as_str(),
+        crate::rpc::CONSOLE_ATTENTION_METHOD | crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD
+    ) {
+        return (
+            StatusCode::OK,
+            console_attention_rpc(state, auth_context, read_only, &parsed_request).await,
         );
     }
     if matches!(
@@ -3293,7 +3443,9 @@ pub(crate) struct ConsoleSendGovernance {
     pub(crate) side_chat_owner: Option<String>,
     /// Who sends: recorded on the send's `user_input` frame, and its
     /// requester carried to the agent's run. `None` only for a caller the
-    /// Console did not authenticate (the unscoped Rust send API).
+    /// Console did not authenticate (the unscoped Rust send API). A sender
+    /// that names a requester is also the person the replies to the send are
+    /// for ([`crate::console_replies`]).
     pub(crate) sender: Option<crate::console_aggregator::ConsoleSender>,
 }
 
@@ -3700,6 +3852,10 @@ mod console_shared_object_tests;
 #[cfg(test)]
 #[path = "console_actor_tests.rs"]
 mod console_actor_tests;
+
+#[cfg(test)]
+#[path = "console_reply_tests.rs"]
+mod console_reply_tests;
 
 #[cfg(test)]
 #[path = "console_audit_tests.rs"]
@@ -4951,6 +5107,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/reset_all"
             | "meta/console/send"
             | "meta/console/recover_send"
+            | crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD
             | crate::console_voice::VOICE_OPEN_METHOD
             | "meta/blob/upload"
             | "meta/ensure_member"
@@ -9782,9 +9939,16 @@ fn console_audience_view(
 pub(crate) fn console_person_private_owner_key(
     human: &crate::runtime::AuthenticatedConsoleHuman,
 ) -> String {
+    person_private_owner_key(human.issuer(), human.subject())
+}
+
+/// The private-owner key of the person a verified OIDC `issuer` and `subject`
+/// name: the one digest [`console_person_private_owner_key`], `whoami`'s
+/// `caller_scope` and the personal account owner check all compute.
+pub(crate) fn person_private_owner_key(issuer: &str, subject: &str) -> String {
     console_caller_scope(&ConsoleSendScope::Human {
-        issuer: human.issuer().to_string(),
-        subject: human.subject().to_string(),
+        issuer: issuer.to_string(),
+        subject: subject.to_string(),
     })
 }
 
@@ -23218,6 +23382,7 @@ message = "review"
             mob_announcements: Default::default(),
             durable_decisions: Default::default(),
             console_audit: None,
+            console_attention: None,
         };
         let authenticate = |subject: &str| {
             let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -32500,6 +32665,7 @@ mod console_viewer_resolver_tests {
             mob_announcements: Default::default(),
             durable_decisions: Default::default(),
             console_audit: None,
+            console_attention: None,
         }
     }
 
@@ -33005,6 +33171,7 @@ mod console_human_admission_tests {
             mob_announcements: Default::default(),
             durable_decisions: Default::default(),
             console_audit: None,
+            console_attention: None,
         }
     }
 

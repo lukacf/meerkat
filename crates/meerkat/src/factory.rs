@@ -675,6 +675,104 @@ pub fn decode_llm_client_override_from_service(
         .map(|typed| typed.0.clone())
 }
 
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+struct ErasedMcpAuthResolverOverride(Arc<dyn meerkat_mcp::McpAuthResolver>);
+
+/// Encode a build's own MCP credential source for transport in
+/// `SessionBuildOptions::mcp_auth_resolver_override`.
+///
+/// `SessionBuildOptions` lives in `meerkat-core` and cannot name
+/// `meerkat_mcp::McpAuthResolver`, so the source is carried as
+/// `Arc<dyn Any + Send + Sync>`, as an LLM client override is.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub fn encode_mcp_auth_resolver_override_for_service(
+    resolver: Arc<dyn meerkat_mcp::McpAuthResolver>,
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    Arc::new(ErasedMcpAuthResolverOverride(resolver))
+}
+
+/// Decode a build's own MCP credential source from `SessionBuildOptions`.
+///
+/// Accepts exactly the typed wrapper produced by
+/// [`encode_mcp_auth_resolver_override_for_service`]; any other payload
+/// decodes to `None`.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub fn decode_mcp_auth_resolver_override_from_service(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Option<Arc<dyn meerkat_mcp::McpAuthResolver>> {
+    value
+        .as_ref()
+        .downcast_ref::<ErasedMcpAuthResolverOverride>()
+        .map(|typed| Arc::clone(&typed.0))
+}
+
+/// The MCP credential source of a build whose
+/// `SessionBuildOptions::mcp_auth_resolver_override` is not one: it refuses
+/// every credential, so the build never falls back to the factory's source.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+struct RefusingMcpAuthResolver;
+
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+const FOREIGN_MCP_AUTH_RESOLVER_OVERRIDE: &str =
+    "this build's MCP credential source override is not a credential source";
+
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl meerkat_mcp::McpAuthResolver for RefusingMcpAuthResolver {
+    async fn stored_bearer_token(
+        &self,
+        _target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+    ) -> Result<Option<String>, meerkat_providers::mcp_oauth::McpOAuthError> {
+        Err(foreign_override_refusal())
+    }
+
+    async fn interactive_login(
+        &self,
+        _target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+        _www_authenticate: Option<&str>,
+    ) -> Result<String, meerkat_providers::mcp_oauth::McpOAuthError> {
+        Err(foreign_override_refusal())
+    }
+
+    async fn stdio_service_secrets(
+        &self,
+        _server: &meerkat_core::McpServerConfig,
+    ) -> Result<
+        meerkat_core::auth::McpServiceSecretValues,
+        meerkat_core::auth::McpServiceSecretRefusal,
+    > {
+        Err(meerkat_core::auth::McpServiceSecretRefusal::Unavailable {
+            reason: FOREIGN_MCP_AUTH_RESOLVER_OVERRIDE.to_owned(),
+        })
+    }
+}
+
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+fn foreign_override_refusal() -> meerkat_providers::mcp_oauth::McpOAuthError {
+    meerkat_providers::mcp_oauth::McpOAuthError::CredentialAccess {
+        refusal: meerkat_core::auth::TokenStoreRefusal::Unsupported,
+        detail: FOREIGN_MCP_AUTH_RESOLVER_OVERRIDE.to_owned(),
+    }
+}
+
+/// The MCP credential source a build carries in
+/// `SessionBuildOptions::mcp_auth_resolver_override`, decoded fail-closed: a
+/// payload that is not a credential source becomes one that refuses every
+/// credential.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+fn decode_build_mcp_auth_resolver(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Arc<dyn meerkat_mcp::McpAuthResolver> {
+    decode_mcp_auth_resolver_override_from_service(value).unwrap_or_else(|| {
+        tracing::warn!(
+            "a session build's MCP credential source override is not a credential source; its \
+             MCP connections get no credential"
+        );
+        Arc::new(RefusingMcpAuthResolver)
+    })
+}
+
 /// Resolve a pre-built session comms runtime override (multi-host mobs
 /// DEC-P3H-3). Fail closed on both failure modes: an unrecognized payload
 /// never falls back to config-mode construction, and a runtime whose
@@ -1137,7 +1235,10 @@ pub struct AgentBuildConfig {
     /// never open a browser: when no usable credential exists the server is
     /// reported through the router's typed `AuthorizationRequired` host
     /// status, and the host runs `mcp_login_start`/`mcp_login_complete`.
-    /// `None` connects without OAuth.
+    /// `None` uses the factory's source ([`AgentFactory::mcp_auth_resolver`]),
+    /// and without one connects without OAuth. A service build takes it from
+    /// `SessionBuildOptions::mcp_auth_resolver_override`
+    /// ([`encode_mcp_auth_resolver_override_for_service`]).
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     pub mcp_auth_resolver: Option<Arc<dyn meerkat_mcp::McpAuthResolver>>,
 }
@@ -1466,6 +1567,14 @@ impl AgentBuildConfig {
             .llm_client_override
             .as_ref()
             .and_then(decode_llm_client_override_from_service);
+        // The build's own MCP credential source, in place of the factory's.
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        {
+            self.mcp_auth_resolver = build
+                .mcp_auth_resolver_override
+                .as_ref()
+                .map(decode_build_mcp_auth_resolver);
+        }
         self.agent_llm_client_decorator = build.agent_llm_client_decorator.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
@@ -1530,6 +1639,23 @@ impl AgentBuildConfig {
         self.host_prompt_sections = build.host_prompt_sections;
     }
 
+    /// This build's own MCP credential source, erased for
+    /// `SessionBuildOptions::mcp_auth_resolver_override`.
+    fn mcp_auth_resolver_override_for_service(
+        &self,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        {
+            self.mcp_auth_resolver
+                .clone()
+                .map(encode_mcp_auth_resolver_override_for_service)
+        }
+        #[cfg(not(all(feature = "mcp", not(target_arch = "wasm32"))))]
+        {
+            None
+        }
+    }
+
     /// Convert build options to the service transport representation.
     pub fn to_session_build_options(&self) -> SessionBuildOptions {
         SessionBuildOptions {
@@ -1560,6 +1686,7 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            mcp_auth_resolver_override: self.mcp_auth_resolver_override_for_service(),
             agent_llm_client_decorator: self.agent_llm_client_decorator.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,

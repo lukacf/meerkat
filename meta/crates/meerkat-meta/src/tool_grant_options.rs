@@ -139,7 +139,7 @@ mod tests {
         )
         .expect("a 400-day maximum parses")
         .expect("the option names a maximum");
-        assert_eq!(parsed.max_lifetime, Duration::from_millis(34_560_000_000));
+        assert_eq!(parsed.max_lifetime, Duration::from_hours(9_600));
         assert_eq!(parsed.policy().max_lifetime_ms(), 34_560_000_000);
         let largest = ToolGrantLaunchOptions::parse(
             Some(&json!({ "max_lifetime_ms": MAX_TOOL_GRANT_LIFETIME_MS })),

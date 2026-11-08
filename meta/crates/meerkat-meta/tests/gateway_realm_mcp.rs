@@ -37,7 +37,7 @@ runtime_mode = "turn_driven"
 [profiles.worker.tools]
 comms = true
 "#;
-const LINE_WAIT: Duration = Duration::from_secs(180);
+const LINE_WAIT: Duration = Duration::from_mins(3);
 /// The secret slot the fixture server declares.
 const SLOT: &str = "SEARCH_API_KEY";
 /// The value the rows set: it must appear in no response, no error, no

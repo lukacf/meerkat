@@ -37,7 +37,7 @@ comms = true
 builtins = true
 grant_gated = { tools = ["datetime"] }
 "#;
-const LINE_WAIT: Duration = Duration::from_secs(180);
+const LINE_WAIT: Duration = Duration::from_mins(3);
 const HOUR_MS: u64 = 3_600_000;
 const DAY_MS: u64 = 24 * HOUR_MS;
 

@@ -203,7 +203,7 @@ async fn rpc(app: &axum::Router, subject: &str, method: &str, params: Value) -> 
                 .to_string(),
         ))
         .expect("rpc request");
-    let response = tokio::time::timeout(Duration::from_secs(60), app.clone().oneshot(request))
+    let response = tokio::time::timeout(Duration::from_mins(1), app.clone().oneshot(request))
         .await
         .expect("bounded rpc")
         .expect("rpc response");

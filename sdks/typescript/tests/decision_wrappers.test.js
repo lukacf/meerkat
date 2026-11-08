@@ -218,3 +218,37 @@ describe("durable decision wrappers", () => {
     }
   });
 });
+
+describe("decision notices", () => {
+  it("drops a decision notice instead of buffering it as a session event", () => {
+    // A stdio connection shows its operator each durable decision as a
+    // decision/notice; this client has no listener for it.
+    const client = new MeerkatClient();
+    // A stream waits for its session: a session event that names none would
+    // be buffered for it.
+    client.pendingStreamQueues.set(3, { put() {} });
+    client.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "decision/notice",
+        params: {
+          notice_id: "472e7eeb-5768-494e-9e4b-4193c676f0a3",
+          decision_id: DECISION_ID,
+          kind: "release",
+          event: "presented",
+          phase: "open",
+          approver_id: "operator",
+          requester: REQUESTER,
+          presentation: {
+            rendering: "Release build 7 to production.",
+            renderer: "render.v1",
+            subject_digest: SUBJECT_DIGEST,
+            parts: [{ index: 0, count: 1, part_digest: SUBJECT_DIGEST }],
+          },
+        },
+      }),
+    );
+    assert.equal(client.unmatchedStreamBuffer.size, 0, "nothing buffered as a session event");
+    assert.equal(client.eventQueues.size, 0, "no session queue was touched");
+  });
+});

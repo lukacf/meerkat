@@ -277,6 +277,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   by earlier releases (unknown action): keep it out of a configuration an
   earlier gateway may still load.
 
+- An access configuration that names `decisions.view`, `decisions.decide`,
+  `decisions.admin` or `decisions.*` does not load in an earlier Meta, and
+  neither does an approver id whose only holders are `ingress_subjects` or
+  `people` entries (an earlier Meta ignores both fields and refuses an
+  approver without holders): it refuses to start with that configuration.
+  Before rolling back, remove those actions from the rules and give each
+  such approver id its `subjects` or `groups`, or restore the configuration
+  saved before the upgrade.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor

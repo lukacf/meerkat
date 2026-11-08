@@ -436,7 +436,7 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   `MobError::MemberReloadRequired` when its write failed (reload, settle
   again) or its tail repair failed (reload; the member then keeps no run),
   `MobError::MemberSessionNotLive` when the session leaves the process
-  (another writer took its store fence, or an unregister ended the run
+  (its store realm lost its fence, or an unregister ended the run
   first: its inputs then stopped when it keeps queued work, a mob
   Shutdown's default, and cancelled when it stops), and
   `MobError::MemberInputTerminalNotYetReadable` when the run is no longer
@@ -445,7 +445,11 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   `MobError::MemberSessionNotLive` and never woken. `MemberNotFound` (a
   member the mob no longer holds; a release answers it too) and
   `UnsupportedForMode` (a placed or session-less member, never held) answer
-  the same on every round: that member is done.
+  the same on every round: that member is done. A host store realm that
+  lost its fence (`SpiRealm::realm_poisoned`: no wake, reload or cold read
+  in this process serves a member until the realm is opened again), and a
+  mob destroyed or shut down (every verb answers `ActorCommandChannelClosed`),
+  end the recovery in this process.
   `MeerkatMachine::session_work_state` reads cold whether one session
   holds the work a start wakes a member for, without loading or registering
   it: `Registered`, `Idle`,

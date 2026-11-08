@@ -11327,17 +11327,22 @@ impl MobHandle {
     /// terminals through
     /// [`meerkat_runtime::MeerkatMachine::input_terminal_receipt`].
     ///
-    /// The verb never wakes a member. A member the mob does not hold is
-    /// [`MobError::MemberNotFound`]; one not materialized in this process
-    /// (dormant, or waking), whose registration is gone or leaving through
-    /// its unregister, or whose session store's fence another writer took, is
-    /// [`MobError::MemberSessionNotLive`]: wake it under the host's hold
-    /// first, or read its stored work cold with
+    /// The verb never wakes a member. A member the mob does not hold (a
+    /// retired one) is [`MobError::MemberNotFound`], and once the mob is
+    /// destroyed or shut down every verb of the handle answers
+    /// [`MobError::ActorCommandChannelClosed`]. A member not materialized in
+    /// this process (dormant, or waking), or whose registration is gone or
+    /// leaving through its unregister, is [`MobError::MemberSessionNotLive`]:
+    /// wake it under the host's hold first, or read its stored work cold with
     /// [`meerkat_runtime::MeerkatMachine::session_work_state`]. A member
-    /// whose runtime needs a durability reload, also when the settlement's
-    /// own write failed (the reload loses the settle) or its tail repair
-    /// left the run's tail standing (the reloaded member keeps no run), is
-    /// refused with [`MobError::MemberReloadRequired`]: reload it
+    /// whose session's store realm lost its fence (another writer took it, or
+    /// the realm stopped itself) is [`MobError::MemberSessionNotLive`] at
+    /// every call too, and neither remedy serves it: the realm refuses this
+    /// process until it is opened again, and the realm's next owner recovers
+    /// the run. A member whose runtime needs a durability reload, also when
+    /// the settlement's own write failed (the reload loses the settle) or its
+    /// tail repair left the run's tail standing (the reloaded member keeps no
+    /// run), is refused with [`MobError::MemberReloadRequired`]: reload it
     /// ([`Self::reload_member_registration`]) under the hold and settle
     /// again. A registration that no longer keeps the run while an input
     /// bound to it reads no committed terminal yet is refused with the

@@ -10810,8 +10810,8 @@ mod tests {
 
     /// A runtime refusal of a member's retained-run settle maps to a typed
     /// mob refusal. A registration that is gone, draining for its
-    /// unregister or owing one, or whose store fence another writer took
-    /// (the runtime's stale-authority refusal) answers
+    /// unregister or owing one, or whose store realm lost its fence (the
+    /// runtime's stale-authority refusal) answers
     /// `MemberSessionNotLive`; one that needs a durability reload (its
     /// settlement's write failed, say) answers `MemberReloadRequired`; and
     /// an input of the run whose terminal is not readable yet answers the
@@ -10852,7 +10852,7 @@ mod tests {
             ),
             (
                 RuntimeDriverError::StaleAuthority {
-                    reason: "another writer holds the session store's fence".to_string(),
+                    reason: "the session's store realm lost its fence".to_string(),
                 },
                 false,
             ),
@@ -15289,8 +15289,8 @@ pub(crate) mod provision_finish_test_hooks {
 ///
 /// - The member's registration is gone from this process, drains for its
 ///   unregister, or owes one (the unregister's staged final transition, or
-///   the teardown-only anchor a failed finalization leaves), or another
-///   writer holds its session store's fence (the runtime's stale-authority
+///   the teardown-only anchor a failed finalization leaves), or its
+///   session's store realm lost its fence (the runtime's stale-authority
 ///   refusal): the member's session has no live runtime here,
 ///   `MemberSessionNotLive`. Nothing wakes it.
 /// - The registration needs a durability reload (a settlement whose write

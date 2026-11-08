@@ -321,8 +321,9 @@ committed. Four steps, per member:
    `MobHandle::reload_member_registration`, which applies the hold again,
    and settle again) or its tail repair failed (after the reload the member
    keeps no run, and the next settle answers `NotRetained`), and
-   `MobError::MemberSessionNotLive` when another writer took the session's
-   store fence, or when an unregister ended the run first (its inputs then
+   `MobError::MemberSessionNotLive` when the session's store realm lost its
+   fence (another writer took it, or the realm stopped itself; see step 4),
+   or when an unregister ended the run first (its inputs then
    end `stopped` when the unregister keeps queued work, as a mob Shutdown
    does by default, whatever their state, and `cancelled` when it stops).
    When the registration no longer keeps the run but an input of the run
@@ -339,13 +340,24 @@ committed. Four steps, per member:
    that member again; releasing it there would let the run continue. Two
    refusals answer the same on every round, so the member is done:
    `MobError::MemberNotFound`, for a member the mob no longer holds (a retire
-   or destroy dropped its hold with it), and `MobError::UnsupportedForMode`,
-   for one the hold never applied to (a placed member, or one with no
-   session). A release for a member the mob no longer holds answers
-   `MemberNotFound` too, with nothing left staged.
+   dropped its hold with it), and `MobError::UnsupportedForMode`, for one the
+   hold never applied to (a placed member, or one with no session). A
+   release for a member the mob no longer holds answers `MemberNotFound`
+   too, with nothing left staged. Two cases end the recovery in this
+   process for every member. Once the mob is destroyed or shut down, its
+   actor is gone and every verb answers `MobError::ActorCommandChannelClosed`
+   (a destroyed mob's members are gone with it; a mob shut down is recovered
+   at its next start, under the hold again). Once the host store realm lost
+   its fence (`SpiRealm::realm_poisoned` reads `Some`: another writer took
+   the fence, or the realm stopped itself), every settle is refused
+   `MemberSessionNotLive`: the realm refuses this process's reads and writes
+   until it is opened again, so no wake, reload or cold read here can serve
+   a member, and the realm's next owner recovers the runs (this process
+   recovers them only after it opens the realm again).
 
 ```rust
 use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobError, MobHandle};
+use meerkat_runtime::store::spi::SpiRealm;
 use meerkat_runtime::{MeerkatMachine, RetainedRunSettlement, SessionWorkState};
 
 /// What a member's recovery leaves.
@@ -354,6 +366,8 @@ enum Recovered {
     Done,
     /// The run may still be open: keep the hold, settle again later.
     StillOpen,
+    /// The mob's actor is gone: no verb of the handle answers again.
+    MobGone,
 }
 
 async fn recover(
@@ -370,59 +384,83 @@ async fn recover(
             return Ok(Recovered::Done);
         }
         if let Err(error) = handle.ensure_member_live(identity).await {
-            return done_for_good(error);
+            return final_refusal(error);
         }
     }
     match handle.settle_member_retained_run(identity).await {
         Ok(RetainedRunSettlement::Busy { current_run_id: None }) => Ok(Recovered::StillOpen),
         // Settled, NotRetained, or a run is current.
         Ok(_) => Ok(Recovered::Done),
-        Err(error) => done_for_good(error),
+        Err(error) => final_refusal(error),
     }
 }
 
-/// The refusals that answer the same on every round end a member's recovery:
-/// the mob no longer holds the member (a retire or destroy dropped its hold
-/// with it), or the hold never applied to it (a placed member, or one with no
-/// session). Any other refusal keeps the hold for a later round.
-fn done_for_good(error: MobError) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
+/// The refusals that answer the same at every call. The mob no longer holds
+/// the member (a retire dropped its hold with it), or the hold never applied
+/// to it (a placed member, or one with no session): that member is done. The
+/// mob's actor is gone (a destroy or a shutdown): the recovery is over. Any
+/// other refusal keeps the hold for a later round.
+fn final_refusal(error: MobError) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
     match error {
         MobError::MemberNotFound(_) | MobError::UnsupportedForMode { .. } => Ok(Recovered::Done),
+        MobError::ActorCommandChannelClosed => Ok(Recovered::MobGone),
         error => Err(error.into()),
     }
 }
 
-// `machine` is the MeerkatMachine the mob's session service runs on.
+/// One round over `members`: the members to settle again in a later round,
+/// none when nothing in this process can recover a member any more.
+async fn recover_round(
+    handle: &MobHandle,
+    machine: &MeerkatMachine,
+    realm: Option<&SpiRealm>,
+    members: &[AgentIdentity],
+) -> Vec<AgentIdentity> {
+    let mut settle_again = Vec::new();
+    for identity in members {
+        if realm.is_some_and(|realm| realm.realm_poisoned().is_some()) {
+            // The realm lost its fence: its next owner recovers the runs.
+            return Vec::new();
+        }
+        match recover(handle, machine, identity).await {
+            Ok(Recovered::Done) => {
+                match handle
+                    .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
+                    .await
+                {
+                    // Released, or the mob no longer holds the member:
+                    // nothing stays staged for it.
+                    Ok(()) | Err(MobError::MemberNotFound(_)) => {}
+                    Err(MobError::ActorCommandChannelClosed) => return Vec::new(),
+                    Err(_) => settle_again.push(identity.clone()),
+                }
+            }
+            Ok(Recovered::MobGone) => return Vec::new(),
+            // The run may still be open, or the member needs a reload first:
+            // the hold keeps the run from continuing until a later round.
+            Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
+        }
+    }
+    settle_again
+}
+
+// `machine` is the MeerkatMachine the mob's session service runs on, and
+// `realm` the host store realm it writes through (`None` on a `sqlite` or
+// `jsonl` realm, which has no fence to lose).
 let handle = MobBuilder::for_resume(storage)
     .with_session_service(service)
     .hold_restored_member_run_starts(HostRunStartHoldReason::HostRecovery, members.clone())
     .resume()
     .await?;
-let mut settle_again = Vec::new();
-for identity in &members {
-    match recover(&handle, &machine, identity).await {
-        Ok(Recovered::Done) => {
-            match handle
-                .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
-                .await
-            {
-                // Released, or the mob no longer holds the member: nothing
-                // stays staged for it.
-                Ok(()) | Err(MobError::MemberNotFound(_)) => {}
-                Err(_) => settle_again.push(identity.clone()),
-            }
-        }
-        // The run may still be open, or the member needs a reload first:
-        // the hold keeps the run from continuing until a later round.
-        Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
-    }
-}
+let mut settle_again = recover_round(&handle, &machine, realm.as_deref(), &members).await;
 ```
 
-Run the loop again over `settle_again` (after reloading a member refused
-`MemberReloadRequired`) until it is empty: a member leaves it once its run is
-settled or none is kept and its hold is released, or once the mob no longer
-holds it or the hold never applied to it.
+Run `recover_round` again over `settle_again` (after reloading a member
+refused `MemberReloadRequired`) until it is empty. A member leaves it once
+its run is settled or none is kept and its hold is released, or once the mob
+no longer holds it or the hold never applied to it; and a round leaves none
+when the mob's actor is gone or the realm lost its fence, which ends the
+recovery in this process (see step 4).
 
 A retry is safe. A settle that arrives while an earlier one is still
 settling the same run joins it and gets the same answer. A retry after the
@@ -440,11 +478,12 @@ standing, answers `RuntimeDriverError::RecoveryRepairBlocked`: reload the
 registration (`recover_or_discard_reload_required_registration_if_current`),
 which applies the staged hold again, and settle again (after a failed tail
 repair the reloaded registration keeps no run, so that settle answers
-`NotRetained`). A writer whose session store's fence another writer took is
-refused as a session that leaves this process, and its run is the new
-owner's: a host store realm refuses that writer's reads and writes until it
-is reopened, so no reload here can serve the session, and the settle
-answers `RuntimeDriverError::StaleAuthority`.
+`NotRetained`). A writer whose host store realm lost its fence (another
+writer took it, or the realm stopped itself) is refused as a session that
+leaves this process at every settle, `RuntimeDriverError::StaleAuthority`:
+the realm refuses that writer's reads and writes until it is opened again,
+so no reload here can serve the session, and the realm's next owner
+recovers the run.
 
 ## Tools That Run Again
 

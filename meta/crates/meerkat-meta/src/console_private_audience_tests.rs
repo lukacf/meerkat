@@ -52,8 +52,10 @@ async fn roster_labels(
 }
 
 /// The requests of every kind of member-scoped console method, each naming
-/// `name` where the method takes the member it reads or acts on.
+/// `name` where the method takes the member it reads or acts on, with every
+/// other parameter the method needs, so each answer is the method's own.
 fn member_requests(name: &str) -> Vec<(&'static str, Value)> {
+    let remote = "remote-mob/worker/peer";
     vec![
         ("meta/get_member", json!({ "member_id": name })),
         ("meta/member_status", json!({ "member_id": name })),
@@ -65,12 +67,21 @@ fn member_requests(name: &str) -> Vec<(&'static str, Value)> {
         ("meta/identity/routing_status", json!({ "identity": name })),
         (
             "meta/send_status",
-            json!({ "identity": name, "input_id": "input-1" }),
+            json!({
+                "identity": name,
+                "session_id": "01a1b8c0-96e4-71d4-8671-d7a73527e863",
+                "input_id": "00000000-0000-4000-8000-000000000001",
+            }),
         ),
         ("meta/schedule/list", json!({ "identity": name })),
         (
             "meta/agent_memory/recall",
-            json!({ "identity": name, "query": "heron" }),
+            json!({
+                "identity": name,
+                "selection": "contextual",
+                "query_text": "Where is the heron?",
+                "query_terms": ["heron"],
+            }),
         ),
         ("meta/retire", json!({ "identity": name })),
         ("meta/retire_member", json!({ "member_id": name })),
@@ -81,7 +92,11 @@ fn member_requests(name: &str) -> Vec<(&'static str, Value)> {
         ("meta/force_cancel_member", json!({ "member_id": name })),
         (
             "meta/stop_member_run",
-            json!({ "member_id": name, "run_id": "run-1" }),
+            json!({
+                "member_id": name,
+                "run_id": "00000000-0000-4000-8000-000000000002",
+                "reason": "the row stops a run",
+            }),
         ),
         (
             "meta/fork_member",
@@ -91,29 +106,178 @@ fn member_requests(name: &str) -> Vec<(&'static str, Value)> {
             "meta/cross_mob/wire_local",
             json!({
                 "local_member_id": name,
-                "remote_comms_name": "elsewhere/worker/peer",
-                "remote_peer_id": "peer-1",
-                "remote_address": "inproc://elsewhere",
+                "remote_comms_name": remote,
+                "remote_peer_id":
+                    meerkat_core::comms::PeerId::from_ed25519_pubkey(&[42_u8; 32]).to_string(),
+                "remote_address": format!("inproc://{remote}"),
+                // The 32-byte key [42; 32] the peer id is derived from.
+                "remote_pubkey_b64": "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
             }),
         ),
     ]
 }
 
+/// The console of `runtime` (sign-in for Alice and Bob, no access
+/// configuration) with every part a member method reads: an identity runtime
+/// over a Core that holds `member` live on its own session (registered after
+/// the fork that seated the member, which an identity of the name refuses),
+/// with agent memory in `memory_dir`, and an aggregator over the runtime.
+async fn fully_composed_console(
+    runtime: &MobRuntime,
+    member: &str,
+    memory_dir: &std::path::Path,
+) -> Result<ConsoleJsonState, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::identity_first::core_test_bridge::{CoreReadsBridge, register_live};
+    use crate::identity_first::{
+        AgentAddressability, AgentMemoryConfig, AgentMemoryRuntimeInjector, DurabilityPolicy,
+        DurableAgentSpec, IdentityRuntime, IdentityRuntimeConfig, LocalContinuityStore,
+        LocalLeaseProvider, MemberReloadDisposition, PublicIdentityRuntime,
+    };
+
+    let bridge = Arc::new(CoreReadsBridge::with_registration_reload(
+        MemberReloadDisposition::Discarded,
+    ));
+    let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+        continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+        lease_provider: Arc::new(LocalLeaseProvider::new()),
+        runtime_instance_id: "fully-composed-console".to_string(),
+        has_runtime_store: true,
+        durability_policy: DurabilityPolicy::SyncWriteThrough,
+        bridge: Some(bridge.clone()),
+        default_timeout: None,
+    }));
+    let session = runtime
+        .handle()
+        .get_member(&AgentIdentity::from(member))
+        .await?
+        .ok_or_else(|| format!("{member} is seated"))?
+        .bridge_session_id()
+        .cloned()
+        .ok_or_else(|| format!("{member} has a session"))?;
+    register_live(
+        &identity_runtime,
+        &bridge.core,
+        DurableAgentSpec {
+            identity: crate::identity_first::AgentIdentity::parse(member)?,
+            profile: meerkat_mob::ProfileName::from("worker"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        },
+        1,
+        session,
+    )
+    .await?;
+    identity_runtime
+        .set_agent_memory(Some(AgentMemoryRuntimeInjector::new(
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(memory_dir)?),
+            AgentMemoryConfig::default(),
+        )))
+        .await;
+    let aggregator = crate::console_aggregator::MetaConsoleAggregator::in_memory();
+    aggregator.register_runtime_handles_with_policy(
+        "default",
+        "",
+        runtime.clone(),
+        None,
+        ConsoleEventStore::new(),
+        Arc::new(crate::console_aggregator::AllowAllConsoleVisibilityPolicy),
+    );
+    let mut state = enforced_console(runtime, None);
+    state.identity_runtime = Some(PublicIdentityRuntime::new(
+        identity_runtime,
+        runtime.clone(),
+    ));
+    state.console_aggregator = Some(aggregator);
+    Ok(state)
+}
+
+/// Whether `member` has left the roster of `runtime` within five seconds.
+async fn leaves_the_roster(
+    runtime: &MobRuntime,
+    member: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    for _ in 0..50 {
+        if runtime
+            .handle()
+            .get_member(&AgentIdentity::from(member))
+            .await?
+            .is_none()
+        {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Ok(false)
+}
+
 /// A request naming a member hidden from its caller takes the method's own
 /// path for a member that does not exist: the answer is the one a name no
 /// member holds gets, never a refusal of its own, so nothing tells the caller
-/// the member exists. Nothing happens to the hidden member, and its owner
-/// still reads it.
+/// the member exists. The console holds every part a member method reads,
+/// so each answer compared is the method's own answer for an absent member,
+/// never one for a part the console lacks: its owner's answer for the same
+/// member differs from it (a missing part would answer both alike), and the
+/// member's owner first records what the reads list (a remembered fact and a
+/// schedule). Nothing happens to the hidden member.
 #[tokio::test]
 async fn a_hidden_member_answers_as_an_absent_one() -> TestResult {
     let (_temp_dir, runtime) = runtime("hidden-answers-as-absent").await?;
     seeded_member(&runtime, "worker", "alpha", &[]).await?;
-    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    runtime.console_schedules().attach(
+        meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::default())),
+        crate::schedule_wiring::ScheduleFiringHostBinding::external_driver(),
+    );
     let alice = bearer(alice_claims());
     let bob = bearer(bob_claims());
-    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
-    assert!(forked["error"].is_null(), "{forked:#}");
+    let forking = console_json_router_with_state(enforced_console(&runtime, None));
+    for side_chat in ["alpha-side", "alpha-side-closed"] {
+        let forked = fork_on_console(&forking, Some(&alice), "alpha", side_chat).await;
+        assert!(forked["error"].is_null(), "{forked:#}");
+    }
+    let memory_dir = tempfile::tempdir()?;
+    let app = console_json_router_with_state(
+        fully_composed_console(&runtime, "alpha-side", memory_dir.path()).await?,
+    );
+    let remembered = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/agent_memory/remember",
+        json!({
+            "identity": "alpha-side",
+            "title": "The heron",
+            "body": "The heron is at the north pond.",
+            "tags": ["heron"],
+        }),
+    )
+    .await;
+    assert!(remembered["error"].is_null(), "{remembered:#}");
+    let scheduled = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/schedule/create",
+        json!({
+            "identity": "alpha-side",
+            "content": "Post the morning summary.",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                "every_seconds": 3600,
+            },
+            "name": "Morning summary",
+        }),
+    )
+    .await;
+    assert!(scheduled["error"].is_null(), "{scheduled:#}");
 
+    let mut absent_answers = BTreeMap::new();
     for ((method, hidden), (_, absent)) in member_requests("alpha-side")
         .into_iter()
         .zip(member_requests("alpha-gone"))
@@ -126,6 +290,7 @@ async fn a_hidden_member_answers_as_an_absent_one() -> TestResult {
             "{method} answers a hidden member as an absent one: \
              hidden {hidden_answer:#}, absent {absent_answer:#}"
         );
+        absent_answers.insert(method, masked(&absent_answer, "alpha-gone"));
     }
     assert!(
         runtime
@@ -135,14 +300,41 @@ async fn a_hidden_member_answers_as_an_absent_one() -> TestResult {
             .is_some(),
         "the side chat is still seated"
     );
-    let read = console_rpc_as(
+
+    // Each method tells an existing member from an absent one here. The acts
+    // that restart or retire a member come last, and the owner closes her
+    // second side chat, whose close is answered as an absent one's is.
+    let mut requests = member_requests("alpha-side");
+    let last = [
+        "meta/respawn",
+        "meta/respawn_member",
+        "meta/reset",
+        "meta/retire",
+    ];
+    requests.sort_by_key(|(method, _)| last.iter().position(|late| late == method));
+    for (method, params) in requests {
+        if method == "meta/retire_member" {
+            continue;
+        }
+        let owners = console_rpc_as(&app, Some(&alice), method, params).await;
+        assert_ne!(
+            masked(&owners, "alpha-side"),
+            absent_answers[method],
+            "{method} answers its owner for the member as for an absent one: {owners:#}"
+        );
+    }
+    let closed = console_rpc_as(
         &app,
         Some(&alice),
-        "meta/get_member",
-        json!({ "member_id": "alpha-side" }),
+        "meta/retire_member",
+        json!({ "member_id": "alpha-side-closed" }),
     )
     .await;
-    assert!(read["error"].is_null(), "its owner reads it: {read:#}");
+    assert!(closed["error"].is_null(), "{closed:#}");
+    assert!(
+        leaves_the_roster(&runtime, "alpha-side-closed").await?,
+        "the owner's close retires her side chat"
+    );
     Ok(())
 }
 
@@ -967,6 +1159,43 @@ async fn a_private_member_is_hidden_on_every_read_without_access_configuration()
         "alpha-side"
     ));
 
+    // The structural stream: an event attributed to the member by its alias
+    // alone (no exact authority, as the low-level router projects one) is
+    // shown to its owner and to no one else.
+    let attributed = || crate::unified_runtime::mob_events::ProjectedMobEvent {
+        envelope: crate::MobStructuralEventEnvelope {
+            event_id: "mob-evt-private".to_string(),
+            cursor: 1,
+            mob_id: "private-reads-no-access".to_string(),
+            timestamp_ms: 1_000,
+            kind: "peers_wired".to_string(),
+            run_id: None,
+            step_id: None,
+            agent_identity: Some("alpha-side".to_string()),
+            mob_labels: BTreeMap::new(),
+            run_labels: BTreeMap::new(),
+            data: json!({ "note": "PRIVATE-EVENT" }),
+        },
+        member_authority: None,
+        endpoints: Vec::new(),
+    };
+    for (view, shown) in [(&bob, false), (&alice, true)] {
+        let decided = crate::http_sse::project_structural_envelope_for_console(
+            &runtime.handle(),
+            Some(&runtime),
+            &crate::console_aggregator::AllowAllConsoleVisibilityPolicy,
+            Some(view),
+            attributed(),
+            false,
+        )
+        .await;
+        assert_eq!(
+            decided.is_some(),
+            shown,
+            "the structural event of the side chat is shown only to its owner: {decided:?}"
+        );
+    }
+
     // Timeline frames, with captured provenance and without.
     let entry = runtime
         .handle()
@@ -1433,18 +1662,19 @@ async fn a_workgraph_goal_aimed_at_a_hidden_member_targets_no_one() -> TestResul
     Ok(())
 }
 
-/// A console with no local runtime primes the caller's audience from the
-/// runtimes it aggregates before it decides a timeline frame: the owner of a
-/// private member reads its frames, another person does not.
-#[tokio::test]
-async fn an_aggregator_console_primes_before_it_decides_timeline_frames() -> TestResult {
+/// A console with no local runtime (sign-in for Alice and Bob, no access
+/// configuration) over an aggregator of a runtime with the worker `alpha`
+/// and Alice's private side chat `alpha-side`, which has one frame the
+/// console captured no provenance for (`PRIVATE-DELTA`).
+async fn aggregator_only_console(
+    mob_id: &str,
+) -> Result<(tempfile::TempDir, MobRuntime, Router), Box<dyn std::error::Error + Send + Sync>> {
     use crate::console_aggregator::{
         ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, MetaConsoleAggregator,
         NewConsoleFrame,
     };
-    use tower::ServiceExt;
 
-    let (_temp_dir, runtime) = runtime("aggregator-priming").await?;
+    let (temp_dir, runtime) = runtime(mob_id).await?;
     seeded_member(&runtime, "worker", "alpha", &[]).await?;
     let alice_scope = caller_scope(
         &console_json_router_with_state(enforced_console(&runtime, None)),
@@ -1499,7 +1729,17 @@ async fn an_aggregator_console_primes_before_it_decides_timeline_frames() -> Tes
     let mut state = enforced_console(&runtime, None);
     state.runtime = None;
     state.console_aggregator = Some(aggregator);
-    let app = console_json_router_with_state(state);
+    Ok((temp_dir, runtime, console_json_router_with_state(state)))
+}
+
+/// A console with no local runtime primes the caller's audience from the
+/// runtimes it aggregates before it decides a timeline frame: the owner of a
+/// private member reads its frames, another person does not.
+#[tokio::test]
+async fn an_aggregator_console_primes_before_it_decides_timeline_frames() -> TestResult {
+    use tower::ServiceExt;
+
+    let (_temp_dir, _runtime, app) = aggregator_only_console("aggregator-priming").await?;
     let timeline = |bearer: String| {
         let app = app.clone();
         async move {
@@ -1533,6 +1773,137 @@ async fn an_aggregator_console_primes_before_it_decides_timeline_frames() -> Tes
             .await
             .contains("PRIVATE-DELTA"),
         "its owner reads it: the console primed her audience first"
+    );
+    Ok(())
+}
+
+/// The text of the timeline stream of `alpha-side` as the holder of
+/// `bearer` reads it, up to the end of its snapshot.
+async fn timeline_stream_snapshot(app: &Router, bearer: &str) -> String {
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/console/timeline/stream?identity=alpha-side")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(axum::body::Body::empty())
+                .expect("timeline stream request"),
+        )
+        .await
+        .expect("timeline stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let mut text = String::new();
+    while !text.contains("snapshot_complete") {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(30), body.next())
+            .await
+            .unwrap_or_else(|_| panic!("the snapshot ends: {text}"))
+            .unwrap_or_else(|| panic!("the stream stays open through its snapshot: {text}"))
+            .expect("a stream chunk");
+        text.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    text
+}
+
+/// `meta/console/send` to `identity` through `POST /console/rpc/multipart`,
+/// as the holder of `bearer`: its JSON answer.
+async fn multipart_send(app: &Router, bearer: &str, identity: &str) -> Value {
+    use tower::ServiceExt;
+
+    let boundary = "private-audience-multipart";
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": "send-1",
+        "method": "meta/console/send",
+        "params": {
+            "identity": identity,
+            "content": "Repeat the code word you were told, if any.",
+            "origin": "console",
+            "idempotency_key": "multipart-send",
+        },
+    });
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"payload\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(payload.to_string().as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/console/rpc/multipart")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(axum::body::Body::from(body))
+                .expect("multipart request"),
+        )
+        .await
+        .expect("multipart response");
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("multipart body");
+    serde_json::from_slice(&body).unwrap_or(Value::Null)
+}
+
+/// A console with no local runtime primes the caller's audience from the
+/// runtimes it aggregates before its timeline stream decides a frame: the
+/// stream shows a private member's frame to its owner and to no one else.
+#[tokio::test]
+async fn an_aggregator_console_primes_its_timeline_stream() -> TestResult {
+    let (_temp_dir, _runtime, app) = aggregator_only_console("aggregator-stream-priming").await?;
+
+    let bobs = timeline_stream_snapshot(&app, &bearer(bob_claims())).await;
+    assert!(
+        !bobs.contains("PRIVATE-DELTA"),
+        "another person's stream sends no frame of the private member: {bobs}"
+    );
+    let alices = timeline_stream_snapshot(&app, &bearer(alice_claims())).await;
+    assert!(
+        alices.contains("PRIVATE-DELTA"),
+        "its owner's stream sends it: the stream primed her audience first: {alices}"
+    );
+    Ok(())
+}
+
+/// A console with no local runtime primes the caller's audience from the
+/// runtimes it aggregates before its multipart send resolves the member it
+/// names, ahead of any upload: another person's multipart send to a private
+/// member is answered as one to a member that does not exist, while its
+/// owner's passes the resolution (this send carries no image, so a later
+/// stage refuses it).
+#[tokio::test]
+async fn an_aggregator_console_primes_its_multipart_send() -> TestResult {
+    let (_temp_dir, _runtime, app) =
+        aggregator_only_console("aggregator-multipart-priming").await?;
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+
+    let hidden = multipart_send(&app, &bob, "alpha-side").await;
+    let absent = multipart_send(&app, &bob, "alpha-gone").await;
+    assert!(
+        absent["error"].to_string().contains("alpha-gone"),
+        "a send to an absent member is refused naming it: {absent:#}"
+    );
+    assert_eq!(
+        masked(&hidden, "alpha-side"),
+        masked(&absent, "alpha-gone"),
+        "another person's multipart send to the private member is answered as \
+         one to an absent member: hidden {hidden:#}, absent {absent:#}"
+    );
+    let owners = multipart_send(&app, &alice, "alpha-side").await;
+    assert_ne!(
+        masked(&owners, "alpha-side"),
+        masked(&absent, "alpha-gone"),
+        "its owner's multipart send passes the resolution: {owners:#}"
     );
     Ok(())
 }

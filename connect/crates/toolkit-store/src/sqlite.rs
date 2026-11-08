@@ -21,14 +21,28 @@ pub struct SqliteStore {
 // The slot is emptied only by the store's release, which waits for that work.
 struct OwnedConnection {
     connection: Connection,
-    _physical_owner: File,
+    _physical_owner: PhysicalOwner,
+}
+
+// The physical owner file, locked through this descriptor: the store's
+// custody. Dropping it unlocks the file, then closes it. The lock belongs to
+// the open file description, and a process spawned meanwhile holds a copy of
+// the descriptor until it executes its program, which would keep a custody
+// the close alone ended. The description is this store's own, so the unlock
+// releases no other opener's lock.
+struct PhysicalOwner(File);
+
+impl Drop for PhysicalOwner {
+    fn drop(&mut self) {
+        unlock_physical_owner(&self.0);
+    }
 }
 
 // Darwin's whole-file flock conflicts with SQLite's own POSIX locks. Keep
 // custody on the same inode, but reserve one byte outside SQLite's main-file
 // lock range (0x40000000 through 0x400001ff). OFD locks remain bound to this
-// open description across unrelated SQLite closes and until the last retained
-// File is dropped; ordinary process-associated F_SETLK would not suffice.
+// open description across unrelated SQLite closes, until the owner unlocks
+// it; ordinary process-associated F_SETLK would not suffice.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
@@ -64,6 +78,32 @@ fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
         file.try_lock_shared()
             .map_err(|_| StoreError::OwnerUnavailable)
     }
+}
+
+// The same byte as `lock_physical_owner`, unlocked for this open description.
+// A failed unlock leaves the close that follows to end the lock.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn unlock_physical_owner(file: &File) {
+    use std::os::fd::AsRawFd;
+    let lock = libc::flock {
+        l_start: 0,
+        l_len: 1,
+        l_pid: 0,
+        l_type: libc::F_UNLCK,
+        l_whence: libc::SEEK_SET as i16,
+    };
+    // SAFETY: file retains a valid descriptor for this synchronous call. The
+    // initialized flock lives through the call and F_OFD_SETLK reads it without
+    // retaining the pointer. Byte zero, length one is the range the owner
+    // locked; F_UNLCK releases this open description's lock on it.
+    let _ = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &lock) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unlock_physical_owner(file: &File) {
+    // A failed unlock leaves the close that follows to end the lock.
+    let _ = file.unlock();
 }
 
 impl SqliteStore {
@@ -108,14 +148,16 @@ impl SqliteStore {
 
     /// End this opened store's physical custody, for every clone of it: once
     /// any blocking work already entered on the connection ends, close the
-    /// connection and the physical owner file, which releases the owner's
-    /// lock. From then on every operation through any clone answers
-    /// [`StoreError::OwnerUnavailable`] without touching the database, so a
-    /// task that still holds a clone can no longer read or change it, and the
-    /// same database opens again at once. Nothing committed changes. A second
-    /// call changes nothing.
+    /// connection, then unlock and close the physical owner file, so the
+    /// owner's lock ends even while a process spawned meanwhile still holds a
+    /// copy of its descriptor. From then on every operation through any clone
+    /// answers [`StoreError::OwnerUnavailable`] without touching the
+    /// database, so a task that still holds a clone can no longer read or
+    /// change it, and the same database opens again at once. Nothing
+    /// committed changes. A second call changes nothing.
     ///
-    /// The host's close calls it after the host's last legitimate change.
+    /// The host's close calls it once every join that can still touch the
+    /// store has returned.
     ///
     /// # Errors
     /// [`StoreError::Worker`] when the blocking release could not run; the
@@ -144,6 +186,7 @@ impl SqliteStore {
             .ok()?
             .as_ref()?
             ._physical_owner
+            .0
             .try_clone()
             .ok()
     }
@@ -165,13 +208,14 @@ impl SqliteStore {
             .open(path)
             .map_err(|_| StoreError::OwnerUnavailable)?;
         lock_physical_owner(&physical_owner, publication.is_some())?;
-        check_database_identity(path, &physical_owner)?;
+        let physical_owner = PhysicalOwner(physical_owner);
+        check_database_identity(path, &physical_owner.0)?;
         let mut flags = rusqlite::OpenFlags::default();
         if !create {
             flags.remove(rusqlite::OpenFlags::SQLITE_OPEN_CREATE);
         }
         let mut connection = Connection::open_with_flags(path, flags)?;
-        check_database_identity(path, &physical_owner)?;
+        check_database_identity(path, &physical_owner.0)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         if !create {
             let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;

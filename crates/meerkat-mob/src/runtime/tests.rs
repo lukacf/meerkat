@@ -61497,7 +61497,7 @@ async fn a_role_wide_flow_step_never_selects_an_open_approval_branch() {
     assert!(
         handle.list_members().await.iter().any(|entry| {
             entry.agent_identity == branch
-                && entry.role == ProfileName::from("worker")
+                && entry.role.as_str() == "worker"
                 && entry.status == MobMemberStatus::Active
         }),
         "the branch is an active member of its grantee's role"

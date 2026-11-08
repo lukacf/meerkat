@@ -31137,7 +31137,7 @@ ExtendToolGrantGateChangedIdle(server, gated) ==
     /\ phase = "Idle"
     /\ (session_id # None)
     /\ (IF (server \in tool_grant_gated_servers) THEN TRUE ELSE (tool_grant_gates_unconfigured_servers /\ ~((server \in tool_grant_ungated_servers))))
-    /\ (\E name \in gated : ~((name \in tool_grant_gated_names)))
+    /\ ~((\A name \in gated : (name \in tool_grant_gated_names)))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ tool_grant_gated_names' = ExtendToolGrantGateChangedIdle_ForEach29_tool_grant_gated_names(tool_grant_gated_names, gated)
@@ -31149,7 +31149,7 @@ ExtendToolGrantGateChangedAttached(server, gated) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ (IF (server \in tool_grant_gated_servers) THEN TRUE ELSE (tool_grant_gates_unconfigured_servers /\ ~((server \in tool_grant_ungated_servers))))
-    /\ (\E name \in gated : ~((name \in tool_grant_gated_names)))
+    /\ ~((\A name \in gated : (name \in tool_grant_gated_names)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ tool_grant_gated_names' = ExtendToolGrantGateChangedAttached_ForEach30_tool_grant_gated_names(tool_grant_gated_names, gated)
@@ -31161,7 +31161,7 @@ ExtendToolGrantGateChangedRunning(server, gated) ==
     /\ phase = "Running"
     /\ (session_id # None)
     /\ (IF (server \in tool_grant_gated_servers) THEN TRUE ELSE (tool_grant_gates_unconfigured_servers /\ ~((server \in tool_grant_ungated_servers))))
-    /\ (\E name \in gated : ~((name \in tool_grant_gated_names)))
+    /\ ~((\A name \in gated : (name \in tool_grant_gated_names)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ tool_grant_gated_names' = ExtendToolGrantGateChangedRunning_ForEach31_tool_grant_gated_names(tool_grant_gated_names, gated)
@@ -31173,7 +31173,7 @@ ExtendToolGrantGateChangedRetired(server, gated) ==
     /\ phase = "Retired"
     /\ (session_id # None)
     /\ (IF (server \in tool_grant_gated_servers) THEN TRUE ELSE (tool_grant_gates_unconfigured_servers /\ ~((server \in tool_grant_ungated_servers))))
-    /\ (\E name \in gated : ~((name \in tool_grant_gated_names)))
+    /\ ~((\A name \in gated : (name \in tool_grant_gated_names)))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ tool_grant_gated_names' = ExtendToolGrantGateChangedRetired_ForEach32_tool_grant_gated_names(tool_grant_gated_names, gated)
@@ -31185,7 +31185,7 @@ ExtendToolGrantGateChangedStopped(server, gated) ==
     /\ phase = "Stopped"
     /\ (session_id # None)
     /\ (IF (server \in tool_grant_gated_servers) THEN TRUE ELSE (tool_grant_gates_unconfigured_servers /\ ~((server \in tool_grant_ungated_servers))))
-    /\ (\E name \in gated : ~((name \in tool_grant_gated_names)))
+    /\ ~((\A name \in gated : (name \in tool_grant_gated_names)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ tool_grant_gated_names' = ExtendToolGrantGateChangedStopped_ForEach33_tool_grant_gated_names(tool_grant_gated_names, gated)

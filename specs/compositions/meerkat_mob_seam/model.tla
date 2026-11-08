@@ -65212,7 +65212,7 @@ meerkat_ExtendToolGrantGateChangedIdle(arg_server, arg_gated) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ (IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))
-       /\ (\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names)))
+       /\ ~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
        /\ meerkat_phase' = "Idle"
        /\ meerkat_tool_grant_gated_names' = meerkat_ExtendToolGrantGateChangedIdle_ForEach29_tool_grant_gated_names(meerkat_tool_grant_gated_names, packet.payload.gated)
        /\ meerkat_tool_grant_not_mounted_names' = meerkat_ExtendToolGrantGateChangedIdle_ForEach29_tool_grant_not_mounted_names(meerkat_tool_grant_not_mounted_names, packet.payload.gated)
@@ -65238,7 +65238,7 @@ meerkat_ExtendToolGrantGateChangedAttached(arg_server, arg_gated) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ (IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))
-       /\ (\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names)))
+       /\ ~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
        /\ meerkat_phase' = "Attached"
        /\ meerkat_tool_grant_gated_names' = meerkat_ExtendToolGrantGateChangedAttached_ForEach30_tool_grant_gated_names(meerkat_tool_grant_gated_names, packet.payload.gated)
        /\ meerkat_tool_grant_not_mounted_names' = meerkat_ExtendToolGrantGateChangedAttached_ForEach30_tool_grant_not_mounted_names(meerkat_tool_grant_not_mounted_names, packet.payload.gated)
@@ -65264,7 +65264,7 @@ meerkat_ExtendToolGrantGateChangedRunning(arg_server, arg_gated) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ (IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))
-       /\ (\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names)))
+       /\ ~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
        /\ meerkat_phase' = "Running"
        /\ meerkat_tool_grant_gated_names' = meerkat_ExtendToolGrantGateChangedRunning_ForEach31_tool_grant_gated_names(meerkat_tool_grant_gated_names, packet.payload.gated)
        /\ meerkat_tool_grant_not_mounted_names' = meerkat_ExtendToolGrantGateChangedRunning_ForEach31_tool_grant_not_mounted_names(meerkat_tool_grant_not_mounted_names, packet.payload.gated)
@@ -65290,7 +65290,7 @@ meerkat_ExtendToolGrantGateChangedRetired(arg_server, arg_gated) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ (IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))
-       /\ (\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names)))
+       /\ ~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
        /\ meerkat_phase' = "Retired"
        /\ meerkat_tool_grant_gated_names' = meerkat_ExtendToolGrantGateChangedRetired_ForEach32_tool_grant_gated_names(meerkat_tool_grant_gated_names, packet.payload.gated)
        /\ meerkat_tool_grant_not_mounted_names' = meerkat_ExtendToolGrantGateChangedRetired_ForEach32_tool_grant_not_mounted_names(meerkat_tool_grant_not_mounted_names, packet.payload.gated)
@@ -65316,7 +65316,7 @@ meerkat_ExtendToolGrantGateChangedStopped(arg_server, arg_gated) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ (IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))
-       /\ (\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names)))
+       /\ ~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
        /\ meerkat_phase' = "Stopped"
        /\ meerkat_tool_grant_gated_names' = meerkat_ExtendToolGrantGateChangedStopped_ForEach33_tool_grant_gated_names(meerkat_tool_grant_gated_names, packet.payload.gated)
        /\ meerkat_tool_grant_not_mounted_names' = meerkat_ExtendToolGrantGateChangedStopped_ForEach33_tool_grant_not_mounted_names(meerkat_tool_grant_not_mounted_names, packet.payload.gated)
@@ -138780,11 +138780,11 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "ReplaceToolGrantGate") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((\A name \in packet.payload.not_mounted_names : ~((name \in packet.payload.gated)))) /\ ((\A server \in packet.payload.ungated_servers : ~((server \in packet.payload.gated_servers))))
     \/ /\ (packet.variant = "ReplaceToolGrantGate") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((\A name \in packet.payload.not_mounted_names : ~((name \in packet.payload.gated)))) /\ ((\A server \in packet.payload.ungated_servers : ~((server \in packet.payload.gated_servers))))
     \/ /\ (packet.variant = "ReplaceToolGrantGate") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((\A name \in packet.payload.not_mounted_names : ~((name \in packet.payload.gated)))) /\ ((\A server \in packet.payload.ungated_servers : ~((server \in packet.payload.gated_servers))))
-    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names))))
-    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names))))
-    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names))))
-    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names))))
-    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\E name \in packet.payload.gated : ~((name \in meerkat_tool_grant_gated_names))))
+    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ (~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names))))
+    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ (~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names))))
+    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ (~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names))))
+    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ (~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names))))
+    \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ (~((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names))))
     \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
     \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))
     \/ /\ (packet.variant = "ExtendToolGrantGate") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((IF (packet.payload.server \in meerkat_tool_grant_gated_servers) THEN TRUE ELSE (meerkat_tool_grant_gates_unconfigured_servers /\ ~((packet.payload.server \in meerkat_tool_grant_ungated_servers))))) /\ ((\A name \in packet.payload.gated : (name \in meerkat_tool_grant_gated_names)))

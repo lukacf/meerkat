@@ -36900,8 +36900,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (self.tool_grant_gates_unconfigured_servers
                     && !self.tool_grant_ungated_servers.contains(server))
             }
+            // The negation of the unchanged arm's `already_gated`, so the two
+            // arms exclude each other by their guards' form.
             guard "adds_names" {
-                exists(name in gated, !self.tool_grant_gated_names.contains(name))
+                !for_all(name in gated, self.tool_grant_gated_names.contains(name))
             }
             update {
                 for name in gated {

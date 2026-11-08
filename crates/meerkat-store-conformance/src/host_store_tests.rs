@@ -33,20 +33,34 @@ use crate::{ConformanceFailure, HostStoreFactory, InMemoryHostStore, chapters};
 /// so the scope loads as a typed conflict at that version from then on. With
 /// `per_scope` its listings report such a scope in `conflicts`; without, a
 /// page that would show it fails whole, as a store that does not report a
-/// conflict per scope does.
+/// conflict per scope does. With `rows_serve`, a row read of such a scope
+/// answers the rows of the batch the reference store kept instead of the
+/// conflict, as a store that checks its versions at head loads only does.
 struct LoadConflicting {
     inner: Arc<InMemoryHostStore>,
     per_scope: bool,
+    rows_serve: bool,
     newest: AtomicU64,
     conflicted: Mutex<BTreeMap<ScopeRef, ScopeVersion>>,
 }
 
 impl LoadConflicting {
     fn factory(per_scope: bool) -> Shared {
+        Self::canary(per_scope, false)
+    }
+
+    /// Lists its conflicts per scope and fails their head loads, but serves
+    /// their rows.
+    fn serving_rows() -> Shared {
+        Self::canary(true, true)
+    }
+
+    fn canary(per_scope: bool, rows_serve: bool) -> Shared {
         let inner = Arc::new(InMemoryHostStore::new());
         let store = Arc::new(Self {
             inner: Arc::clone(&inner),
             per_scope,
+            rows_serve,
             newest: AtomicU64::new(0),
             conflicted: Mutex::new(BTreeMap::new()),
         });
@@ -135,8 +149,8 @@ impl HostStore for LoadConflicting {
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
         match self.conflict_of(scope) {
-            Some(conflict) => Err(conflict),
-            None => self.inner.read_rows(scope, from, limit).await,
+            Some(conflict) if !self.rows_serve => Err(conflict),
+            _ => self.inner.read_rows(scope, from, limit).await,
         }
     }
 
@@ -600,6 +614,22 @@ async fn store_failing_the_page_of_a_conflicted_scope_fails_the_host_store_chapt
         .expect_err(
             "a store that fails a whole listing page for a scope that loads as a typed conflict \
              must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "a_conflicted_scope_is_listed_typed");
+}
+
+// A store that lists a conflicted scope typed and fails its head load, but
+// serves one batch's rows of it, would let Core fold the rows of a scope
+// whose conflict arose after the open's listing instead of quarantining it:
+// the conflict row reads the scope's rows too.
+#[tokio::test]
+async fn store_serving_the_rows_of_a_conflicted_scope_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&LoadConflicting::serving_rows())
+        .await
+        .expect_err(
+            "a store that serves the rows of a scope whose head loads as a typed conflict must \
+             fail",
         );
     assert_eq!(failure.chapter(), "host_store");
     assert_eq!(failure.step(), "a_conflicted_scope_is_listed_typed");

@@ -18882,10 +18882,15 @@ impl MobHandle {
     /// committed before the caller's own spoken turn, so the child branches
     /// at that pre-turn boundary even when the source finalized another turn
     /// during the wait; `None` takes the source's committed end at fork time.
+    ///
+    /// The child takes nothing of its source's build but its exemption from
+    /// the definition's wiring rules: a fork of a member seated
+    /// [`crate::DefinitionWiring::Exempt`] is seated exempt, as every durable
+    /// fork is.
     pub async fn fork_member_at_turn_boundary(
         &self,
         source_identity: &AgentIdentity,
-        member: SpawnMemberSpec,
+        mut member: SpawnMemberSpec,
         message_count: Option<usize>,
         bound: Duration,
     ) -> Result<ForkMemberAtTurnBoundary, MobError> {
@@ -18899,6 +18904,15 @@ impl MobHandle {
                 meerkat_core::ActivationWindow::None,
             )
             .await?;
+        if self
+            .roster
+            .read()
+            .await
+            .get(source_identity)
+            .is_some_and(|entry| entry.definition_wiring.is_exempt())
+        {
+            member.definition_wiring = crate::DefinitionWiring::Exempt;
+        }
         let fork = self
             .session_service
             .fork_persisted_session_at_turn_boundary(

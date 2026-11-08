@@ -324,8 +324,9 @@ them.
 - `meerkat-mob`: a durable fork of a member seated exempt from the
   definition's wiring rules is seated exempt too, whatever seating its
   spawn request states (`MobHandle::fork_member`, an agent's `fork_off`
-  child, a temporary council's local participant). A fork of a member the
-  rules apply to keeps the seating its request states.
+  child, a temporary council's local participant, and the live delegation
+  worker `MobHandle::fork_member_at_turn_boundary` seats). A fork of a
+  member the rules apply to keeps the seating its request states.
 
 - `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
   decision kind it registers instead of the whole store, so two runtimes on

@@ -918,7 +918,8 @@ respawn restores the explicit edges it held. The exemption is recorded with
 the member, so a restart and a respawn keep it; a rotation
 (`MobHandle::rotate_member`) takes the exemption of the spec it seats. A
 durable fork of an exempt member (`MobHandle::fork_member`, an agent's
-`fork_off` child, a temporary council's local participant) is seated exempt
+`fork_off` child, a temporary council's local participant, a live delegation
+worker from `MobHandle::fork_member_at_turn_boundary`) is seated exempt
 too, whatever seating its request states. A member placed on a member host
 cannot be exempt.
 

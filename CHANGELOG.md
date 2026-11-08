@@ -1265,6 +1265,16 @@ them.
   custody it is refused `MobError::IdentityMember` before anything is
   created.
 
+- `meerkat-mob`: a rotation of a member onto a fresh session (a
+  `rotate_member`: a reset, or a deleted identity created anew) settles the
+  session it leaves before its terminal step. A member that compacted inside
+  a run its stop committed as interrupted owed that compaction's memory
+  projection until its next wake, and a lazy start does not wake it for
+  that: rotated while dormant, its batch stayed staged and invisible and its
+  outbox row pending, for good. Now the batch is finalized into the old
+  session's memory and the row acknowledged. A settle that fails leaves
+  them owed, as before, and never fails the rotation.
+
 ### Security
 
 - `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
@@ -1304,16 +1314,6 @@ them.
   `chmod 700` on the realm directories and on `refresh-locks` under the
   credentials root (`<platform-config>/meerkat/credentials` by default) to
   tighten them.
-
-- `meerkat-mob`: a rotation of a member onto a fresh session (a
-  `rotate_member`: a reset, or a deleted identity created anew) settles the
-  session it leaves before its terminal step. A member that compacted inside
-  a run its stop committed as interrupted owed that compaction's memory
-  projection until its next wake, and a lazy start does not wake it for
-  that: rotated while dormant, its batch stayed staged and invisible and its
-  outbox row pending, for good. Now the batch is finalized into the old
-  session's memory and the row acknowledged. A settle that fails leaves
-  them owed, as before, and never fails the rotation.
 
 ### Upgrade notes
 

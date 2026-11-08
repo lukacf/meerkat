@@ -409,6 +409,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from the list read), and one without build preparation records no
   cause.
 
+- Rust: `SessionBridge::settle_owed_compaction_projections` (provided,
+  unsupported by default) settles the compaction projections an identity's
+  current session still owes, through Core's
+  `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
+  and the exported bridge implement it.
+
+- `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
+  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
+  step owed the session it ended failed. Its record has its own key, apart
+  from the retirement's distillation, and goes once the fallback read of
+  the session's memory harvested them. Earlier releases neither write nor
+  read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
+  (provided, removes nothing by default) removes such a record; the SQLite,
+  in-memory and host store placements implement it.
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals
@@ -580,21 +595,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gateway's session builder carries the host's error answer to its build
   callback as structured data, and nothing matches the error's text. A
   callback that never completed stays the retryable failure it was.
-
-- Rust: `SessionBridge::settle_owed_compaction_projections` (provided,
-  unsupported by default) settles the compaction projections an identity's
-  current session still owes, through Core's
-  `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
-  and the exported bridge implement it.
-
-- `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
-  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
-  step owed the session it ended failed. Its record has its own key, apart
-  from the retirement's distillation, and goes once the fallback read of
-  the session's memory harvested them. Earlier releases neither write nor
-  read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
-  (provided, removes nothing by default) removes such a record; the SQLite,
-  in-memory and host store placements implement it.
 
 ### Fixed
 

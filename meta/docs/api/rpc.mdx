@@ -2381,11 +2381,11 @@ A member's profile can gate tools (`[profiles.<name>.tools] grant_gated`,
 see [Mob profile tools](/reference/configuration#mob-profile-tools-profilestools)):
 each build of the member, a resume included, mounts the gated tools closed,
 and a call to a closed tool is refused `tool_grant_required` while the turn
-continues. A grant to the member's identity opens a gated tool or tool family
-for a fixed window, across the member's respawns and the gateway's restarts,
-in the mob's running incarnation: a mob destroyed and created again under the
-same id holds none of the old grants. Meerkat keeps the grants, the gate and
-every check; Meta keeps no grant state.
+continues. A grant to the member's identity opens a gated tool, tool family or
+MCP server for a fixed window, across the member's respawns and the gateway's
+restarts, in the mob's running incarnation: a mob destroyed and created again
+under the same id holds none of the old grants. Meerkat keeps the grants, the
+gate and every check; Meta keeps no grant state.
 
 The methods serve the identities the gateway's identity runtime knows, on the
 stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
@@ -2402,10 +2402,15 @@ stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
 }
 ```
 
-- `target`: `{kind: "tool", name}` or `{kind: "family", family}` (a built-in
-  tool family; the grant opens the names the family has when it is issued).
-  The gate the member's next build resolves must name it: the member's own
-  profile gate joined with its role's current gate.
+- `target`: `{kind: "tool", name}`, `{kind: "family", family}` (a built-in
+  tool family; the grant opens the names the family has when it is issued)
+  or `{kind: "mcp_server", server, tools?}` (every tool the server provides,
+  or with `tools` only those named; a gated server the member's profile
+  configures connects at the member's next build). The gate the member's
+  next build resolves must name it: the member's own profile gate joined
+  with its role's current gate. A server is also gated when the gate's
+  `unconfigured_mcp_servers` is on and the member's profile does not
+  configure it.
 - Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms) bounds the
   grant, at most the gateway's maximum lifetime: 24 hours unless the launch
   sets `runtime_options.tool_grants.max_lifetime_ms` (see
@@ -2420,7 +2425,9 @@ stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
 
 Answers `{grant}`, Meerkat's `WireToolGrant`. The issuer is
 `{kind: "operator", caller?, decision_ref?}`: `caller` is the signed-in
-principal on the Console and absent for the stdio host.
+principal on the Console and absent for the stdio host. Meta's grant answers
+do not report `applies` or the gate yet: Meerkat's own `tool_grants/grant`
+and `tool_grants/list` report them, Meta's answers leave them out.
 
 A grant wakes nothing. It opens the tool at the member's next model request,
 and a revoke or the deadline closes it there and refuses the next call at
@@ -2428,6 +2435,13 @@ once. When Core holds no member of the identity (its member was retired),
 the grant seats the identity first, as a delivery does: Core seats it
 Dormant, on its archived session or a fresh one, and builds nothing, and its
 first delivery builds it with the grant.
+
+The grant commits through the mob, which decides it against its live roster
+in order with the retirements that end an identity's grants: an identity no
+longer on the roster then (it retired, or a respawn is replacing its member)
+is `subject_unknown` and nothing is issued, and a retirement after the
+commit ends the grant. Retry a grant refused during a respawn once the
+respawn answers.
 
 ### `meta/tool_grants/revoke`
 
@@ -2472,10 +2486,10 @@ Every refusal of a request is `-32602` with
 
 | Kind | When |
 |------|------|
-| `subject_unknown` | No identity the gateway serves; an identity created at runtime (Meta's grant methods do not act on store-owned identities); or an identity Core still holds no member of after the seat, one placed on a member host or bound to an external runtime, whose host creates its member at its first use |
+| `subject_unknown` | No identity the gateway serves; an identity created at runtime (Meta's grant methods do not act on store-owned identities); an identity Core still holds no member of after the seat, one placed on a member host or bound to an external runtime, whose host creates its member at its first use; or an identity no longer on the mob's roster when the grant commits |
 | `target_not_gated` | The gate the member's next build resolves does not name the target |
 | `invalid_window` | Not exactly one of `duration_ms` and `expires_at_ms`, or a window that is past, empty or longer than the maximum lifetime |
-| `empty_target` | A target that names no tool |
+| `empty_target` | A target that names no tool or server, or an empty `tools` list |
 | `invalid_decision_ref` | A `decision_ref` that is empty, longer than 1024 bytes or holds a control character |
 | `not_found` | An unknown or unparseable grant id, a grant of another mob, or on the Console a grant of an identity the caller may not view, with its `grant_id` |
 | `invalid_page_limit` | An audit page `limit` of 0 |

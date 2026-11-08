@@ -14,12 +14,19 @@
 //! no member of the identity, the grant seats it through the declared
 //! apply's one-identity door, Dormant, building nothing, so its first build
 //! reads the grant. The target must be named by the gate the member's next
-//! build resolves ([`meerkat_mob::MobHandle::member_grant_gate`]). List and
-//! audit resolve the mob only, so a retired identity's history stays
-//! readable. A revoke reads the grant first: only an identity grant of this
-//! gateway's mob is revoked here. Every refusal of a request is invalid
-//! params carrying the typed `tool_grant_request_refused` refusal.
+//! build resolves ([`meerkat_mob::MobHandle::member_grant_gate`]), and the
+//! grant commits through the mob
+//! ([`meerkat_mob::MobHandle::grant_member_tool`]), which decides it against
+//! its live roster in order with the retirements that end an identity's
+//! grants: an identity no longer on the roster then is `subject_unknown`,
+//! and nothing is issued. Meta's answers do not report a grant's `applies`
+//! or a member's gate yet. List and audit resolve the mob only, so a retired
+//! identity's history stays readable. A revoke reads the grant first: only
+//! an identity grant of this gateway's mob is revoked here. Every refusal of
+//! a request is invalid params carrying the typed
+//! `tool_grant_request_refused` refusal.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +44,7 @@ use meerkat_runtime::tool_grant::wire::{
     wire_unreadable_tool_grant_audit_row,
 };
 use meerkat_runtime::tool_grant::{
-    ToolGrantRequest, ToolGrantRevocation, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
+    StoredToolGrant, ToolGrantRevocation, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -223,18 +230,25 @@ fn service_error(error: ToolGrantServiceError) -> JsonRpcError {
     }
 }
 
-/// The runtime that owns the gateway's grants: the canonical runtime of the
-/// mob's session service.
-fn grant_owner(surface: &ToolGrantSurface<'_>) -> Result<Arc<MeerkatMachine>, JsonRpcError> {
-    let unavailable = || JsonRpcError {
+/// The answer of a gateway whose runtime keeps no scoped tool grants.
+fn runtime_keeps_no_grants() -> JsonRpcError {
+    JsonRpcError {
         code: CAPABILITY_UNAVAILABLE_CODE,
         message: "this gateway's runtime keeps no scoped tool grants".to_string(),
         data: None,
-    };
-    let service = surface.mob.session_service().ok_or_else(unavailable)?;
+    }
+}
+
+/// The runtime that owns the gateway's grants: the canonical runtime of the
+/// mob's session service.
+fn grant_owner(surface: &ToolGrantSurface<'_>) -> Result<Arc<MeerkatMachine>, JsonRpcError> {
+    let service = surface
+        .mob
+        .session_service()
+        .ok_or_else(runtime_keeps_no_grants)?;
     match service.acquire_runtime_adapter(None) {
         Ok(Some(machine)) => Ok(machine),
-        Ok(None) => Err(unavailable()),
+        Ok(None) => Err(runtime_keeps_no_grants()),
         Err(error) => Err(JsonRpcError {
             code: -32603,
             message: format!("the runtime that owns the grants is unavailable: {error}"),
@@ -259,6 +273,24 @@ fn mob_error(error: &meerkat_mob::MobError) -> JsonRpcError {
     }
 }
 
+/// The answer of a member grant the mob did not issue: an identity no
+/// longer on the roster is `subject_unknown`, as a gate read answers one
+/// outside it; the grant service's refusals answer their classes; a mob
+/// without a runtime keeps no grants.
+fn member_grant_error(error: meerkat_mob::MemberToolGrantError, identity: &str) -> JsonRpcError {
+    match error {
+        meerkat_mob::MemberToolGrantError::Mob(meerkat_mob::MobError::MemberNotFound(_)) => {
+            subject_unknown(format!(
+                "'{identity}' is no longer on the mob's roster (it retired, or a respawn is \
+                 replacing its member): no grant was issued"
+            ))
+        }
+        meerkat_mob::MemberToolGrantError::Mob(error) => mob_error(&error),
+        meerkat_mob::MemberToolGrantError::Grant(error) => service_error(error),
+        meerkat_mob::MemberToolGrantError::NoRuntime => runtime_keeps_no_grants(),
+    }
+}
+
 /// The public alias of a roster member id, as every Meta answer spells an
 /// identity.
 fn public_identity(member_id: &str) -> String {
@@ -273,11 +305,13 @@ fn public_grant(mut grant: WireToolGrant) -> WireToolGrant {
     grant
 }
 
-/// An identity a grant may name: a write's subject, the gate its target must
-/// be in, and the session serving it here, if any.
+/// An identity a grant may name: its member in Core's roster, the gate its
+/// target must be in with the MCP servers its build configures ungated, and
+/// the session serving it here, if any.
 struct GrantSubject {
-    subject: ToolGrantSubject,
+    member: meerkat_mob::ids::AgentIdentity,
     gate: meerkat_core::tool_grant::GrantGatedTools,
+    ungated_servers: BTreeSet<String>,
     serving: Option<meerkat_core::types::SessionId>,
 }
 
@@ -328,14 +362,29 @@ async fn identity_for_grant(
         Err(error) => return Err(mob_error(&error)),
     };
     Ok(GrantSubject {
-        subject: ToolGrantSubject::member(
-            handle.mob_id().as_str(),
-            &handle.live_incarnation(),
-            member.as_str(),
-        ),
         gate: gate.named(),
+        ungated_servers: gate.ungated_servers,
         serving: handle.resolve_bridge_session_id(&member).await,
+        member,
     })
+}
+
+/// Issue `grant` to the member `subject` names through the mob, which decides
+/// it against its live roster as it commits, in order with the retirements
+/// that end an identity's grants: a member no longer on the roster then is
+/// refused, and nothing is issued.
+async fn commit_member_grant(
+    surface: &ToolGrantSurface<'_>,
+    identity: &str,
+    subject: &GrantSubject,
+    grant: meerkat_mob::MemberToolGrant,
+) -> Result<StoredToolGrant, JsonRpcError> {
+    surface
+        .mob
+        .handle()
+        .grant_member_tool(&subject.member, grant, subject.serving.as_ref())
+        .await
+        .map_err(|error| member_grant_error(error, identity))
 }
 
 /// The identity a read names: the mob only, so a retired identity's history
@@ -389,26 +438,28 @@ async fn grant(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, 
                 error.to_string(),
             )
         })?;
-    let owner = grant_owner(surface)?;
+    // A runtime that keeps no grants answers before any member is seated.
+    grant_owner(surface)?;
     let subject = identity_for_grant(surface, &params.identity).await?;
     let named = match &params.target {
         ToolGrantTargetRequest::Tool { name } => format!("the tool '{name}'"),
         ToolGrantTargetRequest::Family { family } => format!("the tool family '{family}'"),
+        ToolGrantTargetRequest::McpServer { server, .. } => format!("the MCP server '{server}'"),
     };
     let target =
-        meerkat::resolve_grant_target(params.target, &subject.gate).map_err(|refusal| {
-            let message = match refusal {
-                ToolGrantRequestRefusal::TargetNotGated => format!(
-                    "the gate of '{}' does not name {named}: a grant opens only names the member's \
-                 build gates",
-                    params.identity
-                ),
-                _ => refusal.to_string(),
-            };
-            refused(&refusal, message)
-        })?;
-    let request = ToolGrantRequest {
-        subject: subject.subject,
+        meerkat::resolve_grant_target(params.target, &subject.gate, &subject.ungated_servers)
+            .map_err(|refusal| {
+                let message = match refusal {
+                    ToolGrantRequestRefusal::TargetNotGated => format!(
+                        "the gate of '{}' does not name {named}: a grant opens only what the \
+                         member's build gates",
+                        params.identity
+                    ),
+                    _ => refusal.to_string(),
+                };
+                refused(&refusal, message)
+            })?;
+    let grant = meerkat_mob::MemberToolGrant {
         target,
         issuer: ToolGrantIssuer::Operator {
             caller: surface.caller.map(ToString::to_string),
@@ -417,12 +468,10 @@ async fn grant(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, 
         reason: params.reason,
         window,
     };
-    let grant = owner
-        .grant_tool(request, subject.serving.as_ref())
-        .await
-        .map_err(service_error)?;
+    let grant = commit_member_grant(surface, &params.identity, &subject, grant).await?;
     result(&GrantToolResult {
         grant: public_grant(wire_tool_grant(&grant)),
+        applies: None,
     })
 }
 
@@ -501,6 +550,7 @@ async fn list(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, J
             .iter()
             .map(wire_unreadable_tool_grant)
             .collect(),
+        gate: None,
     })
 }
 
@@ -653,5 +703,149 @@ mod tests {
                 "{over} reads the largest page"
             );
         }
+    }
+
+    /// A member grant the mob did not issue answers as a gate read answers
+    /// the same facts: an identity no longer on the roster is
+    /// `subject_unknown`, a grant service refusal answers its class, and a
+    /// mob without a runtime keeps no grants.
+    #[test]
+    fn a_member_grant_the_mob_refused_answers_its_class() {
+        let gone = member_grant_error(
+            meerkat_mob::MemberToolGrantError::Mob(meerkat_mob::MobError::MemberNotFound(
+                crate::member_comms_id::roster_member_id_for_identity("agent-a"),
+            )),
+            "agent-a",
+        );
+        assert_eq!(gone.code, -32602);
+        assert_eq!(
+            gone.data,
+            Some(json!({
+                "kind": "tool_grant_request_refused",
+                "tool_grant_request_refusal": {"kind": "subject_unknown"},
+            }))
+        );
+        assert_eq!(
+            member_grant_error(
+                meerkat_mob::MemberToolGrantError::Grant(ToolGrantServiceError::Conflict {
+                    grant_id: "g1".to_string(),
+                }),
+                "agent-a",
+            )
+            .code,
+            i64::from(meerkat_contracts::ErrorCode::SessionBusy.jsonrpc_code())
+        );
+        assert_eq!(
+            member_grant_error(meerkat_mob::MemberToolGrantError::NoRuntime, "agent-a").code,
+            CAPABILITY_UNAVAILABLE_CODE
+        );
+    }
+
+    /// A grant for an identity no longer on the mob's roster answers
+    /// `subject_unknown` and issues nothing. The gate read found the member;
+    /// a retirement then took it off the roster; the commit, which the mob
+    /// decides against its live roster, refuses it. The runtime's own writer
+    /// does not read the roster, so a grant written there would outlive the
+    /// retirement.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn a_grant_for_an_identity_no_longer_on_the_roster_issues_nothing() {
+        let state = tempfile::tempdir().unwrap();
+        let mob_id = format!("meta-grant-roster-{}", uuid::Uuid::new_v4());
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+builtins = true
+grant_gated = {{ tools = ["datetime"] }}
+"#
+        ))
+        .unwrap();
+        let unified = Box::pin(
+            crate::UnifiedRuntimeBuilder::default()
+                .definition(definition)
+                .persistent_state(state.path())
+                .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+                .build(),
+        )
+        .await
+        .unwrap();
+        let surface = ToolGrantSurface {
+            mob: unified.mob_runtime(),
+            identity_runtime: None,
+            caller: None,
+            access: None,
+        };
+        let handle = unified.mob_runtime().handle();
+        let member = crate::member_comms_id::roster_member_id_for_identity("agent-a");
+        handle
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                member.as_str().to_string(),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let gate = handle.member_grant_gate(&member).await.unwrap();
+        let subject = GrantSubject {
+            member: member.clone(),
+            gate: gate.named(),
+            ungated_servers: gate.ungated_servers,
+            serving: handle.resolve_bridge_session_id(&member).await,
+        };
+        handle.retire(member.clone()).await.unwrap();
+
+        let refused = commit_member_grant(
+            &surface,
+            "agent-a",
+            &subject,
+            meerkat_mob::MemberToolGrant {
+                target: meerkat_core::tool_grant::ToolGrantTarget::Tool {
+                    name: meerkat_core::types::ToolName::from("datetime"),
+                },
+                issuer: ToolGrantIssuer::Operator {
+                    caller: None,
+                    decision_ref: None,
+                },
+                reason: None,
+                window: ToolGrantWindow::For(Duration::from_mins(10)),
+            },
+        )
+        .await
+        .expect_err("a member no longer on the roster is granted nothing");
+        assert_eq!(
+            refused.data,
+            Some(json!({
+                "kind": "tool_grant_request_refused",
+                "tool_grant_request_refusal": {"kind": "subject_unknown"},
+            })),
+            "{refused:?}"
+        );
+        let listed = grant_owner(&surface)
+            .unwrap()
+            .list_tool_grants(
+                &ToolGrantSubject::member(
+                    handle.mob_id().as_str(),
+                    &handle.live_incarnation(),
+                    member.as_str(),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            listed.grants.is_empty(),
+            "nothing was issued: {:?}",
+            listed.grants
+        );
+        let _ = unified.shutdown().await;
     }
 }

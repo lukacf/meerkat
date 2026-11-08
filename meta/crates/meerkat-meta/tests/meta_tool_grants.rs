@@ -920,6 +920,7 @@ async fn a_revoke_answers_not_found_for_a_grant_of_another_mob() {
             name: GATED_TOOL.to_string(),
         },
         &meerkat_core::tool_grant::GrantGatedTools::default().with_tool(GATED_TOOL),
+        &std::collections::BTreeSet::new(),
     )
     .expect("a gated target");
     let grant = machine

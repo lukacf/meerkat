@@ -422,23 +422,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `meta/tool_grants/grant`, `revoke`, `list` and `audit`, on the stdio
   gateway and on `POST /console/rpc`: Meerkat's scoped tool grants for the
-  identities a gateway serves. A grant opens a tool or a built-in tool
-  family the member's profile gates (`[profiles.*.tools] grant_gated`, its
-  own gate joined with its role's) for a fixed window, across respawns and
-  restarts, in the mob's running incarnation; it wakes nothing and applies at
-  the member's next model request. A host may record its own reference to
-  the decision behind a grant (`decision_ref`). A registered identity Core
-  holds no member of (its member was retired) is seated by the grant, as a
-  delivery seats it, Dormant and building nothing. Meta keeps no grant
-  state. Every refusal of a request is `-32602` with the typed
-  `tool_grant_request_refused` refusal; an identity created at runtime
-  (store-owned) is `subject_unknown`. On the Console, grant and revoke need
-  `agent.tool_grants.manage` on the identity and record the signed-in
-  principal (the grant's caller, the revoke's actor), list and audit need
-  `agent.view`, a revoke answers a caller that may not view the grant's
-  identity `not_found` as it answers an unknown grant id, and a read-only
-  Console refuses the writes; a candidate launch refuses them too
-  (`candidate_launch`).
+  identities a gateway serves. A grant opens a tool, a built-in tool family
+  or an MCP server the member's profile gates (`[profiles.*.tools]
+  grant_gated`, its own gate joined with its role's) for a fixed window,
+  across respawns and restarts, in the mob's running incarnation; it wakes
+  nothing and applies at the member's next model request. It commits
+  through the mob, against its live roster: an identity no longer on the
+  roster then is `subject_unknown`, and nothing is issued. A host may
+  record its own reference to the decision behind a grant (`decision_ref`).
+  A registered identity Core holds no member of (its member was retired) is
+  seated by the grant, as a delivery seats it, Dormant and building
+  nothing. Meta keeps no grant state. Every refusal of a request is
+  `-32602` with the typed `tool_grant_request_refused` refusal; an identity
+  created at runtime (store-owned) is `subject_unknown`. On the Console,
+  grant and revoke need `agent.tool_grants.manage` on the identity and
+  record the signed-in principal (the grant's caller, the revoke's actor),
+  list and audit need `agent.view`, a revoke answers a caller that may not
+  view the grant's identity `not_found` as it answers an unknown grant id,
+  and a read-only Console refuses the writes; a candidate launch refuses
+  them too (`candidate_launch`).
 - `runtime_options.tool_grants = {max_lifetime_ms}` on the stdio gateway,
   and the top-level `tool_grants` init param on `meta_gateway`: the longest
   window a grant may have (24 hours by default), set as the runtime's grant
@@ -835,6 +837,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sign-out, or a new sign-in in the same browser), the review stays open
   but nobody can read or answer it, and a new one starts only after the
   application restarts.
+- Meta's grant answers do not report `applies` or the gate yet:
+  `meta/tool_grants/grant` answers `{grant}` without Meerkat's advisory
+  `applies`, and `meta/tool_grants/list` answers without the member's
+  `gate`. Meerkat's own `tool_grants/grant` and `tool_grants/list` report
+  both.
 
 ## [0.9.10] - 2026-11-04
 

@@ -2033,8 +2033,9 @@ id = "minimal"
     }
 
     /// The implicit definition's `delegate` profile records the owner's auth
-    /// binding when given one, and that record survives a persisted round
-    /// trip; without one it is exactly the provider-route definition.
+    /// binding when given one, and that record survives persistence (a
+    /// serialize and parse); without one it is exactly the provider-route
+    /// definition.
     #[test]
     fn implicit_definition_records_the_owners_auth_binding() {
         let delegate = ProfileName::from("delegate");

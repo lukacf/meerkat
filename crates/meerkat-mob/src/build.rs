@@ -1741,8 +1741,8 @@ mod tests {
     #[tokio::test]
     async fn test_build_agent_config_threads_profile_auth_binding() {
         let def = sample_definition();
-        let profile_name = ProfileName::from("lead");
-        let agent_identity = AgentIdentity::from("lead-1");
+        let profile_name = ProfileName::from("worker");
+        let agent_identity = AgentIdentity::from("worker-1");
         let unbound = def.profiles[&profile_name].as_inline().unwrap().clone();
         assert_eq!(unbound.auth_binding, None);
         let binding = meerkat_core::AuthBindingRef {

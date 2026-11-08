@@ -280,32 +280,44 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
     let audit: Vec<StoredAuthorizationAuditObservation> =
         serde_json::from_value(serde_json::to_value(row).unwrap()["authorization_audit"].clone())
             .unwrap();
+    if let Err(failure) = tool_succeeded_in(&audit, name) {
+        panic!("{failure}");
+    }
+}
+
+/// Whether the native tool `name` prepared once in `audit` and returned a
+/// success, with no refused or unavailable answer for its operation.
+fn tool_succeeded_in(
+    audit: &[StoredAuthorizationAuditObservation],
+    name: &str,
+) -> Result<(), String> {
     let operations = audit.iter().filter_map(|row| match &row.observation.observation {
         AuditObservation::Prepared { target, .. }
             if matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == name)
             => Some(row.observation.operation_id.clone()),
         _ => None,
     }).collect::<std::collections::HashSet<_>>();
-    assert_eq!(
-        operations.len(),
-        1,
-        "the actual selected native tool must prepare once"
-    );
-    assert!(
-        audit
-            .iter()
-            .any(|row| operations.contains(&row.observation.operation_id)
-                && matches!(
-                    &row.observation.observation,
-                    AuditObservation::Outcome {
-                        outcome: OperationObservedOutcome::ToolDispatchReturned {
-                            result_is_error: false,
-                            terminal_error: None,
-                            ..
-                        }
+    if operations.len() != 1 {
+        return Err(format!(
+            "the actual selected native tool must prepare once: {} operations",
+            operations.len()
+        ));
+    }
+    if !audit.iter().any(|row| {
+        operations.contains(&row.observation.operation_id)
+            && matches!(
+                &row.observation.observation,
+                AuditObservation::Outcome {
+                    outcome: OperationObservedOutcome::ToolDispatchReturned {
+                        result_is_error: false,
+                        terminal_error: None,
+                        ..
                     }
-                ))
-    );
+                }
+            )
+    }) {
+        return Err("the tool's operation returned no success".to_string());
+    }
     let refused = audit
         .iter()
         .filter(|row| {
@@ -317,10 +329,174 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
                 )
         })
         .collect::<Vec<_>>();
-    assert!(
-        refused.is_empty(),
-        "the tool's operation was refused or unavailable before it succeeded: {refused:?}"
-    );
+    if !refused.is_empty() {
+        return Err(format!(
+            "the tool's operation was refused or unavailable before it succeeded: {refused:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// One stored audit row of the checked input, for operation `operation`, as
+/// Core records it for a peer delivery's memory tool (the shape of a run's
+/// recorded rows).
+fn audit_row(operation: &str, observation: serde_json::Value) -> serde_json::Value {
+    const INPUT: &str = "eaed4620-bd71-84db-b5a9-a4d2f8af4e8b";
+    let principal = |id: &str, kind: &str, domain: &str| {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "qualification": {"kind": "qualified", "trust_domain_id": domain},
+        })
+    };
+    let human = principal("uid-1001", "human", "rkat-realm-mob.factory");
+    serde_json::json!({
+        "contributors": [{
+            "input_id": INPUT,
+            "logical_executor": principal("project-one", "shared_agent", "factory-test"),
+            "represented_subject": human.clone(),
+            "requester": human,
+        }],
+        "observation": {
+            "context_revision": null,
+            "execution_scope": {
+                "canonical_input_id": INPUT,
+                "kind": "runtime_input",
+                "owner_session_id": "01a1b7f5-bc68-70ac-9aa8-09068e6e83ff",
+                "runtime_epoch_id": "01a1b7f5-bc6a-77c4-b5e5-5984a414cb05",
+                "submitted_input_id": INPUT,
+            },
+            "observation": observation,
+            "operation_id": operation,
+            "run_id": "01a1b7f5-c1e7-772c-9d18-6c987dd9dc97",
+        },
+    })
+}
+
+/// The memory tool call an audit row of [`audit_row`] names.
+fn memory_tool() -> serde_json::Value {
+    let arguments_digest = vec![0_u8; 32];
+    serde_json::json!({
+        "arguments_digest": arguments_digest,
+        "call_id": "project-read-call",
+        "kind": "tool",
+        "owners": [{"authority_key": "root-dispatcher", "owner_key": "memory"}],
+        "tool_name": "memory",
+    })
+}
+
+const PUBLICATION: &str = "bfd436ef-da2f-496a-8166-b11e090236d4";
+
+/// A refusal of the memory tool's operation, of `reason`, decided while an
+/// owner change was in progress on the publication.
+fn refused_in_a_change(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "refused",
+        "read": {
+            "basis": "change_in_progress",
+            "live_sequence": 65,
+            "observed_at_ms": 1_794_087_699_016_u64,
+            "publication_instance": PUBLICATION,
+            "publication_sequence": 65,
+        },
+        "reason": reason,
+        "target": memory_tool(),
+    })
+}
+
+fn prepared_memory_tool() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "prepared",
+        "policy": {
+            "controller_lineages": [],
+            "observed_at_ms": 1_794_087_699_018_u64,
+            "operation_authorities": [],
+            "publication_instance": PUBLICATION,
+            "publication_sequence": 66,
+        },
+        "target": memory_tool(),
+    })
+}
+
+fn entered(boundary: &str) -> serde_json::Value {
+    serde_json::json!({"boundary": boundary, "kind": "entry"})
+}
+
+fn returned_success() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "outcome",
+        "outcome": {
+            "asynchronous_operations": [],
+            "kind": "tool_dispatch_returned",
+            "result_is_error": false,
+            "terminal_error": null,
+        },
+    })
+}
+
+fn decoded(rows: Vec<serde_json::Value>) -> Vec<StoredAuthorizationAuditObservation> {
+    serde_json::from_value(serde_json::Value::Array(rows)).unwrap()
+}
+
+/// Core's waited re-preparation, as a peer delivery's memory tool met it:
+/// the tool's first preparation met an owner change in progress on the
+/// authorization publication and was refused `ReprepareRequired` before any
+/// preparation was recorded; Core waited the change out and prepared it
+/// again under the same operation id, and the tool ran once and succeeded.
+/// The success check accepts that refusal, and still refuses the same
+/// refusal after the operation's preparation, a refusal of another kind and
+/// an unavailable answer.
+///
+/// RED before the fix: the check refuses Core's own refusal to rebuild.
+#[test]
+fn a_tool_prepared_again_after_an_owner_change_still_succeeded() {
+    const TOOL: &str = "01a1b7f5-c23c-77e9-928e-feb1626e6a75";
+    let row = |observation: serde_json::Value| audit_row(TOOL, observation);
+    let reprepared = vec![
+        row(refused_in_a_change("reprepare_required")),
+        row(prepared_memory_tool()),
+        row(entered("tool_dispatch")),
+        row(entered("tool_execution_policy")),
+        row(returned_success()),
+    ];
+    if let Err(failure) = tool_succeeded_in(&decoded(reprepared), "memory") {
+        panic!("Core's waited re-preparation is a success: {failure}");
+    }
+    let unavailable = serde_json::json!({
+        "kind": "authorization_unavailable",
+        "target": memory_tool(),
+    });
+    for (what, rows) in [
+        (
+            "the same refusal after the operation's preparation",
+            vec![
+                row(prepared_memory_tool()),
+                row(refused_in_a_change("reprepare_required")),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "a refusal of another kind",
+            vec![
+                row(refused_in_a_change("denied")),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+        (
+            "an unavailable answer",
+            vec![
+                row(unavailable),
+                row(prepared_memory_tool()),
+                row(returned_success()),
+            ],
+        ),
+    ] {
+        assert!(
+            tool_succeeded_in(&decoded(rows), "memory").is_err(),
+            "{what} is never a success"
+        );
+    }
 }
 
 async fn source_row(

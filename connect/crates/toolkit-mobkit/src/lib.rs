@@ -968,6 +968,10 @@ pub mod source_hold_probe {
         /// it out through Core's owner-change waiter; not keyed. A control's
         /// hold answer here is ignored.
         AcquisitionConflict,
+        /// A helper source's first binding write, just before its binding
+        /// check resolves the issued controller lineages again; keyed by
+        /// the source row's ID.
+        BindingCheck,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

@@ -283,3 +283,33 @@ pub fn setup_report_definition() -> ToolDef {
         SETUP_RESULTS_BUNDLE,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The source owner's answer as the report tool's: a conflict in the
+    // source's facts is contention (another writer's change in flight), so
+    // it is unavailable, retryable, never a denial; only the owner's own
+    // refusal denies.
+    //
+    // RED before the fix: a conflict answers `access_denied`.
+    #[test]
+    fn a_source_conflict_is_unavailable_never_a_denial() {
+        assert!(
+            matches!(
+                source_error(PrivateOriginalError::Conflict),
+                ToolError::Unavailable { .. }
+            ),
+            "a conflict is contention"
+        );
+        assert!(matches!(
+            source_error(PrivateOriginalError::Unavailable),
+            ToolError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            source_error(PrivateOriginalError::Denied),
+            ToolError::AccessDenied { .. }
+        ));
+    }
+}

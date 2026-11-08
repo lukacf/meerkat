@@ -18,13 +18,17 @@
 //! - `FirstWrite`: a first binding write just before it begins its owner
 //!   change, the hold lasting into the change, where the write tries the
 //!   collection;
+//! - `BindingCheck`: a first binding write's check, just before it resolves
+//!   the issued controller lineages again;
 //! - `PrepareBind`: a helper preparation's capture binder;
 //! - `Submit`: a helper submission's source check.
 //!
 //! A held collection is waited out within Core's owner-change bound, and an
 //! owner change met by the lineage resolution is a stale read, waited out
 //! with the step's one churn; only the check, the read or the publication is
-//! made again, never the binding write. Past the bounds the refusal is typed
+//! made again, never the binding write. An owner change met by the first
+//! binding's check, which writes nothing, is waited out with the same churn
+//! and the bind made again. Past the bounds the refusal is typed
 //! `tool_unavailable`, never a denial. Another actor's owner change begun
 //! while a bind waits is not held up by it.
 use super::publication_source_wait::{Found, finds_with_hold_at, reply};
@@ -176,6 +180,50 @@ async fn retain_lineage_resolution_past_the_bounds_is_unavailable_never_denied()
     let hold = OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(1);
     let found = finds_with_hold_at(
         Site::Resolve,
+        1,
+        Hold {
+            owner_change: true,
+            duration: hold,
+        },
+        0,
+        false,
+    )
+    .await;
+    assert_eq!(found.feedback.len(), 1, "{:?}", found.feedback);
+    let first = &found.feedback[0];
+    assert!(first.is_error, "{}", reply(first));
+    assert_eq!(
+        reply(first)["error"],
+        "tool_unavailable",
+        "a change is never a denial: {}",
+        reply(first)
+    );
+    assert_eq!(found.helpers, 0, "nothing was retained");
+}
+
+// An owner change of the shared publication in progress at the work step's
+// first binding check, as another original's first binding holds one (the
+// change holds the collection too): the check's lineage resolution cannot
+// say now, which is contention, not a denial. Nothing is written yet, so the
+// retention waits the change out with the step's one churn and binds again:
+// the Find admits its helper, its grant issued once.
+//
+// RED before the fix: the check answers a denial (`access_denied`) at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_binding_check_waits_out_an_owner_change() {
+    let found = finds_with_hold_at(Site::BindingCheck, 1, change_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+}
+
+// The same owner change held past Core's owner-change bound: the retention
+// stays typed, tool_unavailable, never access_denied, and nothing is retained.
+//
+// RED before the fix: `access_denied`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_binding_check_past_the_bounds_is_unavailable_never_denied() {
+    let hold = OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(1);
+    let found = finds_with_hold_at(
+        Site::BindingCheck,
         1,
         Hold {
             owner_change: true,

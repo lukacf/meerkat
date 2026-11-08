@@ -231,4 +231,77 @@ mod tests {
             }
         }
     }
+
+    /// An inner binder that records each submission it is told of, and
+    /// refuses one when asked to.
+    #[cfg(all(feature = "native-host", unix))]
+    struct RecordingBinder {
+        submitted: std::sync::Mutex<Vec<meerkat_core::types::SessionId>>,
+        refuse: bool,
+    }
+
+    #[cfg(all(feature = "native-host", unix))]
+    #[async_trait::async_trait]
+    impl meerkat_mobkit::identity_first::GovernedInputBinder for RecordingBinder {
+        async fn try_bind(
+            &self,
+            _context: &meerkat_mobkit::identity_first::GovernedBindContext,
+            _input: meerkat_runtime::Input,
+        ) -> Result<
+            meerkat_mobkit::identity_first::BoundGovernedInput,
+            meerkat_mobkit::identity_first::GovernedBindError,
+        > {
+            Err(meerkat_mobkit::identity_first::GovernedBindError::Refused(
+                meerkat_mobkit::identity_first::GovernedBindRefusal::denied("never bound here"),
+            ))
+        }
+
+        async fn submitting(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> Result<(), meerkat_mobkit::identity_first::GovernedBindRefusal> {
+            self.submitted.lock().unwrap().push(session_id.clone());
+            if self.refuse {
+                Err(meerkat_mobkit::identity_first::GovernedBindRefusal::denied(
+                    "the door refused the submission",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn retain_unresolved(
+            &self,
+            _settlement: Box<dyn meerkat_mobkit::identity_first::GovernedSettlement>,
+            _detail: &str,
+        ) {
+        }
+    }
+
+    /// A reviewed launch's binder tells its door of the submission, with the
+    /// session the bind bound, and a door's refusal there refuses the send:
+    /// a door that records its send's submission is never skipped under a
+    /// reviewed launch.
+    ///
+    /// RED before the fix: the held binder answers `Ok` for the door, which
+    /// is never told.
+    #[cfg(all(feature = "native-host", unix))]
+    #[tokio::test]
+    async fn a_held_binder_tells_its_door_of_the_submission() {
+        for refuse in [false, true] {
+            let inner = Arc::new(RecordingBinder {
+                submitted: std::sync::Mutex::new(Vec::new()),
+                refuse,
+            });
+            let held = ReviewCustody::default().bind(inner.clone());
+            let session = meerkat_core::types::SessionId::new();
+            let answered = held.submitting(&session).await;
+            assert_eq!(
+                *inner.submitted.lock().unwrap(),
+                vec![session.clone()],
+                "the door was told once, with the bound session"
+            );
+            assert_eq!(answered.is_err(), refuse, "the door's answer: {answered:?}");
+        }
+    }
 }

@@ -173,7 +173,11 @@ impl PrivateOriginals {
             let Some(work) = context.work_authorization() else {
                 return read;
             };
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining = waiter_budget(
+                deadline,
+                tokio::time::Instant::now(),
+                context.remaining_tool_time(),
+            );
             if remaining.is_zero()
                 || !churn
                     .lock()
@@ -479,6 +483,19 @@ impl PrivateOriginals {
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The budget of one wait of
+/// [`PrivateOriginals::acquisition_original_through_waiter`]: the time left
+/// to the read's `deadline`. `tool_time` is the dispatch's remaining tool
+/// time (`None` without a tool timeout).
+fn waiter_budget(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+    tool_time: Option<std::time::Duration>,
+) -> std::time::Duration {
+    let _ = tool_time;
+    deadline.saturating_duration_since(now)
 }
 
 #[cfg(test)]
@@ -1268,5 +1285,39 @@ mod tests {
             fixture.adapter.acquisition_original(&context).await,
             Err(PrivateOriginalError::Denied)
         ));
+    }
+
+    // One wait of the acquisition original's waiter never outlasts the
+    // dispatch's remaining tool time: its budget is the time to the read's
+    // deadline (within Core's owner-change bound), cut to the tool time when
+    // less is left, so a conflict that outlasts the wait answers unavailable
+    // within the dispatch, never as its timeout.
+    //
+    // RED before the fix: the budget ignores the tool time.
+    #[test]
+    fn a_conflict_wait_never_outlasts_the_remaining_tool_time() {
+        let now = tokio::time::Instant::now();
+        let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let little = std::time::Duration::from_millis(300);
+        assert_eq!(
+            waiter_budget(now + bound, now, Some(little)),
+            little,
+            "cut to the tool time left"
+        );
+        assert_eq!(
+            waiter_budget(now + bound, now, None),
+            bound,
+            "a dispatch without a tool timeout"
+        );
+        assert_eq!(
+            waiter_budget(now + bound, now, Some(bound * 2)),
+            bound,
+            "the read's deadline comes first"
+        );
+        assert_eq!(
+            waiter_budget(now, now + little, Some(little)),
+            std::time::Duration::ZERO,
+            "past the read's deadline"
+        );
     }
 }

@@ -136,17 +136,22 @@ impl WorkflowCalls {
             };
         }
         let staged = self.source.stage_workflow_call(call, context, plan);
-        staged.map_err(|error| match error {
-            PrivateOriginalError::Unavailable => ToolExecutionResolutionError::Unavailable {
-                tool_name: call.name.into(),
-                reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
-            },
-            PrivateOriginalError::Denied | PrivateOriginalError::Conflict => {
-                ToolExecutionResolutionError::AccessDenied {
-                    tool_name: call.name.into(),
-                }
+        staged.map_err(|error| stage_refusal(call.name, error))
+    }
+}
+
+/// A plan's staging refusal as a resolution answer.
+fn stage_refusal(name: &str, error: PrivateOriginalError) -> ToolExecutionResolutionError {
+    match error {
+        PrivateOriginalError::Unavailable => ToolExecutionResolutionError::Unavailable {
+            tool_name: name.into(),
+            reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+        },
+        PrivateOriginalError::Denied | PrivateOriginalError::Conflict => {
+            ToolExecutionResolutionError::AccessDenied {
+                tool_name: name.into(),
             }
-        })
+        }
     }
 }
 
@@ -342,5 +347,51 @@ impl AgentToolDispatcher for WorkflowCalls {
         } else {
             Ok(BindOutcome::Skipped(Arc::new(Self { inner, source })))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The source owner's answer at the workflow call gate and at plan
+    // staging: a conflict in the source's facts is contention (another
+    // writer's change in flight), so it is unavailable, retryable, never a
+    // denial; only the owner's own refusal denies.
+    //
+    // RED before the fix: a conflict answers `access_denied` at both.
+    #[test]
+    fn a_source_conflict_is_unavailable_never_a_denial() {
+        let name = "workflow_tool";
+        assert!(
+            matches!(
+                workflow_failure(name, PrivateOriginalError::Conflict),
+                ToolError::Unavailable { .. }
+            ),
+            "the call gate: a conflict is contention"
+        );
+        assert!(
+            matches!(
+                stage_refusal(name, PrivateOriginalError::Conflict),
+                ToolExecutionResolutionError::Unavailable { .. }
+            ),
+            "the staging: a conflict is contention"
+        );
+        assert!(matches!(
+            workflow_failure(name, PrivateOriginalError::Unavailable),
+            ToolError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            stage_refusal(name, PrivateOriginalError::Unavailable),
+            ToolExecutionResolutionError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            workflow_failure(name, PrivateOriginalError::Denied),
+            ToolError::AccessDenied { .. }
+        ));
+        assert!(matches!(
+            stage_refusal(name, PrivateOriginalError::Denied),
+            ToolExecutionResolutionError::AccessDenied { .. }
+        ));
     }
 }

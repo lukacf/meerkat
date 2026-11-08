@@ -11291,6 +11291,28 @@ struct GatewayExperimentalLiveSessionBindingAuthority {
     allowed_binding: meerkat_core::AuthBindingRef,
 }
 
+/// The strict live binding authority the gateway composes for `principal`
+/// and its configured `binding`: it decides with the access controller
+/// `runtime` holds (the gateway's configured one, which the gateway's
+/// initialization hands to the runtime before its options move on), and
+/// without one the stdio gateway is the trusted host plane.
+#[cfg(feature = "openai-live")]
+fn gateway_strict_live_binding_authority(
+    runtime: &UnifiedRuntime,
+    machine: Arc<meerkat_runtime::MeerkatMachine>,
+    principal: &str,
+    binding: &meerkat_core::AuthBindingRef,
+) -> Arc<GatewayExperimentalLiveSessionBindingAuthority> {
+    let access = runtime.access_controller().cloned();
+    Arc::new(GatewayExperimentalLiveSessionBindingAuthority {
+        handle: runtime.mob_handle(),
+        machine,
+        access,
+        principal: principal.to_string(),
+        allowed_binding: binding.clone(),
+    })
+}
+
 #[cfg(feature = "openai-live")]
 impl GatewayExperimentalLiveSessionBindingAuthority {
     async fn resolve_exact_member(
@@ -20279,15 +20301,12 @@ external_addressable = true
                         // gateway's configured one, kept there before its
                         // options moved on): without one the stdio gateway
                         // is the trusted host plane.
-                        let access = runtime.access_controller().cloned();
-                        let binding_authority =
-                            Arc::new(GatewayExperimentalLiveSessionBindingAuthority {
-                                handle: runtime.mob_handle(),
-                                machine: Arc::clone(&live_machine),
-                                access,
-                                principal: principal.to_string(),
-                                allowed_binding: binding.clone(),
-                            });
+                        let binding_authority = gateway_strict_live_binding_authority(
+                            &runtime,
+                            Arc::clone(&live_machine),
+                            principal,
+                            binding,
+                        );
                         let transport = Arc::new(
                             meerkat::experimental_gpt_live::ExperimentalGptLiveWebrtcTransport::new(
                             ),
@@ -26698,6 +26717,83 @@ mod strict_live_private_owner_tests {
                 Err(ExperimentalLiveOpenAuthorityError::AccessDenied)
             ),
             "another principal may not use a live binding on a private member"
+        );
+    }
+
+    /// The gateway composes its strict live authority with the access
+    /// controller it installs on the runtime: through the gateway's own
+    /// composition, another principal is refused a live binding on a private
+    /// member, as the configured controller and the private-owner rule
+    /// decide.
+    #[tokio::test]
+    async fn the_gateway_composes_the_strict_live_authority_with_its_access_controller() {
+        let mut runtime = crate::UnifiedRuntime::builder()
+            .definition(
+                meerkat_mob::MobDefinition::from_toml(
+                    "[mob]\nid = 'strict-live-composed'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
+                     [profiles.worker.tools]\ncomms = true\n",
+                )
+                .expect("definition"),
+            )
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let handle = runtime.mob_handle();
+        handle
+            .spawn_spec(
+                meerkat_mob::SpawnMemberSpec::new(
+                    "worker",
+                    meerkat_mob::AgentIdentity::from("alpha-side"),
+                )
+                .with_labels(std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:aa".to_string(),
+                )])),
+            )
+            .await
+            .expect("seat the private member");
+        let side = meerkat_mob::AgentIdentity::from("alpha-side");
+        handle.ensure_member_live(&side).await.expect("live");
+        let session = handle
+            .resolve_bridge_session_id(&side)
+            .await
+            .expect("the private member's session");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("b").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        // As the gateway's initialization installs its configured controller.
+        runtime.set_access_controller(
+            crate::AccessController::new(crate::access::AccessControlConfig {
+                enabled: true,
+                admins: vec!["root@example.test".to_string()],
+                rules: vec![crate::access::AccessRule {
+                    id: "everyone-drives-every-agent".to_string(),
+                    subjects: vec!["*".to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..crate::access::AccessRule::default()
+                }],
+                ..crate::access::AccessControlConfig::default()
+            })
+            .expect("access controller"),
+        );
+        let authority = super::gateway_strict_live_binding_authority(
+            &runtime,
+            Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            "bob@example.test",
+            &binding,
+        );
+        let decided = authority.authorize_binding_use(&session, &binding).await;
+        assert!(
+            matches!(
+                decided,
+                Err(ExperimentalLiveOpenAuthorityError::AccessDenied)
+            ),
+            "the gateway's composition decides with its access controller"
         );
     }
 }

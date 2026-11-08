@@ -6430,6 +6430,9 @@ struct EvidenceRecordingLlm {
     /// A transcript extraction never answers, so the transcript
     /// distillation runs into the distiller's pre-rotation bound.
     hang_transcripts: bool,
+    /// A harvest is answered, and recorded, only half a second after it
+    /// was asked.
+    slow_harvests: bool,
 }
 
 #[async_trait]
@@ -6462,6 +6465,28 @@ impl meerkat_client::LlmClient for EvidenceRecordingLlm {
                 return Box::pin(futures::stream::iter(vec![Err(
                     meerkat_client::LlmError::ServerOverloaded,
                 )]));
+            }
+            if self.slow_harvests {
+                use futures::StreamExt as _;
+                let events = self.events.clone();
+                let answered = futures::stream::once(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    events.lock().unwrap().push("harvest".to_string());
+                })
+                .filter_map(|()| async {
+                    None::<Result<meerkat_client::LlmEvent, meerkat_client::LlmError>>
+                });
+                return Box::pin(answered.chain(futures::stream::iter(vec![
+                    Ok(meerkat_client::LlmEvent::TextDelta {
+                        delta: RESET_ONE_OP_REPLY.to_string(),
+                        meta: None,
+                    }),
+                    Ok(meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::success(
+                            meerkat_core::StopReason::EndTurn,
+                        ),
+                    }),
+                ])));
             }
             self.events.lock().unwrap().push("harvest".to_string());
             RESET_ONE_OP_REPLY
@@ -6498,6 +6523,7 @@ struct EvidenceRecordingHandle {
     events: Arc<Mutex<Vec<String>>>,
     failing_harvests: Arc<AtomicUsize>,
     hang_transcripts: bool,
+    slow_harvests: bool,
 }
 
 #[async_trait]
@@ -6510,6 +6536,7 @@ impl meerkat_meta::memory::distiller::DistillerClientHandle for EvidenceRecordin
             events: self.events.clone(),
             failing_harvests: self.failing_harvests.clone(),
             hang_transcripts: self.hang_transcripts,
+            slow_harvests: self.slow_harvests,
         }))
     }
     fn invalidate(&self) {}
@@ -6678,16 +6705,18 @@ async fn dormant_identity_owing_a_compaction_over(
     meerkat_meta::identity_first::IdentityFirstRuntimeContext,
     tempfile::TempDir,
 ) {
-    dormant_identity_owing_a_compaction_with(name, discards, failing_harvests, false).await
+    dormant_identity_owing_a_compaction_with(name, discards, failing_harvests, false, false).await
 }
 
-/// [`dormant_identity_owing_a_compaction_over`], and whether the model
-/// never answers a transcript extraction.
+/// [`dormant_identity_owing_a_compaction_over`], whether the model never
+/// answers a transcript extraction, and whether it answers each harvest
+/// only half a second after it was asked.
 async fn dormant_identity_owing_a_compaction_with(
     name: &str,
     discards: OwedDiscards,
     failing_harvests: usize,
     hang_transcripts: bool,
+    slow_harvests: bool,
 ) -> (
     Arc<IdentityRuntime>,
     Arc<CountingBridge>,
@@ -6736,6 +6765,7 @@ async fn dormant_identity_owing_a_compaction_with(
             events: events.clone(),
             failing_harvests: Arc::new(AtomicUsize::new(failing_harvests)),
             hang_transcripts,
+            slow_harvests,
         }),
         memory_store.clone(),
         memory_store.clone(),
@@ -7092,6 +7122,7 @@ async fn a_failed_compaction_harvest_keeps_its_own_record_beside_the_transcript_
             OwedDiscards::Published,
             usize::MAX,
             true,
+            false,
         )
         .await;
     let id = make_identity("triage:owed-own-record");
@@ -7949,13 +7980,22 @@ async fn a_refused_reset_harvests_a_compaction_an_earlier_finalization_published
 }
 
 /// A delete Core refuses (its rotation fails before anything of it reaches
-/// Core) keeps the identity's session: the batch the step settled is
-/// harvested as the session's live compaction's would have been, and
-/// nothing of the retirement runs.
+/// Core) keeps the identity's session, and harvests the batch the step
+/// settled before it answers the refusal: the retry the refusal invites
+/// drops the session's scope, so the harvest is never left running behind
+/// it. Nothing of the retirement runs. RED before: the harvest ran
+/// detached, and had not ended when the refusal was answered.
 #[tokio::test]
-async fn a_delete_core_refuses_hands_its_settled_batch_to_the_ordinary_harvest() {
+async fn a_delete_core_refuses_harvests_its_settled_batch_before_it_answers() {
     let (runtime, bridge, session, events, _memory_store, _context, _memory_dir) =
-        dormant_identity_owing_a_compaction("triage:owed-refused-delete").await;
+        dormant_identity_owing_a_compaction_with(
+            "triage:owed-refused-delete",
+            OwedDiscards::Answered,
+            0,
+            false,
+            true,
+        )
+        .await;
     let id = make_identity("triage:owed-refused-delete");
     bridge.fail_create.store(true, Ordering::SeqCst);
 
@@ -7964,6 +8004,11 @@ async fn a_delete_core_refuses_hands_its_settled_batch_to_the_ordinary_harvest()
         .await
         .expect_err("Core refuses the delete's rotation");
 
+    let answered = events.lock().unwrap().clone();
+    assert!(
+        answered.iter().any(|event| event == "harvest"),
+        "the settled batch is harvested before the refusal is answered: {answered:?}"
+    );
     let events = events_once(&events, |event| event == "harvest").await;
     assert!(
         !events.contains(&format!("drop {session}")),
@@ -7973,6 +8018,44 @@ async fn a_delete_core_refuses_hands_its_settled_batch_to_the_ordinary_harvest()
         bridge.settles(),
         vec![(id.clone(), false)],
         "Core's settle is asked once, before Core's rotation"
+    );
+}
+
+/// The roster stops listing an identity whose member owes a compaction's
+/// projection, and Core refuses the retirement before any of it started;
+/// then the roster lists the identity again. The pass that takes the
+/// unlisting back hands the batch the unlisting settled to the ordinary
+/// harvest, as a step Core refuses does: the session goes on. Nothing of
+/// the retirement runs. RED before: the batch stayed in this process until
+/// the incarnation's next retirement, and a restart lost it.
+#[tokio::test]
+async fn a_relisted_identity_s_taken_back_unlisting_hands_its_settled_batch_to_the_ordinary_harvest()
+ {
+    let (_runtime, bridge, _session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-relisted").await;
+    let id = make_identity("triage:owed-relisted");
+    bridge.fail_retire.store(true, Ordering::SeqCst);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "the unlisting settles the projection before Core is asked"
+    );
+    assert!(
+        core_member(&bridge, &id).live,
+        "Core refused the retirement: the member stays"
+    );
+    bridge.fail_retire.store(false, Ordering::SeqCst);
+    context
+        .bootstrap_roster(&[make_spec("triage:owed-relisted")])
+        .await
+        .expect("the roster pass lists the identity again");
+
+    let events = events_once(&events, |event| event == "harvest").await;
+    assert!(
+        !events.iter().any(|event| event == "transcript"),
+        "nothing of the retirement runs: {events:?}"
     );
 }
 

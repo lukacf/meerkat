@@ -12,6 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   peer=<n> exception=<class> errno=<code>`, in the closed categories of its
   other peer diagnostics and never with exception text or paths. Before, a
   failed peer close left no trace of the peer or of what failed.
+- The shared setup owner removes its private sockets and their directory in
+  `/tmp` even when a peer's close fails, still each only while it is the
+  socket the owner bound. A removal it refuses or that fails no longer
+  replaces the failure the owner reports: that failure is raised with the
+  removal's failure as its context. Before, a failed peer close left the
+  sockets behind.
 
 ## [0.9.10] - 2026-11-05
 

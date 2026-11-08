@@ -1069,6 +1069,8 @@ async def shared_connections(adapter_module, controller, count, stopped, ready, 
     directory = Path(tempfile.mkdtemp(prefix="connect-setup-", dir="/tmp")).resolve()
     transports, paths = [], []
     failures = []
+    # The failure on its way when the private sockets are removed, if any.
+    pending = None
     def open_peer(peer):
         transport = _SharedPeerTransport(adapter_module, peer)
         transports.append(transport)
@@ -1100,27 +1102,50 @@ async def shared_connections(adapter_module, controller, count, stopped, ready, 
             physical.ready(owner, count)
         await ready([str(path) for path, _, _ in paths])
         await stopped()
+    except BaseException as error:
+        pending = error
+        raise
     finally:
-        # Global shutdown still belongs to this host. Explicit per-peer close
-        # above never calls either of these Controller owner methods.
-        owner.close_admission()
-        owner._peer_factory = None
-        for transport in transports:
-            transport.retirement(True)
-        failures = await asyncio.gather(*(transport.aclose() for transport in transports),
-                                        return_exceptions=True)
-        # Report each peer whose close failed, before the owner close that can
-        # raise: its index and closed categories, never exception text or paths.
-        for peer, result in enumerate(failures):
-            if isinstance(result, BaseException):
-                print(_shared_peer_failure("peer_close", result.__cause__ or result, peer=peer), file=sys.stderr)
-        await owner.aclose()
-        for path, device, inode in paths:
-            info = path.lstat()
-            if not stat.S_ISSOCK(info.st_mode) or (info.st_dev, info.st_ino) != (device, inode):
-                raise LocalSetupError("local_setup_connection_changed")
-            path.unlink()
-        directory.rmdir()
+        try:
+            # Global shutdown still belongs to this host. Explicit per-peer close
+            # above never calls either of these Controller owner methods.
+            owner.close_admission()
+            owner._peer_factory = None
+            for transport in transports:
+                transport.retirement(True)
+            failures = await asyncio.gather(*(transport.aclose() for transport in transports),
+                                            return_exceptions=True)
+            # Report each peer whose close failed, before the owner close that can
+            # raise: its index and closed categories, never exception text or paths.
+            for peer, result in enumerate(failures):
+                if isinstance(result, BaseException):
+                    print(_shared_peer_failure("peer_close", result.__cause__ or result, peer=peer), file=sys.stderr)
+            await owner.aclose()
+        except BaseException as error:
+            pending = error
+            raise
+        finally:
+            # The private sockets go even when a close above failed, each only
+            # while it is still the socket this owner bound. A refused or failed
+            # removal never takes the place of a failure: the failure on its way,
+            # or else a failed peer close, propagates with the removal's failure
+            # as its context.
+            try:
+                for path, device, inode in paths:
+                    info = path.lstat()
+                    if not stat.S_ISSOCK(info.st_mode) or (info.st_dev, info.st_ino) != (device, inode):
+                        raise LocalSetupError("local_setup_connection_changed")
+                    path.unlink()
+                directory.rmdir()
+            except BaseException as removal:
+                if pending is not None:
+                    # The failure's own context stays behind the removal's.
+                    removal.__context__ = pending.__context__
+                    raise pending
+                failed = [result for result in failures if isinstance(result, BaseException)]
+                if failed:
+                    raise LocalSetupError("local_setup_connection_failed") from failed[0]
+                raise
     failed = [result for result in failures if isinstance(result, BaseException)]
     if failed:
         raise LocalSetupError("local_setup_connection_failed") from failed[0]

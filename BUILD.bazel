@@ -881,6 +881,7 @@ test_suite(
         "//crates/meerkat-rpc:mob_registration_redrive_ordering_test",
         "//crates/meerkat-rpc:mob_stream_resume_test",
         "//crates/meerkat-rpc:multi_process_delivery_test",
+        "//crates/meerkat-rpc:notification_sink_per_connection_test",
         "//crates/meerkat-rpc:realm_config_ingress_test",
         "//crates/meerkat-rpc:realm_mcp_original_session_test",
         "//crates/meerkat-rpc:regression_rpc_test",

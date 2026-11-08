@@ -380,6 +380,16 @@ impl NotificationSink {
         Self::new(tx)
     }
 
+    /// Whether `other` writes to the same connection as this sink.
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
+    /// True once the connection this sink writes to is gone.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     /// Emit one notification of `method` with `params`, best effort and
     /// without waiting: a full channel or a closed transport drops it.
     /// Returns whether the notification was queued on the connection.
@@ -1821,15 +1831,47 @@ pub struct MethodRouter {
 
 use meerkat_runtime::stack_relief::box_in_own_frame as routed_arm;
 
+/// Whether a router's connection becomes its runtime's process-default
+/// `session/event` route ([`SessionRuntime::set_notification_sink`]): the
+/// one that takes the copies of a turn of a session no connection holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessDefaultRoute {
+    /// The server's only client (stdio, a single-client embedding).
+    Install,
+    /// One of several connections a shared runtime serves (TCP): never.
+    Leave,
+}
+
 impl MethodRouter {
     /// Create a new method router.
     ///
     /// Reuses existing mob state from the runtime if available, otherwise
-    /// creates a default. Also spawns schedule host startup.
+    /// creates a default. Also spawns schedule host startup. The router's
+    /// connection becomes the runtime's process-default `session/event`
+    /// route, as the only client of a single-client server: build one router
+    /// per runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`], whose connections never become it.
     pub fn new(
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        Self::new_on_connection(
+            runtime,
+            config_store,
+            notification_sink,
+            ProcessDefaultRoute::Install,
+        )
+    }
+
+    /// [`Self::new`] for one connection of a server that may hold several
+    /// on the same runtime: `default_route` says whether the connection also
+    /// becomes the runtime's process-default `session/event` route.
+    pub(crate) fn new_on_connection(
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        notification_sink: NotificationSink,
+        default_route: ProcessDefaultRoute,
     ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         let runtime_adapter = runtime.runtime_adapter();
         // Reuse the runtime's existing mob state if one was pre-configured
@@ -1860,9 +1902,15 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
-        // Ensure the runtime's notification sink is up-to-date so that
-        // executors created lazily read the current sink at apply time.
-        runtime.set_notification_sink(notification_sink.clone());
+        // A turn writes its session/event copies to the connections of the
+        // requests that admitted its inputs, and a turn no request waits on
+        // to the connection holding its session (see
+        // `SessionRuntime::turn_session_event_sinks`). Only the turns of a
+        // session no connection holds go to the runtime's process default:
+        // a single-client server's connection, never one of several.
+        if default_route == ProcessDefaultRoute::Install {
+            runtime.set_notification_sink(notification_sink.clone());
+        }
         runtime.arm_runtime_delivery_owner();
         Ok(Self {
             #[cfg(feature = "local-authorization")]
@@ -2416,7 +2464,10 @@ impl MethodRouter {
     /// Create a new method router with an explicit mob state.
     ///
     /// The mob state is registered on the runtime. Also spawns schedule host
-    /// startup and updates the notification sink.
+    /// startup and, as [`Self::new`] does, makes the router's connection the
+    /// runtime's process-default `session/event` route: build one router per
+    /// runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     #[cfg(feature = "mob")]
     pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
@@ -2441,8 +2492,8 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
-        // Ensure the runtime's notification sink is up-to-date so that
-        // executors created lazily read the current sink at apply time.
+        // The single-client server's connection is the runtime's
+        // process-default session/event route (see `Self::new`).
         runtime.set_notification_sink(notification_sink.clone());
         Self {
             #[cfg(feature = "local-authorization")]
@@ -4619,6 +4670,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });
@@ -4680,6 +4737,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });

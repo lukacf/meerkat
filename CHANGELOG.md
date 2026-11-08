@@ -2481,6 +2481,35 @@ them.
   credentials root (`<platform-config>/meerkat/credentials` by default) to
   tighten them.
 
+- `meerkat-rpc`: on a server with more than one connection on one runtime
+  (`rkat-rpc --tcp`, or an embedder serving several routers over one
+  `SessionRuntime`), a turn's `session/event` notifications went to the
+  most recently connected client instead of the client that started the
+  turn, and nowhere once that client closed; a mob member's went to the
+  client connected last when the member's executor was attached. Affects
+  0.5.2 through 0.9.10. Every connection to such a server has the same
+  access to every session, so this crossed users only where the host puts
+  its own per-connection access control in front of those connections. A
+  turn's notifications now go to the connections of the requests that
+  started it, and a turn no request waits on (queued work, comms,
+  schedules, a resumed run) to the connection that holds its session: the
+  one that created or forked it or, once that one is gone, the next one
+  that starts a turn on it, and to no other connection. Such a turn of a
+  session no connection holds goes to the runtime's default route
+  (`SessionRuntime::set_notification_sink`), which a TCP connection no
+  longer replaces. `MethodRouter::new` and the `RpcServer` constructors
+  still install their connection as that route, so an embedder that builds
+  one of them per connection over one runtime still sends those turns to
+  the one it built last; serve each such connection with
+  `serve_tcp_connection` instead, whose connections never take that route.
+  On a TCP server the turns of sessions no connection holds now reach no
+  connection; before, the most recently connected client got them. After a
+  reconnect, a client gets a session's turns that no request waits on once
+  it has started a turn on that session; to receive them without starting
+  one, watch the session with `session/stream_open` (a mob member with
+  `mob/stream_open`).
+  (#2116, thanks @zond)
+
 ### Upgrade notes
 
 - A host binder of in-process deliveries from governed work binds them

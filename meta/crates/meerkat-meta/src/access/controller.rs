@@ -108,6 +108,39 @@ fn new_edit_identity() -> Option<String> {
 struct AccessState {
     config: Arc<AccessControlConfig>,
     revision: u64,
+    /// The edit that committed `revision`; `None` until this controller
+    /// commits one.
+    last_edit: Option<AccessLastEdit>,
+}
+
+/// The edit that committed a configuration revision: who made it, when, and
+/// the revision it committed. Kept for this controller's lifetime only; the
+/// console audit log keeps the history of edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccessLastEdit {
+    /// The administrator whose edit it was, as the access policy names
+    /// them; `None` when the edit named no one (the host's own edit through
+    /// the direct API).
+    pub principal: Option<String>,
+    /// Milliseconds since the epoch.
+    pub at_ms: u64,
+    pub revision: u64,
+}
+
+/// An administrator's read of the configuration: the configuration, its
+/// revision and the edit that committed it, all from one read.
+pub(crate) struct AccessAdminRead {
+    pub config: Arc<AccessControlConfig>,
+    pub revision: u64,
+    pub last_edit: Option<AccessLastEdit>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 struct AccessControllerInner {
@@ -197,6 +230,7 @@ impl AccessController {
                 state: RwLock::new(AccessState {
                     config: Arc::new(config),
                     revision: 0,
+                    last_edit: None,
                 }),
                 persist_path: RwLock::new(None),
                 attributes: RwLock::new(BTreeMap::new()),
@@ -378,6 +412,37 @@ impl AccessController {
         Ok((view.config, revision))
     }
 
+    /// [`Self::admin_config`] with the edit that committed the revision,
+    /// all from one read.
+    pub(crate) fn admin_read(
+        &self,
+        subject: Option<&str>,
+    ) -> Result<AccessAdminRead, AccessEditError> {
+        let (config, revision, last_edit) = {
+            let state = self
+                .inner
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                Arc::clone(&state.config),
+                state.revision,
+                state.last_edit.clone(),
+            )
+        };
+        if !self
+            .view_from_config(Arc::clone(&config), subject)
+            .can_administer()
+        {
+            return Err(AccessEditError::Denied);
+        }
+        Ok(AccessAdminRead {
+            config,
+            revision,
+            last_edit,
+        })
+    }
+
     /// Authorize the caller and construct the target preview from one config
     /// snapshot. The returned view retains the existing attribute owner.
     pub(crate) fn admin_preview(
@@ -423,7 +488,7 @@ impl AccessController {
                 actual: revision,
             });
         }
-        self.edit_and_commit((*config).clone(), mutation)
+        self.edit_and_commit((*config).clone(), mutation, subject)
             .map_err(AccessEditError::Config)
     }
 
@@ -441,20 +506,22 @@ impl AccessController {
     }
 
     /// Serialized direct compatibility mutation; shares the exact edit and
-    /// persist-before-publish path with checked administrative writes.
+    /// persist-before-publish path with checked administrative writes. It
+    /// names no editor: it is the host's own edit.
     fn mutate(&self, mutation: AccessMutation) -> Result<u64, AccessConfigError> {
         let _mutation = self
             .inner
             .mutation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.edit_and_commit((*self.snapshot().0).clone(), mutation)
+        self.edit_and_commit((*self.snapshot().0).clone(), mutation, None)
     }
 
     fn edit_and_commit(
         &self,
         mut config: AccessControlConfig,
         mutation: AccessMutation,
+        editor: Option<&str>,
     ) -> Result<u64, AccessConfigError> {
         mutation.apply(&mut config)?;
         super::model::normalize_access_config_for_memory_actions(&mut config);
@@ -469,10 +536,14 @@ impl AccessController {
         {
             check_declared_ingresses(&config, declared)?;
         }
-        self.commit(config)
+        self.commit(config, editor)
     }
 
-    fn commit(&self, config: AccessControlConfig) -> Result<u64, AccessConfigError> {
+    fn commit(
+        &self,
+        config: AccessControlConfig,
+        editor: Option<&str>,
+    ) -> Result<u64, AccessConfigError> {
         // Every caller retains the mutation mutex. Refuse exhaustion before
         // persistence or publication so a checked precondition cannot wrap.
         let next_revision = self
@@ -503,6 +574,11 @@ impl AccessController {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.config = Arc::new(config);
             state.revision = next_revision;
+            state.last_edit = Some(AccessLastEdit {
+                principal: editor.map(str::to_string),
+                at_ms: now_ms(),
+                revision: next_revision,
+            });
         }
         // Signal only once both the state lock and the publication's change
         // are released, so a woken holder reads the new configuration. The

@@ -152,6 +152,15 @@ export interface GatingAuditEntryView {
   outcome?: string;
   decision?: string;
   approverId?: string;
+  /** The verified principal who decided, when the record names one; the
+   * approver id is then the label they decided as. */
+  decidingPrincipal?: string;
+  /** How the decider held the approver id (`held`, `principal`, ...), as
+   * recorded. */
+  approverBinding?: string;
+  /** The assurance the decision was authenticated with, as the record's
+   * `deciding_assurance` names it (`person_authenticated`, ...). */
+  deciderAssurance?: string;
   automaticAllowance: boolean;
 }
 
@@ -523,6 +532,9 @@ export function normalizeGatingAuditEntry(value: unknown): GatingAuditEntryView 
     outcome: trimString(record.outcome),
     decision: trimString(detail.decision),
     approverId: trimString(detail.approver_id),
+    decidingPrincipal: trimString(detail.deciding_principal),
+    approverBinding: trimString(detail.approver_binding),
+    deciderAssurance: trimString(detail.deciding_assurance),
     automaticAllowance: record.event_type === "evaluated"
       && (record.outcome === "allowed" || record.outcome === "allowed_with_audit"),
   };

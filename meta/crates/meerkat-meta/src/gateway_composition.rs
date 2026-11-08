@@ -325,6 +325,10 @@ impl GatewayComposition<PreparedGateway> {
             )
         })
         .await?;
+        // The stock gateways keep the gating owner's state in the realm's
+        // metadata store across restarts, restored here, before anything
+        // can evaluate a gating action.
+        runtime.keep_gating_state_in_realm().await;
         Ok(GatewayComposition {
             profile: self.profile,
             state: BootstrappedGateway { runtime },
@@ -1902,6 +1906,23 @@ mod tests {
         profile: GatewayCompatibilityProfile,
         workgraph: Option<meerkat::WorkGraphService>,
     ) -> Result<GatewayComposition<BootstrappedGateway>, Box<dyn std::error::Error>> {
+        console_drain_test_composition_over(
+            directory,
+            profile,
+            workgraph,
+            Arc::new(InMemoryMetadataStore::new()),
+        )
+        .await
+    }
+
+    /// [`console_drain_test_composition_with`], the stdio profile keeping its
+    /// metadata in `metadata` (the console profile keeps its own in memory).
+    async fn console_drain_test_composition_over(
+        directory: &tempfile::TempDir,
+        profile: GatewayCompatibilityProfile,
+        workgraph: Option<meerkat::WorkGraphService>,
+        metadata: Arc<dyn PersistentMetadataStore>,
+    ) -> Result<GatewayComposition<BootstrappedGateway>, Box<dyn std::error::Error>> {
         let session_path = directory.path().join("sessions");
         std::fs::create_dir_all(&session_path)?;
         let service: Arc<dyn meerkat_mob::MobSessionService> =
@@ -1947,12 +1968,234 @@ mod tests {
                 Vec::new(),
                 Duration::from_secs(10),
                 RuntimeOptions::default(),
-                Arc::new(InMemoryMetadataStore::new()),
+                metadata,
             ),
         };
         Ok(GatewayComposition::prepare(profile, plan)
             .bootstrap()
             .await?)
+    }
+
+    /// An R3 gating request that waits for approval.
+    fn gated(action: &str) -> crate::runtime::GatingEvaluateRequest {
+        crate::runtime::GatingEvaluateRequest {
+            action: action.to_string(),
+            actor_id: "worker".to_string(),
+            risk_tier: crate::runtime::GatingRiskTier::R3,
+            rationale: None,
+            requested_approver: None,
+            approval_recipient: None,
+            approval_channel: None,
+            approval_timeout_ms: Some(600_000),
+            entity: None,
+            topic: None,
+        }
+    }
+
+    /// The `retention` a `meta/gating/audit` read on the stdio surface
+    /// reports.
+    async fn gating_audit_retention(
+        runtime: &UnifiedRuntime,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "meta/gating/audit",
+            "params": { "limit": 1 },
+        });
+        let answer = crate::rpc::handle_unified_rpc_json(
+            runtime,
+            &request.to_string(),
+            Duration::from_secs(5),
+            None,
+            None,
+        )
+        .await;
+        let answer: serde_json::Value = serde_json::from_str(&answer)?;
+        Ok(answer["result"]["retention"].clone())
+    }
+
+    /// The stock gateways keep the gating owner's state in the realm's
+    /// metadata store: the approval a gateway left pending and the decision
+    /// it recorded are there after a restart, and after the next one, and
+    /// its gating audit reads report `durable` retention.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_state_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        let first = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let waiting = first
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        let decided = first
+            .runtime()
+            .evaluate_gating_action(gated("rollback"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        first
+            .runtime()
+            .decide_gating_action(crate::runtime::GatingDecideRequest {
+                pending_id: decided.clone(),
+                approver_id: "ops-lead".to_string(),
+                decision: crate::runtime::GatingDecision::Approve,
+                reason: None,
+            })
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let _ = first.runtime().shutdown().await;
+        drop(first);
+
+        for restart in 1..=2 {
+            let next = console_drain_test_composition_over(
+                &directory,
+                GatewayCompatibilityProfile::StdioRpc,
+                None,
+                Arc::clone(&metadata),
+            )
+            .await?;
+            let pending = next.runtime().list_gating_pending().await;
+            assert_eq!(
+                pending
+                    .iter()
+                    .map(|entry| entry.pending_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![waiting.clone()],
+                "restart {restart}: the pending approval survived"
+            );
+            let audit = next.runtime().gating_audit_entries(512).await;
+            assert!(
+                audit.iter().any(|entry| {
+                    entry.pending_id.as_deref() == Some(decided.as_str())
+                        && entry.event_type == "approval_decided"
+                }),
+                "restart {restart}: the recorded decision survived: {audit:#?}"
+            );
+            assert_eq!(
+                gating_audit_retention(next.runtime()).await?,
+                serde_json::json!("durable"),
+                "restart {restart}"
+            );
+            let _ = next.runtime().shutdown().await;
+        }
+        Ok(())
+    }
+
+    /// A stock gateway whose metadata store keeps nothing across restarts
+    /// keeps gating in memory, and its gating audit reads say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_audit_reports_process_retention_on_an_ephemeral_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let composition =
+            console_drain_test_composition(&directory, GatewayCompatibilityProfile::StdioRpc)
+                .await?;
+        assert_eq!(
+            gating_audit_retention(composition.runtime()).await?,
+            serde_json::json!("process")
+        );
+        let _ = composition.runtime().shutdown().await;
+        Ok(())
+    }
+
+    /// A stored gating state this build cannot read is left byte for byte,
+    /// through gating changes and a shutdown, and the audit reads say
+    /// `process`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_gating_state_is_never_overwritten() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        metadata
+            .set_realm_document("gating/state", Some("{not a snapshot"))
+            .await
+            .map_err(|error| format!("{error}"))?;
+        let composition = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let _pending = composition
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await;
+        assert_eq!(
+            gating_audit_retention(composition.runtime()).await?,
+            serde_json::json!("process")
+        );
+        let _ = composition.runtime().shutdown().await;
+        assert_eq!(
+            metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+                .as_deref(),
+            Some("{not a snapshot")
+        );
+        Ok(())
+    }
+
+    /// The gating state's writer follows a gating change without a shutdown:
+    /// the pending approval reaches the stored state while the gateway still
+    /// runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_change_is_written_without_a_shutdown() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        let composition = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let pending = composition
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut written = false;
+        while tokio::time::Instant::now() < deadline {
+            if metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+                .is_some_and(|document| document.contains(&pending))
+            {
+                written = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            written,
+            "the pending approval was written before any shutdown"
+        );
+        let _ = composition.runtime().shutdown().await;
+        Ok(())
     }
 
     fn console_drain_event(

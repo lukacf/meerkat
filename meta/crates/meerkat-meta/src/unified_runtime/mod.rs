@@ -535,6 +535,21 @@ pub struct UnifiedRuntimeCore {
     // subscription cursor). Falls back to `InMemoryMetadataStore` when not
     // explicitly configured — see `UnifiedRuntimeBuilder::persistent_metadata`.
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
+
+    /// The console audit log, kept in `persistent_metadata` and shared by
+    /// every console router this runtime builds; `None` when that store
+    /// keeps no realm documents.
+    console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The gating owner's state kept in `persistent_metadata`, once the
+    /// composition keeps it (`keep_gating_state_in_realm`).
+    gating_persistence: tokio::sync::Mutex<Option<GatingPersistence>>,
+}
+
+/// The gating owner's state kept in the realm's metadata store, and the task
+/// that writes it after every gating change.
+struct GatingPersistence {
+    persistence: Arc<crate::gating_persistence::GatingStatePersistence>,
+    task: Option<JoinHandle<()>>,
 }
 
 enum MobEventIngress {
@@ -861,6 +876,11 @@ impl UnifiedRuntime {
             )
             .map(|policy| Arc::new(policy) as Arc<dyn EdgeDiscovery>);
         let state_dir_claims = mob_runtime.state_dir_claim_refs();
+        let console_audit = crate::console_audit::ConsoleAuditLog::over(
+            Arc::clone(&persistent_metadata),
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .map(Arc::new);
         Self::assemble(
             UnifiedRuntimeCore {
                 mob_runtime,
@@ -944,6 +964,8 @@ impl UnifiedRuntime {
                 console_schedule_doors: Default::default(),
                 metadata_table,
                 persistent_metadata,
+                console_audit,
+                gating_persistence: tokio::sync::Mutex::new(None),
             },
             public_owner,
         )
@@ -2285,6 +2307,12 @@ impl UnifiedRuntime {
     /// persisted cursor reach through this accessor.
     pub fn persistent_metadata(&self) -> &Arc<dyn PersistentMetadataStore> {
         &self.persistent_metadata
+    }
+
+    /// The console audit log the console routers this runtime builds write
+    /// and read; `None` when the metadata store keeps no realm documents.
+    pub(crate) fn console_audit_log(&self) -> Option<Arc<crate::console_audit::ConsoleAuditLog>> {
+        self.console_audit.clone()
     }
 
     /// Replace the label set associated with this mob.

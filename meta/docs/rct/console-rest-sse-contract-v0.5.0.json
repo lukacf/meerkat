@@ -1359,7 +1359,11 @@
           "success": {
             "required_fields": [
               "entries"
-            ]
+            ],
+            "optional_fields": [
+              "retention"
+            ],
+            "note": "retention is durable when the runtime keeps the gating state across a restart, process when it keeps it in memory."
           },
           "errors": [
             {
@@ -1508,9 +1512,10 @@
             ],
             "optional_fields": [
               "owner_instance",
-              "conditional_mutations"
+              "conditional_mutations",
+              "last_edit"
             ],
-            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes."
+            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes. last_edit (principal, at_ms, revision) is present once the controller committed an edit since it started; principal is null when the edit named no one."
           },
           "errors": [
             {

@@ -249,6 +249,18 @@ impl std::fmt::Display for MetadataStoreError {
 
 impl std::error::Error for MetadataStoreError {}
 
+/// How long records are kept: for the life of the process, or across
+/// restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecordRetention {
+    /// For the life of the process: the records end with it.
+    Process,
+    /// Across restarts: the records are kept in durable storage.
+    Durable,
+}
+
 /// One spawned member's durable idle-retirement opt-in.
 ///
 /// A member seated in the primary mob is idle-retired only when its spawning
@@ -1004,6 +1016,42 @@ pub trait PersistentMetadataStore: Send + Sync {
     /// its callers, so it returns at once.
     async fn settle_detached_writes(&self) {}
 
+    /// How long this store keeps realm documents ([`Self::realm_document`]):
+    /// named documents of the realm as a whole, beside every mob's records.
+    /// The console audit log is kept as realm documents, and so is the
+    /// gating state of a runtime that keeps it.
+    ///
+    /// The default keeps none (`None`): a store that keeps none has no
+    /// console audit log and leaves gating in memory.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        None
+    }
+
+    /// The realm document `key`, `None` when the realm holds none.
+    async fn realm_document(&self, _key: &str) -> Result<Option<String>, MetadataStoreError> {
+        Ok(None)
+    }
+
+    /// Replace the realm document `key` (`None` removes it), durably when
+    /// the store is durable, before this answers. The default keeps no
+    /// realm documents and refuses.
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        _document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        Err(MetadataStoreError::Io(format!(
+            "realm document {key}: this metadata store keeps no realm documents"
+        )))
+    }
+
+    /// The keys of the realm documents that start with `prefix`, in no
+    /// promised order. A key may name a document removed since, which
+    /// [`Self::realm_document`] answers `None` for.
+    async fn realm_document_keys(&self, _prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        Ok(Vec::new())
+    }
+
     /// Bind the attested decide event `event_ref` of the decision ingress
     /// `ingress` to `decision_id`, durably and once: the first decision that
     /// uses an event keeps it. Answers the id of the decision the event is
@@ -1053,6 +1101,7 @@ pub struct InMemoryMetadataStore {
     lifecycle_cursors: RwLock<BTreeMap<String, LifecycleProjectionCursor>>,
     lifecycle_intents: RwLock<BTreeMap<(String, LifecycleIntentKey), LifecycleEffectIntent>>,
     lifecycle_failures: RwLock<BTreeMap<(String, String), LifecycleEffectFailure>>,
+    realm_documents: RwLock<BTreeMap<String, String>>,
 }
 
 impl InMemoryMetadataStore {
@@ -1296,6 +1345,43 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
         }
         Ok(older)
     }
+
+    /// Kept for the life of the process.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        Some(RecordRetention::Process)
+    }
+
+    async fn realm_document(&self, key: &str) -> Result<Option<String>, MetadataStoreError> {
+        Ok(self.realm_documents.read().await.get(key).cloned())
+    }
+
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        let mut documents = self.realm_documents.write().await;
+        match document {
+            Some(document) => {
+                documents.insert(key.to_string(), document.to_string());
+            }
+            None => {
+                documents.remove(key);
+            }
+        }
+        Ok(())
+    }
+
+    async fn realm_document_keys(&self, prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        Ok(self
+            .realm_documents
+            .read()
+            .await
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
 }
 
 /// SQLite-backed persistent metadata store.
@@ -1339,6 +1425,17 @@ const MEMBER_IDLE_RETIRE_KEY_PREFIX: &str = "member_idle_retire/";
 
 fn member_idle_retire_key(member_id: &str) -> String {
     format!("{MEMBER_IDLE_RETIRE_KEY_PREFIX}{member_id}")
+}
+
+/// The `mob_id` of a realm document's row: empty, for the realm as a whole.
+/// The rows' own key prefix keeps them apart from any mob's records.
+const REALM_DOCUMENT_MOB_ID: &str = "";
+
+/// Key prefix of a realm document's row: the document's key follows.
+const REALM_DOCUMENT_KEY_PREFIX: &str = "realm_document/";
+
+fn realm_document_row_key(key: &str) -> String {
+    format!("{REALM_DOCUMENT_KEY_PREFIX}{key}")
 }
 
 /// The runtime-metadata store's schema domain in the per-file migration
@@ -1846,6 +1943,70 @@ impl PersistentMetadataStore for SqliteMetadataStore {
             .map_err(|err| MetadataStoreError::Io(format!("commit: {err}")))?;
         Ok(older)
     }
+
+    /// Kept in the store's file across restarts; a store opened in memory
+    /// ([`SqliteMetadataStore::in_memory`]) keeps them for the process.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        Some(if self.db_path.as_os_str() == ":memory:" {
+            RecordRetention::Process
+        } else {
+            RecordRetention::Durable
+        })
+    }
+
+    async fn realm_document(&self, key: &str) -> Result<Option<String>, MetadataStoreError> {
+        self.identity_record_row(REALM_DOCUMENT_MOB_ID, &realm_document_row_key(key))
+    }
+
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        let row_key = realm_document_row_key(key);
+        let Some(document) = document else {
+            let _fence = self.operation_fence()?;
+            let conn = self.lock_conn()?;
+            conn.execute(
+                "DELETE FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
+                rusqlite::params![REALM_DOCUMENT_MOB_ID, row_key],
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
+            return Ok(());
+        };
+        self.upsert_identity_record_row(REALM_DOCUMENT_MOB_ID, &row_key, document)
+    }
+
+    async fn realm_document_keys(&self, prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        let row_prefix = realm_document_row_key(prefix);
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        // A compare of each key's start, not LIKE (keys may carry `_` and
+        // `%`); the realm documents' own `mob_id` keeps it to their rows.
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT key FROM meta_metadata WHERE mob_id = ?1 AND substr(key, 1, ?2) = ?3",
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("prepare: {err}")))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    REALM_DOCUMENT_MOB_ID,
+                    row_prefix.chars().count(),
+                    row_prefix
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("query: {err}")))?;
+        let mut keys = Vec::new();
+        for row in rows {
+            let row_key = row.map_err(|err| MetadataStoreError::Io(format!("row: {err}")))?;
+            if let Some(key) = row_key.strip_prefix(REALM_DOCUMENT_KEY_PREFIX) {
+                keys.push(key.to_string());
+            }
+        }
+        Ok(keys)
+    }
 }
 
 impl SqliteMetadataStore {
@@ -2145,6 +2306,78 @@ mod tests {
         assert!(
             reencoded.contains("\"record_revision\":7"),
             "a record is written under its current name: {reencoded}"
+        );
+    }
+
+    /// Realm documents round trip on the in-memory and the SQLite store
+    /// alike: written, replaced, listed by prefix (a prefix with `_` and `%`
+    /// matches only itself) and removed, beside a mob's records, which they
+    /// leave alone. The SQLite ones are durable and survive a reopen; the
+    /// in-memory ones last for the process.
+    #[tokio::test]
+    async fn realm_documents_round_trip_beside_mob_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.sqlite");
+        let sqlite = SqliteMetadataStore::open(&path).unwrap();
+        let memory = InMemoryMetadataStore::new();
+        assert_eq!(
+            sqlite.realm_document_retention(),
+            Some(RecordRetention::Durable)
+        );
+        assert_eq!(
+            SqliteMetadataStore::in_memory()
+                .unwrap()
+                .realm_document_retention(),
+            Some(RecordRetention::Process)
+        );
+        assert_eq!(
+            memory.realm_document_retention(),
+            Some(RecordRetention::Process)
+        );
+        let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
+        for store in stores {
+            store.set_subscription_cursor("", 7).await.unwrap();
+            assert_eq!(store.realm_document("log/1").await.unwrap(), None);
+            store
+                .set_realm_document("log/1", Some("one"))
+                .await
+                .unwrap();
+            store
+                .set_realm_document("log/1", Some("first"))
+                .await
+                .unwrap();
+            store
+                .set_realm_document("log/2", Some("second"))
+                .await
+                .unwrap();
+            store
+                .set_realm_document("log_%/3", Some("other"))
+                .await
+                .unwrap();
+            assert_eq!(
+                store.realm_document("log/1").await.unwrap().as_deref(),
+                Some("first")
+            );
+            let mut keys = store.realm_document_keys("log/").await.unwrap();
+            keys.sort();
+            assert_eq!(keys, vec!["log/1".to_string(), "log/2".to_string()]);
+            assert_eq!(
+                store.realm_document_keys("log_%/").await.unwrap(),
+                vec!["log_%/3".to_string()]
+            );
+            store.set_realm_document("log/2", None).await.unwrap();
+            assert_eq!(store.realm_document("log/2").await.unwrap(), None);
+            assert_eq!(
+                store.get_subscription_cursor("").await.unwrap(),
+                Some(7),
+                "a mob's records are left alone"
+            );
+        }
+        drop(sqlite);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.realm_document("log/1").await.unwrap().as_deref(),
+            Some("first")
         );
     }
 

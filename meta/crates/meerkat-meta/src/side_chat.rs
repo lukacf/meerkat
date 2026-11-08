@@ -1687,7 +1687,8 @@ mod tests {
     /// A verified side chat's console labels name its source, the forked
     /// session, and the creator and the private owner its fork recorded, and
     /// lose any spawn lineage the registry held under its identity and any
-    /// creator or private owner no fork recorded; without a lineage nothing
+    /// creator no fork recorded; a private owner on the member's own roster
+    /// row stays (only Meta writes one there). Without a lineage nothing
     /// changes.
     #[test]
     fn the_projection_writes_only_the_verified_lineage() {
@@ -1728,6 +1729,10 @@ mod tests {
                 (
                     SIDE_CHAT_OF_SESSION_LABEL.to_string(),
                     "alpha-session".to_string()
+                ),
+                (
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:unrecorded".to_string()
                 ),
             ])
         );

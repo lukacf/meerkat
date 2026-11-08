@@ -2653,6 +2653,7 @@ impl UnifiedRuntimeBuilder {
                     persistent_state,
                     transcript_store,
                     event_sink: Some(runtime.memory_event_sink()),
+                    private_members: Some(runtime.mob_runtime.private_member_source()),
                     ..Default::default()
                 },
                 self.provider_auth_persistence.clone(),
@@ -2660,6 +2661,14 @@ impl UnifiedRuntimeBuilder {
             .map_err(UnifiedRuntimeBuilderError::Io)?;
             if let Some(panel) = stack.panel.clone() {
                 runtime.set_memory_panel_store(panel);
+            }
+            // The retirements the memory store recorded as private are part
+            // of the private-owner record's durable reads.
+            if let Some(store) = stack.steward_store.clone() {
+                runtime
+                    .mob_runtime
+                    .private_owners()
+                    .bind_private_retirements(store, config.realm.clone());
             }
             // §10.1 dispatch-time taint join: bind the stack's tracker into
             // the member pre-build seam so every member's LLM client marks

@@ -115,12 +115,27 @@ async fn persistent_gateway_runtime(
 
 /// [`persistent_gateway_runtime`] over the state directory `state`, which a
 /// later runtime composed over the same directory restores.
-async fn persistent_gateway_runtime_in(
+pub(super) async fn persistent_gateway_runtime_in(
     state: &std::path::Path,
     mob_id: &str,
     mob_header: &str,
     tail: &str,
 ) -> Result<MobRuntime, Box<dyn std::error::Error + Send + Sync>> {
+    let (runtime, _session_store) =
+        persistent_gateway_runtime_and_store_in(state, mob_id, mob_header, tail).await?;
+    Ok(runtime)
+}
+
+/// [`persistent_gateway_runtime_in`] with the session store its runtime
+/// persists through: the store a runtime with agent memory hands its
+/// distiller and its steward as their transcript source.
+pub(super) async fn persistent_gateway_runtime_and_store_in(
+    state: &std::path::Path,
+    mob_id: &str,
+    mob_header: &str,
+    tail: &str,
+) -> Result<(MobRuntime, Arc<dyn meerkat::SessionStore>), Box<dyn std::error::Error + Send + Sync>>
+{
     use crate::storage_layout::MetaStorageLayout;
 
     let layout = MetaStorageLayout::with_injected_roots(state.to_path_buf(), None);
@@ -134,7 +149,12 @@ async fn persistent_gateway_runtime_in(
             .await
             .map_err(|error| error.to_string())?;
     spec.options.default_llm_client = Some(Arc::new(TestClient::default()));
-    Ok(Box::pin(MobRuntime::bootstrap(spec)).await?)
+    let session_store = spec
+        .durable_session_store
+        .clone()
+        .ok_or("a persistent runtime keeps a durable session store")?;
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
+    Ok((runtime, session_store))
 }
 
 fn request(method: &str, params: Value) -> JsonRpcRequest {

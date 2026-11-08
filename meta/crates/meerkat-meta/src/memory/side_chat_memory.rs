@@ -17,6 +17,12 @@
 //! no memory) gains none. A forged marker on another member only binds that
 //! member's memory tool to its own identity, as its own build does.
 //!
+//! A member private to a person ([`crate::access::PRIVATE_TO_LABEL`]: a
+//! private side chat and every member it creates) keeps its memory to
+//! itself the same way, and its recorder runs inside no mob: its
+//! `propose_to_mob`, which would move its memory into a scope its mob
+//! shares, is refused as the tool's call outside a mob.
+//!
 //! The slot is late-bound: a composition fills it when its memory stack
 //! attaches a recorder, as it fills the dispatch-time taint slot.
 
@@ -95,15 +101,23 @@ impl SideChatMemorySlot {
     }
 
     /// Bind the `memory` tool of a side chat's build to the side chat's own
-    /// identity (see the module docs). Nothing changes for a request that is
-    /// not a member build, a member that carries no side chat marker, an
+    /// identity (see the module docs), and the `memory` tool of a member
+    /// private to a person to a recorder inside no mob: its
+    /// `propose_to_mob`, which would move its memory into a scope its mob
+    /// shares, is refused. Nothing changes for a request that is not a
+    /// member build, a member that is neither a side chat nor private, an
     /// overlay without a `memory` tool, or an unfilled slot.
     pub(crate) fn bind_side_chat_memory(&self, req: &mut CreateSessionRequest) {
         let is_side_chat = req
             .labels
             .as_ref()
             .is_some_and(|labels| labels.contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL));
-        if !is_side_chat {
+        let private = req
+            .labels
+            .as_ref()
+            .and_then(crate::access::private_owner)
+            .is_some();
+        if !is_side_chat && !private {
             return;
         }
         let Some(source) = self.recorder_source() else {
@@ -147,11 +161,127 @@ impl SideChatMemorySlot {
             source.provider,
             source.config,
             identity,
-            Some(binding.mob_id.clone()),
+            (!private).then(|| binding.mob_id.clone()),
         );
         build.external_tools = Some(Arc::new(RecorderToolDispatcher::rebinding(
             Arc::clone(overlay),
             recorder,
         )));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// A member build of `member` in mob `team`, with `labels` and `overlay`
+    /// as its per-spawn tools.
+    fn member_build(
+        member: &str,
+        labels: BTreeMap<String, String>,
+        overlay: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    ) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "gpt-5.5".to_string(),
+            prompt: meerkat_core::types::ContentInput::Text("hello".to_string()),
+            system_prompt: meerkat_core::config::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                mob_member_binding: Some(meerkat_core::MobMemberBinding {
+                    mob_id: "team".to_string(),
+                    role: "worker".to_string(),
+                    member: member.to_string(),
+                }),
+                external_tools: Some(overlay),
+                ..Default::default()
+            }),
+            labels: Some(labels),
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::default(),
+            injected_context: Vec::new(),
+        }
+    }
+
+    /// A private member's `memory` tool proposes nothing to its mob: its
+    /// recorder runs inside no mob, so `propose_to_mob`, which would move its
+    /// memory into a scope its mob shares, is refused. That holds for a
+    /// private side chat and for a member a private member created.
+    #[tokio::test]
+    async fn a_private_members_memory_proposes_nothing_to_its_mob() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: Arc<dyn AgentMemoryProvider> =
+            Arc::new(crate::memory::SqliteAgentMemoryStore::open(dir.path()).unwrap());
+        let config = AgentMemoryConfig::default();
+        let slot = SideChatMemorySlot::default();
+        slot.fill(Arc::clone(&provider), config.clone());
+        let private_to = (
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            "console-caller:v1:aa".to_string(),
+        );
+        for (member, labels) in [
+            (
+                "alpha-side",
+                BTreeMap::from([
+                    (
+                        crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+                        "alpha".to_string(),
+                    ),
+                    private_to.clone(),
+                ]),
+            ),
+            ("alpha-side-helper", BTreeMap::from([private_to.clone()])),
+        ] {
+            let inherited: Arc<dyn meerkat_core::AgentToolDispatcher> =
+                Arc::new(RecorderToolDispatcher::new(
+                    None,
+                    MemoryRecorder::new(
+                        Arc::clone(&provider),
+                        config.clone(),
+                        crate::identity_first::AgentIdentity::parse(member).unwrap(),
+                        Some("team".to_string()),
+                    ),
+                ));
+            let mut req = member_build(member, labels, inherited);
+            slot.bind_side_chat_memory(&mut req);
+            let overlay = req
+                .build
+                .and_then(|build| build.external_tools)
+                .expect("the build keeps a memory tool");
+            let args = serde_json::value::RawValue::from_string(
+                serde_json::json!({
+                    "action": "propose_to_mob",
+                    "title": "Shared fact",
+                    "body": "For the mob.",
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let outcome = overlay
+                .dispatch(meerkat_core::types::ToolCallView {
+                    id: "call-1",
+                    name: MEMORY_TOOL_NAME,
+                    args: &args,
+                })
+                .await
+                .unwrap();
+            let text = outcome
+                .result
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                outcome.result.is_error && text.contains("not running inside a mob"),
+                "{member} proposes nothing to its mob: {text}"
+            );
+        }
     }
 }

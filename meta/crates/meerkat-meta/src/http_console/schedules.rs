@@ -841,8 +841,8 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             runtime_governed: self.runtime.native_work_governed(),
             access: self.access.clone(),
             verification: None,
-            sender: Some(scheduled_sender(sender, &self.decisions)),
             side_chat_owner: None,
+            sender: Some(scheduled_sender(sender, &self.decisions)),
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),

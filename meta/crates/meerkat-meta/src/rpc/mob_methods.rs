@@ -3032,6 +3032,14 @@ pub(super) async fn handle_fork_helper(
             } else {
                 crate::member_comms_id::mob_member_id(&source)
             };
+            // A helper forked from a member private to a person holds that
+            // person's conversation in its first prompt: the spawn customizer
+            // gives it the source's owner, read here from the roster.
+            runtime
+                .mob_runtime()
+                .private_owners()
+                .record_roster_member(&handle, &source_member_id)
+                .await;
             let fork_result = match authority_target {
                 Err(error) => Err(error.to_string()),
                 Ok(Some(target)) => {

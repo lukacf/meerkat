@@ -751,7 +751,7 @@ Key routes in the reference app include:
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/healthz` | GET | Runtime health summary: `ok`, or in JSON a `status` that reads `degraded` while Core holds restored members broken (`broken_members` names each) or while the lifecycle projection is off or stalled (`lifecycle_projection` says which and why, and names the events a stopped predecessor still owes while they drain) |
+| `/healthz` | GET | Runtime health summary: `ok`, or in JSON a `status` that reads `degraded` while Core holds restored members broken (`broken_member_count` counts them and names none: `meta/status` names each) or while the lifecycle projection is off or stalled (`lifecycle_projection` says which and why, and names the events a stopped predecessor still owes while they drain) |
 | `/console` | GET | Admin console HTML |
 | `/console/assets/console-app.js` | GET | React bundle |
 | `/console/assets/console-app.css` | GET | Stylesheet |

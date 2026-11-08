@@ -1424,4 +1424,62 @@ mcp_apps_sandbox_url = " "
             "no-store"
         );
     }
+
+    /// An app of a member private to a person is unavailable to every other
+    /// caller, on a console without access configuration too: the async
+    /// admission primes the caller's audience from the live roster before it
+    /// refuses, and the admission's own check refuses once that audience
+    /// knows the member.
+    #[tokio::test]
+    async fn an_app_of_a_private_member_is_unavailable_to_another_caller()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use super::super::tests::build_empty_console_test_runtime;
+        let (_directory, runtime) = build_empty_console_test_runtime("mcp-app-private").await?;
+        let member = "rt:review:apps:0";
+        runtime
+            .handle()
+            .spawn_spec(
+                SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    crate::member_comms_id::mob_member_id_str(member).into_owned(),
+                    Some("A private member's app.".into()),
+                    None,
+                    None,
+                )
+                .with_labels(std::collections::BTreeMap::from([
+                    ("agent_identity".to_string(), "review:apps".to_string()),
+                    (
+                        crate::access::PRIVATE_TO_LABEL.to_string(),
+                        "console-caller:v1:aa".to_string(),
+                    ),
+                ])),
+            )
+            .await?;
+        let session = runtime
+            .handle()
+            .resolve_bridge_session_id_observation(&crate::member_comms_id::mob_member_id(member))
+            .await
+            .expect("native member session");
+
+        let cold = ingress(
+            state(Some(runtime.clone())),
+            request(&session),
+            Operation::CallTool,
+        );
+        assert!(
+            cold.revalidate_async().await.is_err(),
+            "the async admission primes the caller's audience and refuses"
+        );
+        let mut shared = state(Some(runtime.clone()));
+        let access = AccessController::disabled();
+        prime_access_cache_from_runtime(&runtime, &access).await;
+        shared.access = Some(access);
+        assert!(
+            ingress(shared, request(&session), Operation::Resolve)
+                .revalidate()
+                .is_err(),
+            "the admission's own check refuses a primed private target"
+        );
+        Ok(())
+    }
 }

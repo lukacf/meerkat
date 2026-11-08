@@ -26,8 +26,11 @@ use super::request::RequesterFacts;
 pub const CORE_BATCH_MAX: u64 = 256;
 
 /// The label keys Meta itself sets on members. No request sets them, and a
-/// policy neither reserves one nor declares it an authority field.
-pub const META_RESERVED_LABEL_KEYS: [&str; 7] = [
+/// policy neither reserves one nor declares it an authority field. The last
+/// four are the labels only Meta writes on a roster, which every caller label
+/// path refuses: a console side chat's source, source session and creator,
+/// and a member's private owner.
+pub const META_RESERVED_LABEL_KEYS: [&str; 11] = [
     "agent_identity",
     "class",
     "role",
@@ -35,6 +38,10 @@ pub const META_RESERVED_LABEL_KEYS: [&str; 7] = [
     "spawned_by",
     "via_tool",
     "origin",
+    crate::side_chat::SIDE_CHAT_OF_LABEL,
+    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+    crate::side_chat::SIDE_CHAT_CREATOR_LABEL,
+    crate::access::PRIVATE_TO_LABEL,
 ];
 
 /// Whether `key` is one of Meta's own label keys.

@@ -2153,6 +2153,64 @@ impl StewardStore for SqliteAgentMemoryStore {
         .await
     }
 
+    /// The retirement's row, with status `private`: inserted, or a pending
+    /// row of the same retirement settled so. The exit-interview queue
+    /// (status `pending`) never lists it again.
+    async fn record_private_retirement(
+        &self,
+        realm: &str,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        let identity = identity.to_string();
+        let session_key = session_key.map(str::to_string);
+        let cause = cause.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                conn.execute(
+                    "INSERT INTO pending_harvests \
+                     (identity, session_key, cause, retired_at_ms, status) \
+                     VALUES (?1, ?2, ?3, ?4, 'private') \
+                     ON CONFLICT (identity, retired_at_ms) DO UPDATE SET status = 'private'",
+                    params![identity, session_key, cause, retired_at_ms as i64],
+                )
+                .map_err(sql_err)?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    async fn private_retired_identities(
+        &self,
+        realm: &str,
+    ) -> Result<std::collections::BTreeSet<String>, AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT DISTINCT identity FROM pending_harvests WHERE status = 'private'",
+                    )
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(sql_err)?;
+                let mut identities = std::collections::BTreeSet::new();
+                for row in rows {
+                    identities.insert(row.map_err(sql_err)?);
+                }
+                Ok(identities)
+            })
+        })
+        .await
+    }
+
     async fn record_pending_promotion(
         &self,
         realm: &str,

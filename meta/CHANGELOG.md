@@ -196,15 +196,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The enum is exhaustive, so a downstream exhaustive match needs the new
   arm, or a wildcard arm.
 
-- `console.private_to` is a reserved label: member creation
-  (`meta/ensure_member`, `mob/spawn_member`, `UnifiedRuntime::spawn` and
-  `spawn_many`) refuses it as invalid params, and a member that carries it
-  from anywhere but a console side chat fork has no private owner (every
-  projection drops it).
-- A console member hidden from the caller by its private owner answers as
-  an unknown member on every console surface: `-32001`
-  `unknown identity: <id>` with no data, `404` `unknown_identity` from
-  `POST /console/send`, `member_not_found` from the agent event stream.
+- The labels only Meta writes are reserved: `side_chat_of`,
+  `side_chat_of_session`, `side_chat_creator` and `console.private_to`.
+  Member creation refuses each of them as invalid params naming the label:
+  the console and SDK `meta/ensure_member`, `UnifiedRuntime::spawn` and
+  `spawn_many`, and the host fork API (`UnifiedRuntime::fork_member`); an
+  agent's spawn tools refuse them as invalid arguments. A Meta fork's child
+  (a console side chat fork, the host fork API) no longer inherits a side
+  chat's lineage labels from its source; a fork Meerkat makes (`fork_off`,
+  a council participant) still copies them, where they count for nothing.
+
+- Rust: `identity_creation::META_RESERVED_LABEL_KEYS` lists the four as
+  well (`[&str; 11]`).
+
+- Rust: `MemoryStackSeams` gains `private_members`, the source of the
+  members private to a person, whose memory no Steward dream covers. A host
+  that builds the struct literally adds `private_members: None` to keep
+  today's behaviour.
+
+- A console request that names a member hidden from the caller by its
+  private owner is answered as one naming a member that does not exist:
+  each method gives its own answer for an absent member (for example
+  `meta/get_member` answers `-32602` `member not found`), `POST
+  /console/send` answers `404` `unknown_identity` and the agent event
+  stream `member_not_found`. A request that would create a member under a
+  hidden member's name, or record something for it (an announcement
+  subscription, a schedule, a remembered fact, a topology edge, a WorkGraph
+  goal or attention target), is refused as
+  `-32001` `unknown identity: <id>` with no data.
+
+- A member seated exempt from the mob definition's wiring rules (every side
+  chat) is outside the definition's role-wide flow steps (Meerkat): a
+  role-wide `meta/run_flow` no longer reaches a side chat; role targets that
+  name one still do.
+
+- The `/healthz` JSON summary counts broken members (`broken_member_count`)
+  and names none: `broken_members` is gone from it (`meta/status` on the
+  stdio gateway still names them).
 
 - New refusals for personal accounts on MCP servers. A refused tool call
   ends with a policy denial whose code is `personal_account_shared_thread`,
@@ -615,7 +643,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
   `audit.view` access action. Its reads, and `meta/gating/audit`, report
   `retention`: `durable` where the records survive a restart, `process`
-  where the gateway keeps them in memory.
+  where the gateway keeps them in memory. A read leaves out the rows that
+  name a member hidden from the reader by its private owner (another
+  person's private side chat, or a member one created).
 - Rust: `PersistentMetadataStore` gains provided realm-document methods
   (`realm_document_retention`, `realm_document`, `set_realm_document`,
   `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
@@ -740,6 +770,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The console experience's side chat rows carry `side_chat_audience`:
   `private_to_you`, `private_to_creator` (an access admin viewing another
   person's) or `shared`; the side chat's header names it.
+
 - Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
   `AccessView::hides_agent` and `AccessView::private_owner_key`;
   `ConsoleSendGateRefusal::UnknownIdentity`.
@@ -1094,10 +1125,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - On a console with sign-in, a side chat is private to the person who
   opened it; access admins can also see it. It holds with or without an
-  access configuration, on every surface that shows an agent. Its memory
-  stays its own: the memory distiller never reads a private side chat.
-  Side chats opened before this release keep their audience, and consoles
+  access configuration, on the console's routes, streams and panels; the
+  access control guide's Known limitations name what it does not cover
+  (the stdio gateway, WorkGraph reads, a taken name). The members a
+  private side chat creates are private to the same person too, by the
+  private owner Meta writes on them: a member its turn spawns, in its own
+  mob or in a mob it creates (`mob_create`, the implicit mob `delegate`
+  runs its helpers in), a `fork_off` child and a helper forked from it.
+  They stay private after the side chat is closed and after a restart,
+  and they are seated outside the shared topology (exempt from the
+  definition's wiring rules, so no role-wide flow step reaches them). Side
+  chats opened before this release keep their audience, and consoles
   without sign-in keep side chats shared.
+
+- A private member's memory stays its own: the memory distiller never
+  reads its conversation, the memory steward never dreams over its memory,
+  proposals or exit interview, and its `memory` tool proposes nothing to
+  its mob (`propose_to_mob` is refused). A private member is built without
+  WorkGraph tools, the voice preface names no private peer, and an
+  announcement role template never takes a private member.
+
+- No console surface names a member hidden from the caller: the run
+  records (`meta/flow_status` answers a run that reached one as a run that
+  does not exist, and `meta/list_runs` leaves it out), wiring and operator
+  events, peer lists (`wired_to`, `topology_peers`), `meta/reset_all`
+  (which no longer closes another person's private side chat), the
+  announcement listings, the memory panel's proposals, the readiness and
+  completion listings, the host send precheck, and a console with no local
+  runtime, which reads its runtimes' members before it decides a timeline
+  frame or a multipart send.
+
+- On a console with sign-in, a non-administrator is shown no memory scope,
+  and attaches no session, of a member the console does not know (one
+  that ended before this process read who its members are private to): it
+  may have been private. Who each member is private to is read in the
+  background from the start, and read again until it is read; until then
+  a spawn into a mob a member created before the restart is refused as
+  retryable.
+
+- The SDK gateway's strict live voice authority decides with the
+  configured access controller, primed from the roster, so its access rules
+  and the private-owner rule apply to its configured principal; without an
+  access configuration the stdio gateway stays the trusted host plane.
+
+- The host send precheck (`ConsoleSendPrecheck::check`) decides with the
+  viewer's audience whether or not the console has an access controller, and
+  refuses a target the runtime holds no member or registered identity for
+  (`UnknownIdentity`), as `POST /console/send` refuses it.
+
+- A private owner on a member's own roster labels names its owner whatever
+  made the member (Meta, or a host that declares it); it no longer counts
+  only on a verified side chat.
+
+- A fork Meerkat makes of a private member (the member's own `fork_off`
+  child, a temporary council's participant) takes the member's exemption
+  from the definition's wiring rules as well as its private owner: no
+  definition edge and no role-wide flow step reaches it.
+
+- A run's members are read from the mob's per-target dispatch records, so
+  a role-wide run that reached a member hidden from the caller (one a host
+  seats private to a person and leaves under the definition's wiring) is
+  answered as a run that does not exist: `meta/flow_status`,
+  `meta/cancel_flow`, `meta/list_runs` and the run's structural events.
+
+- A WorkGraph goal, reassignment or supervisor key that names a member
+  hidden from the caller is refused as naming an unknown member in every
+  target form (the identity, an owner key, a session), and an attention
+  list filtered by one lists what a name no member holds lists. One that
+  names a member private to a person is refused for every other caller
+  too, its owner and access admins included (`-32602`,
+  `private_member_workgraph_target`): a private member is built without
+  WorkGraph tools, so no binding can serve it. An agent's
+  `workgraph_attention_reassign` onto one, and its
+  `workgraph_policy_escalate` naming one as supervisor, are refused the
+  same way, as a policy denial.
+
+- `meta/routing/routes/list`, `meta/delivery/history`,
+  `meta/reconcile_edges` and `meta/storage/doctor` leave out every row
+  that names a member hidden from the caller, payloads included; access
+  admins and the member's owner read them whole.
+
+- A member private to a person convenes no council: its agent's `council`
+  call is refused as a policy denial (`private_member_council`).
+
+- An agent's `mob_check_member` and `mob_retire_member`, and Meerkat's
+  member tools (`member_status`, `retire_member`, `force_cancel_member`),
+  naming a member private to a person the agent does not act for answer
+  as for a member that does not exist. The agent's schedule tools leave a
+  schedule aimed at such a member out of its list, answer every verb that
+  names one by its id as for an id no schedule holds, and refuse a target
+  that names one (`access_denied`). A private member's own schedule tools
+  write only schedules aimed at itself; any other target, and an update of
+  a schedule aimed elsewhere, is refused as a policy denial
+  (`private_member_schedule_target`).
 
 ### Fixed
 
@@ -1385,6 +1505,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     answers in the native Toolkit setup panel; with Meta 0.9.10 only the
     front refuses its frontend approvals, controller review answers and
     setup bridge answers.
+
+- The console audit read numbers its rows (`seq`) over the rows it leaves
+  out for a reader, and its `latest_seq` counts them: a reader sees gaps
+  where rows naming a member hidden from them sit, never their content.
 
 - Personal accounts on MCP servers: in a private side chat, an MCP App
   that a personal server serves cannot read its resources or call its tools

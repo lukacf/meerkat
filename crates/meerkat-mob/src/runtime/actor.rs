@@ -16816,6 +16816,7 @@ impl MobActor {
                 .member_session_authorities()
                 .unwrap_or_default(),
             member_grant_mint: self.member_residency.member_grant_mint.clone(),
+            member_tool_audience: self.member_residency.member_tool_audience.clone(),
         }
     }
 

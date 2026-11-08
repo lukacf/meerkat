@@ -643,7 +643,7 @@ Spawn defaults matter:
 | `launch_mode` | fresh member |
 | `tool_access_policy` | inherit |
 | `auto_wire_parent` | `false`; when `true`, a spawn made from a member's own turn into its own mob (the agent tool `mob_spawn_member`, or the member tools `spawn_member` and `spawn_many_members`) wires the new member to that member, and any other spawn wires nothing |
-| `definition_wiring` (Rust `SpawnMemberSpec` only) | `Applies`: the definition's wiring rules (`auto_wire_orchestrator`, `role_wiring`) wire the member. `DefinitionWiring::Exempt` seats it with no edge those rules declare, and no member spawned, seated or rotated later is wired to it by them (see [Wire Peers](#wire-peers)) |
+| `definition_wiring` (Rust `SpawnMemberSpec` only) | `Applies`: the definition's wiring rules (`auto_wire_orchestrator`, `role_wiring`) wire the member. `DefinitionWiring::Exempt` seats it with no edge those rules declare, and no member spawned, seated or rotated later is wired to it by them (see [Wire Peers](#wire-peers)); it is also outside the definition's role-wide flow steps, which only role targets naming it reach, and a durable fork of it is seated exempt too |
 | `entry_custody` (Rust `SpawnMemberSpec` only) | `false`: the member is a worker. `true` (`with_entry_custody(true)`) seats the member of an identity entry through a spawn or a dormant seat: a host's own durable identity, which no worker reconcile spawns or retires (`reconcile` and `ensure_member` refuse a spec with entry custody), no spawn without entry custody takes, and neither the agent lane nor the agent mob tools act on (see [Identity entries](/reference/mob-architecture#identity-entries)) |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
@@ -922,7 +922,17 @@ Explicit wiring (`mob/wire`, topology operations) still applies to it, and a
 respawn restores the explicit edges it held. The exemption is recorded with
 the member, so a restart and a respawn keep it; a rotation
 (`MobHandle::rotate_member`) takes the exemption of the spec it seats. A
-member placed on a member host cannot be exempt.
+durable fork of an exempt member (`MobHandle::fork_member`, an agent's
+`fork_off` child, a temporary council's local participant, a live delegation
+worker from `MobHandle::fork_member_at_turn_boundary`) is seated exempt
+too, whatever seating its request states. A member placed on a member host
+cannot be exempt.
+
+An exempt member is outside the definition's role-wide flow dispatch as
+well: a flow step on its profile dispatches to it only when the run's role
+targets name it (`MobHandle::run_flow_with_role_targets`), a flow's
+supervisor escalation never picks it, and a role whose only Active members
+are exempt gets a provisioned flow member, as a role with none does.
 
 ## Send Work
 

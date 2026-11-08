@@ -6566,6 +6566,9 @@ pub struct MobHandle {
     /// current grant that build nothing
     /// ([`super::MobBuilder::with_member_grant_mint`]).
     pub(super) member_grant_mint: Option<Arc<dyn super::MemberGrantMint>>,
+    /// The host's rule for the members a member's own operator tools may not
+    /// know of ([`super::MobBuilder::with_member_tool_audience`]).
+    pub(super) member_tool_audience: Option<Arc<dyn super::MemberToolAudience>>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -6581,6 +6584,29 @@ impl MobHandle {
             .flow_target_provisioner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provisioner);
+    }
+
+    /// The mob operator tools a member of this mob carries when its profile
+    /// enables mob tools, over the authority such a member's build composes
+    /// by default (no manage scope). A host's rows dispatch a member's call
+    /// through them with that member's session as the dispatch's origin.
+    /// Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn member_operator_tools_for_test(
+        &self,
+    ) -> Result<std::sync::Arc<dyn meerkat_core::AgentToolDispatcher>, MobError> {
+        let authority = crate::build::default_member_mob_operator_authority(
+            &self.definition,
+            &self.definition.id,
+            self.live_incarnation(),
+        )?
+        .ok_or_else(|| {
+            MobError::Internal("a member with mob tools has an operator authority".to_string())
+        })?;
+        Ok(std::sync::Arc::new(
+            super::tools::MobOperatorToolDispatcher::new(self.clone(), true, authority),
+        ))
     }
 
     /// Rebind a clone of this handle onto `authority` (phase 5, ADJ-P5-10).
@@ -7289,7 +7315,9 @@ pub struct SpawnMemberSpec {
     /// and `role_wiring`) apply to this member.
     /// [`crate::DefinitionWiring::Exempt`] seats it with no edge those rules
     /// declare, and no later seat, spawn or rotation of another member is
-    /// wired to it by them. Explicit wiring is unaffected. The member's
+    /// wired to it by them. Explicit wiring is unaffected. No role-wide flow
+    /// step dispatches to an exempt member either: only a role-targeted run
+    /// that names it in its `role_targets` binds it. The member's
     /// `MemberSpawned` row and roster entry record it, and its restore and
     /// respawn keep it. A placed member cannot be exempt.
     pub definition_wiring: crate::DefinitionWiring,
@@ -14507,9 +14535,11 @@ impl MobHandle {
     }
 
     /// Provision a member for every role of `flow_id` that has no runnable
-    /// target. A member-initiated run passes its requester's recorded
-    /// operator authority as `provision_bound`, which each provisioned spawn
-    /// folds into its ceiling like a member's own spawn.
+    /// target of its role-wide steps (a member seated exempt from the
+    /// definition's wiring rules is none). A member-initiated run passes its
+    /// requester's recorded operator authority as `provision_bound`, which
+    /// each provisioned spawn folds into its ceiling like a member's own
+    /// spawn.
     async fn ensure_flow_targets_provisioned(
         &self,
         flow_id: &FlowId,
@@ -14528,7 +14558,7 @@ impl MobHandle {
                 .list_runnable_members()
                 .await
                 .into_iter()
-                .any(|entry| entry.role == role);
+                .any(|entry| entry.role == role && !entry.definition_wiring().is_exempt());
             if has_runnable_target {
                 continue;
             }
@@ -19359,10 +19389,15 @@ impl MobHandle {
     /// committed before the caller's own spoken turn, so the child branches
     /// at that pre-turn boundary even when the source finalized another turn
     /// during the wait; `None` takes the source's committed end at fork time.
+    ///
+    /// The child takes nothing of its source's build but its exemption from
+    /// the definition's wiring rules: a fork of a member seated
+    /// [`crate::DefinitionWiring::Exempt`] is seated exempt, as every durable
+    /// fork is.
     pub async fn fork_member_at_turn_boundary(
         &self,
         source_identity: &AgentIdentity,
-        member: SpawnMemberSpec,
+        mut member: SpawnMemberSpec,
         message_count: Option<usize>,
         bound: Duration,
     ) -> Result<ForkMemberAtTurnBoundary, MobError> {
@@ -19376,6 +19411,15 @@ impl MobHandle {
                 meerkat_core::ActivationWindow::None,
             )
             .await?;
+        if self
+            .roster
+            .read()
+            .await
+            .get(source_identity)
+            .is_some_and(|entry| entry.definition_wiring.is_exempt())
+        {
+            member.definition_wiring = crate::DefinitionWiring::Exempt;
+        }
         let fork = self
             .session_service
             .fork_persisted_session_at_turn_boundary(
@@ -19540,12 +19584,16 @@ impl MobHandle {
                 super::session_service::durable_fork_unsupported(),
             ));
         }
-        let (role, labels) = {
+        let (role, labels, definition_wiring) = {
             let roster = self.roster.read().await;
             let entry = roster
                 .get(source_identity)
                 .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
-            (entry.role.clone(), entry.labels.clone())
+            (
+                entry.role.clone(),
+                entry.labels.clone(),
+                entry.definition_wiring,
+            )
         };
         let (external_tools, external_tools_origin) = {
             let retained = self.per_spawn_external_tools.read().await;
@@ -19608,6 +19656,7 @@ impl MobHandle {
             labels,
             external_tools,
             external_tools_origin,
+            definition_wiring,
         );
         inheritance.creation_source = Some(creation_source);
         Ok((inheritance, app_context_from_fork_child))

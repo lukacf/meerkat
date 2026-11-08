@@ -9,12 +9,14 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::{
-    ConsoleHttpAuthContext, ConsoleJsonState, JsonRpcError, JsonRpcRequest, invalid_params,
+    CONSOLE_RPC_MEMBER_TARGET_FIELDS, ConsoleHttpAuthContext, ConsoleJsonState, JsonRpcError,
+    JsonRpcRequest, console_method_member_fields_or_subject, invalid_params,
     is_console_mutating_rpc_method, response_value,
 };
+use crate::access::AccessView;
 use crate::console_audit::{
     CONSOLE_AUDIT_DEFAULT_PAGE, CONSOLE_AUDIT_MAX_PAGE, ConsoleAuditActor, ConsoleAuditEntry,
-    ConsoleAuditLog, ConsoleAuditSet, Identifiers, audit_target, bounded,
+    ConsoleAuditLog, ConsoleAuditRow, ConsoleAuditSet, Identifiers, audit_target, bounded,
 };
 use crate::runtime::AuthenticatedConsoleHuman;
 
@@ -260,14 +262,48 @@ fn login_scope_digest(human: &AuthenticatedConsoleHuman) -> String {
 /// creator.
 const PERSON_FIELDS: [&str; 4] = ["principal", "issuer", "subject", "login_scope_digest"];
 
+/// Whether `row` names a member `audience` hides (one private to another
+/// person, [`AccessView::hides_agent`]): a member field of the row's method
+/// in its target (the console's one member field table, whose top-level
+/// fields a row keeps; a route's row, such as an MCP app tool call's, names
+/// its member as a subject does), or a member its owner's receipt names (the
+/// member a change created).
+fn names_hidden_member(audience: &AccessView, row: &ConsoleAuditRow) -> bool {
+    let hidden_in = |part: &str, key: &str| {
+        row.fields
+            .get(part)
+            .and_then(|fields| fields.get(key))
+            .and_then(Value::as_str)
+            .is_some_and(|member| audience.hides_agent(member))
+    };
+    let method = row
+        .fields
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    console_method_member_fields_or_subject(method)
+        .iter()
+        .filter_map(|field| match field.path {
+            [key] => Some(*key),
+            _ => None,
+        })
+        .any(|key| hidden_in("target", key))
+        || CONSOLE_RPC_MEMBER_TARGET_FIELDS
+            .into_iter()
+            .any(|key| hidden_in("receipt", key))
+}
+
 /// `meta/console/audit` on the console route: one page of a record set of
 /// the console audit log (`log`: `changes` by default, or `tool_calls`),
 /// oldest first, after `after_seq` (from the oldest row kept without it),
 /// at most `limit` rows (100 by default, 500 at most). It needs
 /// `audit.view`; a console that keeps no log answers that the method is not
-/// found. A `meta/fork_member` row names its actor, a side chat's creator,
-/// only to that person and to admins of an enforced policy, as every other
-/// console answer shows the creator.
+/// found. A row that names a member the reader's audience hides (a member
+/// private to another person) is left out, as every other console read
+/// leaves that member out; the page's cursors still move past it. A
+/// `meta/fork_member` row names its actor, a side chat's creator, only to
+/// that person and to admins of an enforced policy, as every other console
+/// answer shows the creator.
 pub(super) async fn console_audit_rpc(
     state: &ConsoleJsonState,
     auth: &ConsoleHttpAuthContext,
@@ -335,6 +371,19 @@ pub(super) async fn console_audit_rpc(
             );
         }
     };
+    // The members the rows name are judged with their owners: record the
+    // console's runtimes' members first, ended ones included, as every
+    // console read does before it decides.
+    let controller = auth.audience.controller();
+    match (&state.runtime, &state.console_aggregator) {
+        (Some(runtime), _) => super::prime_access_cache_from_runtime(runtime, &controller).await,
+        (None, Some(aggregator)) => {
+            super::prime_access_cache_from_aggregator(aggregator, &controller).await;
+        }
+        (None, None) => {}
+    }
+    page.records
+        .retain(|row| !names_hidden_member(&auth.audience, row));
     let viewer = auth.side_chat_creator_viewer();
     for row in &mut page.records {
         if row.fields.get("method").and_then(Value::as_str) != Some("meta/fork_member") {

@@ -438,25 +438,29 @@ pub(crate) fn render_console_rest_json_route(
     pending: &BTreeSet<String>,
 ) -> ConsoleRestJsonResponse {
     let (base_path, query_params) = split_path_and_query(&request.path);
-    // Subject for ABAC. When app auth is not required the auth resolver
-    // returns None without looking at credentials; still identify callers
-    // that *did* present a valid token so per-user grants apply on
-    // auth-optional consoles. Invalid tokens fall back to anonymous.
-    let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
-    if access_subject.is_none()
-        && access.is_some()
-        && !decisions.console.require_app_auth
-        && let Some(token) = query_params.get("auth_token")
-    {
-        access_subject = resolve_authorized_console_auth_from_token(decisions, fences, token)
-            .map(|auth| auth.email);
-    }
     let view = match audience {
         Some(audience) => audience.clone(),
-        None => access
-            .cloned()
-            .unwrap_or_else(AccessController::audience_only)
-            .view_for_caller(access_subject.as_deref(), None),
+        None => {
+            // Subject for ABAC. When app auth is not required the auth
+            // resolver returns None without looking at credentials; still
+            // identify callers that *did* present a valid token so per-user
+            // grants apply on auth-optional consoles. Invalid tokens fall
+            // back to anonymous.
+            let mut access_subject = resolved_auth.map(|auth| auth.email.clone());
+            if access_subject.is_none()
+                && access.is_some()
+                && !decisions.console.require_app_auth
+                && let Some(token) = query_params.get("auth_token")
+            {
+                access_subject =
+                    resolve_authorized_console_auth_from_token(decisions, fences, token)
+                        .map(|auth| auth.email);
+            }
+            access
+                .cloned()
+                .unwrap_or_else(AccessController::audience_only)
+                .view_for_caller(access_subject.as_deref(), None)
+        }
     };
     // The access configuration's own view, when one is installed.
     let access_view = access.map(|_| &view);
@@ -494,7 +498,7 @@ pub(crate) fn render_console_rest_json_route(
     // A side chat's creator shows only to that person and to access admins.
     crate::side_chat::clear_unseen_side_chat_creators(
         &mut body,
-        crate::side_chat::SideChatCreatorViewer::new(access_subject.as_deref(), access_view),
+        crate::side_chat::SideChatCreatorViewer::new(view.subject(), access_view),
     );
     ConsoleRestJsonResponse { status: 200, body }
 }
@@ -699,6 +703,10 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
         )
         .is_allow()
     });
+    // A member's peer list names no member hidden from the caller.
+    for member in &mut snapshot.members {
+        member.wired_to.retain(|peer| !view.hides_agent(peer));
+    }
     snapshot.agents.retain(|agent| {
         let identity = agent.identity.as_deref().unwrap_or(agent.agent_id.as_str());
         view.allows_agent(crate::access::ACTION_AGENT_VIEW, identity)

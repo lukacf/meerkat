@@ -637,7 +637,11 @@ tool arguments. Without manage scope over the mob, the forker can still:
 
 A profile's member operator tools (`member_status`, `retire_member`,
 `force_cancel_member`, `list_members`) apply the same rule. With manage scope,
-all of these tools reach every member, as before.
+all of these tools reach every member, as before. A host can hide members
+from other members' operator tools (`MobBuilder::with_member_tool_audience`):
+`member_status`, `retire_member` and `force_cancel_member` answer a member its
+audience hides from the calling member exactly as a member the mob does not
+hold, with manage scope too, and do nothing to it.
 
 A member placed on a member host holds manage scope over its mob, including
 the privileged spawn arguments, unless its controlling host narrowed it with

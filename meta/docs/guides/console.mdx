@@ -484,13 +484,34 @@ as they were.
 - On a console with sign-in, a side chat is private to the person who
   opened it: its audience is the agent's narrowed to that person, plus the
   access admins (`admins`). Everyone else meets it on no surface (sidebar,
-  member lists, topology, timeline, streams, inspection, memory) and is
-  answered as for a member the console does not hold when they read it,
-  send to it, close it or fork it (`-32001` `unknown identity`, or `404`
-  `unknown_identity` from `POST /console/send`). This holds with or
-  without an access configuration. Its header says who can see it:
+  member lists, topology, timeline, streams, events, flow runs, peer lists,
+  inspection, memory, the audit log, the runtime's routing, delivery,
+  reconcile and storage reads). A request of theirs that names it, to
+  read it, send to it, close it or fork it, gets the answer that method
+  gives a member that does not exist (for example `-32602` `member not
+  found` from `meta/get_member`, or `404` `unknown_identity` from
+  `POST /console/send`); a request that would record something for it (an
+  announcement subscription, a schedule, a remembered fact, a topology edge,
+  a WorkGraph goal, attention target or supervisor, whether it names the
+  member, its owner key or its session) is refused as naming an unknown
+  member (`-32001`). This holds with or without an access configuration
+  (the SDK gateway's stdio plane is the trusted host plane: see
+  [Known limitations](/concepts/access-control#known-limitations)). Its
+  header says who can see it:
   **Private: only you and access admins can see it.**, or, to an access
-  admin, that it is private to the person who opened it.
+  admin, that it is private to the person who opened it. The members a
+  private side chat creates (a helper or member its turn spawns, the members
+  of a mob it creates and the helpers `delegate` runs for it, a `fork_off`
+  child, a helper forked from it) are private to the same person too, after
+  the side chat is closed as well. A private side chat convenes no council:
+  its `council` call is refused as a policy denial
+  (`private_member_council`), since the council's participants would carry
+  its conversation to members others share. The schedules its agent writes
+  are aimed at itself only (`private_member_schedule_target` refuses any
+  other target), and the schedule tools of an agent not private to you
+  neither list, read nor change them. A WorkGraph goal for it is refused for
+  you too (`private_member_workgraph_target`): it is built without WorkGraph
+  tools, so no binding can serve it.
 - On a console without sign-in, a side chat stays shared, and so does one
   opened by a caller who is not a signed-in person (a service token) or
   before side chats were private. A shared side chat's audience is exactly
@@ -500,8 +521,11 @@ as they were.
   grants nothing (see [Side chats](/concepts/access-control#side-chats)).
   Its header says it is shared.
 - A side chat's memory is its own: its `memory` tool writes to the side
-  chat's identity, never to the agent it was forked from, and the memory
-  distiller never reads a private side chat's conversation.
+  chat's identity, never to the agent it was forked from. The memory
+  distiller never reads a private side chat's conversation, and the memory
+  steward never dreams over its memory or promotes any of it. A private
+  side chat's `memory` tool proposes nothing to its mob, and no one else is
+  shown a proposal it wrote.
 - A private side chat is where personal accounts on MCP servers are used:
   a server the operator marked personal acts with the account of the person
   who opened the side chat, for that person's own messages only (see
@@ -516,7 +540,10 @@ as they were.
   `role_wiring`), so no agent seated after it is wired to it either, and the
   definition-wiring reconcile and the topology's declared edges leave it
   out, as they leave out every member exempt from those rules. A host's own
-  edge discovery policy is never handed one either.
+  edge discovery policy is never handed one either. No role-wide flow step
+  dispatches to it: only a run that names it in its `role_targets` reaches
+  it. A durable fork of it (its `fork_off` child, a helper forked from it)
+  is seated exempt in the same way.
 - It is listed under its agent in the sidebar, marked **Side chat**, and is
   kept until you close it: across a console reload and a gateway restart. It
   never idle-retires. **Close side chat** in its pane retires it, which, as

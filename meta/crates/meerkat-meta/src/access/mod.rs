@@ -27,9 +27,10 @@
 //!    else any matching `allow` rule allows, else the check denies.
 //!
 //! One rule holds before all of these and needs no configuration: an agent
-//! private to one person ([`PRIVATE_TO_LABEL`], a side chat opened on a
-//! console with sign-in) is denied for every agent action to everyone but
-//! that person and the `admins`, with the config disabled or enabled, and
+//! private to one person ([`PRIVATE_TO_LABEL`]: a side chat opened on a
+//! console with sign-in, and the members its own turn creates or forks) is
+//! denied for every agent action to everyone but that person and the
+//! `admins`, with the config disabled or enabled, and
 //! [`AccessView::hides_agent`] says so, so the console answers as for an
 //! unknown agent.
 //!
@@ -54,7 +55,6 @@ pub(crate) use controller::{
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
 pub(crate) use model::is_ingress_name;
-pub(crate) use model::private_owner;
 pub use model::{
     ACCESS_ACTIONS, ACTION_ACCESS_ADMIN, ACTION_AGENT_MEMORY_ADMIN, ACTION_AGENT_MEMORY_DELETE,
     ACTION_AGENT_MEMORY_READ, ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN,
@@ -71,3 +71,4 @@ pub use model::{
     OPERATOR_INGRESS, PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions,
     normalize_access_config_for_schedule_actions, validate_access_config,
 };
+pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};

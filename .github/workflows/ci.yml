@@ -3780,7 +3780,9 @@ jobs:
         # Run times belong to the job, so re-running only this gate cannot
         # launder an execution overrun. Terminals use per-attempt clocks: a
         # re-run lane gets a fresh clock, a carried-over lane keeps its own
-        # attempt's clock.
+        # attempt's clock and its own attempt's runner queue (a re-run
+        # attempt lists a carried-over job with the re-run's creation time,
+        # so its creation time is read from the attempt it ran in).
         #
         # One exception, on a pull request only: an exact-profile lane
         # (governed JSONL, MCP confinement positive) that the plan ran only
@@ -3911,16 +3913,25 @@ jobs:
               for n in range(1, attempt + 1):
                   page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
                   attempt_starts.append((n, ts(page["run_started_at"])))
-              jobs = [
-                  job
-                  for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30"
-                  )
-                  for job in page["jobs"]
-              ]
 
-              lanes = []
-              for job in jobs:
+              def attempt_jobs(n):
+                  return [
+                      job
+                      for page in api(
+                          f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=30"
+                      )
+                      for job in page["jobs"]
+                  ]
+
+              def ran_in(started):
+                  number, clock = attempt_starts[0]
+                  for n, begun in attempt_starts:
+                      if begun <= started:
+                          number, clock = n, begun
+                  return number, clock
+
+              completed_jobs = []
+              for job in attempt_jobs(attempt):
                   if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
                       continue
                   if not job["started_at"] or not job["completed_at"]:
@@ -3928,15 +3939,35 @@ jobs:
                   started, completed = ts(job["started_at"]), ts(job["completed_at"])
                   if completed < started:
                       continue
-                  created = ts(job["created_at"]) if job.get("created_at") else started
-                  ran_in, clock = attempt_starts[0]
-                  for n, begun in attempt_starts:
-                      if begun <= started:
-                          ran_in, clock = n, begun
+                  completed_jobs.append((job, started, completed))
+
+              # A re-run attempt lists the jobs it carried over from an
+              # earlier attempt with that attempt's start and completion
+              # times but with its own creation time, so their runner queue
+              # read as 0 and each looked created after the stagger job. A
+              # carried-over job's creation time comes from the listing of the
+              # attempt it ran in (matched by name and start); one that listing
+              # lacks keeps the re-run's.
+              own_created = {}
+              for job, started, _ in completed_jobs:
+                  ran, _ = ran_in(started)
+                  if ran < attempt and ran not in own_created:
+                      own_created[ran] = {
+                          (own["name"], own["started_at"]): own.get("created_at")
+                          for own in attempt_jobs(ran)
+                      }
+
+              lanes = []
+              for job, started, completed in completed_jobs:
+                  ran, clock = ran_in(started)
+                  created_at = job.get("created_at")
+                  if ran < attempt:
+                      created_at = own_created[ran].get((job["name"], job["started_at"])) or created_at
+                  created = ts(created_at) if created_at else started
                   lanes.append(
                       {
                           "name": job["name"],
-                          "attempt": ran_in,
+                          "attempt": ran,
                           "created": created,
                           "completed": completed,
                           "queued": max(0, int((started - created).total_seconds())),

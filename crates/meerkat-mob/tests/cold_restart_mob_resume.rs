@@ -9226,7 +9226,8 @@ async fn a_member_whose_turn_stopped_before_its_boundary_commit(
 /// read of the session refuses as a transcript revision conflict. The store
 /// holds every durable-tail recovery from before the turn until the row
 /// decides otherwise, so nothing settles the tail before the row starts,
-/// the stopped run's own settle included.
+/// the stopped run's own settle included: the fixture returns only once the
+/// stopped run's lap has ended.
 #[cfg(feature = "test-support")]
 async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit(
     paths: &Paths,
@@ -9362,6 +9363,20 @@ async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit_served_by
         );
         sleep(Duration::from_millis(20)).await;
     }
+    // The machine drops the run before the run's lap ends: the lap still
+    // settles the run's tail (held here) and publishes the run's terminals,
+    // and it holds the session's turn boundary until it ends. Wait for the
+    // boundary, so the stopped run's own settle has run while the store held
+    // every recovery, and the row's next read does not meet a boundary the
+    // lap still holds (such a read defers its settle to a later read).
+    drop(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            service.acquire_runtime_turn_finalization_guard(&w1_sid),
+        )
+        .await
+        .expect("the stopped run's lap releases the session's turn boundary within its bound"),
+    );
 
     let committed_token = committed_head_token(runtime_store.as_ref(), &w1_sid).await;
     let ahead_token = physical_head_token(&store, &w1_sid).await;

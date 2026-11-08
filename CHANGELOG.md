@@ -826,6 +826,43 @@ them.
   gate. A member whose own gate or role gate names anything is refused
   placement on another host.
 
+- `meerkat-core`: `AuthError` gains the variant `SourceUnavailable { reason }`
+  and `AuthErrorKind` the variant `SourceUnavailable` (wire
+  `source_unavailable`): a credential's source (a token exchange, an
+  identity or token endpoint) cannot answer now. `meerkat-contracts`:
+  `WireAuthError` gains `SourceUnavailable { detail }`. Exhaustive matches on
+  any of the three must handle it. The SDKs' generated `AuthErrorKind` and
+  `WireAuthError` types include it, and so does `@rkat/web`'s
+  `ExternalAuthFailure`, the shape a host's external resolver rejects with
+  (`{ kind: 'source_unavailable', detail }`).
+
+- Behaviour-only (not measured by the gate): a provider credential that
+  cannot be had now answers `source_unavailable` where it answered
+  `refresh_failed` or a source resolution failure. GitHub Copilot: a device
+  sign-in build that needs the account's limits during a token exchange
+  outage (before, `ProviderAuthError::SourceResolutionFailed`); on a token
+  route, a rate-limited identity lookup and the pause after it, an identity
+  lookup that answers a 5xx, times out or cannot connect, and the required
+  model listing of a token the lookup does not answer when it is rate
+  limited or meets a 408, 502, 503 or 504, a network failure or a timeout
+  (before, `refresh_failed`). OAuth sign-ins (OpenAI, Anthropic, Gemini and
+  the Copilot device sign-in's GitHub token): `meerkat-auth-core`'s managed
+  store refresh (`PreparedManagedStoreOAuthRefresh::fail`) returns the
+  provider's failure as `RefreshError::Classified` with the verdict
+  AuthMachine issued on it (before, the provider's `Observed` or `Refresh`
+  error, the verdict dropped), and the resolution answers
+  `source_unavailable` for a transient verdict and `user_reauth_required`
+  for a permanent one (before, `refresh_failed` for both). AuthMachine's
+  transient verdict also covers a refresh that fails on the host's own side
+  where the provider refused nothing (for example the token endpoint answers
+  with a redirect, or with a token whose expiry is out of range), so such a
+  refresh answers `source_unavailable` too, and a mob member whose first
+  wake meets it stays dormant until the host's configuration or the
+  endpoint's answer changes. A failure the machine did not classify stays
+  `refresh_failed`. A request still fails as before
+  (`LlmError::AuthenticationFailed`, or the Copilot exchange outage's
+  retryable class).
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -1219,6 +1256,11 @@ them.
   `MobMemberPreviewUnavailableUnknown`, and the Web SDK, whose runtime is the
   same release, keeps its closed vocabulary. `mob_check_member` gives such a
   member a note of its own (see Fixed).
+- `meerkat-core`: `AuthErrorKind::clears_on_its_own()`, true for the kinds
+  whose cause passes with no change to the credential: `source_unavailable`,
+  `credential_store_unavailable` and `credential_access_pending`. A refresh
+  the host's own side refused also answers `source_unavailable`; it passes
+  only once the host's configuration or the endpoint's answer changes.
 
 - `meerkat-runtime`, `meerkat-mob`: a host settles the run a session
   retained, without resuming it and without a model request, for an app's
@@ -1858,6 +1900,16 @@ them.
   provisioned, and an inherited one kept, instead of failing the build or
   dropping the tool for the build's lifetime. The first search completes the
   exchange.
+- `meerkat-mob`: a member whose session its first wake creates no longer
+  breaks when that create meets a provider credential that cannot be had
+  now. A session failure carrying a provider authentication failure whose
+  kind clears on its own (`source_unavailable`,
+  `credential_store_unavailable`, `credential_access_pending`) is retryable:
+  the member stays Dormant with its session unborn, its waking caller or
+  peer gets the retryable `resume_gate_unavailable`, and a later delivery
+  wakes it again. A restore that meets one ends retryable with its boot
+  obligation owed, as for a session store that cannot answer. A provider
+  authentication failure of any other kind still breaks the member.
 
 - `meerkat-sandbox`: on Linux, every confined launch runs in a pid namespace
   of its own and sees a read-only `/proc` of it, so a Rust toolchain runs

@@ -40004,7 +40004,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -43434,7 +43435,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -59881,7 +59883,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -84362,7 +84365,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -96141,7 +96145,7 @@
             "type": "object"
           },
           {
-            "description": "The member's durable resume gate was unavailable at the wake.",
+            "description": "The member's durable resume gate was unavailable at the wake, or its\nsession could not be built now for a cause that clears with no change\nto the member (for example a provider credential whose source or\nstore cannot answer now or whose lookup is in flight).",
             "properties": {
               "kind": {
                 "const": "resume_gate_unavailable",
@@ -119590,7 +119594,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -120615,7 +120620,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -121610,7 +121616,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -164042,6 +164049,23 @@
           "detail"
         ],
         "type": "object"
+      },
+      {
+        "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "source_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
       }
     ],
     "title": "WireAuthError"
@@ -165292,6 +165316,23 @@
               },
               "kind": {
                 "const": "credential_store_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "source_unavailable",
                 "type": "string"
               }
             },
@@ -167157,7 +167198,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -184271,7 +184313,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },

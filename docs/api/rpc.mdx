@@ -3954,7 +3954,7 @@ variant also carries a `message`.
 | `materialization_lost` | The member was woken, but its inbox was gone again before the hand-off | yes |
 | `non_authoritative_composition` | The member belongs to a candidate composition, which never materializes members | no |
 | `host_preparation_pending` | The member's host has preparation pending for it | yes |
-| `resume_gate_unavailable` | The member's durable resume gate was unavailable | yes |
+| `resume_gate_unavailable` | The member's durable resume gate was unavailable, or its session could not be built now for a cause that clears on its own (for example a provider credential whose source or store cannot answer: `source_unavailable`, `credential_store_unavailable`, `credential_access_pending`) | yes |
 | `host_owned` | The member is placed on a member host, which owns its materialization | no |
 | `lifecycle_origin_fenced` | The member's mob is quiescing its lifecycle | no |
 | `sender_waking` | The sender is itself being woken (it sent from inside its own build) and the recipient was not live; the send is refused instead of waiting on another wake | yes, once the sender is live |

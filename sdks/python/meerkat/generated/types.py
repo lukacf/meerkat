@@ -5675,7 +5675,7 @@ WireFlowTurnOutcome = Literal['run_completed'] | Literal['extraction_succeeded']
 
 # Stable discriminant for [`AuthError`]. Used in serialized error summaries
 # and for SDK-facing wire codes.
-AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable']
+AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable', 'source_unavailable']
 
 # Wire projection of `meerkat_core::connection::ConnectionTargetError`'s
 # variant set (closed; kinds only — the parameters stay in the diagnostic
@@ -7414,7 +7414,11 @@ class WireAuthErrorCredentialStoreUnavailable(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['credential_store_unavailable']]
 
-WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable
+class WireAuthErrorSourceUnavailable(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['source_unavailable']]
+
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable
 
 # Wire-safe content block (no `source_path` — internal only).
 class WireContentBlockText(TypedDict, total=False):

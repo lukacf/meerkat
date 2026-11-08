@@ -4814,6 +4814,7 @@ mod tests {
             crate::AuthErrorKind::CredentialInteractionRequired,
             crate::AuthErrorKind::CredentialAccessPending,
             crate::AuthErrorKind::CredentialStoreUnavailable,
+            crate::AuthErrorKind::SourceUnavailable,
         ];
         for kind in kinds {
             let failure = SessionProviderAuthFailure {

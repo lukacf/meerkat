@@ -2244,6 +2244,10 @@ struct MockSessionService {
     /// when set (presence implies failure), built anew for each refused
     /// attempt: such a create's session id is assigned only as it runs.
     create_mint_fail_error: RwLock<Option<fn() -> SessionError>>,
+    /// Sessions whose create_session fails as the facade reports a provider
+    /// credential its build could not get: the typed provider-auth session
+    /// error of the given kind.
+    create_fail_provider_auth: RwLock<HashMap<SessionId, meerkat_core::AuthErrorKind>>,
     /// Timestamps of every refused create_session attempt, per session, so
     /// retry-schedule tests can assert real attempt spacing.
     create_fail_attempts: RwLock<HashMap<SessionId, Vec<std::time::Instant>>>,
@@ -2656,6 +2660,7 @@ impl MockSessionService {
             create_fail_details: RwLock::new(HashMap::new()),
             create_fail_errors: RwLock::new(HashMap::new()),
             create_mint_fail_error: RwLock::new(None),
+            create_fail_provider_auth: RwLock::new(HashMap::new()),
             create_fail_attempts: RwLock::new(HashMap::new()),
             create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
@@ -3237,6 +3242,22 @@ impl MockSessionService {
     async fn fail_session_mints_with(&self, make: fn() -> SessionError) {
         *self.create_mint_fail_error.write().await = Some(make);
     }
+    /// as the facade reports a provider credential its build could not get:
+    /// the typed provider-auth session error of `kind`.
+    async fn set_create_session_provider_auth_failure(
+        &self,
+        session_id: &SessionId,
+        kind: meerkat_core::AuthErrorKind,
+    ) {
+        self.create_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+        self.create_fail_provider_auth
+            .write()
+            .await
+            .insert(session_id.clone(), kind);
+    }
 
     /// Timestamps of every refused create_session attempt for `session_id`,
     /// in attempt order.
@@ -3270,6 +3291,10 @@ impl MockSessionService {
         self.create_fail_sessions.write().await.remove(session_id);
         self.create_fail_details.write().await.remove(session_id);
         self.create_fail_errors.write().await.remove(session_id);
+        self.create_fail_provider_auth
+            .write()
+            .await
+            .remove(session_id);
     }
 
     async fn clear_archive_failure(&self, session_id: &SessionId) {
@@ -4357,6 +4382,22 @@ impl MockSessionService {
                 .copied()
             {
                 return Err(make());
+            }
+            if let Some(kind) = self
+                .create_fail_provider_auth
+                .read()
+                .await
+                .get(&session_id)
+                .copied()
+            {
+                return Err(SessionError::provider_auth_failure(
+                    meerkat_core::service::SessionProviderAuthFailure {
+                        kind,
+                        provider: meerkat_core::Provider::OpenAI,
+                        realm_id: None,
+                        binding_id: None,
+                    },
+                ));
             }
             let detail = self
                 .create_fail_details

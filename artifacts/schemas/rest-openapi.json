@@ -2506,7 +2506,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },

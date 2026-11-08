@@ -417,6 +417,22 @@ fn anthropic_oauth_refresh_error(
     } else {
         format!("{error}{authmachine_failure}")
     };
+    // AuthMachine's verdict on a refresh failure, when it issued one: a
+    // failure that clears on its own is a credential source that cannot
+    // answer now, one that needs a new sign-in a reauthorization. The
+    // verdict is read, never derived from the provider's answer here.
+    if let oauth::AnthropicOAuthError::Refresh(refresh) = &error
+        && let Some(verdict) = refresh.refresh_failure_disposition()
+    {
+        return ProviderAuthError::Auth(match verdict {
+            meerkat_core::auth::RefreshFailureDisposition::Transient => {
+                AuthError::SourceUnavailable { reason: detail }
+            }
+            meerkat_core::auth::RefreshFailureDisposition::ReauthRequired => {
+                AuthError::UserReauthRequired
+            }
+        });
+    }
     if authmachine_failure.is_empty() {
         match error {
             oauth::AnthropicOAuthError::InteractiveLoginRequired

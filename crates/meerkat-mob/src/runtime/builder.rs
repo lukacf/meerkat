@@ -12431,8 +12431,8 @@ pub(super) enum RetryableRestoreCause {
     /// The host asked to retry the member's build preparation later
     /// ([`super::MemberBuildPreparationRefusal::Retryable`]).
     BuildPreparation,
-    /// A seat's first create met a session store, runtime authority or
-    /// hosting claim that is unavailable for now
+    /// A seat's first create met a session store, runtime authority, hosting
+    /// claim or provider credential that is unavailable for now
     /// ([`seat_create_failure_is_retryable`]): the member stays Dormant
     /// with its session unborn, and a later delivery wakes it again.
     SeatCreateUnavailable,
@@ -12488,15 +12488,21 @@ pub(super) fn restore_error_is_retryable(error: &MobError) -> bool {
 /// serve the request now
 /// ([`super::actor::SessionStoreFailureClass::Unavailable`]), the session was
 /// busy, its runtime authority was unavailable, another runtime owner holds
-/// its hosting claim (or the claim cannot be taken now), or its external
-/// write authority could not be checked without waiting. A malformed or
+/// its hosting claim (or the claim cannot be taken now), its external write
+/// authority could not be checked without waiting, or the session's build
+/// could not get its provider credential now: the facade's typed
+/// provider-auth failure names a kind that clears on its own
+/// ([`meerkat_core::AuthErrorKind::clears_on_its_own`]: the credential's
+/// source or the credential store cannot answer now, or a lookup of the
+/// credential is in flight). A malformed or
 /// refusing persisted state, a store that refuses the session until its realm
 /// is reopened (it answers the same until then), a durable tail held for or
 /// refused by its
 /// recovery (a hold is reported with the member Broken, so its host sees it),
 /// quarantined or diverged durable evidence (which needs its sanctioned
-/// repair), an agent fault and every other typed cause are terminal. The
-/// settlement diagnostics a failure carries never change its class.
+/// repair), an agent fault, a provider-auth failure of any other kind and
+/// every other typed cause are terminal. The settlement diagnostics a failure
+/// carries never change its class.
 pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionError) -> bool {
     use meerkat_core::service::SessionError;
 
@@ -12511,6 +12517,9 @@ pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionE
         | SessionError::ServedElsewhere { .. }
         | SessionError::HostingUnavailable { .. }
         | SessionError::ExternalWriteFenceBackoff { .. } => true,
+        SessionError::FailedWithData { .. } => error
+            .provider_auth_failure_data()
+            .is_some_and(|failure| failure.kind.clears_on_its_own()),
         SessionError::NotFound { .. }
         | SessionError::PersistenceDisabled
         | SessionError::CompactionDisabled
@@ -12520,7 +12529,6 @@ pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionE
         | SessionError::DurableEvidenceQuarantined { .. }
         | SessionError::WholeBlobAuditedEndpointDivergence { .. }
         | SessionError::Agent(_)
-        | SessionError::FailedWithData { .. }
         | SessionError::CapabilityUnavailable(_)
         | SessionError::Unsupported(_)
         | SessionError::ExternalWriteFenceConflict { .. }
@@ -12530,10 +12538,11 @@ pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionE
 
 /// Whether a seat's first create failed for a cause that clears on its own
 /// ([`session_error_is_retryable`]): the store could not serve the write
-/// now, the session was busy, its runtime authority was unavailable, or
-/// another runtime owner held its hosting claim. Any other cause (a build the
-/// host or the factory refuses, a malformed or refusing persisted state, an
-/// internal fault) breaks the member.
+/// now, the session was busy, its runtime authority was unavailable, another
+/// runtime owner held its hosting claim, or the build could not get its
+/// provider credential now. Any other cause (a build the host or the factory
+/// refuses, a provider credential that needs an action, a malformed or
+/// refusing persisted state, an internal fault) breaks the member.
 #[cfg(feature = "runtime-adapter")]
 fn seat_create_failure_is_retryable(error: &MobError) -> bool {
     matches!(error, MobError::SessionError(error) if session_error_is_retryable(error))

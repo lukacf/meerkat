@@ -26,10 +26,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::StreamExt;
-use meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig;
+use meerkat_core::lifecycle::run_primitive::{
+    AnthropicCacheControlPolicy, AnthropicThinkingConfig,
+};
 use meerkat_core::{
-    AssistantBlock, BlockAssistantMessage, Message, ProviderMeta, StopReason, ToolChoice, ToolDef,
-    ToolResult, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, ProviderMeta, StopReason, SystemNoticeKind,
+    SystemNoticeMessage, ToolChoice, ToolDef, ToolResult, UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
 use serde_json::{Value, json};
@@ -61,6 +63,21 @@ const TOOL_CUE: &str = "Use the lookup tool.";
 /// A tool the mock account refuses with a 400 of its own, whatever else the
 /// request carries.
 const REFUSED_TOOL: &str = "refused_tool";
+
+/// A tool the mock account answers with a 529 overload when the request
+/// replays no thinking block.
+const OVERLOADED_TOOL: &str = "overloaded_tool";
+
+/// Whether `body` lists a tool named `name`.
+fn carries_tool(body: &Value, name: &str) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+        })
+}
 
 /// One request the endpoint received.
 #[derive(Debug, Clone)]
@@ -115,6 +132,18 @@ async fn messages(
         betas: betas.clone(),
         body: body.clone(),
     });
+    if carries_tool(&body, OVERLOADED_TOOL) && replayed_thinking_blocks(&body) == 0 {
+        return (
+            StatusCode::from_u16(529).unwrap(),
+            [("content-type", "application/json")],
+            json!({
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "Overloaded"}
+            })
+            .to_string(),
+        )
+            .into_response();
+    }
     match judge(&body, &betas) {
         Ok(dropped) => stream_reply(&body, &betas, &dropped),
         Err(message) => (
@@ -1349,4 +1378,208 @@ fn completed_turns_replay_no_thinking_on_a_route_without_the_control() {
     assert_eq!(messages[4]["content"][0]["signature"], "sig-3", "{body}");
     assert_eq!(types(&messages[7]), ["thinking", "tool_use"], "{body}");
     assert_eq!(messages[7]["content"][0]["signature"], "sig-4", "{body}");
+}
+
+/// The history of a turn whose tool round ended in an answer holding only
+/// thinking (an empty answer the agent loop accepts once the turn called a
+/// tool), followed by a new user turn, on a route without the control.
+async fn history_after_a_thinking_only_answer(
+    account: &EnforcingAccount,
+    client: &AnthropicClient,
+    model: &str,
+    shape: fn(LlmRequest) -> LlmRequest,
+) -> Vec<Message> {
+    let (first, continuation, _) = tool_round(account, client, model, shape, tools_before()).await;
+    assert!(continuation.succeeded(), "{model}: {continuation:?}");
+    let mut thinking_only_answer = continuation;
+    thinking_only_answer.text.clear();
+    vec![
+        Message::User(UserMessage::text(format!("What is alpha? {TOOL_CUE}"))),
+        first.assistant(),
+        first.tool_results(),
+        thinking_only_answer.assistant(),
+        second_question(),
+    ]
+}
+
+/// A completed answer holding only thinking has nothing else to send and is
+/// left out, so the API joins the tool results before it with the new user
+/// turn: the tool round before it is the assistant message the request
+/// continues, and it keeps its thinking, which manual `enabled` thinking
+/// requires there.
+#[tokio::test]
+async fn a_tool_round_continued_after_a_left_out_answer_keeps_its_thinking() {
+    let (account, client, server) = spawn_account_without_the_control().await;
+    let model = "claude-mythos-5-1";
+    let history = history_after_a_thinking_only_answer(&account, &client, model, enabled).await;
+    let before = account.all().len();
+    let second = run(
+        &client,
+        &enabled(LlmRequest::new(model, history).with_tools(tools_before())),
+    )
+    .await;
+    let sent = account.all().split_off(before);
+    server.abort();
+    assert!(
+        second.succeeded(),
+        "the next turn completes: {second:?}; sent: {:#?}",
+        sent.iter()
+            .map(|seen| seen.body["messages"].clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    let messages = sent[0].body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        4,
+        "the answer holding only thinking is left out: {}",
+        sent[0].body
+    );
+    assert_eq!(
+        messages[1]["content"][0]["type"], "thinking",
+        "the continued tool round keeps its thinking: {}",
+        sent[0].body
+    );
+}
+
+/// The same history under adaptive thinking, across a tools change: the next
+/// turn completes.
+#[tokio::test]
+async fn a_left_out_answer_then_an_adaptive_turn_across_a_tools_change() {
+    let (account, client, server) = spawn_account_without_the_control().await;
+    let model = "claude-mythos-5-1";
+    let history = history_after_a_thinking_only_answer(&account, &client, model, adaptive).await;
+    let before = account.all().len();
+    let second = run(
+        &client,
+        &adaptive(LlmRequest::new(model, history).with_tools(tools_after())),
+    )
+    .await;
+    let sent = account.all().split_off(before);
+    server.abort();
+    assert!(second.succeeded(), "the next turn completes: {second:?}");
+    for attempt in &sent {
+        assert!(
+            attempt.body["thinking"].get("block_binding").is_none(),
+            "{}",
+            attempt.body
+        );
+        assert!(!attempt.carries_binding_beta(), "{:?}", attempt.betas);
+    }
+}
+
+/// A turn opened by a system notice (a background job that finished, a
+/// message from a peer) is a turn of its own: across a tools change it
+/// replays no thinking of the turn before it and takes one request.
+#[tokio::test]
+async fn a_turn_opened_by_a_notice_replays_no_earlier_thinking() {
+    let (account, client, server) = spawn_account_without_the_control().await;
+    let model = "claude-opus-5-5";
+    let first = run(
+        &client,
+        &LlmRequest::new(model, vec![first_question()]).with_tools(tools_before()),
+    )
+    .await;
+    assert!(first.succeeded(), "{first:?}");
+    let notice = Message::SystemNotice(SystemNoticeMessage::new(
+        SystemNoticeKind::Generic,
+        "a background job finished",
+    ));
+    let before = account.all().len();
+    let second = run(
+        &client,
+        &LlmRequest::new(model, vec![first_question(), first.assistant(), notice])
+            .with_tools(tools_after()),
+    )
+    .await;
+    let sent = account.all().split_off(before);
+    server.abort();
+    assert!(
+        second.succeeded(),
+        "the turn after the tools change completes: {second:?}"
+    );
+    assert_eq!(sent.len(), 1, "one request, none refused: {sent:#?}");
+    assert_eq!(
+        replayed_thinking_blocks(&sent[0].body),
+        0,
+        "{}",
+        sent[0].body
+    );
+}
+
+/// Cache breakpoint claims follow the messages as sent. Under
+/// `system_and_conversation` on a route without the control, a transcript
+/// whose completed answer holds only thinking (left out of the request) gets
+/// no claim, since no lowered boundary maps back to the transcript; one whose
+/// completed turn only loses its thinking keeps its claims.
+#[test]
+fn cache_claims_follow_the_messages_as_sent() {
+    let client = AnthropicClient::builder("test-key".to_string())
+        .thinking_binding_controls_supported(false)
+        .build()
+        .unwrap();
+    let thinking = |signature: &str| AssistantBlock::Reasoning {
+        text: String::new(),
+        meta: Some(Box::new(ProviderMeta::Anthropic {
+            signature: signature.to_string(),
+        })),
+    };
+    let text = |text: &str| AssistantBlock::Text {
+        text: text.to_string(),
+        meta: None,
+    };
+    let assistant = |blocks: Vec<AssistantBlock>| {
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::EndTurn))
+    };
+    let user = |text: &str| Message::User(UserMessage::text(text));
+    let claims = |messages: Vec<Message>| {
+        let request =
+            LlmRequest::new("claude-opus-5-5", messages).with_anthropic_tag_merge(|tag| {
+                tag.cache_control = Some(AnthropicCacheControlPolicy::SystemAndConversation);
+            });
+        client
+            .authored_cache_breakpoints(&request, &request.messages)
+            .unwrap()
+    };
+    let left_out = claims(vec![
+        user("first"),
+        assistant(vec![thinking("sig-1"), text("one")]),
+        user("second"),
+        assistant(vec![thinking("sig-2")]),
+        user("third"),
+    ]);
+    assert!(
+        left_out.is_empty(),
+        "no claim maps a lowered boundary back to the transcript: {left_out:?}"
+    );
+    let stripped = claims(vec![
+        user("first"),
+        assistant(vec![thinking("sig-1"), text("one")]),
+        user("second"),
+    ]);
+    assert!(
+        !stripped.is_empty(),
+        "a transcript whose messages are all sent keeps its claims"
+    );
+}
+
+/// A resend that fails with an error the client retries (an overload here;
+/// a rate limit or a network error alike) returns that error, so the call is
+/// retried. A resend refused for another reason returns the first error
+/// (`a_refused_resend_surfaces_the_original_error`).
+#[tokio::test]
+async fn a_resend_that_fails_with_a_retryable_error_returns_that_error() {
+    let (account, client, server) = spawn_account_without_the_control().await;
+    let mut tools = tools_after();
+    tools.push(tool(OVERLOADED_TOOL));
+    let (_, continuation, sent) =
+        tool_round(&account, &client, "claude-opus-5-5", unchanged, tools).await;
+    server.abort();
+    assert_eq!(sent.len(), 2, "one attempt, then one resend: {sent:#?}");
+    let error = continuation.error.expect("the call fails");
+    assert!(
+        matches!(error, LlmError::ServerError { status: 529, .. }),
+        "the resend's overload is returned: {error:?}"
+    );
+    assert!(error.is_retryable(), "{error:?}");
 }

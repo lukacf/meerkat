@@ -4174,6 +4174,19 @@ macro_rules! mob_catalog_machine_dsl {
             owned == true && a_is_an_entry == true && b_is_an_entry == true
         }
 
+        // Whether an owned edge is out of force (0.9.11): the complement of
+        // owned_edge_in_force, spelled as the disjunction of its facts'
+        // negations. The arms of an edge out of force read it, so each of
+        // them refutes, fact by fact, the same-trigger arm of an edge in
+        // force.
+        helper owned_edge_out_of_force(
+            owned: bool,
+            a_is_an_entry: bool,
+            b_is_an_entry: bool
+        ) -> bool {
+            owned == false || a_is_an_entry == false || b_is_an_entry == false
+        }
+
         // The cause a new store-owned entry is unseated for at its create's
         // commit (RecordCreatedIdentityEntry), from the request's facts, with
         // the declared apply's precedence for a never-created identity
@@ -35868,10 +35881,10 @@ macro_rules! mob_catalog_machine_dsl {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input AdmitMemberUnwire { edge }
             guard "edge_not_in_force" {
-                owned_edge_in_force(
+                owned_edge_out_of_force(
                     self.identity_edge_owners.contains_key(edge),
                     self.identity_entry_origins.contains_key(mob_machine_wiring_edge_a(edge)),
-                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == false
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == true
             }
             update {}
             to Running
@@ -35980,10 +35993,10 @@ macro_rules! mob_catalog_machine_dsl {
             on input AdmitOwnedEdgeRealization { edge }
             guard "edge_owned" { self.identity_edge_owners.contains_key(edge) == true }
             guard "edge_not_in_force" {
-                owned_edge_in_force(
+                owned_edge_out_of_force(
                     self.identity_edge_owners.contains_key(edge),
                     self.identity_entry_origins.contains_key(mob_machine_wiring_edge_a(edge)),
-                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == false
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == true
             }
             update {}
             to Running

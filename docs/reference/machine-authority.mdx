@@ -392,7 +392,8 @@ its identity's edges, whichever end owns them, in its own step
 (`MemberUnwireAdmission`); and the boot recovers each edge from its owner's
 row (`RecoverOwnedIdentityEdge`). The map is the edge's desired record. An
 edge is in force while both its ends are identity entries (the helper
-`owned_edge_in_force`): only then does the shell realize it
+`owned_edge_in_force`, and its complement `owned_edge_out_of_force`): only
+then does the shell realize it
 (`wiring_edges`) once both its ends are seated, each realization (a seat's,
 a spawn's or a pass's) reading MobMachine's verdict before its wire
 (`AdmitOwnedEdgeRealization`, `OwnedEdgeRealization`), and only then is it

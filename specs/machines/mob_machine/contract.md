@@ -929,6 +929,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_rows_purge_verdict`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, rows_purged: Bool, host_operator: Bool, changes_held: Bool, rows_present: Bool) -> `IdentityRowsPurgeVerdict`
 - `identity_import_verdict`(kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, composition_authoritative: Bool, changes_held: Bool, rows_purged: Bool, unsettled: Bool, rowless: Bool, origin_declared: Bool, origin_created: Bool, name_reserved: Bool, seated: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool, session_matches: Bool) -> `IdentityImportVerdict`
 - `owned_edge_in_force`(owned: Bool, a_is_an_entry: Bool, b_is_an_entry: Bool) -> `Bool`
+- `owned_edge_out_of_force`(owned: Bool, a_is_an_entry: Bool, b_is_an_entry: Bool) -> `Bool`
 - `created_entry_cause`(preparation_required: Bool, placement: EntryPlacementKind, held_creation: Bool) -> `UnseatedEntryCause`
 - `unlist_entry_verdict`(composition_authoritative: Bool, declared_entry: Bool, in_flight: Bool, seated: Bool) -> `UnlistEntryVerdict`
 - `preparation_construction_verdict`(composition_authoritative: Bool, preparation_pending: Bool, constructed: Bool, construction_open: Bool) -> `PreparationConstructionVerdict`

@@ -1938,15 +1938,17 @@ PY
   # A plain unwire of an owned edge in force is admitted (the admission's
   # edge_not_in_force guard dropped): two arms answer it.
   mutate edges unwire_admits_owned_edge "Invariant AuditEdgesExactlyOne" <<'PY'
-drop_guard("AdmitMemberUnwireAdmittedRunning", "owned_edge_in_force(")
+drop_guard("AdmitMemberUnwireAdmittedRunning", "owned_edge_out_of_force(")
 PY
 
-  # An owned edge counts in force whatever its ends (the helper reads the
-  # custody alone): an edge one of whose ends no entry holds is realized,
-  # and its pair refused a plain unwire.
+  # An owned edge counts in force whatever its ends (the helper and its
+  # complement read the custody alone): an edge one of whose ends no entry
+  # holds is realized, and its pair refused a plain unwire.
   mutate edges realization_admits_a_name_no_identity_holds "Action property AuditOwnedEdgeBindsIdentitiesOnly" <<'PY'
 replace_text("owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == ((owned = TRUE) /\\ (a_is_an_entry = TRUE) /\\ (b_is_an_entry = TRUE))",
              "owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == (owned = TRUE)")
+replace_text("owned_edge_out_of_force(owned, a_is_an_entry, b_is_an_entry) == (IF (owned = FALSE) THEN TRUE ELSE (IF (a_is_an_entry = FALSE) THEN TRUE ELSE (b_is_an_entry = FALSE)))",
+             "owned_edge_out_of_force(owned, a_is_an_entry, b_is_an_entry) == (owned = FALSE)")
 PY
 
   # An import's restoration needs the edge's other end to be an identity

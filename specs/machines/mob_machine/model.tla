@@ -272,6 +272,7 @@ preparation_settle_verdict(composition_authoritative, preparation_pending, const
 preparation_construction_verdict(composition_authoritative, preparation_pending, constructed, construction_open) == (IF (composition_authoritative = FALSE) THEN "NonAuthoritative" ELSE (IF (preparation_pending = FALSE) THEN "NotPending" ELSE (IF (constructed = FALSE) THEN "NotConstructed" ELSE (IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Held"))))
 unlist_entry_verdict(composition_authoritative, declared_entry, in_flight, seated) == (IF (composition_authoritative = FALSE) THEN "NonAuthoritative" ELSE (IF (declared_entry = FALSE) THEN "NotADeclaredEntry" ELSE (IF (in_flight = TRUE) THEN "Deferred" ELSE (IF (seated = TRUE) THEN "Retiring" ELSE "Removed"))))
 created_entry_cause(preparation_required, placement, held_creation) == (IF (preparation_required = TRUE) THEN "PreparationPending" ELSE (IF (placement # "Local") THEN "HostedOnFirstUse" ELSE (IF (held_creation = TRUE) THEN "HeldCreation" ELSE "SeatOwed")))
+owned_edge_out_of_force(owned, a_is_an_entry, b_is_an_entry) == (IF (owned = FALSE) THEN TRUE ELSE (IF (a_is_an_entry = FALSE) THEN TRUE ELSE (b_is_an_entry = FALSE)))
 owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == ((owned = TRUE) /\ (a_is_an_entry = TRUE) /\ (b_is_an_entry = TRUE))
 identity_import_verdict(kind, adopted_from_roster, row, composition_authoritative, changes_held, rows_purged, unsettled, rowless, origin_declared, origin_created, name_reserved, seated, placed, session_bound, seat_owed, session_matches) == (IF (composition_authoritative = FALSE) THEN "NonAuthoritative" ELSE (IF (changes_held = TRUE) THEN "ChangesHeld" ELSE (IF (rows_purged = TRUE) THEN "RowsPurged" ELSE (IF (row = "Same") THEN "Unchanged" ELSE (IF (row = "Other") THEN "NameTakenMeanwhile" ELSE (IF (unsettled = TRUE) THEN "Unsettled" ELSE (IF (rowless = TRUE) THEN (IF (kind = "Tombstone") THEN (IF (seated = TRUE) THEN "NameTakenMeanwhile" ELSE "RestoredTombstone") ELSE (IF (seated = TRUE) THEN (IF ((kind = "Present") /\ (placed = FALSE) /\ (session_bound = TRUE)) THEN "RestoredInPlace" ELSE "NameTakenMeanwhile") ELSE (IF (kind = "Present") THEN "RestoredOwedSeat" ELSE (IF (kind = "PendingPreparation") THEN "RestoredPending" ELSE "RestoredArchived")))) ELSE (IF (IF (name_reserved = TRUE) THEN TRUE ELSE (origin_created = TRUE)) THEN "NameTakenMeanwhile" ELSE (IF (origin_declared = TRUE) THEN (IF ((kind = "Present") /\ (adopted_from_roster = TRUE) /\ (IF ((seated = TRUE) /\ (placed = FALSE) /\ (session_bound = TRUE)) THEN TRUE ELSE ((seated = FALSE) /\ (seat_owed = TRUE)))) THEN "RestoredByAdoption" ELSE "NameTakenMeanwhile") ELSE (IF (seated = TRUE) THEN (IF ((kind = "Present") /\ (placed = FALSE) /\ (session_bound = TRUE) /\ (session_matches = TRUE)) THEN "RestoredInPlace" ELSE "NameTakenMeanwhile") ELSE (IF (kind = "Present") THEN "RestoredOwedSeat" ELSE (IF (kind = "PendingPreparation") THEN "RestoredPending" ELSE (IF (kind = "Archived") THEN "RestoredArchived" ELSE "RestoredTombstone")))))))))))))
 identity_rows_purge_verdict(composition_authoritative, receipt, rows_purged, host_operator, changes_held, rows_present) == (IF (composition_authoritative = FALSE) THEN "NonAuthoritative" ELSE (IF (receipt = "Same") THEN "Replayed" ELSE (IF (receipt = "Other") THEN "OperationReused" ELSE (IF (rows_purged = TRUE) THEN "RowsPurged" ELSE (IF (host_operator = FALSE) THEN "NotHostOperator" ELSE (IF (changes_held = FALSE) THEN "ChangesNotHeld" ELSE (IF (rows_present = FALSE) THEN "NothingToPurge" ELSE "Purged")))))))
@@ -26952,7 +26953,7 @@ EndOwnedIdentityEdgeMobNotRunningDestroyed(edge, owner, cause) ==
 
 AdmitMemberUnwireAdmittedRunning(edge) ==
     /\ phase = "Running"
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -26960,7 +26961,7 @@ AdmitMemberUnwireAdmittedRunning(edge) ==
 
 AdmitMemberUnwireAdmittedStopped(edge) ==
     /\ phase = "Stopped"
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -26968,7 +26969,7 @@ AdmitMemberUnwireAdmittedStopped(edge) ==
 
 AdmitMemberUnwireAdmittedCompleted(edge) ==
     /\ phase = "Completed"
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -26976,7 +26977,7 @@ AdmitMemberUnwireAdmittedCompleted(edge) ==
 
 AdmitMemberUnwireAdmittedDestroyed(edge) ==
     /\ phase = "Destroyed"
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -27123,7 +27124,7 @@ AdmitOwnedEdgeRealizationNotOwnedDestroyed(edge) ==
 AdmitOwnedEdgeRealizationEndNotAnIdentityRunning(edge) ==
     /\ phase = "Running"
     /\ ((edge \in DOMAIN identity_edge_owners) = TRUE)
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -27132,7 +27133,7 @@ AdmitOwnedEdgeRealizationEndNotAnIdentityRunning(edge) ==
 AdmitOwnedEdgeRealizationEndNotAnIdentityStopped(edge) ==
     /\ phase = "Stopped"
     /\ ((edge \in DOMAIN identity_edge_owners) = TRUE)
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -27141,7 +27142,7 @@ AdmitOwnedEdgeRealizationEndNotAnIdentityStopped(edge) ==
 AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted(edge) ==
     /\ phase = "Completed"
     /\ ((edge \in DOMAIN identity_edge_owners) = TRUE)
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326
@@ -27150,7 +27151,7 @@ AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted(edge) ==
 AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed(edge) ==
     /\ phase = "Destroyed"
     /\ ((edge \in DOMAIN identity_edge_owners) = TRUE)
-    /\ (owned_edge_in_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = FALSE)
+    /\ (owned_edge_out_of_force((edge \in DOMAIN identity_edge_owners), (mob_machine_wiring_edge_a(edge) \in DOMAIN identity_entry_origins), (mob_machine_wiring_edge_b(edge) \in DOMAIN identity_entry_origins)) = TRUE)
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326

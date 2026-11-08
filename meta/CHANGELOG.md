@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carries the new `OperatorMemoryRefusal`: a steward batch that would
   change, copy or write a person's operator memory outside the accept of
   their own proposal is refused.
+- Rust: `StewardProfile::load` now refuses a prompt bundle without an
+  `operator_proposals` phase (see Upgrade).
 
 - The console send routes refuse the `origin_kind` values reserved for
   Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
@@ -116,9 +118,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   operator memory; grant `operator.memory.read_any` too where a role reads
   every person's.
 - A steward prompt bundle a host supplies needs the new `operator_proposals`
-  phase, as the embedded bundle has it: `StewardProfile::load` refuses a
-  bundle without it, and a dream fails on one while a person's operator
-  proposal is pending.
+  phase, as the embedded bundle has it: its template holds the
+  `{{operator_scope}}` and `{{proposals}}` placeholders, and the model
+  replies with one JSON object holding a `proposal_verdicts` array (an
+  accept, reject or hold per proposal id). `StewardProfile::load` refuses a
+  bundle without the phase; a dream whose profile lacks it records that the
+  operator proposal call failed, and people's operator proposals stay
+  pending.
 
 ### Added
 
@@ -178,15 +184,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   only when the memory steward accepts its proposal; the configuration does
   not require a steward. With the operator scope off (the default), an
   `operator_said` fact stays the agent's own memory, as before.
-- The steward never changes a person's operator memory: it judges a
-  person's proposals in a call of their own, which sees only those
-  proposals and can only accept, reject or hold them, and accepts a
-  proposal into that person's operator memory only. It refuses (typed)
-  every dream op that would supersede, tombstone, retier or copy an
-  operator record, or name an operator key, and refuses to promote a
-  person's proposal or record to a mob scope. A dream's gather and
-  consolidate phases no longer read a person's operator records or pending
-  proposals, so no promotion gate shows them.
+- The steward never changes a person's operator memory: it judges
+  people's pending operator proposals together, in a call of their own
+  that sees those proposals and nothing else of the store and can only
+  accept, reject or hold them, and accepts a proposal only into the
+  operator memory of the person it was filed for. If that call fails, the
+  proposals stay pending and the rest of the dream goes on, and what the
+  dream records of that call (its skips and run rows) holds no text its
+  model wrote. It refuses (typed) every dream op that would supersede,
+  tombstone, retier or copy an operator record, or name an operator key,
+  and refuses to promote a person's proposal or record to a mob scope. A
+  dream's gather and consolidate phases no longer read a person's operator
+  records or pending proposals, so no promotion gate shows them.
 - The Distiller is unchanged: it distills the agent's own transcript,
   which everyone who views the agent reads, and cannot tell which person
   said a fact, so a fact it tags `operator_said` stays the agent's own

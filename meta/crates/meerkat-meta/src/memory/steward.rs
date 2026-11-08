@@ -38,7 +38,9 @@
 //!   prompts. One call judges them; it sees nothing else of the store and
 //!   replies with verdicts only, which the shell applies as accept, reject
 //!   or hold of the proposals it was given. It writes no op, so nothing a
-//!   person said reaches shared memory through a dream.
+//!   person said reaches shared memory through a dream. Its skips carry no
+//!   text the model wrote, and a failed call leaves the proposals pending
+//!   while the dream goes on.
 //! - **Harvest** (exit interviews): retired identities recorded by the
 //!   retire/delete hooks are harvested — durable knowledge proposed into
 //!   mob scope, the rest tombstoned per retention judgment.
@@ -130,6 +132,11 @@ const MAX_QUARANTINE_PER_DREAM: usize = 16;
 const MAX_HARVESTS_PER_DREAM: usize = 4;
 const MAX_TOMBSTONES_RENDERED: usize = 32;
 const MAX_DISTILLATES_RENDERED: usize = 8;
+
+/// The one skip a failed call on people's operator proposals leaves: a
+/// fixed text, never the failure's own, which can quote the model's reply.
+const OPERATOR_PROPOSAL_REVIEW_FAILED: &str =
+    "the operator proposal review failed; its proposals stay pending";
 
 /// Usage audit bounds (§9.2).
 const USAGE_LEDGER_SAMPLE: usize = 128;
@@ -1778,9 +1785,24 @@ impl StewardEngine {
             }
         }
 
-        // A person's operator proposals: judged in a call of their own.
-        self.review_operator_proposals(&signals, run_id, run)
-            .await?;
+        // A person's operator proposals: judged in a call of their own. A
+        // failed call is contained: its proposals stay pending, the dream
+        // goes on, and nothing records the failure's own text, which can
+        // quote the model's reply.
+        if let Err(err) = self.review_operator_proposals(&signals, run_id, run).await {
+            let failure = steward_failure_class(&err);
+            tracing::warn!(
+                run_id,
+                failure,
+                "agent memory steward: the operator proposal review failed; its proposals stay \
+                 pending"
+            );
+            run.phases.push((
+                "operator_proposals".to_string(),
+                format!("failed: {failure}"),
+            ));
+            run.skips.push(OPERATOR_PROPOSAL_REVIEW_FAILED.to_string());
+        }
 
         // Harvests (exit interviews).
         self.harvest_phase(&mob_context_text, run_id, run).await?;
@@ -3034,7 +3056,9 @@ impl StewardEngine {
     }
 
     /// Apply the verdicts of one steward call to `proposals`, the proposals
-    /// that call was given; a verdict on any other proposal is dropped.
+    /// that call was given; a verdict on any other proposal is dropped. The
+    /// skips name only the shell's own proposal ids, never text the model
+    /// wrote: a verdict on an id the call was not given is only counted.
     async fn apply_proposal_verdicts(
         &self,
         signals: &SignalPacket,
@@ -3052,12 +3076,10 @@ impl StewardEngine {
             .into_iter()
             .map(str::to_string)
             .collect();
+        let mut unknown_ids = 0usize;
         for verdict in verdicts {
             let Some(proposal) = by_id.get(verdict.proposal_id.as_str()) else {
-                run.skips.push(format!(
-                    "proposal verdict for unknown '{}', dropped",
-                    verdict.proposal_id
-                ));
+                unknown_ids += 1;
                 continue;
             };
             // §10.2: a proposal with an in-flight operator gate is never
@@ -3081,7 +3103,7 @@ impl StewardEngine {
                     run.skips.push(format!(
                         "proposal '{}' accept downgraded to an operator gate: proposal was \
                          tainted at propose time ({reason})",
-                        verdict.proposal_id
+                        proposal.proposal_id
                     ));
                     let target_scope = match &proposal.scope {
                         MemoryScope::Mob { mob, .. } => Some(MemoryScope::Mob {
@@ -3137,7 +3159,7 @@ impl StewardEngine {
                 {
                     run.skips.push(format!(
                         "proposal '{}' targets operator scope while operator_scope is off;                          held for re-dream",
-                        verdict.proposal_id
+                        proposal.proposal_id
                     ));
                     if self
                         .store
@@ -3245,11 +3267,18 @@ impl StewardEngine {
                             .await;
                     }
                 }
-                other => {
-                    run.skips
-                        .push(format!("unknown proposal verdict '{other}', dropped"));
+                _ => {
+                    run.skips.push(format!(
+                        "an unknown verdict on proposal '{}', dropped",
+                        proposal.proposal_id
+                    ));
                 }
             }
+        }
+        if unknown_ids > 0 {
+            run.skips.push(format!(
+                "proposal verdicts on ids this call was not given, dropped: {unknown_ids}"
+            ));
         }
     }
 
@@ -4334,6 +4363,22 @@ fn classify_llm_error(error: LlmError) -> StewardError {
 
 fn store_err(err: AgentMemoryError) -> StewardError {
     StewardError::Store(err.to_string())
+}
+
+/// A fixed name for the kind of a steward failure, for records that must
+/// not carry the failure's own text: a reply that does not parse is quoted
+/// by the parser's message.
+fn steward_failure_class(err: &StewardError) -> &'static str {
+    match err {
+        StewardError::Profile(_) => "profile",
+        StewardError::Config(_) => "config",
+        StewardError::Auth(_) => "auth",
+        StewardError::Client(_) => "client",
+        StewardError::Truncated { .. } => "truncated",
+        StewardError::Incomplete { .. } => "incomplete",
+        StewardError::Parse(_) => "the reply did not parse",
+        StewardError::Store(_) => "store",
+    }
 }
 
 fn now_ms() -> u64 {
@@ -8590,6 +8635,337 @@ mod tests {
                     .any(|proposal| proposal.proposal_id == mob_proposal
                         && proposal.status == "pending"),
             "the call judges only the proposals it was given: {pending:?} {:?}",
+            run.skips
+        );
+    }
+
+    /// The texts a dream leaves for readers other than the proposal's own
+    /// person: the run's detail (or its failure reason), the
+    /// `memory.dream.completed` and `memory.dream.skipped` events, and the
+    /// durable dream run rows, the failure row included.
+    async fn dream_texts(fixture: &Fixture, outcome: &DreamOutcome) -> Vec<String> {
+        let mut texts = vec![match outcome {
+            DreamOutcome::Completed(run) => run.detail().to_string(),
+            DreamOutcome::Skipped { reason } => reason.clone(),
+        }];
+        texts.extend(
+            fixture
+                .events
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.event_type(),
+                        "memory.dream.completed" | "memory.dream.skipped"
+                    )
+                })
+                .map(|event| event.data().to_string()),
+        );
+        texts.extend(
+            fixture
+                .store
+                .dream_runs(REALM, 16)
+                .await
+                .expect("dream runs")
+                .into_iter()
+                .map(|row| row.detail),
+        );
+        texts
+    }
+
+    /// The call that judges a person's operator proposals echoes no text
+    /// its model wrote. A reply that puts the proposal's title in a
+    /// verdict's id and in a verdict word, or in a field that does not
+    /// parse, leaves no trace of the title in the run's detail, the dream
+    /// events or the dream run rows: a verdict on an id the call was not
+    /// given is only counted, an unknown verdict word names only the
+    /// shell's own proposal id, and a reply that does not parse records a
+    /// fixed reason. The proposal stays pending.
+    #[tokio::test]
+    async fn the_operator_proposal_call_echoes_no_model_text() {
+        const TITLE: &str = "Alice prefers terse status notes";
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:alice".to_string(),
+        };
+        let author = MemoryAuthor::Agent {
+            identity: "identity:worker".to_string(),
+        };
+        // A reply that parses: the title as a proposal id and as a verdict.
+        let fixture = build_operator_fixture(
+            vec![
+                empty_gather(),
+                empty_consolidate(),
+                "OPERATOR-PROPOSALS".to_string(),
+            ],
+            vec![],
+        );
+        let proposal_id = fixture
+            .store
+            .propose(&alice, new_record(TITLE, "Alice said it."), author.clone())
+            .await
+            .expect("propose to the person's operator scope");
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies
+                .iter_mut()
+                .find(|r| r.as_str() == "OPERATOR-PROPOSALS")
+                .unwrap() = json_reply(serde_json::json!({
+                "proposal_verdicts": [
+                    {"proposal_id": TITLE, "verdict": "accept", "rationale": "x"},
+                    {"proposal_id": proposal_id, "verdict": TITLE, "rationale": "y"}
+                ]
+            }));
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let texts = dream_texts(&fixture, &outcome).await;
+        assert!(
+            !texts.iter().any(|text| text.contains(TITLE)),
+            "no dream record repeats the call's text: {texts:#?}"
+        );
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        for skip in [
+            "proposal verdicts on ids this call was not given, dropped: 1".to_string(),
+            format!("an unknown verdict on proposal '{proposal_id}', dropped"),
+        ] {
+            assert!(run.skips.contains(&skip), "{skip}: {:?}", run.skips);
+        }
+        let pending = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("pending");
+        assert!(
+            pending
+                .iter()
+                .any(|proposal| proposal.proposal_id == proposal_id
+                    && proposal.status == "pending"),
+            "the proposal stays pending: {pending:?}"
+        );
+
+        // A reply that does not parse, before and after its repair: the
+        // title in a malformed field.
+        let malformed = json_reply(serde_json::json!({"proposal_verdicts": TITLE}));
+        let fixture = build_operator_fixture(
+            vec![
+                empty_gather(),
+                empty_consolidate(),
+                malformed.clone(),
+                malformed,
+            ],
+            vec![],
+        );
+        fixture
+            .store
+            .propose(&alice, new_record(TITLE, "Alice said it."), author)
+            .await
+            .expect("propose to the person's operator scope");
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let texts = dream_texts(&fixture, &outcome).await;
+        assert!(
+            !texts.iter().any(|text| text.contains(TITLE)),
+            "a reply that does not parse leaves no trace either: {texts:#?}"
+        );
+        assert!(
+            fixture
+                .store
+                .pending_proposals(REALM, 8)
+                .await
+                .expect("pending")
+                .iter()
+                .all(|proposal| proposal.status == "pending"),
+            "the proposal stays pending"
+        );
+    }
+
+    /// A failed call on a person's operator proposals is contained: it
+    /// commits nothing for the person, leaves the proposal pending and
+    /// records one fixed skip, and the dream goes on: the consolidate op
+    /// stays committed, the harvest and the rank run, and the dream
+    /// completes.
+    #[tokio::test]
+    async fn a_failed_operator_proposal_call_does_not_fail_the_dream() {
+        const TITLE: &str = "Alice prefers terse status notes";
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:alice".to_string(),
+        };
+        let consolidate = json_reply(serde_json::json!({
+            "ops": [{
+                "op": "create", "id": "own-new",
+                "scope": {"kind": "identity", "key": "identity:worker"},
+                "kind": "fact", "title": "Deploys run on Tuesdays",
+                "description": "the deploy day", "body": "Deploys run on Tuesdays.",
+                "rationale": "the agent's own knowledge"
+            }],
+            "proposal_verdicts": [], "quarantine_verdicts": [],
+            "open_loop_escalations": [], "contradictions": [], "working_set": ["own-new"]
+        }));
+        let fixture = build_operator_fixture(
+            vec![
+                empty_gather(),
+                consolidate,
+                "not json".to_string(),
+                "still not json".to_string(),
+            ],
+            vec![],
+        );
+        fixture
+            .store
+            .propose(
+                &alice,
+                new_record(TITLE, "Alice said it."),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose to the person's operator scope");
+        fixture
+            .engine
+            .note_identity_retired("identity:retiree", None, "retire")
+            .await;
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("the dream completes: {outcome:?}");
+        };
+        assert!(
+            run.skips.contains(
+                &"the operator proposal review failed; its proposals stay pending".to_string()
+            ),
+            "one fixed skip records the failure: {:?}",
+            run.skips
+        );
+        assert_eq!(
+            scope_titles(&fixture.store, identity_scope("identity:worker")).await,
+            vec!["Deploys run on Tuesdays".to_string()],
+            "the consolidate op stays committed"
+        );
+        assert!(
+            scope_titles(&fixture.store, alice).await.is_empty(),
+            "nothing is committed for the person"
+        );
+        let pending = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("pending");
+        assert!(
+            pending
+                .iter()
+                .any(|proposal| proposal.record.title == TITLE && proposal.status == "pending"),
+            "the person's proposal stays pending: {pending:?}"
+        );
+        assert_eq!(run.verdicts.harvests_completed, 1, "the harvest runs");
+        assert!(
+            fixture
+                .store
+                .pending_harvests(REALM, 8)
+                .await
+                .expect("harvests")
+                .is_empty(),
+            "no harvest is left pending"
+        );
+        assert_eq!(
+            run.ops_committed, 2,
+            "the consolidate op and the rank commit: {:?}",
+            run.skips
+        );
+    }
+
+    /// A dream that learned a person's proposal id elsewhere (the memory
+    /// tool's reply names it) can neither read the proposal nor decide it:
+    /// a gather by that id finds no record, and a consolidate verdict on it
+    /// is dropped, since the consolidate's verdicts reach only the
+    /// proposals the dream read. Nothing is committed for the person and
+    /// the proposal stays pending.
+    #[tokio::test]
+    async fn a_dream_can_neither_read_nor_verdict_an_operator_proposal_by_id() {
+        const TITLE: &str = "Alice prefers terse status notes";
+        const BODY: &str = "Alice said: keep status notes under three lines.";
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:alice".to_string(),
+        };
+        let fixture = build_operator_fixture(
+            vec![
+                "GATHER".to_string(),
+                empty_gather(),
+                "CONSOLIDATE".to_string(),
+                json_reply(serde_json::json!({"proposal_verdicts": []})),
+            ],
+            vec![],
+        );
+        let proposal_id = fixture
+            .store
+            .propose(
+                &alice,
+                new_record(TITLE, BODY),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose to the person's operator scope");
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies.iter_mut().find(|r| r.as_str() == "GATHER").unwrap() =
+                json_reply(serde_json::json!({
+                    "requests": [{"kind": "record_body", "id": proposal_id}]
+                }));
+            *replies
+                .iter_mut()
+                .find(|r| r.as_str() == "CONSOLIDATE")
+                .unwrap() = json_reply(serde_json::json!({
+                "ops": [], "quarantine_verdicts": [], "open_loop_escalations": [],
+                "contradictions": [], "working_set": [],
+                "proposal_verdicts": [
+                    {"proposal_id": proposal_id, "verdict": "accept", "rationale": "x"}
+                ]
+            }));
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        let dream_prompts = gather_and_consolidate_prompts(&fixture);
+        assert!(
+            !dream_prompts
+                .iter()
+                .any(|prompt| prompt.contains(TITLE) || prompt.contains(BODY)),
+            "the gather by id reads nothing of the proposal: {dream_prompts:#?}"
+        );
+        assert!(
+            scope_titles(&fixture.store, alice).await.is_empty(),
+            "the consolidate verdict on the person's proposal commits nothing: {:?}",
+            run.skips
+        );
+        assert_eq!(run.verdicts.proposals_accepted, 0, "{:?}", run.skips);
+        let pending = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("pending");
+        assert!(
+            pending
+                .iter()
+                .any(|proposal| proposal.proposal_id == proposal_id
+                    && proposal.status == "pending"),
+            "the proposal stays pending: {pending:?}"
+        );
+        assert!(
+            run.skips
+                .iter()
+                .any(|skip| skip.starts_with("proposal verdict")),
+            "the dropped verdict is recorded: {:?}",
             run.skips
         );
     }

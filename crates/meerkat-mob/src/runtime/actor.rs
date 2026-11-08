@@ -42568,7 +42568,10 @@ impl MobActor {
     /// `MemberSessionNotLive`, and nothing wakes it: a wake while nothing
     /// holds its run starts would resume the run. A placed member's runtime
     /// lives on its member host (`UnsupportedForMode`). A member runtime that
-    /// needs a durability reload is `MemberReloadRequired`. The settle waits
+    /// needs a durability reload is refused by the member runtime's settle
+    /// itself, which tells a store realm that lost its fence
+    /// (`MemberSessionNotLive`) from any other degraded registration
+    /// (`MemberReloadRequired`). The settle waits
     /// for the run's settlement on a DETACHED task (ADJ-P4-12).
     async fn handle_settle_member_retained_run(
         &mut self,
@@ -42618,10 +42621,10 @@ impl MobActor {
             }));
             return;
         }
-        if let Err(error) = self.ensure_member_runtime_durability_ready(&entry).await {
-            let _ = reply_tx.send(Err(error));
-            return;
-        }
+        // No durability check here: the member runtime's settle refuses a
+        // degraded registration itself, and only it tells a store realm that
+        // lost its fence, which no reload in this process can serve, from a
+        // registration a reload repairs.
         let provisioner = self.provisioner.clone();
         let member_ref = entry.member_ref.clone();
         self.actor_io_tasks.spawn(async move {

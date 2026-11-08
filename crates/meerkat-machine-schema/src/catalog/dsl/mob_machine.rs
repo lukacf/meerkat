@@ -11709,6 +11709,26 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // A resume replays every active abandonment row against the state
+        // the whole journal leaves. The row of a generation the name has
+        // moved past, after a later life of the name ended: that life's spawn
+        // took the abandoned generation's hold and tombstone, and its own
+        // terminal ended it, so nothing of the row's generation is left to
+        // record, prune or end (0.9.11). A row of a generation the name
+        // never reached matches no arm and stays refused.
+        transition ObserveRespawnTopologyAbandonedStaleEndedSuccessor {
+            on signal ObserveRespawnTopologyAbandoned { agent_identity, agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            guard "generation_not_terminal_history" { self.identity_runtime_generations.get_copied(agent_identity) != Some(generation) }
+            guard "later_generation_recorded" {
+                self.identity_runtime_generations.contains_key(agent_identity) == true
+                && self.identity_runtime_generations.get_copied(agent_identity).get("value") > generation
+            }
+            update {}
+            to Running
+        }
+
         transition ObserveRespawnTopologyAbandonedDestroyed {
             on signal ObserveRespawnTopologyAbandoned { agent_identity, agent_runtime_id, fence_token, generation }
             guard { self.lifecycle_phase == Phase::Destroyed }

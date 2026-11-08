@@ -169,7 +169,7 @@ ResolveRuntime* runtime ingress and retire refusal feedback from MeerkatMachine;
 ClassifyMemberWait* member wait classification over runtime material; no audit drives it
 ClassifyIdentity* identity reconciliation decisions; no audit drives them
 ConvergeRecovered* recovered roster topology convergence in a destroyed mob and the respawn topology convergence; member_residency_audit's replay-same run drives the roster convergence in Running
-ObserveRespawn* respawn topology preservation records; no audit drives them
+ObserveRespawn* respawn topology preservation records; no audit drives them but member_lifecycle_audit's replay of an abandonment after a later incarnation ended, the stale arm (ObserveRespawnTopologyAbandonedStaleEndedSuccessor), whose answer it checks against every other arm's guards
 ResolveRespawn* respawn topology restore; no audit drives it
 RecoverIdentityGeneration* generation high-water recovery; generation_highwater_audit drives it and checks its witnesses, without a coverage list
 SealIdentity* generation high-water seal; generation_highwater_audit drives it and checks its witnesses, without a coverage list

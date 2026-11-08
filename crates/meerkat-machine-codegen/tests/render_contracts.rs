@@ -960,6 +960,37 @@ fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
     }
 }
 
+/// MobMachine's stale respawn abandonment arm (0.9.11) is declared beside
+/// its siblings in the catalog and emitted on the late tail, after every
+/// variant 0.9.10 published and after the arms 0.9.11 appended before it,
+/// so no `TransitionId` discriminant moves:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, the variant 0.9.10 published
+/// last, keeps index 1902.
+#[test]
+fn mob_stale_abandonment_arm_follows_every_published_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    let stale = index("ObserveRespawnTopologyAbandonedStaleEndedSuccessor");
+    for earlier in [
+        "UnlistIdentityEntryMobNotRunningDestroyed",
+        "AdoptLegacyIdentityEntryAdoptedUnlisted",
+        "AdoptLegacyIdentityEntryRetireUnadopted",
+        "SealDeclaredRosterRefused",
+    ] {
+        assert!(
+            stale > index(earlier),
+            "the stale abandonment arm must follow `{earlier}`"
+        );
+    }
+}
+
 #[test]
 fn generated_meerkat_operation_status_is_closed_enum() {
     let rendered = render_machine_kernel_module(&meerkat_machine());

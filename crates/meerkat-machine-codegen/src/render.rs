@@ -1176,6 +1176,9 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // The seal refused while an unseated entry it does not list
             // remains, which the one-entry unlist ends first (0.9.11).
             "SealDeclaredRosterRefused",
+            // A respawn's abandonment replayed after a later life of its
+            // name ended, a no-op (0.9.11).
+            "ObserveRespawnTopologyAbandonedStaleEndedSuccessor",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

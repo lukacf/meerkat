@@ -19452,6 +19452,265 @@ mod tests {
         );
     }
 
+    /// One journal row of the name `alpha`'s life `generation` (fence
+    /// `fence`): its spawn, its retirement start (preserving its topology
+    /// for a respawn or not), its terminal, or its respawn's abandonment.
+    fn alpha_life_row(generation: u64, fence: u64, row: AlphaLifeRow) -> MobEventKind {
+        let alpha = AgentIdentity::from("alpha");
+        let generation = Generation::new(generation);
+        let runtime = AgentRuntimeId::new(alpha.clone(), generation);
+        match row {
+            AlphaLifeRow::Spawned => MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                alpha,
+                generation,
+                FenceToken::new(fence),
+                runtime,
+                ProfileName::from("worker"),
+            )),
+            AlphaLifeRow::RetirementStarted { respawn } => MobEventKind::MemberRetirementStarted {
+                agent_identity: alpha,
+                agent_runtime_id: runtime,
+                generation,
+                role: ProfileName::from("worker"),
+                releasing: None,
+                session_id: None,
+                retiring_peer_endpoint: None,
+                preserve_machine_topology: respawn,
+                rotation: None,
+                cause: None,
+            },
+            AlphaLifeRow::Retired => MobEventKind::MemberRetired {
+                agent_identity: alpha,
+                generation,
+                role: ProfileName::from("worker"),
+                session_archived: true,
+                facts: crate::event::MemberRetiredFacts::default(),
+            },
+            AlphaLifeRow::RespawnAbandoned => MobEventKind::RespawnTopologyAbandoned {
+                agent_identity: alpha,
+                generation,
+                agent_runtime_id: Some(runtime),
+                fence_token: Some(FenceToken::new(fence)),
+            },
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum AlphaLifeRow {
+        Spawned,
+        RetirementStarted { respawn: bool },
+        Retired,
+        RespawnAbandoned,
+    }
+
+    /// A journal as 0.9.10 wrote it for `alpha`, wired to the live `beta`:
+    /// `alpha`'s first life (generation 0, fence 7) is respawned, the
+    /// respawn is abandoned, and then `later` follows (rows of later lives
+    /// of the name). The abandonment's row follows the old member's terminal
+    /// (the old member was archived when the replacement failed), or, with
+    /// `abandoned_while_retiring`, precedes it (the respawn was abandoned
+    /// while the old member was still Retiring, and its retirement then
+    /// finished as an ordinary terminal).
+    fn abandoned_respawn_journal(
+        definition: &MobDefinition,
+        abandoned_while_retiring: bool,
+        later: &[MobEventKind],
+    ) -> Vec<MobEvent> {
+        let mut kinds = vec![
+            alpha_life_row(0, 7, AlphaLifeRow::Spawned),
+            MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                AgentIdentity::from("beta"),
+                Generation::INITIAL,
+                FenceToken::new(9),
+                AgentRuntimeId::new(AgentIdentity::from("beta"), Generation::INITIAL),
+                ProfileName::from("worker"),
+            )),
+            MobEventKind::MembersWired {
+                a: AgentIdentity::from("alpha"),
+                b: AgentIdentity::from("beta"),
+            },
+            alpha_life_row(0, 7, AlphaLifeRow::RetirementStarted { respawn: true }),
+        ];
+        if abandoned_while_retiring {
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::RespawnAbandoned));
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::Retired));
+        } else {
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::Retired));
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::RespawnAbandoned));
+        }
+        kinds.extend_from_slice(later);
+        kinds
+            .into_iter()
+            .zip(1..)
+            .map(|(kind, cursor)| test_event(&definition.id, cursor, kind))
+            .collect()
+    }
+
+    /// The later life (generation 1, fence 8): spawned, then retired by an
+    /// ordinary retirement.
+    fn retired_later_life() -> Vec<MobEventKind> {
+        vec![
+            alpha_life_row(1, 8, AlphaLifeRow::Spawned),
+            alpha_life_row(1, 8, AlphaLifeRow::RetirementStarted { respawn: false }),
+            alpha_life_row(1, 8, AlphaLifeRow::Retired),
+        ]
+    }
+
+    /// What a resume replays from `source`, a journal 0.9.10 wrote, over a
+    /// store holding it, in the resume's order: the recovered-abandonment
+    /// repair (the journal's abandonment is durable, so it writes nothing),
+    /// the generation high-water, the general replay, and the pending
+    /// replay, whose answer is returned with the authority.
+    async fn resume_replay_of_a_written_journal(
+        definition: &MobDefinition,
+        source: &[MobEvent],
+    ) -> (
+        crate::machines::mob_machine::MobMachineAuthority,
+        Result<Vec<RecoveredIdentityEnd>, MobError>,
+    ) {
+        let store = InMemoryMobEventStore::new();
+        let mut events = persist_event_kinds(&store, &definition.id, source).await;
+        ensure_recovered_respawn_topology_abandonments(
+            &store,
+            &definition.id,
+            &mut events,
+            &BTreeSet::new(),
+        )
+        .await
+        .expect("the recovered-abandonment repair");
+        assert_eq!(
+            store.replay_all().await.expect("the journal").len(),
+            source.len(),
+            "the repair writes nothing: the journal's abandonment is durable"
+        );
+        let mut authority = seed_mob_authority();
+        recover_identity_generation_highwaters(&mut authority, &events)
+            .expect("the generation high-water");
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the general replay");
+        let pending = recover_pending_member_retirements(&mut authority, &events);
+        (authority, pending)
+    }
+
+    /// The replayed mob holds nothing of `alpha` but its history at
+    /// `generation`: no member, no respawn hold, no abandonment tombstone,
+    /// and no edge to `beta`, which is still a member.
+    fn assert_alpha_ended_at(
+        authority: &crate::machines::mob_machine::MobMachineAuthority,
+        generation: u64,
+    ) {
+        let alpha = mob_dsl::AgentIdentity::from("alpha");
+        let beta = mob_dsl::AgentIdentity::from("beta");
+        let state = authority.state();
+        assert!(!state.identity_to_runtime.contains_key(&alpha));
+        assert_eq!(
+            state.identity_runtime_generations.get(&alpha),
+            Some(&mob_dsl::Generation(generation))
+        );
+        assert!(!state.pending_respawn_topology.contains(&alpha));
+        assert!(!state.abandoned_respawn_topology.contains_key(&alpha));
+        assert!(
+            !state
+                .wiring_edges
+                .contains(&mob_dsl::WiringEdge::new(alpha, beta.clone())),
+            "alpha's topology was pruned"
+        );
+        assert!(state.identity_to_runtime.contains_key(&beta));
+    }
+
+    /// A respawn abandoned after its old member's archive, the name spawned
+    /// again, and that later life retired, in a journal 0.9.10 wrote: the
+    /// marker names a generation the name has moved past, and the resume's
+    /// pending replay answers it as a no-op. Nothing is ended, and the name
+    /// is left free, its topology pruned.
+    #[tokio::test]
+    async fn a_written_journal_whose_abandoned_respawns_name_later_retired_replays() {
+        let definition = MobDefinition::explicit("abandoned-respawn-later-life-retired");
+        let source = abandoned_respawn_journal(&definition, false, &retired_later_life());
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert!(ends.is_empty(), "the stale marker ends nothing: {ends:?}");
+        assert_alpha_ended_at(&authority, 1);
+    }
+
+    /// The same when the respawn was abandoned while the old member was
+    /// still Retiring, its retirement then finishing as an ordinary terminal.
+    #[tokio::test]
+    async fn a_written_journal_whose_retiring_abandonments_name_later_retired_replays() {
+        let definition = MobDefinition::explicit("retiring-abandonment-later-life-retired");
+        let source = abandoned_respawn_journal(&definition, true, &retired_later_life());
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert!(ends.is_empty(), "the stale marker ends nothing: {ends:?}");
+        assert_alpha_ended_at(&authority, 1);
+    }
+
+    /// The later life was reset to a newer generation before it retired: the
+    /// marker is further behind the name's history, and still a no-op.
+    #[tokio::test]
+    async fn a_written_journal_whose_abandoned_respawns_name_was_reset_and_retired_replays() {
+        let definition = MobDefinition::explicit("abandoned-respawn-later-life-reset");
+        let alpha = AgentIdentity::from("alpha");
+        let later = [
+            alpha_life_row(1, 8, AlphaLifeRow::Spawned),
+            MobEventKind::MemberReset {
+                agent_identity: alpha.clone(),
+                previous_generation: Generation::new(1),
+                new_generation: Generation::new(2),
+                fence_token: FenceToken::new(10),
+                agent_runtime_id: AgentRuntimeId::new(alpha, Generation::new(2)),
+            },
+            alpha_life_row(2, 10, AlphaLifeRow::RetirementStarted { respawn: false }),
+            alpha_life_row(2, 10, AlphaLifeRow::Retired),
+        ];
+        let source = abandoned_respawn_journal(&definition, false, &later);
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert!(ends.is_empty(), "the stale marker ends nothing: {ends:?}");
+        assert_alpha_ended_at(&authority, 2);
+    }
+
+    /// The later life's own respawn was abandoned too, after its archive: two
+    /// markers. The first life's is stale and changes nothing; the later
+    /// life's names the name's last incarnation, so its replay still ends
+    /// the identity, once, and records that generation's tombstone.
+    #[tokio::test]
+    async fn a_written_journal_with_the_later_lifes_own_abandonment_ends_the_identity_once() {
+        let definition = MobDefinition::explicit("abandoned-respawn-twice");
+        let later = [
+            alpha_life_row(1, 8, AlphaLifeRow::Spawned),
+            alpha_life_row(1, 8, AlphaLifeRow::RetirementStarted { respawn: true }),
+            alpha_life_row(1, 8, AlphaLifeRow::Retired),
+            alpha_life_row(1, 8, AlphaLifeRow::RespawnAbandoned),
+        ];
+        let source = abandoned_respawn_journal(&definition, false, &later);
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert_eq!(
+            ends.iter()
+                .map(|end| end.identity.clone())
+                .collect::<Vec<_>>(),
+            vec![AgentIdentity::from("alpha")],
+            "only the later life's abandonment ends the identity"
+        );
+        let alpha = mob_dsl::AgentIdentity::from("alpha");
+        assert_eq!(
+            authority.state().abandoned_respawn_topology.get(&alpha),
+            Some(&mob_dsl::Generation(1))
+        );
+        assert!(!authority.state().identity_to_runtime.contains_key(&alpha));
+    }
+
     #[test]
     fn recovered_respawn_topology_requires_a_durable_successor() {
         fn recover_case(

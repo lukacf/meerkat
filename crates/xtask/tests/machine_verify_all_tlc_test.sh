@@ -777,24 +777,30 @@ fi
 # plus action properties (a member's recorded observation time never
 # decreases; a new incarnation keeps no predecessor's health or failure
 # record; a member runtime destroyed removes only that runtime; the mob is
-# Destroyed only through a destroy it admitted) and two
-# invariants that check why the remaining member arms cannot fire. It
+# Destroyed only through a destroy it admitted) and three
+# invariants: two check why the remaining member arms cannot fire, and one
+# that a resume's replay of a respawn's abandonment of a generation the
+# identity has moved past (a later incarnation ended) is answered by exactly
+# one arm, the stale arm, which answers no other marker. It
 # explores the whole reachable space, with no step bound: its TLC VIEW
 # leaves out the two counters the model never reads
 # (model_step_count, topology_epoch), which it checks first. It runs with
 # TLC coverage and requires every listed arm to fire and a floor of distinct
-# states, requires its six witnesses reached (one recovers an archived
+# states, requires its seven witnesses reached (one recovers an archived
 # identity's next incarnation, one replays a delayed final of an older
-# generation), and refuses eight seeded defects (--mutants): a progress arm
+# generation, one replays a stale abandonment), and refuses ten seeded
+# defects (--mutants): a progress arm
 # without its observation guard, that guard rendered as a plain `<=` between
 # option records, which TLC cannot evaluate, a peer-only retirement-start
 # replay that drops a releasing retirement's session while its ingress
 # detach is pending, the stale-incarnation Retired replay with its old
 # guard, which prunes the Retiring runtime of an identity held for a
 # respawn, a roster recovery that keeps its predecessor's execution health,
-# and a runtime destroy observation that ends the mob, one that leaves its
+# a runtime destroy observation that ends the mob, one that leaves its
 # runtime live, and one that resets the mob's run count (the audit also starts
-# and finishes one mob-level run, so the count is not always zero).
+# and finishes one mob-level run, so the count is not always zero), the
+# stale abandonment arm dropped, and that arm without its
+# later_generation_recorded guard.
 # A second run of the same audit drops the progress observations, adds the
 # mob's completion and destruction (DestroyMob, and the destroy admission,
 # after which a member runtime destroyed still removes only that runtime),

@@ -18213,6 +18213,7 @@ pub enum TransitionId {
     RestoreOwnedIdentityEdgeMobNotRunningDestroyed,
     PurgeIdentityRowsNothingToPurge,
     SealDeclaredRosterRefused,
+    ObserveRespawnTopologyAbandonedStaleEndedSuccessor,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

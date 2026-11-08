@@ -493,8 +493,10 @@ pub struct CopilotModel {
     pub capabilities: CopilotModelCapabilities,
     #[serde(default)]
     pub policy: Option<CopilotModelPolicy>,
+    /// The endpoints the entry lists for the model; `None` when the entry
+    /// states no list.
     #[serde(default)]
-    pub supported_endpoints: Vec<CopilotEndpoint>,
+    pub supported_endpoints: Option<Vec<CopilotEndpoint>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,22 +507,53 @@ pub struct CopilotModelOffering {
     pub model_picker_enabled: Option<bool>,
     pub capabilities: CopilotModelCapabilities,
     pub policy: Option<CopilotModelPolicy>,
-    pub supported_endpoints: Vec<CopilotEndpoint>,
+    /// The endpoints the account lists for the model; `None` when its entry
+    /// states no list.
+    pub supported_endpoints: Option<Vec<CopilotEndpoint>>,
 }
 
 impl CopilotModelOffering {
+    /// The endpoints the account lists for the model that Meerkat speaks.
     pub fn endpoints(&self) -> impl Iterator<Item = CopilotEndpoint> + '_ {
         self.supported_endpoints
             .iter()
+            .flatten()
             .copied()
             .filter(|endpoint| *endpoint != CopilotEndpoint::Unknown)
     }
 
+    /// The endpoints the account serves this model on: the ones it lists that
+    /// Meerkat speaks, or Chat Completions when its entry states no list (the
+    /// endpoint the OpenAI and Gemini families share). A model whose list is
+    /// empty, or names only endpoints Meerkat does not speak, is served on
+    /// none.
+    fn served_endpoints(&self) -> impl Iterator<Item = CopilotEndpoint> + '_ {
+        let default = self
+            .supported_endpoints
+            .is_none()
+            .then_some(CopilotEndpoint::ChatCompletions);
+        self.endpoints().chain(default)
+    }
+
+    /// Whether the account lists the model with an empty endpoint list: its
+    /// catalog states that the model has no endpoints.
+    pub(crate) fn lists_no_endpoints(&self) -> bool {
+        self.supported_endpoints.as_ref().is_some_and(Vec::is_empty)
+    }
+
+    /// The endpoint `provider`'s family speaks to this model on the account:
+    /// the OpenAI family takes Responses first, then Chat Completions; the
+    /// Gemini family Chat Completions; the Anthropic family Messages. A model
+    /// whose entry states no endpoint list is served on Chat Completions.
+    /// `None` when the account's policy for the model is not `enabled`.
     pub fn route_for(&self, provider: Provider) -> Option<CopilotEndpoint> {
         if !self.enabled() {
             return None;
         }
-        let supports = |candidate| self.endpoints().any(|endpoint| endpoint == candidate);
+        let supports = |candidate| {
+            self.served_endpoints()
+                .any(|endpoint| endpoint == candidate)
+        };
         match provider {
             Provider::OpenAI => [CopilotEndpoint::Responses, CopilotEndpoint::ChatCompletions]
                 .into_iter()
@@ -537,9 +570,17 @@ impl CopilotModelOffering {
     /// Whether the account's policy leaves this model enabled. A model whose
     /// policy states nothing is enabled.
     pub fn enabled(&self) -> bool {
+        self.refusing_policy_state().is_none()
+    }
+
+    /// The account's policy state for this model when it is not `enabled`,
+    /// as the account states it.
+    pub(crate) fn refusing_policy_state(&self) -> Option<&str> {
         self.policy
             .as_ref()
-            .is_none_or(|policy| policy.state == CopilotModelPolicyState::Enabled)
+            .map(|policy| &policy.state)
+            .filter(|state| **state != CopilotModelPolicyState::Enabled)
+            .map(CopilotModelPolicyState::as_str)
     }
 
     /// The provider family whose protocol serves this model on the account,
@@ -549,13 +590,18 @@ impl CopilotModelOffering {
     /// is the Anthropic family, which speaks Messages; otherwise a model
     /// offered on the Responses or the Chat Completions endpoint is the
     /// OpenAI family, whose route takes Responses first
-    /// ([`Self::route_for`]). `None` when the account's policy disables the
-    /// model or it advertises no endpoint Meerkat speaks.
+    /// ([`Self::route_for`]). A model whose entry states no endpoint list is
+    /// served on Chat Completions, so it is the OpenAI family. `None` when
+    /// the account's policy for the model is not `enabled`, or its list is
+    /// empty or names only endpoints Meerkat does not speak.
     pub fn protocol_provider(&self) -> Option<Provider> {
         if !self.enabled() {
             return None;
         }
-        let supports = |candidate| self.endpoints().any(|endpoint| endpoint == candidate);
+        let supports = |candidate| {
+            self.served_endpoints()
+                .any(|endpoint| endpoint == candidate)
+        };
         if supports(CopilotEndpoint::Messages) {
             Some(Provider::Anthropic)
         } else if supports(CopilotEndpoint::Responses) || supports(CopilotEndpoint::ChatCompletions)
@@ -631,13 +677,49 @@ pub struct CopilotModelSupports {
     pub min_thinking_budget: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The state of the account's policy for a model, as `/models` states it.
+/// Only `enabled` lets the account's routes serve the model; any other state
+/// is kept as stated, so a refusal can name it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum CopilotModelPolicyState {
     Enabled,
     Disabled,
-    #[serde(other)]
-    Unknown,
+    /// Any other state, as stated (for example `unconfigured`).
+    Other(String),
+}
+
+impl CopilotModelPolicyState {
+    /// The state as `/models` states it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Other(state) => state,
+        }
+    }
+}
+
+impl From<String> for CopilotModelPolicyState {
+    fn from(state: String) -> Self {
+        match state.as_str() {
+            "enabled" => Self::Enabled,
+            "disabled" => Self::Disabled,
+            _ => Self::Other(state),
+        }
+    }
+}
+
+impl From<CopilotModelPolicyState> for String {
+    fn from(state: CopilotModelPolicyState) -> Self {
+        match state {
+            CopilotModelPolicyState::Other(state) => state,
+            known @ (CopilotModelPolicyState::Enabled | CopilotModelPolicyState::Disabled) => {
+                known.as_str().to_string()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -706,27 +788,41 @@ impl CopilotModelSnapshot {
     /// does not define: the model's registry definition when the account
     /// offers it on a protocol Meerkat speaks
     /// ([`CopilotModelOffering::registry_definition`]). A model the list does
-    /// not name, or whose policy disables it, is refused as not offered,
-    /// naming the ids the account offers; a model offered on no endpoint
-    /// Meerkat speaks is refused as such. `credential` names the account in
-    /// a refusal.
+    /// not name is refused as not offered, naming the ids the account
+    /// offers; a model whose policy state is not `enabled` is refused naming
+    /// the state; a model listed with an empty endpoint list is refused as
+    /// having none; a model offered only on endpoints Meerkat does not speak
+    /// is refused as such. `credential` names the account in a refusal.
     pub fn account_model(
         &self,
         credential: &AuthCredentialIdentity,
         model: &str,
     ) -> AccountModelLookup {
-        match self.model(model) {
-            Some(offering) if offering.enabled() => match offering.registry_definition() {
-                Some(definition) => AccountModelLookup::Offered(definition),
-                None => AccountModelLookup::Refused(AccountModelRefusal::UnsupportedEndpoints {
-                    credential: credential.clone(),
-                    model: model.to_string(),
-                }),
-            },
-            Some(_) | None => AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+        let Some(offering) = self.model(model) else {
+            return AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
                 credential: credential.clone(),
                 model: model.to_string(),
                 available: self.offered_model_ids().map(str::to_string).collect(),
+            });
+        };
+        if let Some(state) = offering.refusing_policy_state() {
+            return AccountModelLookup::Refused(AccountModelRefusal::PolicyNotEnabled {
+                credential: credential.clone(),
+                model: model.to_string(),
+                state: state.to_string(),
+            });
+        }
+        if offering.lists_no_endpoints() {
+            return AccountModelLookup::Refused(AccountModelRefusal::NoEndpoints {
+                credential: credential.clone(),
+                model: model.to_string(),
+            });
+        }
+        match offering.registry_definition() {
+            Some(definition) => AccountModelLookup::Offered(definition),
+            None => AccountModelLookup::Refused(AccountModelRefusal::UnsupportedEndpoints {
+                credential: credential.clone(),
+                model: model.to_string(),
             }),
         }
     }
@@ -775,7 +871,10 @@ mod tests {
             model_picker_enabled: Some(true),
             capabilities: CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::ChatCompletions, CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![
+                CopilotEndpoint::ChatCompletions,
+                CopilotEndpoint::Responses,
+            ]),
         };
         let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
         let model = snapshot.model("gpt-5").expect("discovered model");
@@ -800,7 +899,10 @@ mod tests {
             model_picker_enabled: Some(true),
             capabilities: CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Messages, CopilotEndpoint::ChatCompletions],
+            supported_endpoints: Some(vec![
+                CopilotEndpoint::Messages,
+                CopilotEndpoint::ChatCompletions,
+            ]),
         };
         let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
         let model = snapshot.model("claude").expect("discovered model");
@@ -834,7 +936,7 @@ mod tests {
             policy: Some(CopilotModelPolicy {
                 state: CopilotModelPolicyState::Disabled,
             }),
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         };
         let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
         assert_eq!(
@@ -862,7 +964,7 @@ mod tests {
             model_picker_enabled: None,
             capabilities: CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         };
 
         assert!(matches!(
@@ -1048,7 +1150,7 @@ mod tests {
             model_picker_enabled: Some(true),
             capabilities: CopilotModelCapabilities::default(),
             policy: policy.map(|state| CopilotModelPolicy { state }),
-            supported_endpoints: endpoints,
+            supported_endpoints: Some(endpoints),
         }
     }
 
@@ -1064,8 +1166,10 @@ mod tests {
     /// define is the protocol of the endpoints the account advertises for
     /// it: the Messages endpoint is the Anthropic family, the Responses and
     /// Chat Completions endpoints the OpenAI family. The vendor never
-    /// decides it, and a model the policy disables or that advertises no
-    /// endpoint Meerkat speaks has none.
+    /// decides it, and a model the policy disables, or whose list is empty or
+    /// names only endpoints Meerkat does not speak, has none (a model whose
+    /// entry states no list at all is served on Chat Completions; see
+    /// `a_model_without_supported_endpoints_is_served_on_chat_completions`).
     #[test]
     fn a_discovered_model_protocol_comes_from_its_endpoints_not_its_vendor() {
         use super::CopilotEndpoint::{ChatCompletions, Messages, Responses, Unknown};
@@ -1192,9 +1296,9 @@ mod tests {
     }
 
     /// The account's model list defines a model the registry does not, and
-    /// refuses one it cannot serve, typed: a model it does not list or its
-    /// policy disables (naming the ids it offers), and a model it offers on
-    /// no endpoint Meerkat speaks.
+    /// refuses one it cannot serve, typed: a model it does not list (naming
+    /// the ids it offers), a model its policy disables (naming the state),
+    /// and a model it offers on no endpoint Meerkat speaks.
     #[test]
     fn an_account_model_lookup_refuses_unknown_disabled_and_unsupported_models() {
         use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
@@ -1224,17 +1328,22 @@ mod tests {
             snapshot.account_model(&credential, "account-model-1"),
             AccountModelLookup::Offered(definition) if definition.provider == Provider::OpenAI
         ));
-        for model in ["account-model-2", "absent-model"] {
-            assert_eq!(
-                snapshot.account_model(&credential, model),
-                AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
-                    credential: credential.clone(),
-                    model: model.to_string(),
-                    available: vec!["account-model-1".to_string()],
-                }),
-                "{model}"
-            );
-        }
+        assert_eq!(
+            snapshot.account_model(&credential, "absent-model"),
+            AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+                credential: credential.clone(),
+                model: "absent-model".to_string(),
+                available: vec!["account-model-1".to_string()],
+            })
+        );
+        assert_eq!(
+            snapshot.account_model(&credential, "account-model-2"),
+            AccountModelLookup::Refused(AccountModelRefusal::PolicyNotEnabled {
+                credential: credential.clone(),
+                model: "account-model-2".to_string(),
+                state: "disabled".to_string(),
+            })
+        );
         assert_eq!(
             snapshot.account_model(&credential, "account-model-3"),
             AccountModelLookup::Refused(AccountModelRefusal::UnsupportedEndpoints {
@@ -1242,5 +1351,86 @@ mod tests {
                 model: "account-model-3".to_string(),
             })
         );
+    }
+
+    /// A model whose entry states no endpoint list is served on Chat
+    /// Completions by the OpenAI and Gemini families, the endpoint both
+    /// speak; the Anthropic family needs Messages listed. A model that lists
+    /// only endpoints Meerkat does not speak gets no default (an empty list:
+    /// `an_explicitly_empty_endpoint_list_is_refused`).
+    #[test]
+    fn a_model_without_supported_endpoints_is_served_on_chat_completions() {
+        let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+            "data": [
+                {"id": "no-endpoints"},
+                {"id": "unspoken-endpoints", "supported_endpoints": ["/v1/embeddings"]}
+            ]
+        }))
+        .expect("model list");
+        let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("unique model ids");
+        let absent = snapshot.model("no-endpoints").expect("listed model");
+        assert_eq!(
+            absent.route_for(Provider::OpenAI),
+            Some(CopilotEndpoint::ChatCompletions)
+        );
+        assert_eq!(
+            absent.route_for(Provider::Gemini),
+            Some(CopilotEndpoint::ChatCompletions)
+        );
+        assert_eq!(absent.route_for(Provider::Anthropic), None);
+        assert_eq!(absent.protocol_provider(), Some(Provider::OpenAI));
+        let unspoken = snapshot.model("unspoken-endpoints").expect("listed model");
+        assert_eq!(unspoken.route_for(Provider::OpenAI), None);
+        assert_eq!(unspoken.protocol_provider(), None);
+    }
+
+    /// A policy state other than `enabled` keeps its value: the account's
+    /// model list refuses the model naming the state (`disabled`, or one
+    /// Meerkat does not know such as `unconfigured`), and the state
+    /// round-trips as the account stated it.
+    #[test]
+    fn a_policy_state_other_than_enabled_is_refused_by_name() {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+        let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+            "data": [
+                {"id": "enabled-model", "policy": {"state": "enabled"}, "supported_endpoints": ["/responses"]},
+                {"id": "disabled-model", "policy": {"state": "disabled"}, "supported_endpoints": ["/responses"]},
+                {"id": "unconfigured-model", "policy": {"state": "unconfigured"}, "supported_endpoints": ["/responses"]}
+            ]
+        }))
+        .expect("model list");
+        let states: Vec<_> = listed
+            .data
+            .iter()
+            .map(|model| model.policy.as_ref().map(|policy| policy.state.as_str()))
+            .collect();
+        assert_eq!(
+            states,
+            [Some("enabled"), Some("disabled"), Some("unconfigured")]
+        );
+        assert_eq!(
+            serde_json::to_value(&listed.data[2].policy).expect("serializes"),
+            serde_json::json!({"state": "unconfigured"})
+        );
+        let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("unique model ids");
+        let credential = github_copilot_credential();
+        assert!(matches!(
+            snapshot.account_model(&credential, "enabled-model"),
+            AccountModelLookup::Offered(_)
+        ));
+        for (model, state) in [
+            ("disabled-model", "disabled"),
+            ("unconfigured-model", "unconfigured"),
+        ] {
+            assert_eq!(
+                snapshot.account_model(&credential, model),
+                AccountModelLookup::Refused(AccountModelRefusal::PolicyNotEnabled {
+                    credential: credential.clone(),
+                    model: model.to_string(),
+                    state: state.to_string(),
+                }),
+                "{model}"
+            );
+        }
     }
 }

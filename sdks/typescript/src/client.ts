@@ -419,6 +419,7 @@ import {
   type MobHelperOptions,
   type MobKickoffMemberSnapshot,
   type MobMemberCustodyDeferral,
+  type MobMemberPreviewUnavailableUnknown,
   type MobKickoffWaitOptions,
   type MobMemberSnapshot,
   type MobPeerConnectivity,
@@ -6653,29 +6654,35 @@ export class MeerkatClient {
 
   /**
    * Parse the typed reason a member-status read carries no observed preview.
-   * Absent (or `null`) means `output_preview`/`tokens_used` are observations;
-   * a value outside the closed vocabulary fails closed.
+   * Absent (or `null`) means `output_preview`/`tokens_used` are observations.
+   * The field is advisory and its vocabulary may grow: a reason this SDK
+   * does not know reads as `{ unknown: <value> }`, so a newer server never
+   * fails the read. A value that is not a string is malformed and fails
+   * closed.
    */
   private static parseWireMemberPreviewUnavailable(
     raw: unknown,
     context: string,
-  ): WireMemberPreviewUnavailable | undefined {
+  ): WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | undefined {
     if (raw == null) {
       return undefined;
+    }
+    if (typeof raw !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: preview_unavailable must be a string`,
+      );
     }
     const values: readonly WireMemberPreviewUnavailable[] = [
       "observation_deadline",
       "read_failed",
       "session_absent",
       "not_observed_while_retiring",
+      "store_refused",
     ];
-    if (typeof raw === "string" && values.includes(raw as WireMemberPreviewUnavailable)) {
-      return raw as WireMemberPreviewUnavailable;
-    }
-    throw new MeerkatError(
-      "INVALID_RESPONSE",
-      `${context}: preview_unavailable must be a valid preview-unavailable reason`,
-    );
+    return values.includes(raw as WireMemberPreviewUnavailable)
+      ? (raw as WireMemberPreviewUnavailable)
+      : { unknown: raw };
   }
 
   /**

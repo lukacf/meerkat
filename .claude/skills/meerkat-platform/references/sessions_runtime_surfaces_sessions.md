@@ -414,8 +414,37 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   cancelled and fails the run, which is closed as interrupted with its
   committed rounds kept; retire, destroy, reset and unregister abandon
   them; a graceful unregister that keeps queued work leaves the run to resume
-  at the next start, unless a bound input is older than the stop's max age
-  by then.
+  at the next start, unless the stop's max age has passed since the stop by
+  then.
+- Settling a kept run without a model request (0.9.11, a host's Recover
+  flow): hold the member with `HostRunStartHoldReason::HostRecovery`
+  (`MobBuilder::hold_restored_member_run_starts`, before the start; no mob or
+  Meta path stages or releases it, and a retire or destroy of the member
+  drops it), wake it under the hold (`MobHandle::ensure_member_live`), call
+  `MobHandle::settle_member_retained_run` (runtime:
+  `MeerkatMachine::settle_retained_run`), then release the hold on every
+  answer that leaves no open run. `RetainedRunSettlement::Settled { run_id,
+  inputs }` once the settlement committed (never resumed; the run's inputs
+  hold their committed terminals: cancelled, closed as interrupted, when the
+  settle ended it, or a stop's, reset's or retire's reason when one ended it
+  first); `NotRetained` when nothing is kept,
+  which is also the answer to a retry after the settle;
+  `Busy { current_run_id: Some(_) }` when a run is current (it is never
+  stopped); `Busy { current_run_id: None }` when the registration cannot
+  settle now: keep the hold and settle again. A settlement that did not
+  commit, or that left the run's tail standing, is never `Settled`:
+  `MobError::MemberReloadRequired` when its write failed (reload, settle
+  again) or its tail repair failed (reload; the member then keeps no run),
+  `MobError::MemberSessionNotLive` when the session leaves the process
+  (another writer took its store fence, or an unregister ended the run
+  first: its inputs then stopped when it keeps queued work, a mob
+  Shutdown's default, and cancelled when it stops). A member not live
+  in this process is refused `MobError::MemberSessionNotLive` and never
+  woken. `MeerkatMachine::session_work_state` reads cold whether one session
+  holds the work a start wakes a member for, without loading or registering
+  it: `Registered`, `Idle`,
+  `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })` or
+  `Unobserved(cause)` (never idle).
 - Not resumed, closed as interrupted with content kept: a bound input already
   settled, a retired runtime, or a run with no bound inputs (direct and
   machine-service turns). A run settled without resuming (a stop first, a
@@ -450,9 +479,10 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   with per-round commits in flight like a crash: the turn stops at once
   (work since the last round commit is redone), its inputs stay bound with
   waiters answered `requeued_across_stop`, and the run continues at the next
-  open, before the kept queued prompts; if a bound input is older than
-  `max_age` (from admission; unregister: no default, 1 ms to 24 h; mob:
-  15 min default) at that start, the inputs end `requeue_expired` instead
+  open, before the kept queued prompts; if more than `max_age` (counted
+  from the stop, not from admission; unregister: no default, 1 ms to 24 h;
+  mob: 15 min default) has passed at that start, the inputs end
+  `requeue_expired` instead
   and the run is closed as interrupted, its committed rounds kept. No
   Requeue, an explicit stop/cancel, retire, destroy, reset, a requeue stop
   that meets a steer being written into the turn, or a session without
@@ -506,8 +536,11 @@ settled as interrupted and not replayed, and the transcript gets a
 `tool_process_recovery` notice with a `tool_process_interrupted` block (the
 tool's effects may be partial or complete). Since 0.9.5 a run that can resume
 from a committed round (above) resumes instead: the call whose process may
-have run gets an `outcome_uncertain` result rather than running again, and the
-notice is still added. Custody knows whether the tool
+have run gets an `outcome_uncertain` result rather than running again. For a
+foreground shell call that result is the record: no `tool_process_interrupted`
+block is added for it, whether the run resumes or is settled without resuming
+(closed as interrupted). A background shell job, a monitor or a command hook
+keeps its notice, since its process outlives the call that started it. Custody knows whether the tool
 process started: a spawn gate holds the command until the host has durably
 recorded it, and if the host dies first nothing runs. When custody cannot be
 proven,

@@ -13,7 +13,7 @@ import pytest
 
 from launchkit.templates_v2.console_auth import ConsoleFront
 from launchkit.templates_v2.console_connect import ConsoleConnect
-from test_console_auth import connect_view, finish_stream_tasks, login
+from test_console_auth import connect_view, finish_stream_tasks, login, named
 
 
 SERVICE_HOST_PEER = r'''
@@ -94,7 +94,8 @@ async def startup_binding(client):
 
 async def test_service_private_prompt_is_answerable_on_original_start_without_session(tmp_path):
     factory, children, traces = service_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    # Answering a setup prompt needs a person: a named account.
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as client:
@@ -142,7 +143,7 @@ async def test_service_private_prompt_is_answerable_on_original_start_without_se
 
 async def test_service_startup_prompt_is_private_login_owned_and_rejects_browser_authority(tmp_path):
     factory, children, traces = service_factory(tmp_path)
-    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory)
+    front = ConsoleFront(tmp_path, 8855, "reader", "local-password-123", connect_factory=factory, **named())
     app, tasks = front.application("http://127.0.0.1:61347"), []
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=front.origin) as first, \

@@ -21,6 +21,7 @@ test_application_update_startup.py
 test_candidate_deployment_updates.py
 test_connect_native_operations.py
 test_console_binding.py
+test_console_oidc.py
 test_default_native_console_login.py
 test_deployment_application_bootstrap.py
 test_deployment_application_preparation.py

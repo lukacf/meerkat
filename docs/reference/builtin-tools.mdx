@@ -627,6 +627,9 @@ tool arguments. Without manage scope over the mob, the forker can still:
   `read_failed` say to check again later and that only `status` and
   `progress.run_state` are current; `session_absent` says the member has no
   readable session, so checking again will not bring the preview back;
+  `store_refused` says the store refuses to read the member's session until
+  its realm is reopened, so checking again will not bring the preview back
+  before then, and that `status` and `progress.run_state` are current;
   `not_observed_while_retiring` says the member is retiring and its session
   was not read;
 - retire any of its descendants with `mob_retire_member`;

@@ -17,14 +17,34 @@ function sendObservations(fixture) {
   return fixture.observations.filter(item => item.method === "POST" &&
     (item.path.endsWith("/send") || item.request.includes('"method":"meta/console/send"')));
 }
+/** A send's own envelope, as the gateway's send reads it: the gateway takes
+ * the console's `expected_caller_scope` (whom it sends for) out first. */
 function wireEnvelope(observation) {
+  const { expected_caller_scope: _caller, ...envelope } = wireBody(observation);
+  return envelope;
+}
+/** The caller a send named (`expected_caller_scope`). */
+function wireCaller(observation) {
+  return wireBody(observation).expected_caller_scope;
+}
+function wireBody(observation) {
   const body = JSON.parse(observation.request);
   return body.method === "meta/console/send" ? body.params : body;
 }
-const namespace = fixture => `${fixture.baseUrl}/acceptance-realm/operator-a`;
-const queueKey = (fixture, storageNamespace = namespace(fixture)) => `meta-send-attempts:v1:${encodeURIComponent(storageNamespace)}:${encodeURIComponent(identity)}`;
-async function savedAttempts(page, fixture, storageNamespace = namespace(fixture)) {
-  return page.evaluate(key => JSON.parse(localStorage.getItem(key) || '{"attempts":[]}').attempts, queueKey(fixture, storageNamespace));
+const hostNamespace = fixture => `${fixture.baseUrl}/acceptance-realm/operator-a`;
+/** The scoped stock host's storage namespace: the host's namespace combined
+ * with the signed-in user's storage scope, as the console keeps it. */
+async function namespace(fixture) {
+  const response = await fetch(`${fixture.baseUrl}/console/experience`);
+  assert.equal(response.status, 200);
+  const experience = await response.json();
+  assert(typeof experience.storage_scope === "string" && experience.storage_scope.trim(), "the console names a per-user storage scope");
+  return JSON.stringify([hostNamespace(fixture), experience.storage_scope]);
+}
+const queueKey = storageNamespace => `meta-send-attempts:v1:${encodeURIComponent(storageNamespace)}:${encodeURIComponent(identity)}`;
+async function savedAttempts(page, fixture, storageNamespace) {
+  const key = queueKey(storageNamespace ?? await namespace(fixture));
+  return page.evaluate(key => JSON.parse(localStorage.getItem(key) || '{"attempts":[]}').attempts, key);
 }
 async function draftDocuments(page) {
   return page.evaluate(() => Object.keys(sessionStorage).filter(key => key.startsWith("meta-composer-draft:v2:"))
@@ -249,7 +269,7 @@ async function quotedContext(host) {
     const record = JSON.parse(envelope.content[1].text.split("\n")[2]);
     assert.equal(record.version, 1); assert.equal(record.quote, quote); assert.equal(record.messageId, selected.messageId);
     assert.equal(record.sourceIdentity, identity);
-    assert.equal(record.sourceScope, host === "stock" ? namespace(fixture) : "fixture-principal-a");
+    assert.equal(record.sourceScope, host === "stock" ? await namespace(fixture) : "fixture-principal-a");
     assert(record.id && record.label);
     if (storedContext) assert.deepEqual(record, storedContext, "send freezes the exact stored context");
     if (record.sourceRange) assert.equal(selected.sourceText.slice(record.sourceRange.start, record.sourceRange.end), quote);
@@ -328,7 +348,7 @@ async function editedQuotedContext(host) {
 async function lostAcknowledgement(withQuote = false, { host = "stock" } = {}) {
   const name = `${host === "embedded" ? "embedded" : "scoped"}-${withQuote ? "quoted-" : ""}lost-ack`;
   return inBrowser(`real-${name}`, async ({ fixture, page, monitor }) => {
-    let storageNamespace = namespace(fixture);
+    let storageNamespace = host === "embedded" ? null : await namespace(fixture);
     const assetResponses = [];
     if (host === "embedded") {
       const response = await fetch(`${fixture.baseUrl}/console/experience`);
@@ -396,6 +416,7 @@ async function lostAcknowledgement(withQuote = false, { host = "stock" } = {}) {
     assert.equal(saved.text, text);
     const envelope = JSON.parse(saved.envelopeJson);
     assert.deepEqual(wireEnvelope(dropped), envelope, "persisted frozen envelope equals actual outgoing request");
+    assert(typeof wireCaller(dropped) === "string" && wireCaller(dropped).trim(), "the send names the caller the console acts as");
     assert.equal(envelope.idempotency_key, saved.idempotencyKey);
     const content = withQuote ? [{ type: "text", text }, expectedContextBlock(saved.contexts[0])] : text;
     assert.deepEqual(envelope.content, content);
@@ -667,7 +688,7 @@ async function newerDraftDuringEnqueue() {
         resolve();
         return new Promise(release => { window.__releaseAcceptanceQueueLock = release; });
       });
-    }), queueKey(fixture));
+    }), queueKey(await namespace(fixture)));
     await compose(page, oldInstruction);
     assert.equal(await scope.getByTestId(`chat-composer:${identity}`).inputValue(), "", "submitted text clears before persistence completes");
     await addQuote(scope, newQuote);

@@ -13370,7 +13370,7 @@ Ok::<(), RuntimeDriverError>(())
     /// unregister's final transition is staged, `ValidationFailed` as the
     /// teardown-only anchor. `None` for any other registration, and when the
     /// session is not registered here.
-    async fn lifecycle_mutation_refused_by_unregister(
+    pub(super) async fn lifecycle_mutation_refused_by_unregister(
         &self,
         session_id: &SessionId,
     ) -> Option<RuntimeDriverError> {

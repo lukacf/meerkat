@@ -1987,9 +1987,10 @@ pub enum MobError {
         input_id: meerkat_core::InputId,
     },
 
-    /// An input a graceful Shutdown kept queued was older than its requeue
-    /// bound when the mob's next start recovered it, so it ended without
-    /// running. Resubmitting it is now correct.
+    /// A graceful Shutdown kept this input queued, and more than its requeue
+    /// bound had passed since that Shutdown when the mob's next start
+    /// recovered it, so it ended without running. Resubmitting it is now
+    /// correct.
     #[error(
         "input {input_id} in session {session_id} was requeued across a stop but expired before it ran; resubmit it"
     )]

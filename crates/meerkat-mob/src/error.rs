@@ -2104,6 +2104,27 @@ pub enum MobError {
         class: MobQuarantineClass,
         cause: Arc<MobError>,
     },
+
+    /// A build of member `member_id` was refused because it would run
+    /// without the tool dispatch admission its lineage runs under: the member
+    /// is forked from a source whose build runs under one (a `fork_off`
+    /// child, a fork from [`crate::MobHandle::fork_member`] and its siblings,
+    /// a local temporary-council branch, a live-delegation fork, a
+    /// prompt-context fork), or it is such a fork being rebuilt (a wake, a
+    /// restore, a reload, an explicit resume) or respawned, and the host's
+    /// spawn customizer derived no admission for the build. MobMachine
+    /// decides it
+    /// ([`crate::machines::mob_machine::MemberDispatchAdmissionVerdict::Refused`]).
+    /// A refused fork seats nothing, and a refused handle fork forks nothing
+    /// either (a council branch's source is forked for it before it is
+    /// seated, and the council's cleanup removes that fork); a refused
+    /// rebuild leaves the member unbuilt, and a refused respawn retires
+    /// nothing. Have the host's customizer install the admission for the
+    /// member too, as it does for its source.
+    #[error(
+        "member '{member_id}' would run without the tool dispatch admission its lineage runs under: the host's spawn customizer derived none for its build"
+    )]
+    DispatchAdmissionRequired { member_id: AgentIdentity },
 }
 
 /// Why a member's operator authority ceiling was refused
@@ -2952,6 +2973,10 @@ impl MobError {
                 "source_member_id": source_member_id.as_str(),
                 "max_bytes": max_bytes,
                 "required_bytes": required_bytes,
+            })),
+            Self::DispatchAdmissionRequired { member_id } => Some(serde_json::json!({
+                "kind": "dispatch_admission_required",
+                "member_id": member_id.as_str(),
             })),
             // A restore failure that IS a typed resume hold projects the hold
             // under meerkat's own key, so a wire caller classifies the Broken

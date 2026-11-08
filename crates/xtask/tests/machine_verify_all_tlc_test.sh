@@ -1329,6 +1329,35 @@ if run_part audits-e; then
   TLC_WORKERS="${tlc_workers}" "${durable_tail_classification_audit}" --mutants
 fi
 
+# The MobMachine member dispatch admission verdict
+# (ResolveMemberDispatchAdmission*: AskHost, Inherit, Refused, NoneRequired,
+# by the build's observed lineage and the host's answer) has four arms in
+# each phase whose guards must partition the observations, a lineage that
+# runs under a host's tool dispatch admission must never be built without
+# one, and an Unknown lineage (a fork-derived member whose spawn row records
+# none) only once the host derived none: the DSL declares state invariants
+# only and the generated Next
+# is a disjunction, so the ci sweep never checks it. A hand-written audit
+# over the same generated model checks, with ENABLED at the initial state
+# over all 21 observation pairs, that exactly one arm answers each pair with
+# the verdict the shell mirrors. It first checks on the generated model that
+# the arms read no state but phase, and that each arm's copies in the
+# Stopped, Completed and Destroyed phases have its Running guards, so the
+# initial state stands for every state; then requires every Running arm to
+# fire in a one-step run (TLC coverage) and its witness reached. --mutants
+# refuses one seeded defect per verdict arm and two for the Unknown lineage,
+# each by the invariant it targets. It needs no step bound, and runs in under
+# a minute.
+member_dispatch_admission_audit="${workspace_root}/specs/machines/mob_machine/member_dispatch_admission_audit.sh"
+if [[ ! -x "${member_dispatch_admission_audit}" ]]; then
+  echo "error: member dispatch admission audit runner is missing from workspace runfiles: ${member_dispatch_admission_audit}" >&2
+  exit 1
+fi
+if run_part audits-e; then
+  echo "running member dispatch admission TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${member_dispatch_admission_audit}" --mutants
+fi
+
 # The MeerkatMachine durable-tail recovery authorization
 # (AuthorizeDurableTailRecovery*, Idle and Retired) over the drive's
 # store-proven ownership (NotProven, ExclusiveHost, ExclusiveWriter): a

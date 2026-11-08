@@ -88,6 +88,32 @@ them.
   existing variant's discriminant moves. Exhaustive matches must add the
   new variants.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides each member build's tool dispatch admission and
+  records the lineage that runs under one (see Security). `MobMachineInput`
+  (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob::Input` gain `ResolveMemberDispatchAdmission
+  { agent_identity, lineage, host_answer }` and
+  `RecordMemberDispatchAdmissionLineage { agent_identity, agent_runtime_id }`,
+  and `MobMachineInputVariant` (meerkat-machine-schema),
+  `MobMachineCatalogInput` (meerkat-mob) and the kernel `InputKind` gain
+  both names. `MobMachineEffect` and the kernel `Effect` gain
+  `MemberDispatchAdmissionResolved { lineage, host_answer, verdict }`, and
+  the kernel `EffectKind` its name. `MobMachineState` and the kernel `State`
+  gain the field `member_dispatch_admission_lineage` (a map from a member's
+  identity to the runtime id of the incarnation it records), so code that
+  builds the state literally must set it. The kernel
+  `generated::mob::TransitionId` gains
+  `ResolveMemberDispatchAdmission{AskHost,Inherit,Refused,NoneRequired}`
+  in each of the phases `Running`, `Stopped`, `Completed` and `Destroyed`,
+  and `RecordMemberDispatchAdmissionLineageRunning` and
+  `RecordMemberDispatchAdmissionLineageStopped`. The enums
+  `MemberDispatchAdmissionLineage`, `MemberDispatchAdmissionHostAnswer` and
+  `MemberDispatchAdmissionVerdict` are new. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn
   reconfigure, the refusal of an until-changed switch-turn while another
@@ -3065,6 +3091,38 @@ them.
   `mob/stream_open`).
   (#2116, thanks @zond)
 
+- `meerkat-mob`, `meerkat-mob-mcp`: a member created by `fork_off`, by a
+  `council` branch or by another fork (`MobHandle::fork_member` and its
+  siblings, a live delegation), a member a spawn policy seated, and a member
+  rebuilt by a resume or a reload ran without the tool dispatch admission
+  its host installs (`SpawnMemberSpec::tool_dispatch_admission`, which a
+  `SpawnMemberCustomizer` sets): its tool calls reached the host's tools
+  without passing the host's gate. MobMachine now decides each such build's
+  admission. A fork of a member whose build runs under one asks the host's
+  customizer for the child and runs under what it installs, or is refused
+  with the new `MobError::DispatchAdmissionRequired` before the child is
+  seated (a refused `fork_off` or handle fork forks nothing; a refused
+  council branch is refused after the council forked its source for it, and
+  the council's cleanup removes that fork). MobMachine records that the
+  child's incarnation runs under an admission, and the child's spawn row
+  persists the record, so each later build of it (a wake, a restore after a
+  restart, a reload, an explicit resume, a respawn) asks again and is
+  refused when the customizer installs none. A fork child seated by an earlier release, whose
+  spawn row records nothing, is gated by the host's customizer when it is
+  rebuilt: it runs under the admission the customizer installs for it, and
+  as before when it installs none. A `fork_helper` child of such a member,
+  whose spawn asks the customizer as before, is refused the same way when it
+  installs none. A member a spawn policy seats now asks the customizer for
+  its admission alone (`SpawnSource::PolicySpawn`) and runs under what it
+  installs. An ordinary member's reload and explicit resume run under the
+  admission the customizer gives the rebuild. Affects 0.8.42 through 0.9.10.
+  Until you upgrade, do not offer `fork_off` or `council` to members you
+  gate, and do not combine a spawn policy with a customizer that gates.
+  Downgrade: an earlier release ignores the record on spawn rows and
+  rebuilds those fork children without the admission again, and seats
+  policy members without one.
+
+
 ### Upgrade notes
 
 - A host binder of in-process deliveries from governed work binds them
@@ -3314,6 +3372,23 @@ them.
   a store with no fence hands `AdmissionGuard::none()`. The connector-client
   writers enter it through `credential_fence` and
   `with_exclusive_mutation_under`, whose defaults refuse.
+
+- Forks of gated members fail closed. A host that sets
+  `SpawnMemberSpec::tool_dispatch_admission` on its spawn requests itself,
+  with no `SpawnMemberCustomizer`, can no longer fork those members: a fork
+  of a member whose build runs under an admission asks the customizer for
+  the child, and with no customizer the fork is refused with
+  `MobError::DispatchAdmissionRequired`. Install a customizer that sets the
+  admission (it is asked with `SpawnSource::PersistedForkResume` for a
+  fork's child, `SpawnSource::AttachedForkedParticipant` for a council
+  branch) to keep forking them.
+
+- A host without a `SpawnMemberCustomizer` that runs live delegation can
+  no longer fork the delegated worker, its own `fork_off` included: the
+  worker runs under its delegation's gate, so a fork of it needs an
+  admission from the host's customizer, and with none the fork is refused
+  with `MobError::DispatchAdmissionRequired`.
+
 
 ### Known limitations
 

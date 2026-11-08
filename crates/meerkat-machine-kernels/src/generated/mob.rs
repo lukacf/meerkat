@@ -5159,6 +5159,194 @@ impl std::fmt::Display for MemberCustodyRestoreKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberDispatchAdmissionHostAnswer {
+    #[default]
+    #[serde(rename = "NotAsked")]
+    NotAsked,
+    #[serde(rename = "Derived")]
+    Derived,
+    #[serde(rename = "NoneDerived")]
+    NoneDerived,
+}
+impl MemberDispatchAdmissionHostAnswer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotAsked => "NotAsked",
+            Self::Derived => "Derived",
+            Self::NoneDerived => "NoneDerived",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberDispatchAdmissionHostAnswer {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotAsked" => Ok(Self::NotAsked),
+            "Derived" => Ok(Self::Derived),
+            "NoneDerived" => Ok(Self::NoneDerived),
+            other => Err(format!(
+                "invalid MemberDispatchAdmissionHostAnswer value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberDispatchAdmissionHostAnswer {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberDispatchAdmissionHostAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberDispatchAdmissionLineage {
+    #[default]
+    #[serde(rename = "NoneRecorded")]
+    NoneRecorded,
+    #[serde(rename = "Recorded")]
+    Recorded,
+    #[serde(rename = "SourceBuiltGated")]
+    SourceBuiltGated,
+    #[serde(rename = "SourceBuiltUngated")]
+    SourceBuiltUngated,
+    #[serde(rename = "SourceRebuildGated")]
+    SourceRebuildGated,
+    #[serde(rename = "SourceRebuildUngated")]
+    SourceRebuildUngated,
+    #[serde(rename = "Unknown")]
+    Unknown,
+}
+impl MemberDispatchAdmissionLineage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoneRecorded => "NoneRecorded",
+            Self::Recorded => "Recorded",
+            Self::SourceBuiltGated => "SourceBuiltGated",
+            Self::SourceBuiltUngated => "SourceBuiltUngated",
+            Self::SourceRebuildGated => "SourceRebuildGated",
+            Self::SourceRebuildUngated => "SourceRebuildUngated",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberDispatchAdmissionLineage {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoneRecorded" => Ok(Self::NoneRecorded),
+            "Recorded" => Ok(Self::Recorded),
+            "SourceBuiltGated" => Ok(Self::SourceBuiltGated),
+            "SourceBuiltUngated" => Ok(Self::SourceBuiltUngated),
+            "SourceRebuildGated" => Ok(Self::SourceRebuildGated),
+            "SourceRebuildUngated" => Ok(Self::SourceRebuildUngated),
+            "Unknown" => Ok(Self::Unknown),
+            other => Err(format!(
+                "invalid MemberDispatchAdmissionLineage value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberDispatchAdmissionLineage {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberDispatchAdmissionLineage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberDispatchAdmissionVerdict {
+    #[default]
+    #[serde(rename = "AskHost")]
+    AskHost,
+    #[serde(rename = "Inherit")]
+    Inherit,
+    #[serde(rename = "Refused")]
+    Refused,
+    #[serde(rename = "NoneRequired")]
+    NoneRequired,
+}
+impl MemberDispatchAdmissionVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AskHost => "AskHost",
+            Self::Inherit => "Inherit",
+            Self::Refused => "Refused",
+            Self::NoneRequired => "NoneRequired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberDispatchAdmissionVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AskHost" => Ok(Self::AskHost),
+            "Inherit" => Ok(Self::Inherit),
+            "Refused" => Ok(Self::Refused),
+            "NoneRequired" => Ok(Self::NoneRequired),
+            other => Err(format!(
+                "invalid MemberDispatchAdmissionVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberDispatchAdmissionVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberDispatchAdmissionVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberHealthClass {
     #[default]
     #[serde(rename = "Healthy")]
@@ -11044,6 +11232,8 @@ pub struct State {
     pub member_instruction_recorded: std::collections::BTreeMap<AgentIdentity, u64>,
     pub member_instruction_blocked:
         std::collections::BTreeMap<AgentIdentity, MemberInstructionBlock>,
+    pub member_dispatch_admission_lineage:
+        std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -12674,6 +12864,17 @@ pub mod inputs {
         pub edge: WiringEdge,
         pub owner: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberDispatchAdmission {
+        pub agent_identity: AgentIdentity,
+        pub lineage: MemberDispatchAdmissionLineage,
+        pub host_answer: MemberDispatchAdmissionHostAnswer,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberDispatchAdmissionLineage {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12942,6 +13143,8 @@ pub enum Input {
     ImportIdentityRecord(inputs::ImportIdentityRecord),
     AdmitOwnedEdgeRealization(inputs::AdmitOwnedEdgeRealization),
     RestoreOwnedIdentityEdge(inputs::RestoreOwnedIdentityEdge),
+    ResolveMemberDispatchAdmission(inputs::ResolveMemberDispatchAdmission),
+    RecordMemberDispatchAdmissionLineage(inputs::RecordMemberDispatchAdmissionLineage),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -13286,6 +13489,10 @@ impl Input {
             Self::ImportIdentityRecord(_) => InputKind::ImportIdentityRecord,
             Self::AdmitOwnedEdgeRealization(_) => InputKind::AdmitOwnedEdgeRealization,
             Self::RestoreOwnedIdentityEdge(_) => InputKind::RestoreOwnedIdentityEdge,
+            Self::ResolveMemberDispatchAdmission(_) => InputKind::ResolveMemberDispatchAdmission,
+            Self::RecordMemberDispatchAdmissionLineage(_) => {
+                InputKind::RecordMemberDispatchAdmissionLineage
+            }
         }
     }
 }
@@ -13547,6 +13754,8 @@ pub enum InputKind {
     ImportIdentityRecord,
     AdmitOwnedEdgeRealization,
     RestoreOwnedIdentityEdge,
+    ResolveMemberDispatchAdmission,
+    RecordMemberDispatchAdmissionLineage,
 }
 
 pub mod signals {
@@ -15646,6 +15855,12 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeclaredRosterSealRefused {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberDispatchAdmissionResolved {
+        pub lineage: MemberDispatchAdmissionLineage,
+        pub host_answer: MemberDispatchAdmissionHostAnswer,
+        pub verdict: MemberDispatchAdmissionVerdict,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15858,6 +16073,7 @@ pub enum Effect {
     OwnedIdentityEdgeRestored(effects::OwnedIdentityEdgeRestored),
     IdentityEnded(effects::IdentityEnded),
     DeclaredRosterSealRefused(effects::DeclaredRosterSealRefused),
+    MemberDispatchAdmissionResolved(effects::MemberDispatchAdmissionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -16065,6 +16281,7 @@ pub enum EffectKind {
     OwnedIdentityEdgeRestored,
     IdentityEnded,
     DeclaredRosterSealRefused,
+    MemberDispatchAdmissionResolved,
 }
 
 pub mod command_capabilities {
@@ -18214,6 +18431,24 @@ pub enum TransitionId {
     PurgeIdentityRowsNothingToPurge,
     SealDeclaredRosterRefused,
     ObserveRespawnTopologyAbandonedStaleEndedSuccessor,
+    ResolveMemberDispatchAdmissionAskHostRunning,
+    ResolveMemberDispatchAdmissionAskHostStopped,
+    ResolveMemberDispatchAdmissionAskHostCompleted,
+    ResolveMemberDispatchAdmissionAskHostDestroyed,
+    ResolveMemberDispatchAdmissionInheritRunning,
+    ResolveMemberDispatchAdmissionInheritStopped,
+    ResolveMemberDispatchAdmissionInheritCompleted,
+    ResolveMemberDispatchAdmissionInheritDestroyed,
+    ResolveMemberDispatchAdmissionRefusedRunning,
+    ResolveMemberDispatchAdmissionRefusedStopped,
+    ResolveMemberDispatchAdmissionRefusedCompleted,
+    ResolveMemberDispatchAdmissionRefusedDestroyed,
+    ResolveMemberDispatchAdmissionNoneRequiredRunning,
+    ResolveMemberDispatchAdmissionNoneRequiredStopped,
+    ResolveMemberDispatchAdmissionNoneRequiredCompleted,
+    ResolveMemberDispatchAdmissionNoneRequiredDestroyed,
+    RecordMemberDispatchAdmissionLineageRunning,
+    RecordMemberDispatchAdmissionLineageStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18621,5 +18856,6 @@ pub fn initial_state() -> State {
         member_instruction_owed: Default::default(),
         member_instruction_recorded: Default::default(),
         member_instruction_blocked: Default::default(),
+        member_dispatch_admission_lineage: Default::default(),
     }
 }

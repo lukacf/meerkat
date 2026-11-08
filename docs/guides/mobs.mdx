@@ -771,6 +771,28 @@ behavior, not durable configuration: re-supply it from a
 `SpawnMemberCustomizer` after restart. Remote placement rejects it before
 materialization instead of dropping the override.
 
+A host gates a member's tool calls with a per-member
+`SpawnMemberSpec.tool_dispatch_admission` (an `Arc<dyn ToolDispatchAdmission>`),
+usually set by its `SpawnMemberCustomizer`. It is process-local: it is never
+persisted and never copied to a fork. When a member whose build runs under one
+is forked (the agent tools `fork_off` and `council`, `MobHandle::fork_member`
+and its siblings, a live delegation), the customizer is asked for the child
+before the child is seated, and only the `tool_dispatch_admission` of its
+answer is used: the child runs under it, or the fork is refused with
+`MobError::DispatchAdmissionRequired`. A refused `fork_off` or handle fork
+forks nothing; a refused council branch is refused after the council forked
+its source for it, and the council's cleanup removes that fork. A
+`fork_helper` child of such a member is asked as any spawn is, and is refused
+the same way when the customizer installs none. Every later build of such a
+child (a wake, a restore after a restart, a reload, an explicit resume) and a
+respawn successor of it ask again, and are refused when the customizer
+installs none, so the child never runs without an admission. A fork child
+seated before 0.9.11, whose spawn row records nothing, is asked the same way
+each time it is rebuilt and runs under the admission the customizer installs,
+or under none when it installs none. A member a spawn policy seats is asked
+too, for its admission alone (`SpawnSource::PolicySpawn`), and runs under what
+the customizer installs. Before 0.9.11 such members ran with no admission.
+
 A trusted host that decides each member's destination or agent mandate
 installs a `MemberRuntimeRegistrationHook` with
 `MobBuilder::with_member_runtime_registration_hook` (`runtime-adapter`). Since

@@ -899,6 +899,18 @@ macro_rules! mob_catalog_machine_dsl {
             member_instruction_owed: Map<AgentIdentity, u64>,
             member_instruction_recorded: Map<AgentIdentity, u64>,
             member_instruction_blocked: Map<AgentIdentity, Enum<MemberInstructionBlock>>,
+            // The incarnation of each member whose lineage runs under a
+            // host's tool dispatch admission (0.9.11). A seat that requires
+            // the lineage (a fork seat's commit, a respawn successor's, a
+            // rotation's terminal) records its incarnation with
+            // RecordMemberDispatchAdmissionLineage in the same actor command
+            // as its seat commit, and the replay of a spawn row that carries
+            // the lineage records it before the boot plan is sealed. The
+            // member dispatch admission verdict reads it for the identity's
+            // current incarnation only (identity_to_runtime), so the record
+            // of an earlier incarnation never matches; the destroy and the
+            // reset clear it.
+            member_dispatch_admission_lineage: Map<AgentIdentity, AgentRuntimeId>,
         }
 
         init(Running) {
@@ -1236,6 +1248,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_instruction_owed = EmptyMap,
             member_instruction_recorded = EmptyMap,
             member_instruction_blocked = EmptyMap,
+            member_dispatch_admission_lineage = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -2388,6 +2401,30 @@ macro_rules! mob_catalog_machine_dsl {
             // holds (0.9.11), after every record: the custody the next start's
             // recovery of the owner's row reads (RecoverOwnedIdentityEdge).
             RestoreOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity },
+            // The tool dispatch admission of one member build whose lineage
+            // may carry one: a fork seat (`fork_off`, a member fork, a local
+            // council branch, a live-delegation fork), a respawn successor,
+            // and every rebuild of a member seated from such a lineage (wake,
+            // restore, reload, explicit resume). The shell feeds two RAW
+            // observations without composing them: what it observed of the
+            // lineage (the fork source's build in this process, the record
+            // its source's own mob holds, or the host's answer for the
+            // source's next build), and what the host's spawn customizer
+            // derived for this build, when asked. The lineage this machine
+            // records for agent_identity's current incarnation
+            // (member_dispatch_admission_lineage) is read here, never taken
+            // from the shell: the member being rebuilt, or the fork source
+            // or respawned member a seat answers to. MobMachine decides
+            // whether the host must be asked, whether the build inherits a
+            // derived admission, runs without one, or is refused; the shell
+            // mirrors the verdict and never builds a gated lineage's member
+            // without an admission.
+            ResolveMemberDispatchAdmission { agent_identity: AgentIdentity, lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer> },
+            // The current incarnation of agent_identity runs under a host's
+            // tool dispatch admission: a seat that requires the lineage
+            // records it in the same actor command as its seat commit, and
+            // the replay of a spawn row that carries it records it again.
+            RecordMemberDispatchAdmissionLineage { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId },
         }
 
         surface_only [
@@ -3113,6 +3150,11 @@ macro_rules! mob_catalog_machine_dsl {
             // Declared entry it does not list remains, which the one-entry
             // unlist ends first. Nothing changes.
             DeclaredRosterSealRefused,
+            // The verdict on one member build's tool dispatch admission,
+            // echoing the observations it was decided on: ask the host, build
+            // with the admission the host derived, build without one, or
+            // refuse the build.
+            MemberDispatchAdmissionResolved { lineage: Enum<MemberDispatchAdmissionLineage>, host_answer: Enum<MemberDispatchAdmissionHostAnswer>, verdict: Enum<MemberDispatchAdmissionVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -5004,6 +5046,10 @@ macro_rules! mob_catalog_machine_dsl {
         // A refused seal answers the declared apply, which never reaches it:
         // the actor unlists every unseated entry the roster leaves out first.
         disposition DeclaredRosterSealRefused => local seam SurfaceResultAlignment,
+        // A member build's dispatch admission: the verdict answers the build
+        // that asked, which asks the host, builds with or without the
+        // admission, or refuses.
+        disposition MemberDispatchAdmissionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -17589,6 +17635,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_edge_owners = EmptyMap;
                 self.identity_entry_rowless = EmptySet;
                 self.member_definition_wiring_exempt = EmptySet;
+                self.member_dispatch_admission_lineage = EmptyMap;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
                 self.identity_runtime_fence_tokens = EmptyMap;
@@ -18088,6 +18135,9 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_instruction_owed = EmptyMap;
                 self.member_instruction_recorded = EmptyMap;
                 self.member_instruction_blocked = EmptyMap;
+                // No member is seated after the reset, and a record names an
+                // incarnation of a member before it.
+                self.member_dispatch_admission_lineage = EmptyMap;
                 if self.operator_instruction_generation > 0 {
                     self.operator_instruction_generation += 1;
                 }
@@ -25127,6 +25177,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_tombstones = EmptySet;
                 self.identity_entry_unreadable = EmptySet;
                 self.member_definition_wiring_exempt = EmptySet;
+                self.member_dispatch_admission_lineage = EmptyMap;
                 self.identity_runtime_generations = EmptyMap;
                 self.identity_generation_highwater = EmptyMap;
                 self.identity_runtime_fence_tokens = EmptyMap;
@@ -38176,6 +38227,117 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit IdentityRecordImportResolved { agent_identity: agent_identity, verdict: IdentityImportVerdict::MobNotRunning }
         }
+        // --- Member dispatch admission ---
+        //
+        // One member build's tool dispatch admission, from the shell's raw
+        // observations of the build's lineage and of the host's answer, and
+        // the lineage this machine records (member_dispatch_admission_lineage)
+        // for agent_identity's current incarnation: the member being rebuilt,
+        // or the fork source or respawned member a seat answers to. A lineage
+        // carries an admission when this machine records it for that
+        // incarnation (a record of an earlier incarnation never matches), when
+        // the fork source's own mob recorded it (Recorded), when the fork
+        // source's build in this process ran under one, or when the host's
+        // answer for the source's next build carries one. Such a build is
+        // never made without an admission: the host's spawn customizer is
+        // asked first (AskHost), the admission it derives is the build's
+        // (Inherit), and a build it derives none for is refused (Refused). A
+        // lineage that is not known (a fork-derived member this machine holds
+        // no record for, as rows written before spawn rows recorded one
+        // replay) is built as a fresh spawn the customizer answers: the host
+        // is asked first, the build runs under what it derives (Inherit), and
+        // under none when it derives none (NoneRequired), never refused, so a
+        // host without a customizer builds it as before. Any other lineage
+        // needs none (NoneRequired), and the build takes what its request
+        // carries. Classification across all phases: no state changes.
+
+        transition ResolveMemberDispatchAdmissionAskHost {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { agent_identity, lineage, host_answer }
+            guard "lineage_may_carry_admission" {
+                (self.member_dispatch_admission_lineage.contains_key(agent_identity)
+                    && self.member_dispatch_admission_lineage.get_cloned(agent_identity) == self.identity_to_runtime.get_cloned(agent_identity))
+                || lineage == MemberDispatchAdmissionLineage::Recorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+                || lineage == MemberDispatchAdmissionLineage::Unknown
+            }
+            guard "host_not_asked" { host_answer == MemberDispatchAdmissionHostAnswer::NotAsked }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::AskHost }
+        }
+
+        transition ResolveMemberDispatchAdmissionInherit {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { agent_identity, lineage, host_answer }
+            guard "lineage_may_carry_admission" {
+                (self.member_dispatch_admission_lineage.contains_key(agent_identity)
+                    && self.member_dispatch_admission_lineage.get_cloned(agent_identity) == self.identity_to_runtime.get_cloned(agent_identity))
+                || lineage == MemberDispatchAdmissionLineage::Recorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+                || lineage == MemberDispatchAdmissionLineage::Unknown
+            }
+            guard "host_derived_admission" { host_answer == MemberDispatchAdmissionHostAnswer::Derived }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::Inherit }
+        }
+
+        transition ResolveMemberDispatchAdmissionRefused {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { agent_identity, lineage, host_answer }
+            guard "lineage_carries_admission" {
+                (self.member_dispatch_admission_lineage.contains_key(agent_identity)
+                    && self.member_dispatch_admission_lineage.get_cloned(agent_identity) == self.identity_to_runtime.get_cloned(agent_identity))
+                || lineage == MemberDispatchAdmissionLineage::Recorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltGated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildGated
+            }
+            guard "host_derived_none" { host_answer == MemberDispatchAdmissionHostAnswer::NoneDerived }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::Refused }
+        }
+
+        transition ResolveMemberDispatchAdmissionNoneRequired {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveMemberDispatchAdmission { agent_identity, lineage, host_answer }
+            guard "lineage_not_recorded" {
+                self.member_dispatch_admission_lineage.contains_key(agent_identity) == false
+                || self.member_dispatch_admission_lineage.get_cloned(agent_identity) != self.identity_to_runtime.get_cloned(agent_identity)
+            }
+            guard "lineage_needs_none" {
+                lineage == MemberDispatchAdmissionLineage::NoneRecorded
+                || lineage == MemberDispatchAdmissionLineage::SourceBuiltUngated
+                || lineage == MemberDispatchAdmissionLineage::SourceRebuildUngated
+                || (lineage == MemberDispatchAdmissionLineage::Unknown && host_answer == MemberDispatchAdmissionHostAnswer::NoneDerived)
+            }
+            update {}
+            to Running
+            emit MemberDispatchAdmissionResolved { lineage: lineage, host_answer: host_answer, verdict: MemberDispatchAdmissionVerdict::NoneRequired }
+        }
+
+        // The record of a member incarnation whose lineage runs under a
+        // host's tool dispatch admission (member_dispatch_admission_lineage).
+        // A live seat that requires the lineage (a fork seat's commit, a
+        // respawn successor's, a rotation's terminal) applies it in the same
+        // actor command as its seat commit, and the replay of a spawn row that
+        // carries the lineage applies it before the boot plan is sealed. Only
+        // the identity's current incarnation is recorded, and only a local
+        // member's: a placed member never runs under a process-local
+        // admission.
+        transition RecordMemberDispatchAdmissionLineage {
+            per_phase [Running, Stopped]
+            on input RecordMemberDispatchAdmissionLineage { agent_identity, agent_runtime_id }
+            guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "member_local" { self.member_placement.contains_key(agent_identity) == false }
+            update {
+                self.member_dispatch_admission_lineage.insert(agent_identity, agent_runtime_id);
+            }
+            to Running
+        }
     }
         }
 
@@ -42980,6 +43142,76 @@ impl Default for PlacedKickoffObligation {
             objective_id: String::new(),
         }
     }
+}
+
+/// What the shell observed of the lineage one member build answers to
+/// ([`MobMachineInput::ResolveMemberDispatchAdmission`]): the lineage
+/// carries a tool dispatch admission when it is `Recorded`,
+/// `SourceBuiltGated` or `SourceRebuildGated`, and may carry one when it is
+/// `Unknown`. Whatever the observation, a lineage this machine records for
+/// the input's identity at its current incarnation
+/// (`member_dispatch_admission_lineage`) carries one: the shell never
+/// supplies that record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberDispatchAdmissionLineage {
+    /// Nothing observed beyond this machine's own record (a rebuild or a
+    /// respawn of an ordinary member: its build takes the customizer's
+    /// answer to its request unless this machine records its lineage).
+    #[default]
+    NoneRecorded,
+    /// The fork source's own mob records that the source's current
+    /// incarnation runs under an admission (its MobMachine said so), for a
+    /// seat in another mob, such as a temporary council branch.
+    Recorded,
+    /// The fork source's build in this process runs under an admission.
+    SourceBuiltGated,
+    /// The fork source's build in this process runs under none.
+    SourceBuiltUngated,
+    /// The fork source has no build in this process and no lineage record,
+    /// and the host's answer for its next build carries an admission.
+    SourceRebuildGated,
+    /// As `SourceRebuildGated`, and the host's answer carries none.
+    SourceRebuildUngated,
+    /// A rebuild of a fork-derived member this machine holds no lineage
+    /// record for: a spawn row written before spawn rows recorded the
+    /// lineage replays so, so whether its lineage runs under one is not
+    /// known. The host is asked, and the build runs under what it derives,
+    /// an admission or none, as a fresh spawn the customizer answers does.
+    Unknown,
+}
+
+/// What the host's spawn customizer derived for one member build's tool
+/// dispatch admission ([`MobMachineInput::ResolveMemberDispatchAdmission`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberDispatchAdmissionHostAnswer {
+    /// The customizer was not asked.
+    #[default]
+    NotAsked,
+    /// The customizer derived an admission for the build.
+    Derived,
+    /// The customizer was asked and derived none.
+    NoneDerived,
+}
+
+/// The verdict on one member build's tool dispatch admission
+/// ([`MobMachineEffect::MemberDispatchAdmissionResolved`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberDispatchAdmissionVerdict {
+    /// The lineage carries an admission and the host was not asked yet, or
+    /// is `Unknown` and the host was not asked yet: ask the host's spawn
+    /// customizer for the build, then resolve again with its answer.
+    #[default]
+    AskHost,
+    /// The lineage carries an admission, or is `Unknown`, and the host
+    /// derived one: the build runs under it (with any admission its request
+    /// carries).
+    Inherit,
+    /// The lineage carries an admission and the host derived none: the
+    /// build is refused; it never runs without one.
+    Refused,
+    /// The lineage carries none, or is `Unknown` and the host derived none:
+    /// the build takes what its request carries.
+    NoneRequired,
 }
 
 /// The custody guards of an identity entry's origin in this DSL: an origin

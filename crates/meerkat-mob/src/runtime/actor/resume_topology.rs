@@ -3374,6 +3374,7 @@ mod tests {
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
             approval_branch: None,
+            dispatch_admission_lineage: false,
         });
         roster
     }
@@ -3863,6 +3864,7 @@ mod tests {
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
             approval_branch: None,
+            dispatch_admission_lineage: false,
         }
     }
 

@@ -1952,6 +1952,7 @@ mod wiring_incarnation_tests {
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
             approval_branch: None,
+            dispatch_admission_lineage: false,
             direct_member_fence: None,
         }
     }

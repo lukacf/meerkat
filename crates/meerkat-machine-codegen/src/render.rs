@@ -1196,6 +1196,28 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // A respawn's abandonment replayed after a later life of its
             // name ended, a no-op (0.9.11).
             "ObserveRespawnTopologyAbandonedStaleEndedSuccessor",
+            // A member build's tool dispatch admission (0.9.11), in every
+            // phase.
+            "ResolveMemberDispatchAdmissionAskHostRunning",
+            "ResolveMemberDispatchAdmissionAskHostStopped",
+            "ResolveMemberDispatchAdmissionAskHostCompleted",
+            "ResolveMemberDispatchAdmissionAskHostDestroyed",
+            "ResolveMemberDispatchAdmissionInheritRunning",
+            "ResolveMemberDispatchAdmissionInheritStopped",
+            "ResolveMemberDispatchAdmissionInheritCompleted",
+            "ResolveMemberDispatchAdmissionInheritDestroyed",
+            "ResolveMemberDispatchAdmissionRefusedRunning",
+            "ResolveMemberDispatchAdmissionRefusedStopped",
+            "ResolveMemberDispatchAdmissionRefusedCompleted",
+            "ResolveMemberDispatchAdmissionRefusedDestroyed",
+            "ResolveMemberDispatchAdmissionNoneRequiredRunning",
+            "ResolveMemberDispatchAdmissionNoneRequiredStopped",
+            "ResolveMemberDispatchAdmissionNoneRequiredCompleted",
+            "ResolveMemberDispatchAdmissionNoneRequiredDestroyed",
+            // The record of a member incarnation whose lineage runs under a
+            // tool dispatch admission (0.9.11).
+            "RecordMemberDispatchAdmissionLineageRunning",
+            "RecordMemberDispatchAdmissionLineageStopped",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

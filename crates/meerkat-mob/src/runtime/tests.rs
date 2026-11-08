@@ -2189,6 +2189,14 @@ struct MockSessionService {
     create_with_external_tools: RwLock<Vec<bool>>,
     /// Records the exact host curator carried by each create_session request.
     create_with_compaction_curators: RwLock<Vec<Option<Arc<dyn meerkat_core::CompactionCurator>>>>,
+    /// Records the exact final dispatch admission each create_session
+    /// request's build carries, with the session it builds.
+    create_with_dispatch_admissions: RwLock<
+        Vec<(
+            SessionId,
+            Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+        )>,
+    >,
     /// Records the declarative MCP server names per create_session call,
     /// in call order.
     mcp_server_names: RwLock<Vec<(SessionId, Vec<String>)>>,
@@ -2640,6 +2648,7 @@ impl MockSessionService {
             member_build_hook: std::sync::Mutex::new(None),
             create_with_external_tools: RwLock::new(Vec::new()),
             create_with_compaction_curators: RwLock::new(Vec::new()),
+            create_with_dispatch_admissions: RwLock::new(Vec::new()),
             mcp_server_names: RwLock::new(Vec::new()),
             external_tools_by_session: RwLock::new(HashMap::new()),
             comms_behaviors: RwLock::new(HashMap::new()),
@@ -3067,6 +3076,17 @@ impl MockSessionService {
         &self,
     ) -> Vec<Option<Arc<dyn meerkat_core::CompactionCurator>>> {
         self.create_with_compaction_curators.read().await.clone()
+    }
+
+    /// The exact final dispatch admission each build carried, with the
+    /// session it built, in build order.
+    async fn recorded_dispatch_admissions(
+        &self,
+    ) -> Vec<(
+        SessionId,
+        Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    )> {
+        self.create_with_dispatch_admissions.read().await.clone()
     }
 
     async fn recorded_mcp_server_names(&self) -> Vec<(SessionId, Vec<String>)> {
@@ -4930,6 +4950,13 @@ impl MockSessionService {
                 .and_then(|build| build.compaction_curator_override.as_ref())
                 .cloned(),
         );
+        self.create_with_dispatch_admissions.write().await.push((
+            session_id.clone(),
+            req.build
+                .as_ref()
+                .and_then(|build| build.tool_dispatch_admission.as_ref())
+                .cloned(),
+        ));
         if let Some(dispatcher) = external_tools {
             // A session service that builds its agent through the agent
             // factory binds the member's tools to the session's mob operator
@@ -86892,7 +86919,8 @@ async fn test_policy_auto_spawn_ignores_customized_effective_profile_after_autho
 }
 
 #[tokio::test]
-async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn_builds() {
+async fn test_spawn_member_customizer_answers_only_the_admission_of_a_policy_auto_spawn_and_covers_respawn_builds()
+ {
     let customizer = RecordingSpawnCustomizer::new();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
@@ -86972,11 +87000,14 @@ async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn
     );
 
     let calls = customizer.calls();
-    assert!(
+    assert_eq!(
         calls
             .iter()
-            .all(|ctx| ctx.spawn_source != SpawnSource::PolicySpawn),
-        "policy auto-spawn must not invoke the build customizer after generated resolution"
+            .filter(|ctx| ctx.spawn_source == SpawnSource::PolicySpawn)
+            .count(),
+        1,
+        "a policy auto-spawn asks the customizer once, for its tool dispatch admission alone: \
+         nothing else it installs (the tools and the prompt above) is applied"
     );
     assert!(
         calls
@@ -92073,6 +92104,11 @@ fn mob_runtime_parity_field_value(
         | "identity_entry_archived_sessions"
         // Owned edges: the parity probes declare none.
         | "identity_edge_owners" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        // The dispatch admission lineage record: the parity probes seat no
+        // member under a host's tool dispatch admission.
+        "member_dispatch_admission_lineage" => {
+            Some(MobRuntimeParityExprValue::Map(BTreeMap::new()))
+        }
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
@@ -92893,6 +92929,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::DeliveryInteractionConflict { .. } => "delivery_interaction_conflict".to_string(),
         MobError::ForkInstructionRefused { .. } => "fork_instruction_refused".to_string(),
         MobError::ForkContextTooLarge { .. } => "fork_context_too_large".to_string(),
+        MobError::DispatchAdmissionRequired { .. } => "dispatch_admission_required".to_string(),
         MobError::HostFeaturesProbeFailed { .. } => "host_features_probe_failed".to_string(),
         MobError::IncarnationInconsistent { .. } => "incarnation_inconsistent".to_string(),
         MobError::IncarnationDestroyed { .. } => "incarnation_destroyed".to_string(),
@@ -102569,6 +102606,10 @@ mod fence_gap_member;
 /// refusal and shortfall is typed.
 #[cfg(not(target_arch = "wasm32"))]
 mod flow_role_targets;
+/// A fork of a member whose build runs under a host's tool dispatch
+/// admission runs under one the host derives for it, at every build.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod fork_dispatch_admission;
 /// #1497 fork job terminals are committed once and validated on every read.
 mod fork_job_terminal;
 /// Producer bridge Part B: held spawns.

@@ -1873,6 +1873,13 @@ impl MobActor {
             // before its declared edges are read below.
             definition_wiring_exempt: candidate.definition_wiring.is_exempt(),
         };
+        // A member whose lineage runs under a host's tool dispatch admission
+        // keeps it across its rotation. MobMachine records it for the
+        // incarnation this terminal retires (read here, before the step), and
+        // the next incarnation's record is applied on the same prepared
+        // authority as the terminal and committed with it, so no other mob
+        // command can find the next incarnation seated without its record.
+        let lineage_recorded = self.member_dispatch_admission_recorded(identity)?;
         let mut authority = self.dsl_authority.prepare_authority();
         let mut transitions = authority.apply_batch([rotation_input]).map_err(|error| {
             MobError::MobMachineRejected {
@@ -1880,6 +1887,20 @@ impl MobActor {
                 reason: error.to_string(),
             }
         })?;
+        if lineage_recorded {
+            let recorded = authority
+                .apply_batch([
+                    mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage {
+                        agent_identity: dsl_identity.clone(),
+                        agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&next_runtime_id),
+                    },
+                ])
+                .map_err(|error| MobError::MobMachineRejected {
+                    context: "commit_member_rotation_dispatch_admission_lineage",
+                    reason: error.to_string(),
+                })?;
+            transitions.extend(recorded);
+        }
         let committed = transitions.first().ok_or_else(|| {
             MobError::Internal("the rotation's terminal applied no transition".into())
         })?;
@@ -2116,6 +2137,11 @@ impl MobActor {
         spawned.definition_wiring = candidate.definition_wiring;
         // The successor keeps its spawner; a fresh life names none.
         spawned.spawned_by = rotation.spawned_by.clone();
+        // A lineage that runs under a host's tool dispatch admission belongs
+        // to the identity: the row persists the record MobMachine makes for
+        // the next incarnation in this step, and every build of it derives
+        // one through the host's spawn customizer or is refused.
+        spawned.dispatch_admission_lineage = lineage_recorded;
         let spawned = spawned.with_resume_from_role(rotation.resume_from_role.clone());
         // Durable: the rotation keeps the identity's standing, and the next
         // incarnation's row records the identity entry MobMachine holds for

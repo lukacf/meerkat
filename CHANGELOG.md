@@ -212,6 +212,12 @@ them.
   installed none), so a member resume never restores an older recorded
   gate. A member whose own gate or role gate names anything is refused
   placement on another host.
+- `meerkat-machine-kernels`: the kernel `generated::mob::TransitionId`
+  gains `ObserveRespawnTopologyAbandonedStaleEndedSuccessor`, appended after
+  every published variant, so no existing variant's discriminant moves;
+  exhaustive matches must add it. It is the MobMachine arm that answers a
+  resume's replay of a respawn's abandonment once a later member under the
+  same name has ended (see Fixed).
 
 ### Added
 
@@ -536,6 +542,16 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+- `meerkat-mob`: a mob could stop resuming for good after an abandoned
+  respawn. When a member's respawn failed after the old member was archived
+  (the replacement never joined), and the name was later spawned again and
+  that later member retired, every later resume of the mob failed with an
+  internal error ("guard rejected transition"): the resume replayed the old
+  respawn's abandonment against a name that had moved on. Such a mob now
+  resumes, one already stuck this way included, with no repair: the
+  replayed abandonment changes and ends nothing, since the later member
+  ended on its own. Affects 0.8.0 through 0.9.10.
 
 ### Upgrade notes
 

@@ -1728,9 +1728,10 @@ async fn linux_launch_resolves_its_own_executable_through_its_procfs() {
 
 /// The launch's procfs is read-only and shows only the launch: task
 /// entries alone (`subset=pid`, so no `/proc/net`, `/proc/sys` or other
-/// host-wide state), and without IP a network namespace of its own, whose
-/// `/proc/self/net` holds a loopback interface and none of the host's
-/// sockets: not a TCP listener, not an abstract Unix socket.
+/// host-wide state), a cgroup namespace of its own, rooted at the launch's
+/// cgroup, so no host cgroup path, and without IP a network namespace of its
+/// own, whose `/proc/self/net` holds a loopback interface and none of the
+/// host's sockets: not a TCP listener, not an abstract Unix socket.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[cfg_attr(
@@ -1763,6 +1764,8 @@ async fn linux_launch_procfs_is_read_only_and_shows_no_host_state() {
         cat /proc/self/net/tcp > tcp
         cat /proc/self/net/unix > unix
         grep ' /proc ' /proc/self/mountinfo > mountinfo
+        readlink /proc/self/ns/cgroup > cgroup-namespace
+        cat /proc/self/cgroup > cgroup
         if printf x 2>/dev/null > /proc/self/comm; then printf written > comm-written; fi
         printf done
     ",
@@ -1808,6 +1811,17 @@ async fn linux_launch_procfs_is_read_only_and_shows_no_host_state() {
         "{mountinfo}"
     );
     assert!(mountinfo.contains("subset=pid"), "{mountinfo}");
+    let cgroup_namespace = read("cgroup-namespace");
+    assert_ne!(
+        PathBuf::from(cgroup_namespace.trim()),
+        std::fs::read_link("/proc/self/ns/cgroup").unwrap(),
+        "a cgroup namespace of its own"
+    );
+    let cgroup = read("cgroup");
+    assert!(
+        !cgroup.is_empty() && cgroup.lines().all(|line| line.ends_with(":/")),
+        "the launch's cgroup is its cgroup namespace's root: {cgroup}"
+    );
     assert!(
         !fixture.work.join("comm-written").exists(),
         "the launch's procfs is read-only"

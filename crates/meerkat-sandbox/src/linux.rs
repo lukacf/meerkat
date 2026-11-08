@@ -7,9 +7,9 @@
 //!
 //! # Processes of a launch
 //!
-//! Every launch is a pid namespace of its own, with new user, mount and IPC
-//! namespaces, and a new network namespace when the requirement grants no IP
-//! access. The host creates its first process directly in them
+//! Every launch is a pid namespace of its own, with new user, mount, IPC and
+//! cgroup namespaces, and a new network namespace when the requirement grants
+//! no IP access. The host creates its first process directly in them
 //! (`clone(2)`): that process is pid 1 of the namespace and the one direct
 //! child NativeChild owns, the leader of the launch's process group. It runs
 //! the setup below, starts the command as pid 2, and replaces its own image
@@ -40,9 +40,12 @@
 //! while host-wide state such as `/proc/sys` and `/proc/net` is absent, and
 //! only the launch's own processes are listed. `/proc/self/net` shows the
 //! launch's network namespace: its own loopback interface when IP is denied,
-//! the host's shared namespace when IP is granted. The mount is best effort:
-//! a host that refuses it (a masked or overmounted `/proc`, or a kernel
-//! without `subset=pid`) still launches, without `/proc`.
+//! the host's shared namespace when IP is granted. `/proc/self/cgroup` shows
+//! the launch's cgroup namespace, rooted at its own cgroup, never the host's
+//! cgroup path. `/proc/self/mountinfo` still shows the source device,
+//! filesystem and options of each mount bound into the launch. The mount is
+//! best effort: a host that refuses it (a masked or overmounted `/proc`, or a
+//! kernel without `subset=pid`) still launches, without `/proc`.
 //!
 //! # Granted paths
 //!
@@ -127,9 +130,14 @@ const PROBE_STEP_STATUS_BASE: i32 = 64;
 const PROCFS_FLAGS: libc::c_ulong =
     libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
 // The namespaces every launch's first process is created in; a launch
-// without IP access also gets a network namespace of its own.
-const LAUNCH_NAMESPACES: libc::c_int =
-    libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::CLONE_NEWPID;
+// without IP access also gets a network namespace of its own. The cgroup
+// namespace roots the launch's /proc/self/cgroup at its own cgroup, so the
+// launch's procfs does not show the host's cgroup path.
+const LAUNCH_NAMESPACES: libc::c_int = libc::CLONE_NEWUSER
+    | libc::CLONE_NEWNS
+    | libc::CLONE_NEWIPC
+    | libc::CLONE_NEWPID
+    | libc::CLONE_NEWCGROUP;
 // The stack each of a launch's two processes runs its setup on, until it
 // executes its program: far more than their allocation-free code needs.
 const LAUNCH_STACK_BYTES: usize = 256 * 1024;
@@ -432,11 +440,11 @@ impl LinuxPolicy {
         Err(ConfinementRefusal::BackendUnavailable)
     }
 
-    /// Creates a launch's first process: pid 1 of new user, mount, IPC and
-    /// pid namespaces (and a network namespace without IP), and the leader
-    /// of a new process group. It runs the setup, starts the command (which
-    /// executes `target`, or for the probe, exits at once) and becomes the
-    /// launch's init (`LaunchPlan`). Returns its PID and the host's ends of
+    /// Creates a launch's first process: pid 1 of new user, mount, IPC, pid
+    /// and cgroup namespaces (and a network namespace without IP), and the
+    /// leader of a new process group. It runs the setup, starts the command
+    /// (which executes `target`, or for the probe, exits at once) and becomes
+    /// the launch's init (`LaunchPlan`). Returns its PID and the host's ends of
     /// the report and status pipes; the caller owns that PID from here, and
     /// keeps `bound` and `target` until the launch's setup is done.
     fn start(&self, bound: &[Bound], target: Option<&Target>) -> io::Result<Started> {

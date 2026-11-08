@@ -661,11 +661,12 @@ can tell it lacks, such as `vm.memfd_noexec`), what keeps the host's own
 inputs from its confined processes, and each convention source it does not
 trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
-user namespaces (with pid namespaces in them, and network namespaces for a
-launch without IP access) and memory files it may execute (`vm.memfd_noexec`
-below 2), and it refuses deny lists, Unix socket grants, nested grants,
-a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in them, and granted
-paths that do not exist or pass through a symbolic link. One link is accepted
+user namespaces (with pid and cgroup namespaces in them, and network
+namespaces for a launch without IP access) and memory files it may execute
+(`vm.memfd_noexec` below 2), and it refuses deny lists, Unix socket grants,
+nested grants, a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in
+them, and granted paths that do not exist or pass through a symbolic link.
+One link is accepted
 on Linux: the last component of a read-only literal file grant in a `custom`
 requirement, such as `{ kind = "literal", path = "/etc/resolv.conf" }` on a
 systemd-resolved host for name resolution with unrestricted `network`, when
@@ -709,9 +710,13 @@ launch's own processes are listed. A launch without IP access also gets a
 network namespace of its own, so `/proc/self/net` shows only its own loopback
 interface. With `network = "unrestricted"` the launch shares the host's
 network namespace, and `/proc/self/net` lists its connections and Unix socket
-names. A host that refuses the backend this mount, such as a container
-runtime that masks or overmounts `/proc`, or a kernel before 5.8, still runs
-confined launches, without `/proc`.
+names. Each launch also gets a cgroup namespace of its own, so
+`/proc/self/cgroup` shows the launch's cgroup as `/`, never the host's cgroup
+path, while `/proc/self/mountinfo` still names the source device, filesystem
+type and mount options of each path bound into the launch. A host that
+refuses the backend this mount, such as a container runtime that masks or
+overmounts `/proc`, or a kernel before 5.8, still runs confined launches,
+without `/proc`.
 
 With IP access, a confined process may create Unix stream and seqpacket
 socket pairs, which the Rust standard library uses to start processes; a

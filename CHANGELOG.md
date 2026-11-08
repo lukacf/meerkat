@@ -710,9 +710,11 @@ them.
   host-wide state such as `/proc/sys` or `/proc/net`, and lists only the
   launch's own processes. A launch without IP access also gets a network
   namespace of its own, so `/proc/self/net` shows only its loopback
-  interface; with IP access it shows the host's network namespace. A host
-  that refuses the mount (a masked or overmounted `/proc`, a kernel before
-  5.8) still launches, without `/proc`, as before. The launch's first
+  interface; with IP access it shows the host's network namespace. Each
+  launch also gets a cgroup namespace of its own, so `/proc/self/cgroup`
+  shows no host cgroup path. A host that refuses the mount (a masked or
+  overmounted `/proc`, a kernel before 5.8) still launches, without
+  `/proc`, as before. The launch's first
   process runs the setup, starts the command, then executes a small init
   that the backend carries in a sealed memory file. The init holds none of
   the host's memory, the command cannot inspect it, it reaps every orphan,
@@ -722,8 +724,8 @@ them.
   and seqpacket socket pairs are allowed, so a confined Rust program can
   start processes (`cargo`, and `rustc`'s linker call, failed with
   `EPERM`); datagram pairs stay refused. A confined launch is now two
-  processes, and the backend needs pid namespaces, network namespaces for
-  a launch without IP access, and memory files it may execute
+  processes, and the backend needs pid and cgroup namespaces, network
+  namespaces for a launch without IP access, and memory files it may execute
   (`vm.memfd_noexec` below 2); a host without them refuses confined
   launches (`BackendUnavailable`), and its startup report names such a
   setting where the backend can tell (see Added). See Breaking.

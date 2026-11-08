@@ -194,6 +194,22 @@ them.
   rebuild. `rkat realm govern`, `grant` and `revoke-grant` refused by a held
   or unusable fence exit 58 or 59.
 
+- `meerkat-core`: `AuthLeaseSnapshot` gains the public fields
+  `adopted_marker_generation: Option<u64>` (the generation the durable
+  lifecycle marker of the lease's current publication carries when it is not
+  the lease's own generation) and `released_publication_at_millis:
+  Option<u64>` (the publication time of the credential the lease last
+  withdrew) (see Fixed). Code that builds a snapshot literally sets both
+  (`None` for a lease that adopted no record and withdrew no credential).
+  `AuthLeaseSnapshot::marker_generation`,
+  `AuthLeaseTransition::adopted_marker_generation` and
+  `AuthLeaseTransition::marker_generation` are new. `meerkat-machine-schema`
+  and `meerkat-runtime` (the generated AuthMachine): `AuthMachineState` gains
+  the fields `adopted_marker_generation` and `released_publication_at_millis`,
+  and the input variant `AuthMachineInput::RestoreCredentialLifecycleSnapshot`
+  gains the fields `adopted_marker_generation` and
+  `released_publication_at_millis`.
+
 ### Added
 
 - `meerkat-core`, `meerkat-mcp`, `meerkat`: a credential continuity witness
@@ -330,6 +346,24 @@ them.
   the resolution while any of them is held or unusable, naming the fence.
   These are the only operations that remove or move a live `admission.lock`,
   and only while they hold it.
+
+### Fixed
+
+- MCP OAuth and connector OAuth: a long-running process serves the
+  credential another process stores after logging the target out and in
+  again, both when its credential lease was ahead of that login (it had
+  published the credential more often) and when its lease had withdrawn its
+  credential before (a logout, or a read that found the credential
+  removed), instead of answering that reauthentication is required on every
+  read until it logged in itself or restarted. A failed save of that
+  process's refresh stores the other process's credential back with the
+  generation it was published under, instead of one the publishing process
+  refuses. The lease keeps its own generation, which never goes back, and
+  records the one the stored record carries and the publication time of a
+  credential it withdrew; a record published at or before that time stays
+  refused. A managed-store provider credential follows the same rule, keeps
+  its cached use through such a lease, and a GitHub Copilot refusal of it
+  withdraws it.
 
 ### Upgrade notes
 

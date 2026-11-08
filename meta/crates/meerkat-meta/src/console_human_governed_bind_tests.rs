@@ -1597,6 +1597,143 @@ async fn an_unresolved_send_is_failed_by_an_absent_read_only_in_a_later_process(
     assert_eq!(bind_count(&host), binds, "never dispatched again");
 }
 
+/// A governed steer whose request went away after its submission was
+/// recorded, and whose submission then answered unresolved (its custody was
+/// lost before native admission settled it; here nothing was admitted), is
+/// recorded by its runtime-owned operation itself. In the process that saw
+/// the unresolved answer an absent read is not final: a replay of its key
+/// and its recovery leave the send `submitted`, and its frame records
+/// `delivery_unresolved`. Nothing is dispatched again.
+///
+/// RED before the fix: nothing records the answer once the request is gone,
+/// so the replay reads the input absent and fails the send (`outcome_unknown`,
+/// retryable), and a new send under a new key could run the turn twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unresolved_steer_whose_request_went_away_is_recorded_and_not_failed_here() {
+    let fixture = Arc::new(Fixture::new().await);
+    let native_accepted = Arc::new(AtomicUsize::new(0));
+    let (runtime, _identity) = governed_identity_runtime_losing(
+        &fixture,
+        losing::LostAnswer::CustodyLost,
+        Arc::clone(&native_accepted),
+    )
+    .await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "dropped-unresolved"));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    runtime.set_governed_submitted_hook({
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        Box::new(move || {
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+            })
+        })
+    });
+    let mut steer = request("dropped-unresolved", HUMAN);
+    steer.handling_mode = Some("steer".to_string());
+    let first = tokio::spawn({
+        let aggregator = aggregator.clone();
+        let runtime = Arc::clone(&runtime);
+        let host = Arc::clone(&host);
+        let steer = steer.clone();
+        async move { send(&aggregator, &runtime, &host, steer).await }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the steer's submission is recorded");
+    // The steer's request goes away; its runtime-owned operation goes on and
+    // answers unresolved, with no request left to record the answer.
+    first.abort();
+    assert!(
+        first.await.is_err_and(|error| error.is_cancelled()),
+        "the steer's request went away"
+    );
+    release.notify_one();
+    let frame = tokio::time::timeout(WAIT, async {
+        loop {
+            let found = aggregator
+                .query_timeline(ConsoleTimelineQuery::default())
+                .await
+                .unwrap()
+                .frames
+                .into_iter()
+                .find(|frame| frame.kind == "user_input");
+            if let Some(frame) = found
+                && !aggregator.send_dispatch_claimed(&frame.id)
+            {
+                return frame;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the operation answered and returned");
+    assert_eq!(
+        native_accepted.load(Ordering::SeqCst),
+        0,
+        "nothing admitted"
+    );
+    let binds = bind_count(&host);
+
+    let replayed = send(&aggregator, &runtime, &host, steer)
+        .await
+        .expect("the replay answers the acceptance");
+    assert_eq!(replayed.input_frame_id, frame.id);
+    let after = frame_now(&aggregator, &replayed).await;
+    assert_eq!(
+        after.status,
+        ConsoleFrameStatus::Submitted,
+        "an absent read in the process that saw the unresolved answer never fails it: {after:?}"
+    );
+    let recovered = aggregator
+        .recover_send(
+            std::slice::from_ref(&replayed.identity),
+            "console",
+            "dropped-unresolved",
+            &super::ConsoleSendGovernance::default().scope,
+        )
+        .await
+        .expect("the recovery answers")
+        .expect("the caller's own send");
+    assert_eq!(
+        recovered.native,
+        crate::console_aggregator::NativeSendObservation::Absent
+    );
+    assert_eq!(
+        frame_now(&aggregator, &replayed).await.status,
+        ConsoleFrameStatus::Submitted,
+        "nor does its recovery here"
+    );
+    // The operation's own record of the answer.
+    let recorded = tokio::time::timeout(WAIT, async {
+        loop {
+            let frame = frame_now(&aggregator, &replayed).await;
+            if frame.payload.get("delivery_unresolved").is_some() {
+                return frame;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the operation records the unresolved answer");
+    assert_eq!(
+        recorded.payload["delivery_unresolved"],
+        unresolved_record(),
+        "{recorded:?}"
+    );
+    assert_eq!(recorded.status, ConsoleFrameStatus::Submitted);
+    assert_eq!(
+        native_accepted.load(Ordering::SeqCst),
+        0,
+        "nothing admitted"
+    );
+    assert_eq!(bind_count(&host), binds, "never dispatched again");
+}
+
 /// A governed Console steer the host refuses answers its typed
 /// refusal: the Console's error keeps the governed kind, HTTP 409
 /// `governed_input_refused` with the refusal's kind (`denied`) and nothing

@@ -568,6 +568,87 @@ async fn external_work_naming_a_moved_session_to_an_entry_is_refused_identity_me
     assert!(is_identity_member(&error, "moved-entry"), "{error:?}");
 }
 
+/// `scope` at a session its member is not bound to: the same incarnation and
+/// fence, another session.
+fn moved_scope(scope: &crate::runtime::MemberDeliveryScope) -> crate::runtime::MemberDeliveryScope {
+    let mut moved = scope.to_json_value();
+    moved["session_id"] = serde_json::to_value(meerkat_core::types::SessionId::new())
+        .expect("a session id serializes");
+    let moved = crate::runtime::MemberDeliveryScope::from_json_value(moved)
+        .expect("the moved scope decodes");
+    assert_ne!(moved.session_id(), scope.session_id());
+    assert_eq!(moved.runtime_id(), scope.runtime_id());
+    assert_eq!(moved.fence_token(), scope.fence_token());
+    moved
+}
+
+/// Work that names a moved session and that no identity member refusal
+/// answers is refused as a stale scope: external work to a worker, and the
+/// internal work of an entry's host. MobMachine's stale session refusal
+/// spares only external work to an entry or to a name reserved unreadable,
+/// which the identity member refusals answer; any other work naming a session
+/// the member is not bound to stays a typed `StaleDeliveryScope`, never an
+/// unanswered rejection.
+///
+/// RED: narrow the stale session refusal's guard to the origin alone (it then
+/// answers no external work, a worker's included), or to the entry alone (it
+/// then answers no work to an entry, its host's included): the work is
+/// answered by no arm, and the shell refuses it as an internal error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_naming_a_moved_session_that_no_identity_member_refusal_answers_is_refused_stale() {
+    let mob = EntryMob::new("moved-session-stale").await;
+    mob.handle
+        .spawn_spec(addressable_spec("moved-worker"))
+        .await
+        .expect("an externally addressable worker");
+    mob.handle
+        .spawn_spec(addressable_spec("moved-host-entry").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    assert_eq!(mob.entry("moved-worker"), None, "a worker is no entry");
+    assert_eq!(
+        mob.entry("moved-host-entry"),
+        Some(IdentityEntryOrigin::Declared)
+    );
+
+    for (name, origin) in [
+        ("moved-worker", WorkOrigin::External),
+        ("moved-host-entry", WorkOrigin::Internal),
+    ] {
+        let scope = mob
+            .handle
+            .capture_member_delivery_scope(&id(name))
+            .await
+            .expect("the member's delivery scope");
+        let moved = moved_scope(&scope);
+        let key = uuid::Uuid::new_v4().to_string();
+        let error = mob
+            .handle
+            .submit_work_with_mode_and_delivery_identity_bounded(
+                &moved,
+                WorkSpec::new(format!("work for {name}"), origin),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::store::MobDeliveryIdentity::new(key.clone(), key)
+                    .expect("a valid delivery identity"),
+                std::time::Instant::now() + STEP,
+            )
+            .await
+            .expect_err("work naming a moved session is refused");
+        match error {
+            MobError::StaleDeliveryScope {
+                agent_identity,
+                expected_session,
+                actual_session,
+            } => {
+                assert_eq!(agent_identity, id(name), "{name}");
+                assert_eq!(&expected_session, moved.session_id(), "{name}");
+                assert_eq!(actual_session.as_ref(), Some(scope.session_id()), "{name}");
+            }
+            other => panic!("{name}: a stale scope, not {other:?}"),
+        }
+    }
+}
+
 /// An entry's origin rides on its seat's or spawn's `MemberSpawned` row, so
 /// a restart restores the entry from the journal alone, and the restored
 /// entry keeps its name reserved. The entries page in identity order.

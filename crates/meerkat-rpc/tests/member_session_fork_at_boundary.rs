@@ -227,23 +227,31 @@ impl Rig {
     }
 
     /// `(role, text)` of every message of a session's history after its
-    /// system prompt (asserted to be first); a `block_assistant` row reads
-    /// as `assistant`.
+    /// system prompt; a `block_assistant` row reads as `assistant`. The
+    /// history must open with exactly one system row: a history that lost
+    /// its system prompt fails here rather than shifting into a prefix.
     async fn history(&self, session_id: &str) -> Vec<(String, String)> {
         let history = self
             .ok("session/history", json!({ "session_id": session_id }))
             .await;
-        history["messages"]
-            .as_array()
-            .expect("messages")
+        let messages = history["messages"].as_array().expect("messages");
+        assert_eq!(
+            messages.first().map(|message| message["role"].as_str()),
+            Some(Some("system")),
+            "the history of {session_id} must open with its system prompt: {messages:?}"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .count(),
+            1,
+            "the history of {session_id} must carry exactly one system row: {messages:?}"
+        );
+        messages[1..]
             .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
+            .map(|message| {
                 let role = message["role"].as_str().unwrap_or_default();
-                if role == "system" {
-                    assert_eq!(index, 0, "the system prompt is the first row");
-                    return None;
-                }
                 let role = if role == "block_assistant" {
                     "assistant"
                 } else {
@@ -253,7 +261,7 @@ impl Rig {
                 if let Some(fields) = body.as_object_mut() {
                     fields.remove("role");
                 }
-                Some((role.to_string(), text_of(&body)))
+                (role.to_string(), text_of(&body))
             })
             .collect()
     }
@@ -586,9 +594,12 @@ async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
         assert!(
             matches!(
                 refused,
-                Err(meerkat_mob::MobError::ForkSourceUnavailable { .. })
+                Err(meerkat_mob::MobError::ForkSourceUnavailable {
+                    ref source_member_id,
+                    cause: meerkat_mob::ForkSourceUnavailableCause::Running,
+                }) if source_member_id == MAIN
             ),
-            "a running source is refused: {refused:?}"
+            "a running source is refused as Running: {refused:?}"
         );
         assert_eq!(
             rig.roster().await,

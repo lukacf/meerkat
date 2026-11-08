@@ -532,48 +532,15 @@ mod tests {
     /// it).
     const TURNS_AFTER_RECOVERY: usize = 5;
 
-    /// INTENDED (gap): the compaction policy a session was built with is
-    /// recorded with it, so the runtime's recovery lowering rebuilds it with
-    /// the same threshold and the recovered session keeps compacting at 1.
+    /// A per-build `auto_compact_threshold_override` is caller-scoped: it
+    /// holds for the build that names it and is not recorded with the
+    /// session (the session contracts reference, "Persistent mode"). So the
+    /// runtime's recovery lowering leaves it unset, and the recovered session
+    /// falls back to the model-aware default and does not compact in the same
+    /// turns; the same turns with the threshold supplied again by the host
+    /// do compact.
     #[tokio::test]
-    #[ignore = "auto_compact_threshold_override is not recorded with the session; recovery lowers it to None; see the PR"]
-    async fn recovered_session_keeps_its_compaction_threshold() {
-        let lowered = Arc::new(Mutex::new(None));
-        let observed = Arc::clone(&lowered);
-        let compactions = compactions_after_recovery(
-            move |session| {
-                let request = recovered_request(session);
-                *observed.lock().expect("lowered threshold") = Some(
-                    request
-                        .build
-                        .as_ref()
-                        .map(|build| build.auto_compact_threshold_override),
-                );
-                request
-            },
-            TURNS_AFTER_RECOVERY,
-        )
-        .await;
-        assert_eq!(
-            *lowered.lock().expect("lowered threshold"),
-            Some(Some(std::num::NonZeroU64::new(1))),
-            "the recovery lowering must restore exactly the recorded threshold 1, not another \
-             low value or a one-shot force"
-        );
-        assert!(
-            compactions >= 1,
-            "a session built with threshold 1 must still compact at 1 after recovery \
-             (summary calls after recovery: {compactions})"
-        );
-    }
-
-    /// TODAY (delete with the fix): the recovery lowering carries no
-    /// threshold (`auto_compact_threshold_override: None`), so the recovered
-    /// session falls back to the model-aware default and does not compact in
-    /// the same turns; the same turns with the threshold re-supplied by the
-    /// host (what a host has to do today) do compact.
-    #[tokio::test]
-    async fn today_recovered_session_loses_its_compaction_threshold() {
+    async fn recovery_does_not_restore_a_per_build_compaction_threshold() {
         let lowered = Arc::new(Mutex::new(None));
         let observed = Arc::clone(&lowered);
         let compactions = compactions_after_recovery(
@@ -593,18 +560,18 @@ mod tests {
         assert_eq!(
             *lowered.lock().expect("lowered threshold"),
             Some(Some(None)),
-            "today the recovery lowering sets auto_compact_threshold_override to None"
+            "the recovery lowering leaves the per-build auto_compact_threshold_override unset"
         );
         assert_eq!(
             compactions, 0,
-            "today the recovered session does not compact at its build threshold"
+            "without the override the recovered session does not compact at the build's threshold"
         );
 
         let resupplied =
             compactions_after_recovery(|_| create_request(Some(1)), TURNS_AFTER_RECOVERY).await;
         assert!(
             resupplied >= 1,
-            "control: the same turns compact when the host re-supplies threshold 1 \
+            "control: the same turns compact when the host supplies threshold 1 again \
              (summary calls: {resupplied})"
         );
     }

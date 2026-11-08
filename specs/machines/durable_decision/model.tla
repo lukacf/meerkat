@@ -39,6 +39,7 @@ vars == << phase, model_step_count, decision_id, deadline_at_ms, subject_digest,
 presentation_complete(complete, link_served_digest, arg_subject_digest) == (IF complete THEN TRUE ELSE (link_served_digest = Some(arg_subject_digest)))
 earliest_presentation(first, presented) == (IF ((presented # None) /\ (IF (first = None) THEN TRUE ELSE ((IF "value" \in DOMAIN presented THEN presented["value"] ELSE None) < (IF "value" \in DOMAIN first THEN first["value"] ELSE None)))) THEN presented ELSE first)
 owed_if_due(arg_notice) == (IF (arg_notice = "NotDue") THEN "Owed" ELSE arg_notice)
+counted_carried_presentation(presented_at_ms, audience, digest, complete, link_served_digest, arg_approver_id, arg_subject_digest) == (IF (IF (presented_at_ms # None) THEN TRUE ELSE ((audience = Some(arg_approver_id)) /\ (digest = Some(arg_subject_digest)) /\ presentation_complete(complete, link_served_digest, arg_subject_digest))) THEN presented_at_ms ELSE None)
 
 Init ==
     /\ phase = "Unheld"
@@ -445,7 +446,7 @@ PresentRefusedNotOpenExecutionRefused(audience, digest, complete, link_served_di
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideAtDeadline(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideAtDeadline(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (deadline_at_ms <= now_ms)
     /\ phase' = "Expired"
@@ -455,7 +456,7 @@ DecideAtDeadline(approve, arg_approver_id, decider, digest, arg_evidence_digest,
     /\ UnchangedFrame_e951506f84a53247
 
 
-DecideRefusedReviewStage(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedReviewStage(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Review")
@@ -464,7 +465,7 @@ DecideRefusedReviewStage(approve, arg_approver_id, decider, digest, arg_evidence
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedEvidenceRequired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedEvidenceRequired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -474,7 +475,7 @@ DecideRefusedEvidenceRequired(approve, arg_approver_id, decider, digest, arg_evi
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedSubjectChanged(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedSubjectChanged(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -485,7 +486,7 @@ DecideRefusedSubjectChanged(approve, arg_approver_id, decider, digest, arg_evide
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedNotEligible(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotEligible(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -497,7 +498,7 @@ DecideRefusedNotEligible(approve, arg_approver_id, decider, digest, arg_evidence
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedSelfApproval(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedSelfApproval(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -511,7 +512,7 @@ DecideRefusedSelfApproval(approve, arg_approver_id, decider, digest, arg_evidenc
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedPresentationIncomplete(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedPresentationIncomplete(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -520,13 +521,13 @@ DecideRefusedPresentationIncomplete(approve, arg_approver_id, decider, digest, a
     /\ (arg_approver_id = approver_id)
     /\ eligible
     /\ (decider # requester)
-    /\ (IF ((carried_presentation_at_ms = None) /\ (first_presented_to_approver_at_ms = None)) THEN TRUE ELSE (carried_presentation_at_ms = Some(0)))
+    /\ (IF ((counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) = None) /\ (first_presented_to_approver_at_ms = None)) THEN TRUE ELSE (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) = Some(0)))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedDecidedBeforePresentation(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedDecidedBeforePresentation(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -535,16 +536,16 @@ DecideRefusedDecidedBeforePresentation(approve, arg_approver_id, decider, digest
     /\ (arg_approver_id = approver_id)
     /\ eligible
     /\ (decider # requester)
-    /\ (carried_presentation_at_ms # Some(0))
-    /\ (IF (carried_presentation_at_ms # None) THEN TRUE ELSE (first_presented_to_approver_at_ms # None))
+    /\ (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # Some(0))
+    /\ (IF (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # None) THEN TRUE ELSE (first_presented_to_approver_at_ms # None))
     /\ (IF (first_presented_to_approver_at_ms = None) THEN TRUE ELSE (observed_at_ms < (IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None)))
-    /\ (IF (carried_presentation_at_ms = None) THEN TRUE ELSE (observed_at_ms < (IF "value" \in DOMAIN carried_presentation_at_ms THEN carried_presentation_at_ms["value"] ELSE None)))
+    /\ (IF (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) = None) THEN TRUE ELSE (observed_at_ms < (IF "value" \in DOMAIN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) THEN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None)))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -553,18 +554,18 @@ DecideApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, e
     /\ (arg_approver_id = approver_id)
     /\ eligible
     /\ (decider # requester)
-    /\ (carried_presentation_at_ms # Some(0))
-    /\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((carried_presentation_at_ms # None) /\ ((IF "value" \in DOMAIN carried_presentation_at_ms THEN carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)))
+    /\ (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # Some(0))
+    /\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # None) /\ ((IF "value" \in DOMAIN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) THEN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) <= observed_at_ms)))
     /\ approve
     /\ phase' = "Approved"
     /\ model_step_count' = model_step_count + 1
-    /\ first_presented_to_approver_at_ms' = earliest_presentation(first_presented_to_approver_at_ms, carried_presentation_at_ms)
+    /\ first_presented_to_approver_at_ms' = earliest_presentation(first_presented_to_approver_at_ms, counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest))
     /\ evidence_digest' = arg_evidence_digest
     /\ decided_at_ms' = Some(now_ms)
     /\ UnchangedFrame_c9db057c1a9d976b
 
 
-DecideRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Open"
     /\ (now_ms < deadline_at_ms)
     /\ (stage = "Human")
@@ -573,12 +574,12 @@ DecideRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, e
     /\ (arg_approver_id = approver_id)
     /\ eligible
     /\ (decider # requester)
-    /\ (carried_presentation_at_ms # Some(0))
-    /\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((carried_presentation_at_ms # None) /\ ((IF "value" \in DOMAIN carried_presentation_at_ms THEN carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)))
+    /\ (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # Some(0))
+    /\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # None) /\ ((IF "value" \in DOMAIN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) THEN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) <= observed_at_ms)))
     /\ ~(approve)
     /\ phase' = "Rejected"
     /\ model_step_count' = model_step_count + 1
-    /\ first_presented_to_approver_at_ms' = earliest_presentation(first_presented_to_approver_at_ms, carried_presentation_at_ms)
+    /\ first_presented_to_approver_at_ms' = earliest_presentation(first_presented_to_approver_at_ms, counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest))
     /\ evidence_digest' = arg_evidence_digest
     /\ decided_at_ms' = Some(now_ms)
     /\ ended_at_ms' = Some(now_ms)
@@ -586,42 +587,42 @@ DecideRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, e
     /\ UnchangedFrame_8f0e447ef7c4d8f2
 
 
-DecideRefusedNotOpenApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotOpenApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Approved"
     /\ phase' = "Approved"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedNotOpenRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotOpenRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Rejected"
     /\ phase' = "Rejected"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedNotOpenExpired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotOpenExpired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Expired"
     /\ phase' = "Expired"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedNotOpenWithdrawn(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotOpenWithdrawn(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Withdrawn"
     /\ phase' = "Withdrawn"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedNotOpenExecuted(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotOpenExecuted(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "Executed"
     /\ phase' = "Executed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_f7d4c4b3385291f4
 
 
-DecideRefusedNotOpenExecutionRefused(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms) ==
+DecideRefusedNotOpenExecutionRefused(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms) ==
     /\ phase = "ExecutionRefused"
     /\ phase' = "ExecutionRefused"
     /\ model_step_count' = model_step_count + 1
@@ -1521,22 +1522,22 @@ Next ==
     \/ (phase = "Withdrawn") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedNotOpenWithdrawn(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
     \/ (phase = "Executed") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedNotOpenExecuted(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
     \/ (phase = "ExecutionRefused") /\ \E audience \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E complete \in BOOLEAN : \E link_served_digest \in OptionDecisionDigestValues : \E presented_at_ms \in 0..2 : \E now_ms \in 0..2 : PresentRefusedNotOpenExecutionRefused(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideAtDeadline(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedReviewStage(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedEvidenceRequired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedSubjectChanged(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotEligible(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedSelfApproval(approve, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedPresentationIncomplete(approve, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedDecidedBeforePresentation(approve, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideApproved(TRUE, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Open") /\ \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRejected(FALSE, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Approved") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Rejected") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Expired") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenExpired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Withdrawn") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenWithdrawn(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "Executed") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenExecuted(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
-    \/ (phase = "ExecutionRefused") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenExecutionRefused(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideAtDeadline(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedReviewStage(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedEvidenceRequired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedSubjectChanged(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotEligible(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedSelfApproval(approve, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedPresentationIncomplete(approve, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedDecidedBeforePresentation(approve, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideApproved(TRUE, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Open") /\ \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRejected(FALSE, arg_approver_id, decider, digest, arg_evidence_digest, TRUE, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Approved") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenApproved(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Rejected") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenRejected(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Expired") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenExpired(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Withdrawn") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenWithdrawn(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "Executed") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenExecuted(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
+    \/ (phase = "ExecutionRefused") /\ \E approve \in BOOLEAN : \E arg_approver_id \in DecisionPartyValues : \E decider \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E eligible \in BOOLEAN : \E carried_presentation_at_ms \in OptionU64Values : \E carried_audience \in OptionDecisionPartyValues : \E carried_digest \in OptionDecisionDigestValues : \E carried_complete \in BOOLEAN : \E carried_link_served_digest \in OptionDecisionDigestValues : \E observed_at_ms \in 0..2 : \E now_ms \in 0..2 : DecideRefusedNotOpenExecutionRefused(approve, arg_approver_id, decider, digest, arg_evidence_digest, eligible, carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, observed_at_ms, now_ms)
     \/ (phase = "Open") /\ \E verdict \in DurableDecisionReviewVerdictValues : \E arg_reviewer \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E now_ms \in 0..2 : ReviewAtDeadline(verdict, arg_reviewer, digest, arg_evidence_digest, now_ms)
     \/ (phase = "Open") /\ \E verdict \in DurableDecisionReviewVerdictValues : \E arg_reviewer \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E now_ms \in 0..2 : ReviewRefusedHumanStage(verdict, arg_reviewer, digest, arg_evidence_digest, now_ms)
     \/ (phase = "Open") /\ \E verdict \in DurableDecisionReviewVerdictValues : \E arg_reviewer \in DecisionPartyValues : \E digest \in DecisionDigestValues : \E arg_evidence_digest \in OptionStringValues : \E now_ms \in 0..2 : ReviewRefusedWrongReviewer(verdict, arg_reviewer, digest, arg_evidence_digest, now_ms)

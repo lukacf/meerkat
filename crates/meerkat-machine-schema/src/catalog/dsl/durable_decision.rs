@@ -346,9 +346,14 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     },
                     // An authenticated human decides for `approver_id`. The
                     // decision event's trusted ingress observed it at
-                    // `observed_at_ms`; it may carry the complete
-                    // presentation to the approver it was shown at
-                    // `carried_presentation_at_ms`.
+                    // `observed_at_ms`; it may carry a presentation shown at
+                    // `carried_presentation_at_ms`, with the facts a
+                    // `Present` reads: its audience, the digest of the
+                    // subject it showed, whether it showed every canonical
+                    // part, and the digest of the rendering its link served.
+                    // The machine counts it only when it is a complete
+                    // presentation of the held subject to the approver
+                    // (counted_carried_presentation).
                     Decide {
                         approve: bool,
                         approver_id: DecisionParty,
@@ -357,6 +362,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest: Option<String>,
                         eligible: bool,
                         carried_presentation_at_ms: Option<u64>,
+                        carried_audience: Option<DecisionParty>,
+                        carried_digest: Option<DecisionDigest>,
+                        carried_complete: bool,
+                        carried_link_served_digest: Option<DecisionDigest>,
                         observed_at_ms: u64,
                         now_ms: u64,
                     },
@@ -401,8 +410,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     HoldReplayed { decision_id: String },
                     Presented { decision_id: String, audience: DecisionParty },
                     Escalated { decision_id: String },
-                    Approved { decision_id: String, decided_at_ms: u64 },
-                    Rejected { decision_id: String, decided_at_ms: u64 },
+                    Approved { decision_id: String, decided_at_ms: u64, carried_presentation_counted: bool },
+                    Rejected { decision_id: String, decided_at_ms: u64, carried_presentation_counted: bool },
                     Expired { decision_id: String, deadline_at_ms: u64, observed_at_ms: u64 },
                     Withdrawn { decision_id: String, observed_at_ms: u64 },
                     ExecutionAuthorized {
@@ -455,6 +464,33 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 // rendering completes nothing).
                 helper presentation_complete(complete: bool, link_served_digest: Option<DecisionDigest>, subject_digest: DecisionDigest) -> bool {
                     complete || link_served_digest == Some(subject_digest)
+                }
+
+                // The time of the presentation a human decision carries,
+                // when it counts: a complete presentation
+                // (presentation_complete) of the held subject to the
+                // approver. A carried presentation to another audience, of
+                // another subject or incomplete counts as none, as does no
+                // presentation; a counted one at 0 stays a presentation at
+                // 0, which no decision is accepted on.
+                helper counted_carried_presentation(
+                    presented_at_ms: Option<u64>,
+                    audience: Option<DecisionParty>,
+                    digest: Option<DecisionDigest>,
+                    complete: bool,
+                    link_served_digest: Option<DecisionDigest>,
+                    approver_id: DecisionParty,
+                    subject_digest: DecisionDigest
+                ) -> Option<u64> {
+                    if presented_at_ms != None
+                        || (audience == Some(approver_id)
+                        && digest == Some(subject_digest)
+                        && presentation_complete(complete, link_served_digest, subject_digest))
+                    {
+                        presented_at_ms
+                    } else {
+                        None
+                    }
                 }
 
                 // An unheld record carries no decision facts at all.
@@ -986,6 +1022,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1013,6 +1053,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1036,6 +1080,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1060,6 +1108,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1085,6 +1137,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1113,6 +1169,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1141,6 +1201,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1157,10 +1221,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     // is no reading of when it was shown.
                     guard "no_timed_presentation" {
                         (
-                            carried_presentation_at_ms == None
+                            counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) == None
                             && self.first_presented_to_approver_at_ms == None
                         )
-                        || carried_presentation_at_ms == Some(0)
+                        || counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) == Some(0)
                     }
                     update {}
                     to Open
@@ -1182,6 +1246,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1193,9 +1261,9 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
+                    guard "carried_presentation_timed" { counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != Some(0) }
                     guard "presented_or_carried" {
-                        carried_presentation_at_ms != None
+                        counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != None
                         || self.first_presented_to_approver_at_ms != None
                     }
                     guard "observed_before_the_recorded_presentation" {
@@ -1203,8 +1271,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         || observed_at_ms < self.first_presented_to_approver_at_ms.get("value")
                     }
                     guard "observed_before_the_carried_presentation" {
-                        carried_presentation_at_ms == None
-                        || observed_at_ms < carried_presentation_at_ms.get("value")
+                        counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) == None
+                        || observed_at_ms < counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest).get("value")
                     }
                     update {}
                     to Open
@@ -1223,6 +1291,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1234,7 +1306,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
+                    guard "carried_presentation_timed" { counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != Some(0) }
                     // A presentation, recorded or carried, at or before the
                     // observed decision: it was observed at or after its
                     // first presentation, the same millisecond included.
@@ -1244,8 +1316,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                             && self.first_presented_to_approver_at_ms.get("value") <= observed_at_ms
                         )
                         || (
-                            carried_presentation_at_ms != None
-                            && carried_presentation_at_ms.get("value") <= observed_at_ms
+                            counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != None
+                            && counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest).get("value") <= observed_at_ms
                         )
                     }
                     guard "approves" { approve }
@@ -1254,11 +1326,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         self.decided_at_ms = Some(now_ms);
                         self.first_presented_to_approver_at_ms = earliest_presentation(
                             self.first_presented_to_approver_at_ms,
-                            carried_presentation_at_ms
+                            counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest)
                         );
                     }
                     to Approved
-                    emit Approved { decision_id: self.decision_id, decided_at_ms: now_ms }
+                    emit Approved {
+                        decision_id: self.decision_id,
+                        decided_at_ms: now_ms,
+                        carried_presentation_counted: counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != None
+                    }
                 }
 
                 transition DecideRejected {
@@ -1270,6 +1346,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1281,15 +1361,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     guard "sealed_approver" { approver_id == self.approver_id }
                     guard "eligible" { eligible }
                     guard "decider_is_not_requester" { decider != self.requester }
-                    guard "carried_presentation_timed" { carried_presentation_at_ms != Some(0) }
+                    guard "carried_presentation_timed" { counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != Some(0) }
                     guard "observed_at_or_after_a_presentation" {
                         (
                             self.first_presented_to_approver_at_ms != None
                             && self.first_presented_to_approver_at_ms.get("value") <= observed_at_ms
                         )
                         || (
-                            carried_presentation_at_ms != None
-                            && carried_presentation_at_ms.get("value") <= observed_at_ms
+                            counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != None
+                            && counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest).get("value") <= observed_at_ms
                         )
                     }
                     guard "rejects" { !approve }
@@ -1299,12 +1379,16 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         self.ended_at_ms = Some(now_ms);
                         self.first_presented_to_approver_at_ms = earliest_presentation(
                             self.first_presented_to_approver_at_ms,
-                            carried_presentation_at_ms
+                            counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest)
                         );
                         self.notice = owed_if_due(self.notice);
                     }
                     to Rejected
-                    emit Rejected { decision_id: self.decision_id, decided_at_ms: now_ms }
+                    emit Rejected {
+                        decision_id: self.decision_id,
+                        decided_at_ms: now_ms,
+                        carried_presentation_counted: counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, self.approver_id, self.subject_digest) != None
+                    }
                 }
 
                 transition DecideRefusedNotOpen {
@@ -1317,6 +1401,10 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         evidence_digest,
                         eligible,
                         carried_presentation_at_ms,
+                        carried_audience,
+                        carried_digest,
+                        carried_complete,
+                        carried_link_served_digest,
                         observed_at_ms,
                         now_ms
                     }
@@ -1436,7 +1524,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         self.decided_at_ms = Some(now_ms);
                     }
                     to Approved
-                    emit Approved { decision_id: self.decision_id, decided_at_ms: now_ms }
+                    emit Approved { decision_id: self.decision_id, decided_at_ms: now_ms, carried_presentation_counted: false }
                 }
 
                 transition ReviewDenied {
@@ -1456,7 +1544,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         self.notice = owed_if_due(self.notice);
                     }
                     to Rejected
-                    emit Rejected { decision_id: self.decision_id, decided_at_ms: now_ms }
+                    emit Rejected { decision_id: self.decision_id, decided_at_ms: now_ms, carried_presentation_counted: false }
                 }
 
                 // An escalation hands the open decision to the human

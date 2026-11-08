@@ -815,6 +815,50 @@ fn a_decide_with_no_presentation_keeps_the_presentation_incomplete_refusal() {
     }
 }
 
+/// Row: a decided decision keeps the presentation it carried only when
+/// DurableDecisionMachine counted it. A carried presentation shown to
+/// another audience, or a summary whose link served another rendering, is
+/// not kept: the row keeps the recorded presentation the decision was
+/// ordered after.
+#[test]
+fn a_decision_keeps_a_carried_presentation_only_when_the_machine_counted_it() {
+    let rendering = rendering();
+    let changed =
+        DecisionRendering::new("Release build 8 to the stable channel.").expect("rendering");
+    let to_another_audience = PresentationRecord::complete(
+        PresentationAudience::Reviewer {
+            reviewer: requester(),
+        },
+        &rendering,
+        None,
+        reference("chat"),
+        reference("message-1"),
+        PRESENTED_AT,
+    );
+    let stale = linked_presentation_at(&rendering, changed.subject_digest(), PRESENTED_AT);
+    for carried in [to_another_audience, stale] {
+        let (_store, _clock, service) = fixture();
+        let decision_id = service
+            .hold(hold_request(&rendering), true)
+            .expect("hold")
+            .decision_id;
+        let recorded = presentation_at(&rendering, PRESENTED_AT);
+        service
+            .present(&decision_id, &recorded)
+            .expect("the approver is shown the decision");
+        let decision = attested_at("alice", rendering.subject_digest(), true, PRESENTED_AT)
+            .with_presentation(carried.clone());
+        let decided = service
+            .decide(&decision_id, &decision, &Eligibility::current())
+            .expect("approved on the recorded presentation");
+        assert_eq!(
+            decided.presentations,
+            vec![recorded],
+            "the carried {carried:?} is not kept"
+        );
+    }
+}
+
 /// A presentation time of 0 is no reading: a presentation recorded at 0 is
 /// refused `presentation_incomplete` and records nothing, and a decision
 /// carrying a presentation at 0 is refused the same way, even after a

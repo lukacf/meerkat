@@ -52,7 +52,10 @@
 #     (RevokedPermitSettledExecuted);
 #   - a summary whose link served the held subject's rendering, recorded as
 #     the approver's presentation, then an approval
-#     (LinkedPresentationThenApproved).
+#     (LinkedPresentationThenApproved);
+#   - a decision carrying a presentation that does not count, with none
+#     recorded, refused as incomplete, then an approval
+#     (UncountedCarriedThenApproved).
 # With --mutants it seeds one defect into a copy of the generated model per
 # mutant and requires TLC to refuse each with its property. TLC stops at its
 # first violation and reports only the first violated invariant of a state,
@@ -89,6 +92,8 @@
 #     (first_presentation_is_a_reading, a generated invariant), and a
 #     decision accepted on a carried presentation at 0
 #     (AuditDecisionFollowsPresentation);
+#   - a carried presentation counted whatever its audience, subject and
+#     completeness (AuditDecisionFollowsPresentation);
 #   - an authorization that ignores the approver's answer, a refusal for an
 #     approver no longer current that drops the outstanding permit, and one
 #     that keeps the decision approved
@@ -131,7 +136,7 @@ trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -
 # green run found at the lane's bound; a run at a smaller bound is not held
 # to it.
 default_steps=6
-safety_states=42729
+safety_states=72821
 min_distinct_states=$(( safety_states * 9 / 10 ))
 
 # Every wrapper must fire. TLC names an arm after the audit's wrapper, so
@@ -356,7 +361,8 @@ for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefu
   WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
   HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
   AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
-  ApproverRevokedEndsRefused RevokedPermitSettledExecuted LinkedPresentationThenApproved; do
+  ApproverRevokedEndsRefused RevokedPermitSettledExecuted LinkedPresentationThenApproved \
+  UncountedCarriedThenApproved; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "" "
   NotAuditWitness${witness}"
@@ -459,7 +465,7 @@ PY
   done
   cat > "${edits}" <<'EOF'
 DecideApproved
-/\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((carried_presentation_at_ms # None) /\ ((IF "value" \in DOMAIN carried_presentation_at_ms THEN carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)))
+/\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # None) /\ ((IF "value" \in DOMAIN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) THEN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) <= observed_at_ms)))
 /\ TRUE
 EOF
   mutate approve_no_presentation AuditApprovalIsAttested "${edits}"
@@ -549,8 +555,8 @@ first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)
 first_presented_to_approver_at_ms["value"] ELSE None) >= 0)
 --
 ${arm}
-carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)
-carried_presentation_at_ms["value"] ELSE None) >= 0)
+counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) <= observed_at_ms)
+counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) >= 0)
 EOF
     case "${arm}" in
       DecideApproved) name=approve_before_presentation ;;
@@ -603,10 +609,20 @@ EOF
   # A decision accepted on a carried presentation at 0.
   cat > "${edits}" <<'EOF'
 DecideApproved
-/\ (carried_presentation_at_ms # Some(0))
+/\ (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # Some(0))
 /\ TRUE
 EOF
   mutate decide_carries_untimed AuditDecisionFollowsPresentation "${edits}"
+
+  # A carried presentation counted whatever its audience, subject and
+  # completeness: the audit reads the carried presentation's facts from
+  # the input, never from the arm that fired.
+  cat > "${edits}" <<'EOF'
+counted_carried_presentation
+(IF ((audience = Some(arg_approver_id)) /\ (digest = Some(arg_subject_digest)) /\ presentation_complete(complete, link_served_digest, arg_subject_digest)) THEN presented_at_ms ELSE None)
+presented_at_ms
+EOF
+  mutate carried_counted_whatever_its_facts AuditDecisionFollowsPresentation "${edits}"
 
   # An authorization that ignores the host's answer for the approver.
   cat > "${edits}" <<'EOF'

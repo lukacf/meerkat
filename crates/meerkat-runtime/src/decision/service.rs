@@ -945,7 +945,12 @@ impl DurableDecisionService {
     /// decision's first presentation to the approver (recorded, or the one
     /// the decision carries), it is refused; observed in the same
     /// millisecond or later, it may decide. A decision carrying a
-    /// presentation at 0 is refused as `PresentationIncomplete`.
+    /// presentation at 0 is refused as `PresentationIncomplete`. The machine
+    /// counts the presentation a decision carries only when it is a
+    /// complete presentation of the held subject to the approver (every
+    /// canonical part shown, or a summary whose link served the held
+    /// subject's rendering); any other counts as none. The decided row
+    /// keeps the carried presentation only when the machine counted it.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `EvidenceRequired`, `SubjectChanged`,
@@ -962,15 +967,8 @@ impl DurableDecisionService {
         let evidence = decision.evidence();
         let evidence_digest = evidence.digest()?;
         self.commit_row(decision_id, |loaded, now_ms| {
-            let descriptor = &loaded.row.descriptor;
-            let carried = decision.presentation().filter(|presentation| {
-                matches!(
-                    &presentation.audience,
-                    PresentationAudience::Approver { approver_id }
-                        if *approver_id == descriptor.approver_id
-                ) && presentation.subject_digest == descriptor.subject_digest
-                    && presentation.is_complete_for(&descriptor.rendering)
-            });
+            let rendering = &loaded.row.descriptor.rendering;
+            let carried = decision.presentation();
             let input = DurableDecisionInput::Decide {
                 approve: decision.approves(),
                 approver_id: approver_party(decision.approver_id()),
@@ -979,6 +977,15 @@ impl DurableDecisionService {
                 evidence_digest: Some(evidence_digest.as_str().to_owned()),
                 eligible: eligibility.check_current().is_ok(),
                 carried_presentation_at_ms: carried.map(|presentation| presentation.at_ms),
+                carried_audience: carried
+                    .map(|presentation| audience_party(&presentation.audience)),
+                carried_digest: carried
+                    .map(|presentation| machine_digest(&presentation.subject_digest)),
+                carried_complete: carried
+                    .is_some_and(|presentation| presentation.shows_every_part_of(rendering)),
+                carried_link_served_digest: carried
+                    .and_then(|presentation| presentation.link.as_ref())
+                    .map(|link| machine_digest(&link.served_digest)),
                 observed_at_ms: decision.observed_at_ms(),
                 now_ms,
             };
@@ -989,10 +996,24 @@ impl DurableDecisionService {
                     DurableDecisionEffect::Approved { .. } | DurableDecisionEffect::Rejected { .. }
                 )
             });
+            // The machine's verdict on the carried presentation: kept only
+            // when the decision counted it.
+            let carried_counted = effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    DurableDecisionEffect::Approved {
+                        carried_presentation_counted: true,
+                        ..
+                    } | DurableDecisionEffect::Rejected {
+                        carried_presentation_counted: true,
+                        ..
+                    }
+                )
+            });
             let next = successor(loaded, state, |row| {
                 if decided {
                     row.outcome = Some(DecisionOutcome::of(evidence.clone()));
-                    if let Some(presentation) = carried {
+                    if let Some(presentation) = carried.filter(|_| carried_counted) {
                         keep_presentation(row, presentation.clone());
                     }
                 }

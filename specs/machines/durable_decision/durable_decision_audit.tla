@@ -20,7 +20,11 @@
 \* one carries no presentation or one shown at 0, 1 or 2 (0 is no reading),
 \* and its ingress observed it at any time in 0..2, before, at or after each
 \* presentation; one with a defect carries a presentation shown at 1,
-\* observed at 1. A presentation shows every canonical part, or is a
+\* observed at 1. A carried presentation shows every part; the valid one
+\* also carries, at 1 and observed at 1, a summary whose link served the
+\* held subject's rendering, and each that does not count: shown to another
+\* audience, of another subject, a summary with no link, or one whose link
+\* served another rendering. A presentation shows every canonical part, or is a
 \* summary that shows none, with a link to the full presentation that served
 \* the held subject's rendering or another one, or with no link; it is
 \* complete when it shows every part or its link served the held subject. A
@@ -50,8 +54,9 @@
 \*   AuditApprovalIsAttested: an approval comes only from an open decision,
 \*     before its deadline, by an attested decision bound to the held
 \*     subject digest: a human acting for the sealed approver id, eligible,
-\*     not the requester, shown a complete presentation (carried or
-\*     recorded); or the sealed reviewer, shown one; with its evidence and
+\*     not the requester, shown a complete presentation (carried, when it
+\*     counts, or recorded); or the sealed reviewer, shown one; with its
+\*     evidence and
 \*     decision time recorded (I-C7).
 \*   AuditRejectionIsAttested: the same for a rejection, which also ends it.
 \*   AuditExecutedOnlyFromApprovedWithHeldBinding: an execution is recorded
@@ -76,8 +81,9 @@
 \*   AuditDecisionFollowsPresentation: a human decision is decided only when
 \*     its ingress observed it at or after the approver's first presentation
 \*     (the earliest the audit saw recorded, or the one the decision
-\*     carries, a time of 0 being none), and is refused for the order only
-\*     when observed before it.
+\*     carries when it counts, a complete presentation of the held subject
+\*     to the approver id read from the input's facts, a time of 0 being
+\*     none), and is refused for the order only when observed before it.
 \*   AuditPermitOnlyForCurrentApprover: a permit is issued, or issued again,
 \*     only for an approver who is still current. For one who is no longer
 \*     current, an authorization of the held binding on an approved decision
@@ -98,7 +104,7 @@
 \*     that fired.
 \*
 \* Reachability (the runner): every wrapper fires in the bounded space,
-\* checked from TLC's coverage, and eighteen scenarios are checked as
+\* checked from TLC's coverage, and nineteen scenarios are checked as
 \* expected violations of their negations: a human approval executed and its
 \* notice delivered; an execution retried after a release; an approval
 \* closed by the owner's permanent refusal; a review escalated and then
@@ -114,7 +120,9 @@
 \* whose decision ends refused with no permit; an approver no longer
 \* current while a permit is outstanding, whose commit still settles as
 \* executed; and a summary whose link served the held subject's rendering
-\* recorded as the approver's presentation, then an approval. With
+\* recorded as the approver's presentation, then an approval; and a
+\* decision carrying a presentation that does not count, with none
+\* recorded, refused as incomplete, then an approval. With
 \* --mutants the runner seeds one defect per property into a
 \* copy of the generated model and requires TLC to refuse each with that
 \* property.
@@ -214,20 +222,47 @@ AuditDecideShapes ==
       [AuditValidDecision EXCEPT !.eligible = FALSE],
       [AuditValidDecision EXCEPT !.decider = AuditRequester] }
 
-\* The valid decision carries no presentation, one at 0 (no reading), or
-\* one shown at either reading, and was observed at any time: before, at or
-\* after each presentation. A decision with a defect is refused whatever
-\* its times, so it carries a presentation it was observed at.
+\* What a presentation a decision carries shows, and to whom: a complete
+\* presentation of the held subject to the approver (every part shown, or a
+\* summary whose link served the held subject's rendering), or one that
+\* does not count (shown to another audience, of another subject, a summary
+\* with no link, or one whose link served another rendering).
+AuditCountedFacts ==
+    [audience |-> Some(AuditApprover), digest |-> Some(AuditHeld),
+     complete |-> TRUE, link |-> None]
+AuditCarriedFacts ==
+    { AuditCountedFacts,
+      [AuditCountedFacts EXCEPT !.complete = FALSE, !.link = Some(AuditHeld)],
+      [AuditCountedFacts EXCEPT !.audience = Some(AuditRequester)],
+      [AuditCountedFacts EXCEPT !.digest = Some(AuditOther)],
+      [AuditCountedFacts EXCEPT !.complete = FALSE],
+      [AuditCountedFacts EXCEPT !.complete = FALSE, !.link = Some(AuditOther)] }
+\* A decision that carries no presentation carries none of its facts.
+AuditNoCarriedFacts == [audience |-> None, digest |-> None, complete |-> FALSE, link |-> None]
+
+\* The valid decision carries no presentation, a complete one at 0 (no
+\* reading), or a complete one shown at either reading, and was observed at
+\* any time: before, at or after each presentation. It also carries, once
+\* each, at 1 and observed at 1, a summary whose link served the held
+\* subject's rendering and each presentation that does not count. A
+\* decision with a defect is refused whatever its times, so it carries a
+\* complete presentation it was observed at.
 AuditDecideTimes(s) ==
     IF s = AuditValidDecision
-    THEN { [carried |-> c, observed |-> o] :
+    THEN { [carried |-> c, observed |-> o,
+            facts |-> IF c = None THEN AuditNoCarriedFacts ELSE AuditCountedFacts] :
            c \in {None} \cup {Some(t) : t \in AuditTimes}, o \in AuditTimes }
-    ELSE { [carried |-> Some(1), observed |-> 1] }
+         \cup { [carried |-> Some(1), observed |-> 1, facts |-> f] :
+                f \in AuditCarriedFacts \ {AuditCountedFacts} }
+    ELSE { [carried |-> Some(1), observed |-> 1, facts |-> AuditCountedFacts] }
 
 AuditDecideInputs ==
     UNION { { [approve |-> a, approver_id |-> s.approver_id, decider |-> s.decider,
                digest |-> s.digest, evidence_digest |-> s.evidence_digest,
                eligible |-> s.eligible, carried_presentation_at_ms |-> t.carried,
+               carried_audience |-> t.facts.audience, carried_digest |-> t.facts.digest,
+               carried_complete |-> t.facts.complete,
+               carried_link_served_digest |-> t.facts.link,
                observed_at_ms |-> t.observed, now_ms |-> n] :
               a \in BOOLEAN, t \in AuditDecideTimes(s), n \in AuditTimes } :
             s \in AuditDecideShapes }
@@ -275,9 +310,11 @@ HoldArm(Arm(_, _, _, _, _, _, _, _, _, _), in) ==
 PresentArm(Arm(_, _, _, _, _, _), in) ==
     Arm(in.audience, in.digest, in.complete, in.link_served_digest, in.presented_at_ms,
         in.now_ms)
-DecideArm(Arm(_, _, _, _, _, _, _, _, _), in) ==
+DecideArm(Arm(_, _, _, _, _, _, _, _, _, _, _, _, _), in) ==
     Arm(in.approve, in.approver_id, in.decider, in.digest, in.evidence_digest,
-        in.eligible, in.carried_presentation_at_ms, in.observed_at_ms, in.now_ms)
+        in.eligible, in.carried_presentation_at_ms, in.carried_audience,
+        in.carried_digest, in.carried_complete, in.carried_link_served_digest,
+        in.observed_at_ms, in.now_ms)
 ReviewArm(Arm(_, _, _, _, _), in) ==
     Arm(in.verdict, in.reviewer, in.digest, in.evidence_digest, in.now_ms)
 WithdrawArm(Arm(_, _, _), in) == Arm(in.withdrawer, in.by_host, in.now_ms)
@@ -310,6 +347,19 @@ AuditLatchKept ==
         /\ \/ notice' = notice
            \/ notice = "Owed" /\ notice' \in {"Delivered", "Failed"}
 
+\* The presentation a decision carries, when it counts: its facts make it a
+\* complete presentation of the held subject to the approver id, read from
+\* the input itself and never from the arm that fired. Read only for a
+\* Decide input.
+AuditCountedCarried(in) ==
+    IF /\ in.carried_presentation_at_ms # None
+       /\ in.carried_audience = Some(approver_id)
+       /\ in.carried_digest = Some(subject_digest)
+       /\ AuditCompleteFor(in.carried_complete, in.carried_link_served_digest,
+                           subject_digest)
+    THEN in.carried_presentation_at_ms
+    ELSE None
+
 \* The attestation an approval and a rejection share.
 AuditDecisionAttested(kind, in) ==
     /\ kind \in {"Decide", "Review"}
@@ -324,7 +374,7 @@ AuditDecisionAttested(kind, in) ==
              /\ in.approver_id = approver_id
              /\ in.eligible
              /\ in.decider # requester
-             /\ (in.carried_presentation_at_ms # None
+             /\ (AuditCountedCarried(in) # None
                  \/ first_presented_to_approver_at_ms # None))
        ELSE (/\ stage = "Review"
              /\ reviewer = Some(in.reviewer)
@@ -429,12 +479,12 @@ AuditEarliest(a, b) ==
     ELSE IF b = None THEN a
     ELSE IF AuditTimeOf(b) < AuditTimeOf(a) THEN b ELSE a
 
-\* The presentation a decision carries, when its time is a reading (0 is
-\* none). Read only for a Decide input.
+\* The presentation a decision carries, when it counts and its time is a
+\* reading (0 is none). Read only for a Decide input.
 AuditTimedCarried(in) ==
-    IF in.carried_presentation_at_ms # None
-       /\ AuditTimeOf(in.carried_presentation_at_ms) > 0
-    THEN in.carried_presentation_at_ms
+    IF AuditCountedCarried(in) # None
+       /\ AuditTimeOf(AuditCountedCarried(in)) > 0
+    THEN AuditCountedCarried(in)
     ELSE None
 
 \* The approver's first presentation as a human decision sees it: the
@@ -520,6 +570,10 @@ AuditMarks(arm, in) ==
     \cup (IF arm = "AuthorizeExecutionRefusedRevokedSettlementOwed"
           THEN {"RevokedSettlementOwed"} ELSE {})
     \cup (IF arm = "PresentToApprover" /\ ~in.complete THEN {"LinkedPresented"} ELSE {})
+    \cup (IF arm = "DecideRefusedPresentationIncomplete"
+              /\ in.carried_presentation_at_ms # None
+              /\ AuditCountedCarried(in) = None
+          THEN {"UncountedCarriedRefused"} ELSE {})
 
 \* Every wrapper ends with this step: the step properties it broke, the
 \* marks it left and the earliest approver presentation accepted.
@@ -1081,6 +1135,10 @@ AuditWitnessRevokedPermitSettledExecuted ==
 \* approver's presentation, then an approval.
 AuditWitnessLinkedPresentationThenApproved ==
     phase = "Approved" /\ "LinkedPresented" \in audit_seen
+\* A decision carrying a presentation that does not count, with none
+\* recorded, refused as incomplete, then an approval.
+AuditWitnessUncountedCarriedThenApproved ==
+    phase = "Approved" /\ "UncountedCarriedRefused" \in audit_seen
 
 NotAuditWitnessHumanApprovalExecutedAndNoticed == ~AuditWitnessHumanApprovalExecutedAndNoticed
 NotAuditWitnessRetriedAfterRelease == ~AuditWitnessRetriedAfterRelease
@@ -1101,4 +1159,5 @@ NotAuditWitnessApprovedAtThePresentation == ~AuditWitnessApprovedAtThePresentati
 NotAuditWitnessApproverRevokedEndsRefused == ~AuditWitnessApproverRevokedEndsRefused
 NotAuditWitnessRevokedPermitSettledExecuted == ~AuditWitnessRevokedPermitSettledExecuted
 NotAuditWitnessLinkedPresentationThenApproved == ~AuditWitnessLinkedPresentationThenApproved
+NotAuditWitnessUncountedCarriedThenApproved == ~AuditWitnessUncountedCarriedThenApproved
 ====

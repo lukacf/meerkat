@@ -442,6 +442,10 @@ pub mod inputs {
         pub evidence_digest: Option<String>,
         pub eligible: bool,
         pub carried_presentation_at_ms: Option<u64>,
+        pub carried_audience: Option<DecisionParty>,
+        pub carried_digest: Option<DecisionDigest>,
+        pub carried_complete: bool,
+        pub carried_link_served_digest: Option<DecisionDigest>,
         pub observed_at_ms: u64,
         pub now_ms: u64,
     }
@@ -561,11 +565,13 @@ pub mod effects {
     pub struct Approved {
         pub decision_id: String,
         pub decided_at_ms: u64,
+        pub carried_presentation_counted: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Rejected {
         pub decision_id: String,
         pub decided_at_ms: u64,
+        pub carried_presentation_counted: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Expired {

@@ -384,7 +384,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
 # durable_decision_audit.sh requires a final distinct-state count at or above
 # its floor, a coverage block in which each of its covered actions (of module
-# durable_decision_audit) generated a state, its eighteen witnesses violated,
+# durable_decision_audit) generated a state, its nineteen witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
 # instruction_boundary_audit.sh (session_document) requires its six
@@ -894,6 +894,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessApproverRevokedEndsRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRevokedPermitSettledExecuted is violated."' \
   'echo "Error: Invariant NotAuditWitnessLinkedPresentationThenApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncountedCarriedThenApproved is violated."' \
   'echo "Error: Invariant AuditTerminalsLatch is violated."' \
   'echo "Error: Invariant AuditApprovalIsAttested is violated."' \
   'echo "Error: Invariant AuditRejectionIsAttested is violated."' \

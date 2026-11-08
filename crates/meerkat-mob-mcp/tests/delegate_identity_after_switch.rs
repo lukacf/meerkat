@@ -29,7 +29,8 @@
 //! serving the same model name appear in two shapes: two self-hosted aliases
 //! on two servers that both serve the remote model [`SHARED_REMOTE_MODEL`],
 //! and one catalog model reached through two realm bindings whose backends
-//! are two endpoints.
+//! are two endpoints. The provider switch needs no alias: the self-hosted
+//! alias and the OpenAI catalog model are different ids.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -882,4 +883,159 @@ async fn record_delegate_after_an_auth_binding_switch_resolves_the_helper_on_the
         "the implicit mob records the model and provider; a profile carries no auth binding"
     );
     delegator.destroy().await;
+}
+
+// ===========================================================================
+// 4. Provider switch: self-hosted to OpenAI
+// ===========================================================================
+
+/// The OpenAI binding the provider-switch case moves to.
+const BINDING_OPENAI: &str = "openai_endpoint";
+
+/// [`self_hosted_config`] plus one OpenAI binding in the realm `global`
+/// whose backend is `openai`, the provider's default. The session's
+/// provider alone picks between the self-hosted servers and `openai`.
+fn cross_provider_config(one: &Endpoint, two: &Endpoint, openai: &Endpoint) -> meerkat::Config {
+    let mut config = self_hosted_config(one, two);
+    let section = config
+        .realm
+        .get_mut(REALM)
+        .expect("the self-hosted config's realm section");
+    section.backend.insert(
+        BINDING_OPENAI.to_string(),
+        meerkat_core::BackendProfileConfig {
+            provider: Provider::OpenAI.as_str().to_string(),
+            backend_kind: "openai_api".to_string(),
+            base_url: Some(openai.base_url.clone()),
+            options: Value::Null,
+            server: None,
+        },
+    );
+    section.auth.insert(
+        BINDING_OPENAI.to_string(),
+        meerkat_core::AuthProfileConfig {
+            provider: Provider::OpenAI.as_str().to_string(),
+            auth_method: "api_key".to_string(),
+            source: meerkat_core::CredentialSourceSpec::InlineSecret {
+                secret: format!("synthetic-key-{BINDING_OPENAI}"),
+            },
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        },
+    );
+    section.binding.insert(
+        BINDING_OPENAI.to_string(),
+        meerkat_core::ProviderBindingConfig {
+            backend_profile: BINDING_OPENAI.to_string(),
+            auth_profile: BINDING_OPENAI.to_string(),
+            credential_account: None,
+            default_model: None,
+            policy: Default::default(),
+            provider_default: true,
+        },
+    );
+    config
+}
+
+/// Runs the provider-switch scenario: a session on [`MIRROR_ON_ONE`]
+/// (provider self-hosted, server `one`) switches in place to
+/// [`CATALOG_MODEL`] on provider OpenAI, whose binding's backend is the
+/// endpoint `openai`, and delegates. Returns the endpoints (server `one`,
+/// server `two`, `openai`) and the implicit mob's `delegate` profile.
+async fn provider_switch_scenario() -> (Endpoint, Endpoint, Endpoint, Profile) {
+    let one = Endpoint::start().await;
+    let two = Endpoint::start().await;
+    let openai = Endpoint::start().await;
+    let delegator = Delegator::spawn(
+        cross_provider_config(&one, &two, &openai),
+        MIRROR_ON_ONE,
+        Provider::SelfHosted,
+        Some(SERVER_ONE),
+    )
+    .await;
+    delegator
+        .switch_then_delegate(
+            MemberTurnOptions::new()
+                .with_model(ModelId::new(CATALOG_MODEL))
+                .with_provider(Provider::OpenAI),
+        )
+        .await;
+
+    // The switch took: the session itself now runs on OpenAI.
+    let metadata = delegator.metadata().await;
+    assert_eq!(
+        (metadata.model.as_str(), metadata.provider),
+        (CATALOG_MODEL, Provider::OpenAI),
+        "the in-place switch moved the session to OpenAI"
+    );
+    assert!(
+        one.models_of(Caller::Parent).is_empty(),
+        "the switch turn itself already runs on OpenAI: {:?}",
+        one.requests()
+    );
+    assert!(
+        openai.models_of(Caller::Parent).len() >= 2,
+        "the switch turn and the delegate turn run on the OpenAI endpoint: {:?}",
+        openai.requests()
+    );
+    assert!(two.requests().is_empty());
+    completed_delegate_result(&[&one, &two, &openai]);
+    let delegate = delegator.implicit_delegate_profile().await;
+    delegator.destroy().await;
+    (one, two, openai, delegate)
+}
+
+/// Intended behaviour. A session built on the self-hosted [`MIRROR_ON_ONE`]
+/// (server `one`) and switched in place to [`CATALOG_MODEL`] on provider
+/// OpenAI delegates. The helper's request arrives at the OpenAI endpoint
+/// and names [`CATALOG_MODEL`], and the implicit mob records the OpenAI
+/// route with no self-hosted server. The delegate tool keeps the model,
+/// provider and server separately, so a fix that refreshed the model and
+/// server but kept the build-time provider would fail this case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "delegate keeps the session's build-time identity after an in-place switch; see the PR"]
+async fn delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_new_provider() {
+    let (one, two, openai, delegate) = provider_switch_scenario().await;
+
+    assert_eq!(
+        openai.models_of(Caller::Helper),
+        [CATALOG_MODEL],
+        "the helper's request arrives at the session's current provider and names its model"
+    );
+    assert!(
+        one.models_of(Caller::Helper).is_empty(),
+        "no helper request reaches the self-hosted server the session left"
+    );
+    assert!(two.requests().is_empty());
+    assert_eq!(
+        (
+            delegate.model.as_str(),
+            delegate.provider,
+            delegate.self_hosted_server_id.as_deref()
+        ),
+        (CATALOG_MODEL, Some(Provider::OpenAI), None),
+        "the implicit mob records the session's current provider for its helpers"
+    );
+}
+
+/// Records today's behaviour; delete it when
+/// [`delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_new_provider`]
+/// (which states the intended behaviour) passes. The delegate tool keeps
+/// the route the session was built with, so after the switch to OpenAI the
+/// helper's request still arrives at the self-hosted server `one` and names
+/// the build-time [`SHARED_REMOTE_MODEL`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn today_delegate_after_an_in_place_provider_switch_sends_the_helper_to_the_build_provider() {
+    let (one, _two, openai, delegate) = provider_switch_scenario().await;
+
+    assert_eq!(one.models_of(Caller::Helper), [SHARED_REMOTE_MODEL]);
+    assert!(openai.models_of(Caller::Helper).is_empty());
+    assert_eq!(
+        (
+            delegate.model.as_str(),
+            delegate.provider,
+            delegate.self_hosted_server_id.as_deref()
+        ),
+        (MIRROR_ON_ONE, Some(Provider::SelfHosted), Some(SERVER_ONE))
+    );
 }

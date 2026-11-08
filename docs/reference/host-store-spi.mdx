@@ -311,7 +311,11 @@ instead of failing the realm:
   cannot answer for it refuse typed while it is quarantined. Core knows a
   runtime whose scope name keeps only a hash of its id (an id over 200
   bytes, or with a control character) by its id only once a call names it;
-  until then those two reads refuse typed instead of naming it. Its chunks
+  until then those two reads answer every other runtime and report it by
+  its scope's name (`RuntimeStore::unnamed_refused_runtimes`, and the
+  listing's `unnamed`), and a mob boot plans the member it belongs to as
+  holding work, found by the member's runtime ids
+  (`RuntimeStore::refuses_runtime_until_reopen`). Its chunks
   are never swept as ownerless. `SpiRealm::quarantined_scopes` lists every
   quarantined scope, and a mob storage whose scope is quarantined is listed
   as quarantined (`SpiStoredMob::quarantined`).

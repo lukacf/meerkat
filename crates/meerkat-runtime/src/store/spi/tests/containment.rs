@@ -212,6 +212,13 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
         .load_input_states(&kept)
         .await
         .expect("another runtime serves");
+    let hashed = prefix.trim_end_matches('~');
+    let reported = |refusals: &[crate::store::RefusedScope]| {
+        refusals.len() == 1
+            && refusals[0].scope == hashed
+            && refusals[0].cause.contains(&name)
+            && refusals[0].to_string().contains("is quarantined")
+    };
     let with_work = store
         .list_runtimes_with_recovery_work()
         .await
@@ -220,13 +227,18 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
         with_work.contains(&kept) && !with_work.contains(&long),
         "the scan lists every runtime it can name: {with_work:?}"
     );
+    assert!(
+        reported(&store.unnamed_refused_runtimes()),
+        "the store reports the runtime it cannot name by its scope: {:?}",
+        store.unnamed_refused_runtimes()
+    );
     let authorities = store
         .list_runtime_delivery_authorities_or_unavailable()
         .await
         .expect("the delivery listing answers the runtimes it can name");
     assert!(
-        authorities.unavailable.is_empty(),
-        "no runtime it can name is unavailable: {authorities:?}"
+        authorities.unavailable.is_empty() && reported(&authorities.unnamed),
+        "the delivery listing reports the runtime it cannot name by its scope: {authorities:?}"
     );
     assert!(
         store.refuses_runtime_until_reopen(&long),
@@ -246,6 +258,10 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
         with_work.contains(&long),
         "the scan lists the quarantined runtime: {with_work:?}"
     );
+    assert!(
+        store.unnamed_refused_runtimes().is_empty(),
+        "a runtime a call named is named"
+    );
     let authorities = store
         .list_runtime_delivery_authorities_or_unavailable()
         .await
@@ -254,8 +270,9 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
         authorities
             .unavailable
             .iter()
-            .any(|runtime| runtime.runtime_id == long),
-        "the delivery listing names the quarantined runtime unavailable"
+            .any(|runtime| runtime.runtime_id == long)
+            && authorities.unnamed.is_empty(),
+        "the delivery listing names the quarantined runtime unavailable: {authorities:?}"
     );
 }
 

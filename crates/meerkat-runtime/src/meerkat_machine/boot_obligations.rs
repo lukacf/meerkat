@@ -8,7 +8,7 @@ use crate::delivery_inbox::{
     RuntimeDeliveryError, runtime_delivery_backlog_in, runtime_delivery_pending_in,
 };
 use crate::identifiers::LogicalRuntimeId;
-use crate::store::RuntimeStoreError;
+use crate::store::{RefusedScope, RuntimeStoreError};
 
 /// What a mob boot reads to plan which members it materializes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,11 +84,15 @@ impl MeerkatMachine {
     /// [`RuntimeDeliveryInbox::runtime_delivery_backlog`](crate::RuntimeDeliveryInbox::runtime_delivery_backlog)
     /// reads). Two store-wide reads, neither of which loads a runtime body.
     ///
-    /// A runtime the store cannot answer for until it is reopened (a host
-    /// store whose scope of that runtime is poisoned) is an obligation: the
-    /// recovery scan lists it as holding work, and it counts as holding
-    /// pending deliveries. The answer stays observed for every other
-    /// runtime, so one such runtime never makes a boot wake every member.
+    /// A runtime the store refuses (a host store whose scope of that
+    /// runtime is poisoned or quarantined) is an obligation: the recovery
+    /// scan lists it as holding work, and it counts as holding pending
+    /// deliveries. The answer stays observed for every other runtime, so one
+    /// such runtime never makes a boot wake every member. A refused runtime
+    /// scope the store cannot name by runtime id is in neither set: the
+    /// store reports it ([`Self::unnamed_refused_runtimes`]), and a boot
+    /// attributes it to the members it plans
+    /// ([`Self::store_refuses_runtime`]).
     ///
     /// A store that cannot list either answers
     /// [`RuntimeRecoveryWork::Unobserved`] with the read it could not make:
@@ -144,6 +148,35 @@ impl MeerkatMachine {
         })
     }
 
+    /// The runtime scopes this machine's store refuses that it cannot name
+    /// by runtime id ([`RuntimeStore::unnamed_refused_runtimes`](crate::store::RuntimeStore::unnamed_refused_runtimes)):
+    /// a host store's quarantined scope of a runtime whose id its scope
+    /// names hash, before any call named the runtime. The store-wide reads
+    /// of [`Self::boot_recovery_obligations`] answer without them; a boot
+    /// attributes each to the members it plans with
+    /// [`Self::store_refuses_runtime`], which names the runtime. No store
+    /// read. A machine without a store has none.
+    #[must_use]
+    pub fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+        self.store
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.unnamed_refused_runtimes())
+    }
+
+    /// Whether this machine's store refuses every call that needs
+    /// `runtime_id`'s state
+    /// ([`RuntimeStore::refuses_runtime_until_reopen`](crate::store::RuntimeStore::refuses_runtime_until_reopen)):
+    /// a host store realm that lost its fence, or whose scope of that runtime
+    /// is poisoned or quarantined, whether or not the store can name the
+    /// runtime in its listings. No store read. A machine without a store
+    /// refuses nothing.
+    #[must_use]
+    pub fn store_refuses_runtime(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|store| store.refuses_runtime_until_reopen(runtime_id))
+    }
+
     /// What `session_id`'s runtime holds durably, read cold: whether a
     /// session nothing in this process has registered (a mob member a host
     /// holds dormant, say) holds the work a start wakes a member for
@@ -164,10 +197,10 @@ impl MeerkatMachine {
     ///
     /// A store that cannot answer either read answers
     /// [`SessionWorkState::Unobserved`] with the read it could not make,
-    /// never a guessed idle. A runtime the store cannot answer for until it
-    /// is reopened (a host store whose scope of that runtime is poisoned)
-    /// holds work, as the boot read lists it. A machine without a store
-    /// holds nothing durable: [`SessionWorkState::Idle`].
+    /// never a guessed idle. A runtime the store refuses (a host store whose
+    /// scope of that runtime is poisoned or quarantined, named in its
+    /// listings or not) holds work, as the boot read lists it. A machine
+    /// without a store holds nothing durable: [`SessionWorkState::Idle`].
     ///
     /// The answer is a snapshot, not a fence: a registration, a delivery or
     /// a wake that lands after the read is not in it.

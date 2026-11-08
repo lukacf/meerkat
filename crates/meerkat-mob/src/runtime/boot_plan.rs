@@ -457,6 +457,38 @@ impl<'a> BootObligationIndex<'a> {
         }
     }
 
+    /// Every runtime id that names a member here, with the member: each
+    /// spelling of its bound session's runtime, and the delivery address of
+    /// its current generation in this incarnation. A runtime the store
+    /// refuses but cannot name in its listings is attributed to its member
+    /// by these ids.
+    fn candidate_runtimes(
+        &self,
+    ) -> Vec<(meerkat_runtime::LogicalRuntimeId, &mob_dsl::AgentIdentity)> {
+        let mut candidates: Vec<_> = self
+            .by_session_runtime
+            .iter()
+            .map(|(runtime_id, identity)| (runtime_id.clone(), identity))
+            .collect();
+        for (identity, candidate) in &self.by_identity {
+            let address = meerkat_runtime::MemberDeliveryAddress {
+                mob_id: self.mob_id.to_string(),
+                incarnation: Some(self.incarnation),
+                identity: identity.clone(),
+                generation: candidate.generation,
+            };
+            match meerkat_runtime::LogicalRuntimeId::for_member(&address) {
+                Ok(runtime_id) => candidates.push((runtime_id, &candidate.identity)),
+                Err(error) => tracing::debug!(
+                    mob_id = %self.mob_id,
+                    %error,
+                    "the boot obligation scan skipped a member whose delivery address does not form"
+                ),
+            }
+        }
+        candidates
+    }
+
     /// The seated member `runtime_id` names, if any. A member delivery
     /// address names a member only for this mob, this incarnation (or an
     /// address minted before incarnations existed, read fail-closed as this
@@ -607,6 +639,32 @@ pub(crate) async fn scan_boot_obligations_among(
                 .entry(identity.clone())
                 .or_insert(mob_dsl::MemberRecoveryObligationKind::PendingDelivery);
         }
+    }
+    // A refused runtime scope the store cannot name by runtime id (a host
+    // store's quarantined scope of a runtime whose id its scope names hash)
+    // is in neither scan: it is attributed here, by the ids that name each
+    // member, and its member is planned as holding work, as a refused
+    // runtime the store names is. Every other member stays as the scan left
+    // it, so such a scope never wakes the whole mob.
+    let unnamed = adapter.unnamed_refused_runtimes();
+    if !unnamed.is_empty() {
+        let mut attributed = BTreeSet::new();
+        for (runtime_id, identity) in index.candidate_runtimes() {
+            if adapter.store_refuses_runtime(&runtime_id) {
+                by_member.insert(
+                    identity.clone(),
+                    mob_dsl::MemberRecoveryObligationKind::RuntimeWork,
+                );
+                attributed.insert(identity.clone());
+            }
+        }
+        let scopes: Vec<String> = unnamed.iter().map(ToString::to_string).collect();
+        tracing::warn!(
+            %mob_id,
+            ?scopes,
+            attributed = attributed.len(),
+            "the runtime store refuses runtime scopes it cannot name by runtime id; each seated member they belong to is planned as holding recovery work"
+        );
     }
     Ok(BootObligations {
         by_member,

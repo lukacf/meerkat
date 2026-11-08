@@ -46,6 +46,10 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
         self.inner.refuses_runtime_until_reopen(runtime_id)
     }
 
+    fn unnamed_refused_runtimes(&self) -> Vec<meerkat_runtime::store::RefusedScope> {
+        self.inner.unnamed_refused_runtimes()
+    }
+
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
         self.inner.session_persistence_profile()
     }

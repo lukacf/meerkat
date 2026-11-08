@@ -35,6 +35,18 @@ const UNAVAILABLE_RUNTIME: &str = "forwarding-probe-unavailable";
 /// The runtime the probe refuses until a reopen: the trait default refuses
 /// none.
 const REFUSED_RUNTIME: &str = "forwarding-probe-refused";
+/// The refused runtime scope the probe cannot name by runtime id: the trait
+/// default reports none, so a decorator that keeps it hides a quarantined
+/// runtime from every boot.
+const UNNAMED_REFUSED_SCOPE: &str = "rt:hforwarding-probe-unnamed";
+
+/// The refused runtime scopes the probe cannot name by runtime id.
+fn probe_unnamed_refusals() -> Vec<RefusedScope> {
+    vec![RefusedScope::new(
+        UNNAMED_REFUSED_SCOPE,
+        "forwarding probe: refused, and named by its scope only",
+    )]
+}
 
 /// The listing the probe answers per runtime: one unavailable runtime.
 fn probe_delivery_listing() -> RuntimeDeliveryAuthorityListing {
@@ -230,6 +242,12 @@ pub(crate) async fn assert_forwards_to(
          that no runtime is refused, so a member its store refuses reads as a failed read"
     );
     assert_eq!(
+        store.unnamed_refused_runtimes(),
+        probe_unnamed_refusals(),
+        "the inner store's refused runtime scopes it cannot name: a decorator that keeps the \
+         default reports none, so a boot never attributes them to their members"
+    );
+    assert_eq!(
         store
             .load_continuation_key_binding("owner", "key")
             .await
@@ -370,6 +388,7 @@ pub(crate) async fn assert_forwards_to(
             "hosting_capability",
             "self_fence",
             "refuses_runtime_until_reopen",
+            "unnamed_refused_runtimes",
             "load_continuation_key_binding",
             "compare_and_swap_runtime_delivery_authority_with_key_binding",
             "load_continuation_admission",
@@ -480,6 +499,11 @@ mod store_impl {
         fn refuses_runtime_until_reopen(&self, _runtime_id: &LogicalRuntimeId) -> bool {
             self.record("refuses_runtime_until_reopen");
             true
+        }
+
+        fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+            self.record("unnamed_refused_runtimes");
+            probe_unnamed_refusals()
         }
 
         async fn load_continuation_key_binding(

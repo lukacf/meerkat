@@ -1471,17 +1471,16 @@ impl SpiRealm {
 
     /// The scopes of `family` that refuse every call, poisoned until the
     /// realm is reopened or quarantined until they are repaired in the
-    /// store and the realm is reopened, in scope order, each with its
-    /// refusal: the reads that list runtimes name each one.
-    ///
-    /// # Errors
-    /// [`SpiError::ScopesQuarantined`] naming each quarantined scope of
-    /// `family` whose store name hashes its key and that no call named
-    /// yet: such a read cannot name it, and never leaves it out.
+    /// store and the realm is reopened, each with its refusal: the reads
+    /// that list runtimes name each one. The first list holds every such
+    /// scope the realm can name by its id, in scope order; the second every
+    /// quarantined scope of `family` whose store name hashes its key and
+    /// that no call named yet, its refusal naming it by that name: such a
+    /// read cannot name it, answers the others, and reports it there.
     pub(crate) fn refused_scopes_of(
         &self,
         family: ScopeFamily,
-    ) -> Result<Vec<(ScopeId, RefusedScope)>, SpiError> {
+    ) -> (Vec<(ScopeId, RefusedScope)>, Vec<RefusedScope>) {
         let mut refused: Vec<(ScopeId, RefusedScope)> = self
             .poisoned_scopes_of(family)
             .into_iter()
@@ -1497,18 +1496,12 @@ impl SpiRealm {
                     let refusal = RefusedScope::of_quarantined(id.to_string(), scope.cause);
                     refused.push((id, refusal));
                 }
-                None => unnamed.push(scope),
+                None => unnamed.push(RefusedScope::of_quarantined(scope.scope, scope.cause)),
             }
-        }
-        if !unnamed.is_empty() {
-            return Err(SpiError::ScopesQuarantined {
-                quarantined: unnamed,
-                poisoned: Vec::new(),
-            });
         }
         refused.sort_by(|left, right| left.0.cmp(&right.0));
         refused.dedup_by(|left, right| left.0 == right.0);
-        Ok(refused)
+        (refused, unnamed)
     }
 
     /// Refuse when the realm is poisoned.

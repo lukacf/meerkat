@@ -3197,19 +3197,24 @@ impl UnavailableRuntime {
 
 /// The delivery authorities of a store, answered per runtime
 /// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]):
-/// the record of every runtime the store answers for, and every runtime it
-/// cannot answer for now. The two sets are disjoint, and a runtime in
-/// neither holds no delivery authority.
+/// the record of every runtime the store answers for, every runtime it
+/// cannot answer for now, and every refused runtime scope it cannot name by
+/// runtime id. The first two are disjoint, and a runtime in none of them
+/// holds no delivery authority.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RuntimeDeliveryAuthorityListing {
     /// Every runtime the store answers for that holds a delivery authority,
     /// with its record.
     pub records: Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>,
-    /// Every runtime the store cannot answer for until it is reopened. Any
-    /// of them may hold a delivery authority with pending rows: none is
-    /// reported absent.
+    /// Every runtime the store refuses until it is reopened, or until its
+    /// quarantined scope is repaired and the realm reopened. Any of them may
+    /// hold a delivery authority with pending rows: none is reported absent.
     pub unavailable: Vec<UnavailableRuntime>,
+    /// Every refused runtime scope the store cannot name by runtime id
+    /// ([`RuntimeStore::unnamed_refused_runtimes`]): each may hold a delivery
+    /// authority with pending rows, named here by its scope.
+    pub unnamed: Vec<RefusedScope>,
 }
 
 impl RuntimeDeliveryAuthorityListing {
@@ -3221,7 +3226,16 @@ impl RuntimeDeliveryAuthorityListing {
         Self {
             records,
             unavailable,
+            unnamed: Vec::new(),
         }
+    }
+
+    /// The listing with `unnamed`, the refused runtime scopes the store
+    /// cannot name by runtime id.
+    #[must_use]
+    pub fn with_unnamed(mut self, unnamed: Vec<RefusedScope>) -> Self {
+        self.unnamed = unnamed;
+        self
     }
 }
 
@@ -10181,6 +10195,26 @@ pub trait RuntimeStore: Send + Sync {
         false
     }
 
+    /// The runtime scopes this store refuses that it cannot name by runtime
+    /// id, each with its refusal naming the scope as the store does. A host
+    /// store names a runtime's scope by a hash of the runtime id when the id
+    /// does not fit its scope names verbatim (over 200 bytes, or with a
+    /// control character), and knows the id only once a call named the
+    /// runtime. Such a scope quarantined before any call named it (the store
+    /// reports a conflict for it) refuses every call, but the reads that list
+    /// runtimes by id cannot list it: they answer every runtime they can name
+    /// ([`Self::list_runtimes_with_recovery_work`],
+    /// [`Self::list_runtime_delivery_authorities_or_unavailable`], which
+    /// reports these in its `unnamed`), so one such scope never refuses a
+    /// store-wide read. A caller that must account for every runtime reads
+    /// these too, and a caller that knows a runtime's id finds whether its
+    /// scope is one of them with [`Self::refuses_runtime_until_reopen`]. A
+    /// store that names every runtime it refuses answers none, the default.
+    /// Decorators must forward their inner store's answer.
+    fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+        Vec::new()
+    }
+
     /// Load the exact generated runtime-delivery authority record.
     async fn load_runtime_delivery_authority(
         &self,
@@ -10320,19 +10354,21 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// [`Self::list_runtime_delivery_authorities`], answered per runtime: the
-    /// record of every runtime the store can answer for, and every runtime
-    /// it cannot answer for until it is reopened
-    /// ([`UnavailableRuntime`]: a host store whose scope of that runtime is
-    /// poisoned). An unavailable runtime may hold pending rows, so a caller
-    /// never reads it as holding none: a drain leaves it alone, a boot plan
-    /// reads it as an obligation, and a total refuses.
+    /// record of every runtime the store can answer for, every runtime it
+    /// refuses ([`UnavailableRuntime`]: a host store whose scope of that
+    /// runtime is poisoned or quarantined), and every refused runtime scope
+    /// it cannot name by runtime id (`unnamed`,
+    /// [`Self::unnamed_refused_runtimes`]). An unavailable runtime, named or
+    /// not, may hold pending rows, so a caller never reads it as holding
+    /// none: a drain leaves it alone, a boot plan reads it as an obligation,
+    /// and a total refuses.
     ///
     /// The default answers every record of
     /// [`Self::list_runtime_delivery_authorities`] and no unavailable
     /// runtime: a store whose listing answers all or nothing changes nothing.
     /// A decorator forwards this method to the store it wraps; left to the
     /// default, it answers through its own listing, which a host store
-    /// refuses while any of its runtime scopes is poisoned.
+    /// refuses while any of its runtime scopes is poisoned or quarantined.
     async fn list_runtime_delivery_authorities_or_unavailable(
         &self,
     ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
@@ -10363,8 +10399,12 @@ pub trait RuntimeStore: Send + Sync {
     /// A mob boot reads this to decide which members it materializes: a
     /// member whose runtime appears here is materialized, and one with no
     /// other reason to start stays dormant until something wakes it. An
-    /// implementation must therefore never omit a runtime that holds work;
-    /// listing one that holds none only materializes its member early. The
+    /// implementation must therefore never omit a runtime that holds work
+    /// and that it can name; a refused runtime scope it cannot name by
+    /// runtime id is reported by [`Self::unnamed_refused_runtimes`] instead,
+    /// and a boot attributes it to its member with
+    /// [`Self::refuses_runtime_until_reopen`]. Listing a runtime that holds
+    /// none only materializes its member early. The
     /// default answers [`RuntimeStoreError::Unsupported`]: a boot over such a
     /// store cannot tell which members hold work and materializes all of
     /// them. A decorator forwards this method to the store it wraps; left to
@@ -10386,7 +10426,10 @@ pub trait RuntimeStore: Send + Sync {
     /// The default answers through the store-wide scan, so a store or a
     /// decorator that implements the scan answers this too, and one that
     /// does not answers [`RuntimeStoreError::Unsupported`]. A store answers
-    /// it for the one runtime when it can, with the same predicate.
+    /// it for the one runtime when it can, with the same predicate; a store
+    /// that refuses runtimes it cannot name in its scan
+    /// ([`Self::unnamed_refused_runtimes`]) answers it for the runtime the
+    /// caller names, a refused one holding work.
     async fn runtime_holds_recovery_work(
         &self,
         runtime_id: &LogicalRuntimeId,

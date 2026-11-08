@@ -758,6 +758,18 @@ them.
   (poisoned or quarantined), `ScopeState::quarantine` and
   `ScopeState::refusal`.
 
+- `meerkat-runtime`: `RuntimeStore::unnamed_refused_runtimes`, the runtime
+  scopes a store refuses that it cannot name by runtime id (a host store's
+  quarantined scope of a runtime whose id its scope names hash, before any
+  call named the runtime), each a `RefusedScope` naming the scope (none by
+  default; a decorator forwards its inner store's answer).
+  `RuntimeDeliveryAuthorityListing` gains `unnamed` (with
+  `RuntimeDeliveryAuthorityListing::with_unnamed`) and
+  `RuntimeDeliveryBacklog` gains `unnamed`, the same scopes, beside the
+  runtimes they name. `MeerkatMachine::unnamed_refused_runtimes` and
+  `MeerkatMachine::store_refuses_runtime` let a boot attribute them to the
+  members it plans, by each member's runtime ids.
+
 - `meerkat-store-conformance`: the host store chapter's
   `a_conflicted_scope_is_listed_typed` row, after `same_version_twice`: a
   scope whose load answers a typed conflict is listed under
@@ -920,9 +932,12 @@ them.
   resumes on its runtime, and the inputs the store keeps for it stay
   queued. The reads across scopes count it as they count a poisoned scope
   of its family: the recovery-work scan lists its runtime as holding work,
-  the delivery authority listing per runtime names it unavailable (both
-  refuse typed while it is a runtime whose scope name keeps only a hash of
-  its id and no call named it yet), the session catalog listing, the
+  the delivery authority listing per runtime names it unavailable (for a
+  runtime whose scope name keeps only a hash of its id and that no call
+  named yet, both answer every other runtime and report it by its scope's
+  name, `RuntimeStore::unnamed_refused_runtimes` and the listing's
+  `unnamed`, and a mob boot plans its member as holding work and leaves the
+  others dormant), the session catalog listing, the
   controller custody and the delivery backlog total refuse typed, and so
   does the tool grant listing while a grant scope is quarantined. Its
   chunks are never swept, and a mob storage lists a mob whose scope is

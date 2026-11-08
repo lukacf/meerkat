@@ -789,30 +789,27 @@ impl SpiRuntimeStore {
 
     /// A cross-scope read of the runtimes that answers per runtime:
     /// exclusive gate (no commit in flight), refused while the realm is
-    /// poisoned, and answered with the runtime scopes that refuse until the
-    /// realm is reopened, poisoned or quarantined, each with its refusal's
-    /// cause, read under the same gate. The caller answers each of them fail
-    /// closed: a poisoned runtime's memory may differ from the host and a
-    /// quarantined one is not in memory, so what memory says of it is never
-    /// the answer, and it is never left out. A quarantined runtime the realm
-    /// cannot name by its id (its store name hashes the id, and no call
-    /// named it yet) refuses the whole read typed instead.
+    /// poisoned, and answered with the runtime scopes that refuse every
+    /// call, poisoned or quarantined, each with its refusal, read under the
+    /// same gate. The caller answers each of them fail closed: a poisoned
+    /// runtime's memory may differ from the host and a quarantined one is not
+    /// in memory, so what memory says of it is never the answer, and it is
+    /// never left out. A quarantined runtime the realm cannot name by its id
+    /// (its store name hashes the id, and no call named it yet) comes in the
+    /// third part, by its scope's name: the read answers every other runtime.
     async fn cross_scope_read_per_runtime<T, F>(
         &self,
         op: F,
-    ) -> Result<(T, Vec<(ScopeId, RefusedScope)>), RuntimeStoreError>
+    ) -> Result<(T, Vec<(ScopeId, RefusedScope)>, Vec<RefusedScope>), RuntimeStoreError>
     where
         F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
         T: Send,
     {
         let _gate = self.exclusive_gate().await;
         self.realm.check_realm().map_err(SpiError::into_read)?;
-        let refused = self
-            .realm
-            .refused_scopes_of(RUNTIME_FAMILY)
-            .map_err(SpiError::into_read)?;
+        let (refused, unnamed) = self.realm.refused_scopes_of(RUNTIME_FAMILY);
         let answer = Self::read_memory(op).await?;
-        Ok((answer, refused))
+        Ok((answer, refused, unnamed))
     }
 
     /// Run a read of memory, refused when it changed the store.
@@ -1437,6 +1434,30 @@ impl RuntimeStore for SpiRuntimeStore {
             || self.realm.scope_refused(&runtime_id_scope(runtime_id))
     }
 
+    /// Every quarantined runtime scope the realm cannot name by its runtime
+    /// id (its store name hashes the id, and no call named it yet), by its
+    /// scope's name, from the writer fence: no store read.
+    fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+        self.realm.refused_scopes_of(RUNTIME_FAMILY).1
+    }
+
+    /// A runtime the store refuses (its scope is poisoned or quarantined)
+    /// holds work, as the scan lists it, whether or not the scan can name
+    /// it; any other runtime answers by the scan.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        self.realm.check_realm().map_err(SpiError::into_read)?;
+        if self.realm.scope_refused(&runtime_id_scope(runtime_id)) {
+            return Ok(true);
+        }
+        Ok(self
+            .list_runtimes_with_recovery_work()
+            .await?
+            .contains(runtime_id))
+    }
+
     async fn commit_prepared_session_boundary_with_fence(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -1601,16 +1622,16 @@ impl RuntimeStore for SpiRuntimeStore {
     }
 
     /// Answered from memory as a cross-scope read of the runtimes, refused
-    /// while the realm is poisoned: the record of every healthy runtime, and
+    /// while the realm is poisoned: the record of every healthy runtime,
     /// every poisoned or quarantined runtime as unavailable, whether or not
     /// its memory holds a record (the batch that poisoned it may have
-    /// written or removed one, and a quarantined one is not in memory). A
-    /// quarantined runtime it cannot name (its store name hashes the id, and
-    /// no call named it yet) refuses it typed.
+    /// written or removed one, and a quarantined one is not in memory), and
+    /// every quarantined runtime it cannot name (its store name hashes the
+    /// id, and no call named it yet) in `unnamed`, by its scope's name.
     async fn list_runtime_delivery_authorities_or_unavailable(
         &self,
     ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
-        let (mut records, refused) = self
+        let (mut records, refused, unnamed) = self
             .cross_scope_read_per_runtime(
                 <InMemoryRuntimeStore as RuntimeStore>::list_runtime_delivery_authorities(
                     &self.memory,
@@ -1623,13 +1644,14 @@ impl RuntimeStore for SpiRuntimeStore {
             .into_iter()
             .map(|(id, refusal)| UnavailableRuntime::new(LogicalRuntimeId::new(id.key), refusal))
             .collect();
-        Ok(RuntimeDeliveryAuthorityListing::new(records, unavailable))
+        Ok(RuntimeDeliveryAuthorityListing::new(records, unavailable).with_unnamed(unnamed))
     }
 
     /// Answered from memory, with no host read, as a cross-scope read (no
     /// commit in flight), refused while the realm is poisoned.
     ///
-    /// The answer is complete. The open imported every runtime's pinned
+    /// The answer is complete for every runtime the realm can name. The open
+    /// imported every runtime's pinned
     /// entries, its catalog entry and its lifecycle among them, and loaded
     /// the body of every runtime the same predicate named. Every later
     /// change to a runtime is a call that loads its body before memory
@@ -1649,13 +1671,14 @@ impl RuntimeStore for SpiRuntimeStore {
     /// out would read as a runtime with nothing to recover. So is a
     /// quarantined runtime, which is not in memory at all. Every other
     /// runtime answers from memory, so one such scope never turns the scan
-    /// into a refusal. The one exception is a quarantined runtime the scan
-    /// cannot name (its store name hashes the id, and no call named it
-    /// yet): the scan refuses typed rather than leave it out.
+    /// into a refusal. A quarantined runtime the scan cannot name (its store
+    /// name hashes the id, and no call named it yet) is reported by
+    /// [`RuntimeStore::unnamed_refused_runtimes`] instead, and the scan
+    /// answers every other runtime.
     async fn list_runtimes_with_recovery_work(
         &self,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
-        let (mut listed, refused) = self
+        let (mut listed, refused, _unnamed) = self
             .cross_scope_read_per_runtime(
                 <InMemoryRuntimeStore as RuntimeStore>::list_runtimes_with_recovery_work(
                     &self.memory,

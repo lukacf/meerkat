@@ -999,8 +999,9 @@ fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
 /// tail after the legacy adoption's arms, so no `TransitionId`
 /// discriminant 0.9.10 renders moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
 /// its last variant, keeps index 1902. Only the arms appended after them
-/// follow them: the build preparation retry's
-/// (`mob_build_preparation_retry_arms_are_the_last_variants`).
+/// follow them: the build preparation retry's, then the seal refusal and
+/// the identity life marker's
+/// (`mob_build_preparation_retry_arms_precede_only_the_later_tail`).
 #[test]
 fn mob_host_adoption_arms_follow_every_earlier_variant() {
     let rendered = render_machine_kernel_module(&mob_machine());
@@ -1026,7 +1027,8 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         "RecoverIdentityEntryAdoptingMarkedRunning",
         "RecoverIdentityEntryAdoptingStaleRunning",
     ];
-    let after = MOB_BUILD_PREPARATION_RETRY_ARMS.len();
+    let after =
+        MOB_BUILD_PREPARATION_RETRY_ARMS.len() + MOB_ARMS_AFTER_BUILD_PREPARATION_RETRY.len();
     let end = variants.len() - after;
     assert_eq!(
         variants[end - host_adoption_arms.len()..end].to_vec(),
@@ -1041,9 +1043,9 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
 
 /// MobMachine's arms of a build preparation the host asked to retry
 /// (0.9.11: the wake feedback that records the cause, and the host's
-/// resolve in each phase) are the last `TransitionId` variants, appended
-/// on the machine's late tail after the host adoption's arms, so no
-/// earlier variant's discriminant moves.
+/// resolve in each phase), appended on the machine's late tail after the
+/// host adoption's arms, so no earlier variant's discriminant moves. Only
+/// the arms of [`MOB_ARMS_AFTER_BUILD_PREPARATION_RETRY`] follow them.
 const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
     "ResolveMemberRevivalRetryableBuildPreparationRunning",
     "ResolveMemberBuildPreparationRunning",
@@ -1051,14 +1053,37 @@ const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
     "ResolveMemberBuildPreparationCompleted",
 ];
 
+/// MobMachine's arms appended after the build preparation retry's (0.9.11):
+/// the seal refused while an unseated entry it does not list remains, then
+/// an identity's life marker (the end of a retirement that ends the
+/// identity, and the resets recovered at resume). They are the last
+/// `TransitionId` variants.
+const MOB_ARMS_AFTER_BUILD_PREPARATION_RETRY: [&str; 9] = [
+    "SealDeclaredRosterRefused",
+    "EndIdentityLifeRunning",
+    "EndIdentityLifeStopped",
+    "EndIdentityLifeCompleted",
+    "EndIdentityLifeDestroyed",
+    "RecoverIdentityLifeResetsRunning",
+    "RecoverIdentityLifeResetsStopped",
+    "RecoverIdentityLifeResetsCompleted",
+    "RecoverIdentityLifeResetsDestroyed",
+];
+
 #[test]
-fn mob_build_preparation_retry_arms_are_the_last_variants() {
+fn mob_build_preparation_retry_arms_precede_only_the_later_tail() {
     let rendered = render_machine_kernel_module(&mob_machine());
     let variants = transition_id_variants(&rendered);
+    let later = variants.len() - MOB_ARMS_AFTER_BUILD_PREPARATION_RETRY.len();
     assert_eq!(
-        variants[variants.len() - MOB_BUILD_PREPARATION_RETRY_ARMS.len()..].to_vec(),
+        variants[later..].to_vec(),
+        MOB_ARMS_AFTER_BUILD_PREPARATION_RETRY.to_vec(),
+        "the seal refusal and the identity life marker's arms are the last TransitionId variants"
+    );
+    assert_eq!(
+        variants[later - MOB_BUILD_PREPARATION_RETRY_ARMS.len()..later].to_vec(),
         MOB_BUILD_PREPARATION_RETRY_ARMS.to_vec(),
-        "the build preparation retry's arms are the last TransitionId variants"
+        "the build preparation retry's arms come right before them"
     );
 }
 

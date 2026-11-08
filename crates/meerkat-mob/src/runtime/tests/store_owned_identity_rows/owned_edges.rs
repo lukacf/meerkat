@@ -765,3 +765,51 @@ async fn a_worker_that_takes_an_unlisted_peers_name_gets_no_owned_edge() {
         "the re-listed identity's edge is alpha's again"
     );
 }
+
+/// Row: a seat of an owned edge's owner (its unarchive) wires no worker
+/// that took the name of the edge's unlisted end: the seat step reads
+/// MobMachine's realization verdict too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unarchive_seat_wires_no_worker_under_an_unlisted_name() {
+    let mob = StoreOwnedMob::new("cycle-unarchive-unlisted").await;
+    mob.declare(&["listed"]).await;
+    committed(
+        mob.create(
+            create_with_peers("create-alpha", "alpha", &["listed"]),
+            ALLOW,
+        )
+        .await,
+    );
+    mob.wired_within("alpha", "listed", true).await;
+    committed(mob.archive("archive-alpha", "alpha").await);
+    mob.unseated_for("alpha", UnseatedEntryCause::Archived)
+        .await;
+    tokio::time::timeout(STEP, mob.handle.unlist_declared_identity(&id("listed")))
+        .await
+        .expect("the unlist answers")
+        .expect("the unlist runs");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member("listed").await {
+        assert!(tokio::time::Instant::now() < deadline, "listed never left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .spawn_spec(SpawnMemberSpec::new("worker", id("listed"))),
+    )
+    .await
+    .expect("the spawn answers")
+    .expect("a worker takes the free name");
+    committed(mob.unarchive("unarchive-alpha", "alpha").await);
+    mob.handle.realize_owned_identity_edges().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !mob.wired_to("alpha").await.contains(&id("listed")),
+        "alpha's seat wired the worker that took the unlisted identity's name"
+    );
+    assert!(
+        !mob.wired_to("listed").await.contains(&id("alpha")),
+        "the worker that took the unlisted identity's name is wired to alpha"
+    );
+}

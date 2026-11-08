@@ -1151,3 +1151,141 @@ async fn rb_cl4_3_and_4_store_owned_states_fixture() {
     })
     .await;
 }
+
+/// The set-up of the rows below: `alpha` (store-owned) owns an edge to the
+/// roster-owned `beta`; the cycle exports and purges; after the restart
+/// (the roll-forward) and before the import, `beta` is adopted into store
+/// custody and its change declares the edge to the reserved `alpha`, so
+/// `beta` owns it; then the import restores `alpha`'s record, which lists
+/// the same edge.
+async fn an_edge_declared_to_a_purged_name_its_record_lists(mob: &mut StoreOwnedMob, tag: &str) {
+    mob.declare(&["beta"]).await;
+    committed(
+        mob.create(
+            StoreOwnedIdentityCreate::new(
+                operation(&format!("create-alpha-{tag}")),
+                IdentityChangeRequesterInput::host("console"),
+                vec![
+                    CreatedIdentityRequest::new(spec("alpha", "worker")).with_peers(vec![
+                        crate::identity::OwnedIdentityEdge::new(
+                            "beta",
+                            crate::identity::OwnedEdgeAdmission::rule("team-peers")
+                                .expect("a peer rule id"),
+                        ),
+                    ]),
+                ],
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    let export = mob.export_and_purge(&format!("purge-{tag}")).await;
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    committed(
+        tokio::time::timeout(
+            STEP,
+            mob.handle.adopt_identity(
+                IdentityAdoption::new(
+                    operation(&format!("adopt-beta-{tag}")),
+                    IdentityChangeRequesterInput::host("console"),
+                    "beta",
+                    AdoptionSource::roster(spec("beta", "worker")),
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the adoption answers"),
+    );
+    let beta_spec = mob
+        .row("beta")
+        .await
+        .spec
+        .expect("beta's row holds its spec");
+    let expected = beta_spec.spec_digest().expect("the spec's digest");
+    let updated = tokio::time::timeout(
+        STEP,
+        mob.handle.update_store_owned_identity(
+            crate::runtime::StoreOwnedIdentityUpdate::new(
+                operation(&format!("update-beta-{tag}")),
+                IdentityChangeRequesterInput::host("console"),
+                beta_spec,
+                expected,
+            )
+            .with_peers_add(vec![crate::identity::OwnedIdentityEdge::new(
+                "alpha",
+                crate::identity::OwnedEdgeAdmission::rule("team-peers").expect("a peer rule id"),
+            )]),
+            ALLOW,
+        ),
+    )
+    .await
+    .expect("the update answers");
+    assert!(
+        updated.is_ok(),
+        "beta's update declares the edge: {updated:?}"
+    );
+    assert_eq!(
+        edge_custody(mob).get(&(id("alpha"), id("beta"))),
+        Some(&id("beta")),
+        "beta owns the edge before the import"
+    );
+    committed(mob.import(&format!("import-{tag}"), export).await);
+}
+
+/// Row: an imported row lists no owned edge another identity owns
+/// already, so the import's custody of the edge is the one the next
+/// restart reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_imported_row_lists_no_owned_edge_another_identity_owns() {
+    let mut mob = StoreOwnedMob::new("cycle-double-listed").await;
+    an_edge_declared_to_a_purged_name_its_record_lists(&mut mob, "parity").await;
+    let imported = edge_custody(&mob);
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    let restarted = edge_custody(&mob);
+    assert_eq!(
+        imported, restarted,
+        "the import's custody of the owned edges is the one a restart recovers"
+    );
+}
+
+/// Row: an owned edge its owner ended after the import stays ended across
+/// a restart: the row the import restored for the edge's other end does
+/// not list it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owned_edge_ended_after_an_import_stays_ended_after_a_restart() {
+    let mut mob = StoreOwnedMob::new("cycle-double-listed-ended").await;
+    an_edge_declared_to_a_purged_name_its_record_lists(&mut mob, "ended").await;
+    let beta_spec = mob
+        .row("beta")
+        .await
+        .spec
+        .expect("beta's row holds its spec");
+    let expected = beta_spec.spec_digest().expect("the spec's digest");
+    let updated = tokio::time::timeout(
+        STEP,
+        mob.handle.update_store_owned_identity(
+            crate::runtime::StoreOwnedIdentityUpdate::new(
+                operation("update-beta-end"),
+                IdentityChangeRequesterInput::host("console"),
+                beta_spec,
+                expected,
+            )
+            .with_peers_remove(vec![id("alpha")]),
+            ALLOW,
+        ),
+    )
+    .await
+    .expect("the update answers");
+    assert!(updated.is_ok(), "beta's update ends the edge: {updated:?}");
+    assert!(
+        !edge_custody(&mob).contains_key(&(id("alpha"), id("beta"))),
+        "the edge ended live"
+    );
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    assert!(
+        !edge_custody(&mob).contains_key(&(id("alpha"), id("beta"))),
+        "the ended edge stays ended after a restart: {:?}",
+        edge_custody(&mob)
+    );
+}

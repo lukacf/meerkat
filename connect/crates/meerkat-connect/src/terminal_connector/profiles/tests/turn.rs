@@ -617,6 +617,7 @@ fn initial_secret_refusal_schedule(
             )),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage: storage.clone(),
             config: meerkat_core::Config::default(),
             factory: meerkat::AgentFactory::new(directory.path().join("factory"))

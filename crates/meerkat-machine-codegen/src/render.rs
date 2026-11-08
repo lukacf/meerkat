@@ -922,8 +922,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverOperatorInstructionGenerationHighwaterKept",
             "PrepareMemberInstructionDeliveryNotOwedRunning",
             "PrepareMemberInstructionDeliveryNotOwedStopped",
-            "PrepareMemberInstructionDeliveryPlacedRunning",
-            "PrepareMemberInstructionDeliveryPlacedStopped",
             "PrepareMemberInstructionDeliveryUnbornRunning",
             "PrepareMemberInstructionDeliveryUnbornStopped",
             "PrepareMemberInstructionDeliveryUnboundRunning",
@@ -1266,6 +1264,10 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverIdentityLifeResetsStopped",
             "RecoverIdentityLifeResetsCompleted",
             "RecoverIdentityLifeResetsDestroyed",
+            // External work refused for an identity entry and for a name
+            // reserved unreadable (0.9.11).
+            "ResolveSubmitWorkRejectionIdentityMember",
+            "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
         ],
     ),
     // The end of a grant with its subject (0.9.11), after every arm 0.9.10

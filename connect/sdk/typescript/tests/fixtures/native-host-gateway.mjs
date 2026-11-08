@@ -72,6 +72,8 @@ privateLines.on("line", line => {
   }
   if (["bootstrap", "replace_application"].includes(request.command.kind)) {
     selectedId = request.id;
+    if (mode === "member-mcp-start-failed") privateReply(0, { kind: "member_class_mcp_required", exchange_id: 1,
+      selection: { admission_id: "add-project-one", identity: "project-one", class: "project" }, bindings: [] });
     if (mode === "private-refused") {
       privateReply(request.id, { kind: "error", error: "denied" });
     } else {

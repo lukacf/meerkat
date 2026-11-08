@@ -33,10 +33,11 @@
 \*     recorded a generation the mob has not minted.
 \*   AuditOwedIsSeatedAndUnblocked (invariant): an owed member is seated,
 \*     never blocked, and owed a minted generation.
-\*   AuditDeliversOnlyToBoundLocalBornMembers (invariant, ENABLED form): a
+\*   AuditDeliversOnlyToBoundBornMembers (invariant, ENABLED form): a
 \*     delivery can be prepared only for an owed member that is bound to a
-\*     session, whose session exists (not an unborn seat), and that is not
-\*     placed.
+\*     session and whose session exists (not an unborn seat). A placed
+\*     member is prepared the same way (no arm of the region reads its
+\*     placement); this audit seats no placed member.
 \*   AuditWriteOwesExactlyTheSelected (action property): a committed write
 \*     owes the new generation to exactly the seated members the slot's old
 \*     or new target selects (an independent statement of the selector), and
@@ -345,13 +346,12 @@ AuditOwedIsSeatedAndUnblocked ==
         /\ id \notin DOMAIN member_instruction_blocked
         /\ member_instruction_owed[id] <= operator_instruction_generation
 
-AuditDeliversOnlyToBoundLocalBornMembers ==
+AuditDeliversOnlyToBoundBornMembers ==
     \A id \in AuditIds :
         ENABLED PrepareMemberInstructionDeliveryDeliverRunning(id) =>
             /\ id \in DOMAIN member_instruction_owed
             /\ id \notin member_seat_session_unborn
             /\ id \in DOMAIN member_session_bindings
-            /\ id \notin DOMAIN member_placement
 
 AuditWriteOwesExactlyTheSelected ==
     [][AuditCommittedWrite =>

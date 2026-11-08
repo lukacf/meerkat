@@ -6,20 +6,21 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.0 supports Apple Silicon macOS 13.5 or later and Linux x86_64 with
-glibc 2.39. Install [Meerkat Core 0.9.0](https://github.com/lukacf/meerkat/releases/tag/v0.9.0)
+Connect 0.9.10 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
+macOS archives (macOS 13.5 or later) are not built yet and follow later.
+Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=macos-arm64 # Use linux-x86_64 on Linux.
-archive="meerkat-connect-0.9.0-$platform.tar.gz"
-release=https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0
+platform=linux-x86_64 # 0.9.10 has no macos-arm64 archive yet.
+archive="meerkat-connect-0.9.10-$platform.tar.gz"
+release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
-shasum -a 256 -c "$archive.sha256" # On Linux: sha256sum -c "$archive.sha256"
+sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
 tar -xpf "$archive"
 export PATH="$PWD/meerkat-connect-$platform/bin:$PATH"
 ```
@@ -56,13 +57,26 @@ the original task in the same conversation. The application supplies login and
 a persistent host. The gateway archive and Rust, JSON-RPC, Python and TypeScript
 interfaces support this composition; the gateway alone does not install an app.
 
-Installed-package checks, including controlled native original-task continuation,
-passed on both supported platforms. The fresh generated-Console business example
-remains incomplete, as documented in the [release notes](docs/releases/0.9.0.md).
+The [0.9.10 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10)
+includes ordinary CLI and Console setup. Connect 0.9.10 does not support
+in-place updates that change an application's tool policy, definition,
+instructions or runtime; Forge's Stage refuses them, so keep the existing
+installation and state. Shared multi-caller setup is an unqualified opt-in,
+available only when an application starts the gateway with
+`--private-workflow-launch`; ordinary CLI and Console setup stay single-caller.
+Do not install over an existing installation to update it.
+Development work and its remaining checks are tracked in
+[follow-up work](docs/releases/follow-up.md).
 
 Service connectors and agent frontends have different roles. A frontend also
 requires the application to own participant identity, audience, routing and
 reply delivery. See [host composition](docs/site/guides/host-composition.mdx).
+
+For the development provider-only host API, see the
+[Python](sdk/python/PROVIDER-SETUP.md) and
+[TypeScript](sdk/typescript/PROVIDER-SETUP.md) guides. Their source-only examples
+use a dedicated protected child pipe before any agent session; they do not
+qualify the published release or a deployed provider flow.
 
 ## Scope
 
@@ -76,7 +90,7 @@ reply delivery. See [host composition](docs/site/guides/host-composition.mdx).
 - REST and an outer MCP Connect entry point are deferred. MCP servers used as
   integrations are included.
 
-See [release notes](docs/releases/0.9.0.md) for platform assets and compatibility,
+See [release notes](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10) for platform assets and compatibility,
 [BUILDING.md](BUILDING.md) to build from source, and
 [source provenance](SOURCE-PROVENANCE.md) for upstream attribution and catalog
 identity. The [documentation source](docs/site) contains the full contracts.

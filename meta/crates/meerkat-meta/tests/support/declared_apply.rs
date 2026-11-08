@@ -46,6 +46,15 @@ async fn intent_named(bridge: &dyn SessionBridge, identity: &AgentIdentity) -> b
 pub struct DeclaredSet(Mutex<BTreeSet<AgentIdentity>>);
 
 impl DeclaredSet {
+    /// Whether the double's Core holds `identity` declared: an identity
+    /// entry.
+    pub fn contains(&self, identity: &AgentIdentity) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(identity)
+    }
+
     /// Hold `roster`'s identities declared and, for a complete roster,
     /// unlist each identity held declared that it does not list, as Core's
     /// seal does: `bridge` retires its live member

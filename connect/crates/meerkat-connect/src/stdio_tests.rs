@@ -176,15 +176,15 @@ fn service_v3_is_a_separate_closed_bootstrap_and_answer_union() {
 }
 
 #[tokio::test]
-async fn service_v3_unqualified_lifecycle_refuses_before_startup_or_artifacts() {
-    for (generic, mismatched) in [(false, false), (false, true), (true, false), (true, true)] {
+async fn service_v3_mismatched_resources_refuse_before_startup_or_artifacts() {
+    for generic in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let mut value = if generic {
             generic_service_binding(root.path())
         } else {
             service_binding(root.path())
         };
-        if mismatched {
+        {
             let digest = value["services"]["resource_manifest_sha256"]
                 .as_str()
                 .unwrap();
@@ -213,14 +213,7 @@ async fn service_v3_unqualified_lifecycle_refuses_before_startup_or_artifacts() 
         assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
         let rows = drain(&mut rx);
         let reply = rows.iter().find(|row| row["id"] == "h:init").unwrap();
-        assert_eq!(
-            reply["error"]["data"]["code"],
-            if !mismatched && option_env!("MEERKAT_CONNECT_RESOURCES_SHA256").is_some() {
-                "unavailable"
-            } else {
-                "invalid_binding"
-            }
-        );
+        assert_eq!(reply["error"]["data"]["code"], "invalid_binding");
         assert!(rows.iter().all(|row| row["method"] != "connect/prompt"));
     }
 }
@@ -312,7 +305,7 @@ async fn service_v3_owner_notice_closure_is_acknowledged_before_init_result() {
         d.owner_closed(observed);
         close.await.unwrap();
         assert!(d.pending.is_none());
-        d.work(Work::Opened(Box::new(Err("native_auth_required"))));
+        d.work(Work::Opened(Box::new(Err("native_auth_required".into()))));
         let rows = drain(&mut rx);
         let closed = rows
             .iter()
@@ -401,7 +394,7 @@ async fn service_v3_retirement_keeps_original_init_until_entered_work_joins() {
             .any(|row| row["params"]["kind"] == "prompt_closed")
     );
     assert!(!rows.iter().any(|row| row["id"] == "h:retire"));
-    d.work(Work::Opened(Box::new(Err("binding_retired"))));
+    d.work(Work::Opened(Box::new(Err("binding_retired".into()))));
     d.settle();
     let rows = drain(&mut rx);
     assert_eq!(
@@ -457,7 +450,7 @@ async fn service_v3_viewer_expiry_closes_before_original_init_settles() {
                 .all(|row| !row.to_string().contains("private-expiry-code"))
         );
         assert!(d.scope.is_none());
-        d.work(Work::Opened(Box::new(Err("binding_retired"))));
+        d.work(Work::Opened(Box::new(Err("binding_retired".into()))));
         d.settle();
         let rows = drain(&mut rx);
         assert_eq!(
@@ -719,7 +712,14 @@ fn service_worker_settlement_is_required_before_retirement_ack() {
         retire(&mut d);
         d.settle();
         assert!(!drain(&mut rx).iter().any(|row| row["id"] == "h:retire"));
-        d.work(Work::Service(if failed { Err(ended()) } else { Ok(()) }));
+        d.work(Work::Service(if failed {
+            Err(services::Failure {
+                origin: FenceOrigin::ServicePrepareError,
+                _error: ended(),
+            })
+        } else {
+            Ok(())
+        }));
         d.settle();
         let rows = drain(&mut rx);
         let reply = rows.iter().find(|row| row["id"] == "h:retire").unwrap();
@@ -735,6 +735,164 @@ fn service_worker_settlement_is_required_before_retirement_ack() {
             assert!(!d.failed);
         }
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn private_services_retirement_joins_guard_owner_once_before_acknowledgement() {
+    let (mut d, mut rx) = driver();
+    d.initialize_id = Some("h:init".into());
+    d.scope = Some("test-scope".into());
+    let session = meerkat::Session::new();
+    let (lazy, presenter) = LazySetup::private_services_owned(
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+        session.id(),
+        None,
+    )
+    .unwrap();
+    let owner = lazy.owner();
+    d.lazy = Some(Arc::new(lazy));
+    drop(presenter);
+    retire(&mut d);
+    d.settle();
+    assert!(d.private_close_started);
+    assert_eq!(d.workers, 1);
+    assert!(!drain(&mut rx).iter().any(|row| row["id"] == "h:retire"));
+    let closed = d.tasks.next().await.expect("same retained close task");
+    d.work(closed);
+    d.settle();
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|row| row["id"] == "h:retire" && row["result"]["entered_work"] == "settled")
+    );
+    assert_eq!(d.workers, 0);
+    assert!(d.tasks.is_empty());
+    owner
+        .shutdown()
+        .await
+        .expect("repeat observes same native close");
+    d.settle();
+    assert!(
+        d.tasks.is_empty(),
+        "retirement never launches a second close operation"
+    );
+}
+
+#[test]
+fn private_services_failed_cleanup_is_retained_and_never_acknowledged_as_settled() {
+    let (mut d, mut rx) = driver();
+    d.initialize_id = Some("h:init".into());
+    d.scope = Some("test-scope".into());
+    d.private_close_started = true;
+    d.workers = 1;
+    retire(&mut d);
+    d.work(Work::PrivateClosed(Err(ended()), None));
+    d.settle();
+    let rows = drain(&mut rx);
+    assert!(rows.iter().any(
+        |row| row["id"] == "h:retire" && row["error"]["data"]["code"] == "shutdown_unconfirmed"
+    ));
+    assert!(
+        rows.iter()
+            .all(|row| row["result"]["entered_work"] != "settled")
+    );
+    assert!(d.close_failure.is_some());
+    d.work(Work::Closed(Ok(())));
+    assert!(
+        d.failed && d.close_failure.is_some(),
+        "later native close cannot erase the helper failure"
+    );
+}
+
+#[test]
+fn private_startup_cleanup_error_keeps_its_owner_through_driver_close() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("retained startup cleanup fixture")]
+    struct Held {
+        _owner: Arc<()>,
+    }
+    let (mut d, mut rx) = driver();
+    d.initialize_id = Some("h:init".into());
+    let owner = Arc::new(());
+    let witness = Arc::downgrade(&owner);
+    let error = ConnectError::native("startup cleanup", Held { _owner: owner });
+    d.work(Work::Opened(Box::new(Err(OpenFailure::native(
+        "native_auth_required",
+        error,
+    )))));
+    assert!(witness.upgrade().is_some() && d.close_failure.is_some());
+    d.work(Work::Closed(Ok(())));
+    assert!(witness.upgrade().is_some() && d.failed);
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .all(|row| row["result"]["resources_closed"] != true)
+    );
+    let retained = d
+        .close_failure
+        .take()
+        .expect("run_io returns the same retained error");
+    drop(d);
+    assert!(witness.upgrade().is_some());
+    drop(retained);
+    assert!(witness.upgrade().is_none());
+}
+
+#[test]
+fn private_second_service_connector_error_retains_cause_without_wire_details() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("private-connector-cause-canary")]
+    struct Held {
+        _owner: Arc<()>,
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (mut d, mut rx) = driver();
+    let mut selected = generic_service_binding(root.path());
+    selected["protocol_version"] = json!(7);
+    d.binding = Some(serde_json::from_value(selected).unwrap());
+    d.initialize_id = Some("h:init".into());
+    d.collection_open_id = Some("h:phase-next".into());
+    d.scope = Some("original-collection-scope".into());
+    d.opening = true;
+    let owner = Arc::new(());
+    let witness = Arc::downgrade(&owner);
+    let error = ConnectError::native("Open connector authority", Held { _owner: owner });
+    d.work(Work::Opened(Box::new(Err(OpenFailure::native(
+        "connector_unavailable",
+        error,
+    )))));
+    let rows = drain(&mut rx);
+    assert!(rows.iter().any(|row| row["id"] == "h:phase-next"
+        && row["error"]["data"]["code"] == "connector_unavailable"));
+    assert!(
+        rows.iter()
+            .all(|row| !row.to_string().contains("private-connector-cause-canary"))
+    );
+    assert!(d.failed && !d.opening && d.collection_open_id.is_none());
+    assert_eq!(d.scope.as_deref(), Some("original-collection-scope"));
+    assert!(witness.upgrade().is_some());
+    d.work(Work::Closed(Ok(())));
+    let retained = d
+        .close_failure
+        .take()
+        .expect("the original connector error survives close");
+    // The derived Debug of Held prints its fields, not its Display message.
+    // Prove the original typed source and owner survived, rather than relying
+    // on a diagnostic formatter to reproduce the private error text.
+    let cause = std::error::Error::source(&retained).expect("retained typed connector source");
+    let held = cause
+        .downcast_ref::<Held>()
+        .expect("original connector error type");
+    assert_eq!(cause.to_string(), "private-connector-cause-canary");
+    assert!(Arc::ptr_eq(
+        &held._owner,
+        &witness.upgrade().expect("original owner retained")
+    ));
+    drop(d);
+    assert!(witness.upgrade().is_some());
+    drop(retained);
+    assert!(witness.upgrade().is_none());
 }
 
 #[tokio::test]
@@ -1619,7 +1777,7 @@ async fn startup_already_entered_is_retained_through_retirement() {
     let future = before_entry(retired, async {
         entered.fetch_add(1, Ordering::SeqCst);
         wait.await.unwrap();
-        Ok(())
+        Ok::<(), &'static str>(())
     });
     tokio::pin!(future);
     assert!(future.as_mut().now_or_never().is_none());
@@ -1628,6 +1786,67 @@ async fn startup_already_entered_is_retained_through_retirement() {
     assert_eq!(entered.load(Ordering::SeqCst), 1);
     release.send(()).unwrap();
     assert!(future.await.is_ok());
+}
+
+#[test]
+fn unknown_completion_fences_new_sends_without_claiming_success_or_settlement() {
+    // Exercise the existing driver result/progression boundary, not a native
+    // completion producer or a fabricated registration/recovery witness.
+    let outcome = CompletionOutcome::OutcomeUnknown {
+        run_id: meerkat_core::RunId::new(),
+    };
+    for terminal in [None, Some(InputTerminalOutcome::Consumed)] {
+        for plain_pending in [false, true] {
+            let observed = TurnCompletion::observed(&outcome, terminal.as_ref());
+            assert_eq!(observed.outcome, Ok("outcome_unknown"));
+            assert!(observed.uncertain && !observed.settled);
+            let (mut d, mut rx) = driver();
+            active(&mut d);
+            d.plain_pending = plain_pending;
+            d.work(Work::Sent("h:send".into(), observed, None));
+            assert!(d.retired && d.closing && d.uncertain);
+            assert_eq!(d.state()["can_send"], false);
+            assert_eq!(d.state()["outcome_uncertain"], true);
+            assert_eq!(
+                d.state()["last_completion"]["completion"],
+                "outcome_unknown"
+            );
+            assert!(
+                !d.settle_plain(),
+                "unknown work cannot start installation finalization"
+            );
+            d.frame(br#"{"jsonrpc":"2.0","id":"h:retry","method":"connect/send","params":{"scope":"test-scope","text":"Do it again"}}"#);
+            assert!(
+                d.tasks.is_empty() && d.active.is_none(),
+                "no retry or native task was scheduled"
+            );
+            retire(&mut d);
+            d.settle();
+            let rows = drain(&mut rx);
+            assert!(
+                rows.iter()
+                    .any(|r| r["id"] == "h:send" && r["result"]["completion"] == "outcome_unknown")
+            );
+            assert!(
+                rows.iter().any(
+                    |r| r["id"] == "h:retry" && r["error"]["data"]["code"] == "binding_retired"
+                )
+            );
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| r["result"]["entered_work"] == "settled")
+            );
+        }
+    }
+    let (mut healthy, _healthy_rx) = driver();
+    active(&mut healthy);
+    healthy.work(Work::Sent(
+        "h:send".into(),
+        TurnCompletion::observed(&CompletionOutcome::CompletedWithoutResult, None),
+        None,
+    ));
+    assert!(!healthy.retired && !healthy.uncertain && !healthy.closing);
 }
 
 #[test]
@@ -1879,7 +2098,7 @@ pub(crate) async fn retire_joined_dispatch(
     d.tasks.push(
         async move {
             dispatch.await;
-            Work::Presenter(false)
+            Work::Presenter(None)
         }
         .boxed(),
     );
@@ -3009,7 +3228,8 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
         Some(json!([])),
         Some(Value::Null),
         Some(json!({})),
-        Some(json!([{"field_path":["config","token_env"],"environment_variable":"SELECTED"}])),
+        Some(json!([{"field":"token_env","reference":"SELECTED_TOKEN"}])),
+        Some(json!([{"field_path":["config","token_env"],"environment_variable":"FIXTURE_TOKEN"}])),
     ] {
         let root = tempfile::tempdir().unwrap();
         let storage = crate::RealmOptions {
@@ -3031,23 +3251,24 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
                 value.clone();
         }
         fixture.prime(true).await;
+        let selected =
+            fixture
+                .owner
+                .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32));
         if references.as_ref().is_some_and(|value| value != &json!([])) {
-            // Malformed rows, or rows for a field help does not declare, are
-            // refused by the checked reference contract. Refusal is not
-            // evidence of absent or empty references.
+            // Malformed evidence, or references absent from the current publisher
+            // field projection, must not produce a usable selection.
             assert!(
-                fixture
-                    .owner
-                    .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32))
-                    .is_err(),
-                "malformed or undeclared credential evidence must not be selectable"
+                matches!(
+                    selected,
+                    Err(crate::service_install::ConnectorSelectionError::Unconfirmed)
+                ),
+                "invalid credential evidence must be unconfirmed"
             );
             continue;
         }
-        let selected = fixture
-            .owner
-            .connector_selection(&fixture.realm, &fixture.session, &"3".repeat(32))
-            .unwrap_or_else(|_| panic!("matched owner metadata must be selectable"));
+        let selected =
+            selected.unwrap_or_else(|_| panic!("absent or empty evidence must preserve selection"));
         assert!(selected.no_auth());
         assert_eq!(
             selected.no_credential_references,
@@ -3066,6 +3287,89 @@ async fn public_auth_declaration_does_not_infer_absent_or_nonempty_credential_ev
             "operations":["auth_test"],"values":{"token_env":"FIXTURE_TOKEN","timeout_seconds":2,"max_response_bytes":65536}}))
             .await.is_err());
         assert!(selected.check_current().is_err());
+    }
+}
+
+#[tokio::test]
+async fn rejected_recheck_envelope_invalidates_only_the_matching_installed_proposal() {
+    for selected_software in [false, true] {
+        for same_validation in [false, true] {
+            for change in [
+                "scope",
+                "profile",
+                "family",
+                "missing-digest",
+                "malformed-digest",
+            ] {
+                if selected_software && change == "family" {
+                    continue;
+                }
+                let root = tempfile::tempdir().unwrap();
+                let fixture = if selected_software {
+                    selected_software_fixture(root.path()).await
+                } else {
+                    let storage = crate::RealmOptions {
+                        context_root: root.path().to_owned(),
+                        state_root: Some(root.path().join("state")),
+                        user_config_root: Some(root.path().join("user")),
+                    }
+                    .resolve("envelope-recheck")
+                    .unwrap();
+                    let fixture = connector_unprimed_fixture(
+                        storage.locator,
+                        meerkat_core::SessionId::new(),
+                        false,
+                    );
+                    fixture.prime(true).await;
+                    fixture
+                };
+                let held = fixture.raw_selection().ok().unwrap();
+                assert!(held.check_current().is_ok());
+                {
+                    let mut check = fixture.package.check.lock().unwrap();
+                    if !same_validation {
+                        check["validation_id"] = json!("f".repeat(32));
+                    }
+                    let digest = if selected_software {
+                        "effect_sha256"
+                    } else {
+                        "configuration_sha256"
+                    };
+                    match change {
+                        "scope" => check["scope"] = json!("contradictory"),
+                        "profile" => check["profile"] = json!("other"),
+                        "family" => check["family"] = json!("other"),
+                        "missing-digest" => {
+                            check.as_object_mut().unwrap().remove(digest);
+                        }
+                        "malformed-digest" => check[digest] = json!("not-a-digest"),
+                        _ => unreachable!(),
+                    }
+                }
+                let (tool, request) = if selected_software {
+                    (
+                        "setup_selected_check",
+                        json!({"profile":"python", "staged_id":"outside",
+                        "component":"server", "document_kind":"local_software_declaration"}),
+                    )
+                } else {
+                    (
+                        "setup_check",
+                        json!({"family":"services", "profile":"slack", "operations":["auth_test"],
+                        "values":{"token_env":"FIXTURE_TOKEN", "timeout_seconds":2, "max_response_bytes":65536}}),
+                    )
+                };
+                assert!(
+                    fixture.call(tool, request).await.is_err(),
+                    "{selected_software}/{change}"
+                );
+                assert_eq!(
+                    held.check_current().is_err(),
+                    same_validation,
+                    "only the matching retained proposal is invalidated: {selected_software}/{change}"
+                );
+            }
+        }
     }
 }
 
@@ -3453,6 +3757,16 @@ async fn connector_profiles_are_not_retained_or_replayed_by_initialization() {
     let root = tempfile::tempdir().unwrap();
     let mut init = generic_service_binding(root.path());
     init["connector_auth"] = json!({"profiles":[connector_profile("http://127.0.0.1:1")]});
+    // Refuse before realm or auth startup even in a resource-bound native build.
+    // This fixture checks profile retention, not host auth configuration.
+    let wrong_manifest = if option_env!("MEERKAT_CONNECT_RESOURCES_SHA256")
+        .is_some_and(|digest| digest == "d".repeat(64))
+    {
+        "e".repeat(64)
+    } else {
+        "d".repeat(64)
+    };
+    init["services"]["resource_manifest_sha256"] = json!(wrong_manifest);
     let (mut d, mut rx) = driver();
     d.frame(
         &serde_json::to_vec(&json!({"jsonrpc":"2.0","id":"h:init",
@@ -3468,11 +3782,10 @@ async fn connector_profiles_are_not_retained_or_replayed_by_initialization() {
             .unwrap()
             .contains("private-profile-canary")
     );
-    assert!(rows.iter().any(|r| r["id"] == "h:init"
-        && matches!(
-            r["error"]["data"]["code"].as_str(),
-            Some("unavailable" | "invalid_binding")
-        )));
+    assert!(
+        rows.iter()
+            .any(|r| r["id"] == "h:init" && r["error"]["data"]["code"] == "invalid_binding")
+    );
     assert!(d.connector.is_none());
     assert!(!root.path().join("state").exists());
 }
@@ -3516,6 +3829,7 @@ pub(crate) async fn connector_fixture_with_owners(
     crate::connector_auth::Control,
 ) {
     let mut startup = SessionStartup {
+        provider_store_root: None,
         storage,
         config: meerkat::Config::default(),
         factory: meerkat::AgentFactory::new(root.join("state/stdio-test"))
@@ -3657,9 +3971,9 @@ async fn connector_start_retirement_joins_discovery_and_retires_late_attempt() {
     assert!(d.connector_busy);
     let (mut socket, _) = tokio::select! { value=listener.accept()=>value.unwrap(),
     _=d.tasks.next()=>panic!("discovery must wait for controlled response") };
-    // The native client writes its request only while the start worker is
-    // polled (its connection must become ready first). Keep driving the
-    // worker while reading, as the driver's own loop does.
+    // Accept can win before the retained request has sent its headers. Keep
+    // polling that same worker while reading them; FuturesUnordered does not
+    // run the native request independently of this driver.
     let (header, _) = tokio::select! { value=connector_http(&mut socket)=>value,
     _=d.tasks.next()=>panic!("discovery must wait for controlled response") };
     assert!(header.starts_with("GET /.well-known/oauth-authorization-server "));
@@ -4545,7 +4859,7 @@ async fn access_review_uses_existing_private_prompt_and_rejects_replacement_scop
                 .await
                 .unwrap()
                 .unwrap(),
-            Work::Presenter(false)
+            Work::Presenter(None)
         ));
         assert!(d.tasks.is_empty());
         // This exercises the actual driver/presenter/native decision store.
@@ -5013,4 +5327,328 @@ async fn canonical_software_plan_reaches_checked_installation_with_exclusive_doc
         }
         assert!(selected.check_current().is_err(), "{change}");
     }
+}
+
+#[tokio::test]
+async fn private_services_cancel_after_native_completion_prevents_automatic_close() {
+    let root = tempfile::tempdir().unwrap();
+    let session = control_session(root.path()).await;
+    let (mut d, mut rx) = driver();
+    d.binding = Some(serde_json::from_value(generic_service_binding(root.path())).unwrap());
+    d.session = Some(session.clone());
+    active(&mut d);
+    d.plain_pending = true;
+    let (_cancel, receive) = watch::channel(false);
+    let (notices, mut received) = mpsc::channel(32);
+    let completed = send(
+        session.clone(),
+        "h:send".into(),
+        "Return one short answer.".into(),
+        receive,
+        notices,
+        None,
+    );
+    let capture = async { while received.recv().await.is_some() {} };
+    let (completed, ()) = tokio::join!(completed, capture);
+    let Work::Sent(id, observed, _) = completed else {
+        panic!("native completion required");
+    };
+    assert!(
+        observed.settled
+            && matches!(
+                observed.outcome,
+                Ok("completed" | "completed_without_result")
+            )
+    );
+    let native_completion = observed.outcome.unwrap();
+    // Native completion exists, but its driver message has not been consumed.
+    d.active.as_mut().unwrap().cancel_result = Some(Ok(false));
+    d.frame(br#"{"jsonrpc":"2.0","id":"h:cancel","method":"connect/cancel","params":{"scope":"test-scope","send_request_id":"h:send"}}"#);
+    assert!(*d.plain_cancel.borrow());
+    d.work(Work::Sent(id, observed, Some(Ok(false))));
+    assert!(d.retired && !d.plain_close_started);
+    assert!(!d.settle_plain());
+    assert!(
+        d.tasks.is_empty(),
+        "explicit cancel cannot schedule a finalizer"
+    );
+    let rows = drain(&mut rx);
+    assert!(
+        rows.iter()
+            .any(|row| row["id"] == "h:send" && row["result"]["completion"] == native_completion)
+    );
+    d.session.take();
+    Arc::try_unwrap(session)
+        .ok()
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn private_services_login_expiry_remains_armed_during_post_close_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let session = Arc::try_unwrap(control_session(root.path()).await)
+        .ok()
+        .unwrap();
+    let closed = match session.try_close_for_finalization().await {
+        crate::session::FinalizationClose::Closed(closed) => closed,
+        _ => panic!("idle native session must supply actual Closed"),
+    };
+    let (mut d, mut rx) = driver();
+    d.binding = Some(serde_json::from_value(generic_service_binding(root.path())).unwrap());
+    d.initialize_id = Some("h:init".into());
+    d.scope = Some("test-scope".into());
+    d.plain_pending = true;
+    d.plain_close_started = true;
+    d.plain_closed = Some(closed);
+    // Model the still-owned presenter join. No physical worker result is invented.
+    d.workers = 1;
+    d.fence("finalizing");
+    assert!(d.watches_expiry());
+    d.binding.as_mut().unwrap().viewer.expires_at_ms = now() - 1;
+    d.fence("expired"); // The same expiry branch used by run_io.
+    assert!(*d.plain_cancel.borrow());
+    assert!(
+        !d.watches_expiry(),
+        "expired timer must not spin at zero delay"
+    );
+    assert!(
+        d.settle_plain() && d.tasks.is_empty(),
+        "cleanup owner remains retained until worker join"
+    );
+    retire(&mut d);
+    d.settle();
+    assert!(
+        !drain(&mut rx)
+            .iter()
+            .any(|row| row["result"]["entered_work"] == "settled")
+    );
+    // Release the actual Closed owner through its cleanup, with no review or
+    // administrative action supplied by this lifecycle-only control.
+    d.workers = 0;
+    d.plain_closed
+        .take()
+        .unwrap()
+        .finish_host_cleanup()
+        .await
+        .map_err(|(_, error)| error)
+        .unwrap();
+    assert!(d.plain_outcomes.is_empty());
+}
+
+#[cfg(feature = "console")]
+pub(crate) fn assert_uncertain_plain_finalization_refuses_settled(
+    outcome: crate::terminal_connector::FinalizedAction,
+) {
+    let (mut d, mut rx) = driver();
+    d.initialize_id = Some("h:init".into());
+    d.scope = Some("test-scope".into());
+    d.private_close_started = true;
+    d.plain_close_started = true;
+    d.workers = 1;
+    d.fence("finalizing");
+    retire(&mut d);
+    d.work(Work::PlainFinalized(Ok(Some(outcome))));
+    d.settle();
+    let rows = drain(&mut rx);
+    assert_eq!(
+        d.plain_outcomes.len(),
+        1,
+        "actual uncertain native outcome stays retained"
+    );
+    assert!(rows.iter().any(|row| row["params"]["state"] == "observed"));
+    assert!(rows.iter().any(
+        |row| row["id"] == "h:retire" && row["error"]["data"]["code"] == "shutdown_unconfirmed"
+    ));
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["result"]["entered_work"] == "settled")
+    );
+    d.frame(br#"{"jsonrpc":"2.0","id":"h:close","method":"connect/close","params":{"target":{"scope":"test-scope"}}}"#);
+    d.settle();
+    assert!(drain(&mut rx).iter().any(
+        |row| row["id"] == "h:close" && row["error"]["data"]["code"] == "shutdown_unconfirmed"
+    ));
+    assert!(
+        d.tasks.is_empty(),
+        "observation cannot retry native effects"
+    );
+}
+
+#[path = "stdio_tests/private_services.rs"]
+mod private_services;
+
+#[path = "stdio_probe_tests.rs"]
+mod probe_tests;
+
+#[path = "stdio_collection_tests.rs"]
+mod collection_tests;
+
+#[test]
+fn private_services_failed_cleanup_diagnostic_is_local_to_exact_host() {
+    use crate::service_probe::{
+        ServiceProbeSelection,
+        tests::{binding, selected},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let selection =
+        Arc::new(ServiceProbeSelection::new(binding(root.path()), vec![selected("one")]).unwrap());
+    let other = ServiceProbeSelection::new(binding(root.path()), vec![selected("two")]).unwrap();
+    let control = selection.control();
+    assert!(
+        control.private_setup_diagnostic().is_none(),
+        "missing observation is not success"
+    );
+    let (mut d, mut rx) = driver();
+    d.probe_selection = Some(selection);
+    d.initialize_id = Some("h:init".into());
+    d.scope = Some("test-scope".into());
+    d.private_close_started = true;
+    d.workers = 1;
+    retire(&mut d);
+    let diagnostic = json!({"scope":"initial_private_setup_attempt", "unobserved_local_begin":true,
+        "core_scope":"terminal_close_and_join_records", "core_truncated":true});
+    d.work(Work::PrivateClosed(Err(ended()), Some(diagnostic.clone())));
+    d.settle();
+    assert_eq!(control.private_setup_diagnostic(), Some(diagnostic.clone()));
+    assert!(other.control().private_setup_diagnostic().is_none());
+    let rows = drain(&mut rx);
+    assert!(rows.iter().any(
+        |row| row["id"] == "h:retire" && row["error"]["data"]["code"] == "shutdown_unconfirmed"
+    ));
+    assert!(rows.iter().all(
+        |row| row["params"]["kind"] != "service_preparation_diagnostic"
+            && row["result"]["entered_work"] != "settled"
+    ));
+    d.work(Work::Closed(Ok(())));
+    assert!(d.failed && d.close_failure.is_some());
+    assert_eq!(control.private_setup_diagnostic(), Some(diagnostic));
+}
+
+fn first_fence_driver() -> (Driver, mpsc::Receiver<OutputFrame>) {
+    let (mut d, rx) = driver();
+    let root = tempfile::tempdir().unwrap();
+    let mut value = generic_service_binding(root.path());
+    value["protocol_version"] = json!(7);
+    d.binding = Some(serde_json::from_value(value).unwrap());
+    active(&mut d);
+    (d, rx)
+}
+
+#[test]
+fn first_fence_settled_cancelled_alone_does_not_fail_or_fence() {
+    let (mut d, mut rx) = first_fence_driver();
+    let observed = TurnCompletion::observed(&CompletionOutcome::Cancelled, None);
+    assert!(observed.settled && !observed.uncertain);
+    d.work(Work::Sent("h:send".into(), observed, None));
+    assert!(!d.failed && !d.retired && d.first_fence.is_none());
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|r| r["result"]["completion"] == "cancelled")
+    );
+}
+
+#[test]
+fn first_fence_internal_failure_signals_original_cancel_without_caller_stop() {
+    let (mut d, mut rx) = first_fence_driver();
+    let cancel = d.active.as_ref().unwrap().cancel.subscribe();
+    d.workers = 1;
+    d.work(Work::Presenter(Some(FenceOrigin::ApprovalPresenterClosed)));
+    assert!(*cancel.borrow());
+    let first = d.first_fence.as_ref().unwrap();
+    assert_eq!(first.origin, FenceOrigin::ApprovalPresenterClosed);
+    assert_eq!(first.cancellation_requested_before, Some(false));
+    assert_eq!(first.send_request_id.as_deref(), Some("h:send"));
+    d.work(Work::Sent(
+        "h:send".into(),
+        TurnCompletion::observed(&CompletionOutcome::Cancelled, None),
+        Some(Ok(true)),
+    ));
+    assert_eq!(
+        d.first_fence.as_ref().unwrap().origin,
+        FenceOrigin::ApprovalPresenterClosed
+    );
+    let rows = drain(&mut rx);
+    assert!(
+        rows.iter()
+            .any(|r| r["params"]["first_fence"]["origin"] == "approval_presenter_closed")
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r["result"]["completion"] == "cancelled")
+    );
+}
+
+#[test]
+fn first_fence_settled_send_keeps_original_context_after_active_is_taken() {
+    let (paired_host, _hosts) = crate::paired_host_tool::PairedHostFrontend::deferred();
+    let (lazy, _presenter) = LazySetup::new(paired_host);
+    lazy.owner().retire();
+    let (mut d, _rx) = first_fence_driver();
+    d.lazy = Some(Arc::new(lazy));
+    d.work(Work::Sent(
+        "h:send".into(),
+        TurnCompletion::observed(&CompletionOutcome::Cancelled, None),
+        None,
+    ));
+    assert!(d.active.is_none() && d.failed && d.retired);
+    let first = d.first_fence.as_ref().unwrap();
+    assert_eq!(first.origin, FenceOrigin::SendOwnerRetired);
+    assert_eq!(first.scope.as_deref(), Some("test-scope"));
+    assert_eq!(first.send_request_id.as_deref(), Some("h:send"));
+    assert_eq!(first.cancellation_requested_before, Some(false));
+}
+
+#[test]
+fn first_fence_service_phase_survives_later_cleanup_failure() {
+    let (mut d, mut rx) = first_fence_driver();
+    d.workers = 2;
+    d.work(Work::Service(Err(services::Failure {
+        origin: FenceOrigin::ServiceLocateFailed,
+        _error: ended(),
+    })));
+    d.work(Work::Service(Err(services::Failure {
+        origin: FenceOrigin::ServicePrepareError,
+        _error: ended(),
+    })));
+    assert_eq!(
+        d.first_fence.as_ref().unwrap().origin,
+        FenceOrigin::ServiceLocateFailed
+    );
+    assert_eq!(
+        drain(&mut rx)
+            .iter()
+            .filter(|r| r["params"]["kind"] == "unavailable")
+            .count(),
+        1
+    );
+    assert!(d.failed && d.retired && d.closing);
+}
+
+#[test]
+fn first_fence_uninstrumented_remains_unknown_and_older_protocol_omits_field() {
+    let (mut d, mut rx) = first_fence_driver();
+    d.fence("failed");
+    assert_eq!(
+        d.first_fence.as_ref().unwrap().origin,
+        FenceOrigin::OtherNativeFailure
+    );
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .any(|r| r["params"]["first_fence"]["origin"] == "other_native_failure")
+    );
+    let (mut legacy, mut rx) = first_fence_driver();
+    legacy.binding.as_mut().unwrap().protocol_version = 5;
+    legacy.fence("failed");
+    assert!(legacy.first_fence.is_none());
+    assert!(
+        drain(&mut rx)
+            .iter()
+            .all(|r| r["params"].get("first_fence").is_none())
+    );
 }

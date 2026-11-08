@@ -79,6 +79,8 @@ mod custody_recovery_stopped_traversal_tests;
 mod custody_recovery_tests;
 #[path = "custody_recovery_writer_tests.rs"]
 mod custody_recovery_writer_tests;
+#[path = "dynamic_member_native_tests.rs"]
+mod dynamic_member_native_tests;
 #[path = "first_input_tests.rs"]
 pub(in crate::private_originals) mod first_input_tests;
 #[path = "governed_submit_test_bridge.rs"]
@@ -93,7 +95,8 @@ pub(crate) enum DeliveryMode {
     PoisonPublicationAfterSecondAcceptance,
     LoseSecondAcceptedAnswer,
     RefuseSecondBeforeLookup,
-    // These two controls target only the fixture's actual helper session.
+    // These controls target only the fixture's actual helper session.
+    HoldHelperBeforeBind,
     HoldHelperBeforeLookup,
     HoldHelperAcceptedReply,
     // These controls invalidate the actual controller-admission observation.
@@ -102,6 +105,12 @@ pub(crate) enum DeliveryMode {
     HelperPolicyChangesThenUnresolved,
     HelperPolicyChangesThenRetirement,
     HelperPolicyChangesThenDeadline,
+    // The first helper admission instead finds a real owner change still in
+    // progress, held this long from another thread.
+    HelperPolicyChangeHeld(std::time::Duration),
+    // The first that many helper admissions each find a real owner change
+    // still in progress, each held this long from another thread.
+    HelperPolicyChangesHeld(usize, std::time::Duration),
 }
 
 impl DeliveryMode {
@@ -113,7 +122,18 @@ impl DeliveryMode {
                 | Self::HelperPolicyChangesThenUnresolved
                 | Self::HelperPolicyChangesThenRetirement
                 | Self::HelperPolicyChangesThenDeadline
+                | Self::HelperPolicyChangeHeld(_)
+                | Self::HelperPolicyChangesHeld(..)
         )
+    }
+    /// How long a held mode holds each owner change it begins.
+    fn held_change(self) -> Option<std::time::Duration> {
+        match self {
+            Self::HelperPolicyChangeHeld(hold) | Self::HelperPolicyChangesHeld(_, hold) => {
+                Some(hold)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -126,6 +146,7 @@ struct DeliveryFault {
     helper_session: std::sync::OnceLock<SessionId>,
     helper_input: Mutex<Option<InputId>>,
     helper_returns: AtomicUsize,
+    helper_controller_lookups: AtomicUsize,
     helper_inputs: Mutex<Vec<serde_json::Value>>,
     helper_policy_changed: AtomicUsize,
     /// The armed helper admission and how many of its native controller-
@@ -133,8 +154,17 @@ struct DeliveryFault {
     helper_admission_change: Mutex<Option<(InputAuthorityAssociation, usize)>>,
     publication_changes: AtomicUsize,
     publication_change_failures: AtomicUsize,
+    held_changes: Mutex<Vec<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>>,
 }
 impl DeliveryFault {
+    /// End every held owner change now and join its thread.
+    fn end_held_changes(&self) {
+        let held = std::mem::take(&mut *self.held_changes.lock().unwrap());
+        for (end, thread) in held {
+            let _ = end.send(());
+            thread.join().unwrap();
+        }
+    }
     fn new(mode: DeliveryMode) -> Self {
         Self {
             mode,
@@ -145,11 +175,13 @@ impl DeliveryFault {
             helper_session: std::sync::OnceLock::new(),
             helper_input: Mutex::new(None),
             helper_returns: AtomicUsize::new(0),
+            helper_controller_lookups: AtomicUsize::new(0),
             helper_inputs: Mutex::new(Vec::new()),
             helper_policy_changed: AtomicUsize::new(0),
             helper_admission_change: Mutex::new(None),
             publication_changes: AtomicUsize::new(0),
             publication_change_failures: AtomicUsize::new(0),
+            held_changes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -370,12 +402,49 @@ fn fixture_controller_decorator() -> meerkat_core::AgentLlmClientDecorator {
 }
 
 #[derive(Default)]
-struct ScriptedProvider(AtomicUsize, Mutex<Option<Arc<PreparedResponsePause>>>);
+struct ScriptedProvider(
+    AtomicUsize,
+    Mutex<Option<(usize, Arc<PreparedResponsePause>)>>,
+);
 
 #[derive(Default)]
 struct PreparedResponsePause {
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
+}
+
+/// Opt-in fixture transport hold after actual model authorization. The test
+/// owns release; dropping that owner always lets the already entered response
+/// settle before normal fixture shutdown. Default transport stays unchanged.
+pub(crate) struct PreparedResponseHold(Arc<PreparedResponsePause>);
+impl PreparedResponseHold {
+    pub(crate) async fn entered(&self) {
+        self.0.entered.notified().await;
+    }
+    pub(crate) fn release(&self) {
+        self.0.release.notify_one();
+    }
+}
+impl Drop for PreparedResponseHold {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+impl ScriptedProvider {
+    fn hold_next_response(&self) -> PreparedResponseHold {
+        self.hold_response_after(0)
+    }
+    fn hold_response_after(&self, preceding_responses: usize) -> PreparedResponseHold {
+        let pause = Arc::new(PreparedResponsePause::default());
+        assert!(
+            self.1
+                .lock()
+                .unwrap()
+                .replace((preceding_responses, pause.clone()))
+                .is_none()
+        );
+        PreparedResponseHold(pause)
+    }
 }
 
 #[async_trait]
@@ -454,7 +523,16 @@ impl LlmClient for ScriptedProvider {
                 outcome: LlmDoneOutcome::success(StopReason::EndTurn),
             }),
         ]);
-        let pause = self.1.lock().unwrap().take();
+        let pause = {
+            let mut selected = self.1.lock().unwrap();
+            match selected.as_mut() {
+                Some((remaining, _)) if *remaining > 0 => {
+                    *remaining -= 1;
+                    None
+                }
+                _ => selected.take().map(|(_, pause)| pause),
+            }
+        };
         match pause {
             None => Box::pin(response),
             Some(pause) => Box::pin(futures::StreamExt::flatten(futures::stream::once(
@@ -888,7 +966,12 @@ impl Fixture {
                 |final_association| {
                     let source = source.clone();
                     let reference = original.clone();
-                    async move { source.persist_binding(&reference, &final_association).await }
+                    async move {
+                        source
+                            .persist_binding(&reference, &final_association)
+                            .await
+                            .map(Into::into)
+                    }
                 },
             )
             .await
@@ -1675,7 +1758,7 @@ async fn controller_only_owner_refuses_operation_basis_before_persistence() {
             &principal("frontend"),
             |_| async {
                 persistence_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(None)
+                Ok(crate::original_ingress::CanonicalBindingObservation::Unretained)
             },
         )
         .await;

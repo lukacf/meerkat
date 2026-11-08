@@ -16552,6 +16552,7 @@ impl MobActor {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         });
 
         // §19.L5: the ops owner for a placed member is the owner bridge
@@ -16944,6 +16945,7 @@ impl MobActor {
                 .member_session_authorities()
                 .unwrap_or_default(),
             member_grant_mint: self.member_residency.member_grant_mint.clone(),
+            member_tool_audience: self.member_residency.member_tool_audience.clone(),
         }
     }
 
@@ -18713,6 +18715,11 @@ impl MobActor {
             }
             Some((mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable, _, _)) => {
                 MobError::NotExternallyAddressable(agent_identity.clone())
+            }
+            Some((mob_dsl::SubmitWorkRejectReasonKind::IdentityMember, _, _)) => {
+                MobError::IdentityMember {
+                    member_id: agent_identity.clone(),
+                }
             }
             Some((mob_dsl::SubmitWorkRejectReasonKind::StaleSessionBinding, _, _)) => {
                 let parse = |session: &mob_dsl::SessionId| SessionId::parse(&session.0).ok();
@@ -31388,10 +31395,29 @@ impl MobActor {
                     // Reaching the handler is the serialized validation ACK.
                     let _ = reply_tx.send(Ok(()));
                 }
-                MobCommand::AdmitControlScope { reply_tx, .. } => {
+                MobCommand::AdmitControlScope {
+                    subject, reply_tx, ..
+                } => {
                     // The requested scope was enforced at the serialized
-                    // mailbox gate. No projection or mutation occurs here.
-                    let _ = reply_tx.send(Ok(()));
+                    // mailbox gate. A member host door also refuses an
+                    // identity entry to a principal without AdminHost, and an
+                    // external work admission answers MobMachine's SubmitWork
+                    // admission of external work for the member, both from
+                    // this actor's state. No projection or mutation occurs
+                    // here.
+                    let result = match &subject {
+                        super::state::ScopeAdmissionSubject::MemberHost(agent_identity) => {
+                            self.member_host_door_refusal(authority, agent_identity)
+                        }
+                        super::state::ScopeAdmissionSubject::ExternalWork(agent_identity) => {
+                            self.external_work_admission(agent_identity)
+                        }
+                        super::state::ScopeAdmissionSubject::Mob
+                        | super::state::ScopeAdmissionSubject::Member(_)
+                        | super::state::ScopeAdmissionSubject::LegacyAdoption(_)
+                        | super::state::ScopeAdmissionSubject::DeclaredApply => Ok(()),
+                    };
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::PruneStaleMemberOperatorRequests { reply_tx } => {
                     let result = self.prune_stale_member_operator_requests().await;
@@ -39694,6 +39720,35 @@ impl MobActor {
         } else {
             false
         };
+        // A member minted on a new session is born with its operator
+        // instruction snapshot. A member host that records one at birth
+        // (V7) is given it on the materialize, so the member's first turn
+        // already has the instructions; toward an older or a governed host
+        // the member receives it by delivery after the spawn, as before.
+        // Asked once, before anything is recorded, and only for a Fresh
+        // launch of a mob that has recorded instructions.
+        let instruction_target = if resume_session_id.is_none()
+            && self.dsl_authority.state().operator_instruction_generation > 0
+        {
+            match self
+                .host_serves_feature(
+                    &host,
+                    super::bridge_protocol::HOST_FEATURE_INSTRUCTION_TARGET_BIRTH,
+                )
+                .await
+            {
+                Ok(true) => match self
+                    .member_instruction_birth_target(&agent_identity, profile_name.as_str())
+                {
+                    Ok(target) => Some(target),
+                    Err(error) => fail!(error),
+                },
+                Ok(false) => None,
+                Err(error) => fail!(error),
+            }
+        } else {
+            None
+        };
 
         // Compose and persist the exact first-turn material BEFORE the
         // canonical Pending carrier. The carrier is the earliest durable
@@ -40200,19 +40255,24 @@ impl MobActor {
         // receiving host's minimum-version gate is what proves it.
         // The same for the V7 prompt-context fork, which rides only a Fresh
         // launch and so never meets the Resume-only V6 attachment, and for
-        // the V7 request to report a plain resume's adopted first turn.
-        let protocol_version = if prompt_context_fork.is_some() || report_adopted_first_turn {
-            super::bridge_protocol::BridgeProtocolVersion::V7
-        } else if forked_participant_attachment.is_some() {
-            super::forked_participant_routing::FORKED_PARTICIPANT_PROTOCOL_VERSION
-        } else {
-            super::bridge_protocol::BridgeProtocolVersion::V4
+        // the V7 request to report a plain resume's adopted first turn, and
+        // for the V7 snapshot a Fresh launch's member is born with.
+        let v7_without_snapshot = prompt_context_fork.is_some() || report_adopted_first_turn;
+        let carries_attachment = forked_participant_attachment.is_some();
+        let protocol_version_for = |carries_snapshot: bool| {
+            if v7_without_snapshot || carries_snapshot {
+                super::bridge_protocol::BridgeProtocolVersion::V7
+            } else if carries_attachment {
+                super::forked_participant_routing::FORKED_PARTICIPANT_PROTOCOL_VERSION
+            } else {
+                super::bridge_protocol::BridgeProtocolVersion::V4
+            }
         };
-        let payload = Box::new(super::bridge_protocol::BridgeMaterializePayload {
+        let mut payload = Box::new(super::bridge_protocol::BridgeMaterializePayload {
             supervisor: supervisor_spec.into(),
             epoch: authority.epoch,
             binding_generation,
-            protocol_version,
+            protocol_version: protocol_version_for(instruction_target.is_some()),
             generation: effect_generation.0,
             fence_token: effect_fence.0,
             spec: compiled.spec,
@@ -40221,7 +40281,28 @@ impl MobActor {
             forked_participant_attachment,
             prompt_context_fork,
             report_adopted_first_turn,
+            instruction_target,
         });
+        // A snapshot that would push the materialize past the comms frame
+        // could never reach the host: the materialize goes without it, in
+        // the shape it has without one, and the member's delivery takes the
+        // snapshot after the spawn (and blocks it there if its record alone
+        // is too large).
+        if payload.instruction_target.is_some() {
+            let bytes =
+                serde_json::to_vec(payload.as_ref()).map_or(usize::MAX, |encoded| encoded.len());
+            if bytes > super::placed_member_instruction::PLACED_COMMAND_FRAME_BUDGET {
+                tracing::warn!(
+                    member = %agent_identity,
+                    bytes,
+                    "a placed member's materialize with its operator-instruction snapshot is \
+                     past the bridge frame budget; it is sent without the snapshot, which the \
+                     member's delivery takes after the spawn"
+                );
+                payload.instruction_target = None;
+                payload.protocol_version = protocol_version_for(false);
+            }
+        }
 
         // Callers that don't carry an owner ops context (the embedder
         // `spawn_spec` path) re-derive the registry from the MobMachine-owned

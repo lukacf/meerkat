@@ -156,11 +156,20 @@ impl Package {
                 self.reply.lock().unwrap().clone()
             }
             "setup_install" | "setup_selected_install" => {
-                self.installs.fetch_add(1, Ordering::SeqCst);
+                let attempt = self.installs.fetch_add(1, Ordering::SeqCst);
                 let mut expected = install(self.selected);
                 expected["validation_id"] = self.reply.lock().unwrap()["validation_id"].clone();
                 assert_eq!(call.parse_args::<Value>().unwrap(), expected);
                 self.entered.notify_one();
+                // The first install's inner call refuses without Core's
+                // certification (9): it claims nothing about the install.
+                if attempt == 0 && self.behavior == 9 {
+                    return Err(ToolError::AuthorizationRefused {
+                        refusal: meerkat_core::authorization::OperationRefused::new(
+                            meerkat_core::authorization::OperationRefusalKind::ReprepareRequired,
+                        ),
+                    });
+                }
                 if matches!(self.behavior, 2 | 5) {
                     self.release.notified().await;
                 }
@@ -1295,8 +1304,8 @@ async fn checked_install_lost_or_malformed_reply_stays_uncertain_without_job_or_
 
 #[tokio::test]
 async fn checked_install_entered_drop_and_retirement_preserve_exact_uncertainty() {
-    for dropped in [false, true] {
-        let mut f = Fixture::new(false, 2, DECISION_LIFETIME);
+    for (selected, dropped) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut f = Fixture::new(selected, 2, DECISION_LIFETIME);
         f.check().await;
         let run = f.install();
         f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
@@ -1341,7 +1350,7 @@ async fn checked_install_entered_drop_and_retirement_preserve_exact_uncertainty(
         assert!(f.approvals.has_uncertain_dispatch());
         assert!(f.install().await.unwrap().is_err());
         assert!(
-            f.start("fresh", f.check_name(), selection(false), false)
+            f.start("fresh", f.check_name(), selection(selected), false)
                 .await
                 .unwrap()
                 .is_err()
@@ -1805,19 +1814,21 @@ async fn owner_local_review_preserves_raw_entry_result_across_capture_failure() 
 
 #[tokio::test]
 async fn owner_local_dropped_synthetic_inner_remains_spent_and_cannot_rearm() {
-    let mut f = Fixture::local(false, 2);
-    f.check().await;
-    let run = f.install();
-    f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
-    f.package.entered.notified().await;
-    // Test only: dropping this inert pending fake checks the custody invariant.
-    // Production owners must instead stop admission and join entered work.
-    run.abort();
-    assert!(run.await.unwrap_err().is_cancelled());
-    assert!(f.approvals.has_uncertain_dispatch());
-    assert_eq!(f.count(), 1);
-    assert!(f.install().await.unwrap().is_err());
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+    for selected in [false, true] {
+        let mut f = Fixture::local(selected, 2);
+        f.check().await;
+        let run = f.install();
+        f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
+        f.package.entered.notified().await;
+        // Test only: dropping this inert pending fake checks the custody invariant.
+        // Production owners must instead stop admission and join entered work.
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert_eq!(f.count(), 1);
+        assert!(f.install().await.unwrap().is_err());
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+    }
 }
 
 #[tokio::test]
@@ -1872,6 +1883,96 @@ async fn owner_local_settlement_matches_call_and_session_and_retains_failure_met
             .custody,
         Custody::Settled(LiveBridgeEffectOutcome::Committed)
     );
+}
+
+fn attempt_custody(f: &Fixture) -> Custody {
+    f.approvals
+        .shared
+        .state()
+        .unwrap()
+        .attempt
+        .as_ref()
+        .unwrap()
+        .custody
+}
+
+// The negative control: an inner call's refusal without the certification
+// claims nothing about whether the install ran. The attempt stays uncertain,
+// the proposal stays used, and a fresh install is refused without a review.
+#[tokio::test]
+async fn uncertified_refusal_after_consume_stays_uncertain_and_refuses_the_retry() {
+    for selected in [false, true] {
+        let mut f = Fixture::local(selected, 9);
+        f.check().await;
+        let arguments = install(selected).to_string();
+        let run = f.install();
+        f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
+        let refused = run.await.unwrap().unwrap_err();
+        assert!(matches!(
+            refused.primary_error(),
+            ToolError::AuthorizationRefused { refusal }
+                if refusal.dispatch() == meerkat_core::authorization::RefusalDispatch::Unknown
+        ));
+        assert_eq!(f.count(), 1);
+        assert_eq!(attempt_custody(&f), Custody::SpentUncertain);
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert_eq!(f.owner.proposal_use_for_test(&arguments), (true, true));
+        let fresh = f.start("install-fresh", f.install_name(), install(selected), true);
+        assert!(fresh.await.unwrap().is_err(), "the retry is refused");
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert_eq!(f.count(), 1);
+    }
+}
+
+// Connect's condition for the restore after a certified refusal
+// (`delegate`): it takes back exactly the identity the install call consumed.
+// While an install that consumed its proposal is in flight, the restore is
+// made at its seam. With nothing changed the consumed proposal is restored;
+// with a successor under the key, a moved binding epoch or a retired owner
+// nothing is restored, and the proposal under the key is left as it is.
+#[tokio::test]
+async fn a_certified_refusal_restores_only_the_exact_consumed_identity() {
+    for change in ["none", "successor", "epoch", "retired"] {
+        let mut f = Fixture::local(true, 2);
+        f.check().await;
+        let arguments = install(true).to_string();
+        let run = f.install();
+        f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
+        f.package.entered.notified().await;
+        let consumed = f.owner.consumed_readback_for_test(&arguments);
+        match change {
+            "successor" => f.owner.replace_proposal_for_test(&arguments),
+            "epoch" => f.package.epoch.store(8, Ordering::SeqCst),
+            "retired" => f.owner.retire(),
+            _ => {}
+        }
+        let restored = f.owner.restore_after_certified_refusal_for_test(
+            f.install_name(),
+            &arguments,
+            &f.session,
+            &consumed,
+        );
+        assert_eq!(
+            restored,
+            change == "none",
+            "{change}: restored only with the consumed identity intact"
+        );
+        let expected = if matches!(change, "none" | "successor") {
+            (false, false)
+        } else {
+            (true, true)
+        };
+        assert_eq!(
+            f.owner.proposal_use_for_test(&arguments),
+            expected,
+            "{change}: the proposal under the key"
+        );
+        // Test only: drop the inert in-flight fake; its custody stays as the
+        // unchanged cancellation path leaves it.
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        assert!(f.approvals.has_uncertain_dispatch());
+    }
 }
 
 struct RefusePreparedOperation;
@@ -2324,6 +2425,9 @@ mod application_policy_tests {
             native_host: Some(CompiledNativeHost {
                 realm: realm.clone(),
                 grant_administrator: application.clone(),
+                authentication_domain: None,
+                event_domain: None,
+                member_classes: vec![],
                 remote_operator: None,
                 service_parent_administration: None,
                 setup: setup.clone(),
@@ -2646,6 +2750,13 @@ mod application_policy_tests {
             .begin_close_activation(HostCloseReason::OperatorDisable)
             .unwrap();
         let refused = f.approvals.check_service_entry(call, &context);
+        f.approvals.retire_checked().unwrap();
+        assert!(
+            f.approvals
+                .closed_observation(&f.session)
+                .unwrap()
+                .is_none()
+        );
         let result = f.approvals.settle_service_result(
             &f.owner,
             call,
@@ -2653,7 +2764,20 @@ mod application_policy_tests {
             LiveBridgeEffectOutcome::Failed,
             Err(ToolError::access_denied(call.name)),
         );
+        assert!(
+            f.approvals
+                .closed_observation(&f.session)
+                .unwrap()
+                .is_none(),
+            "known effect outcome does not join the actual dispatch guard"
+        );
         drop(guard);
+        assert!(
+            f.approvals
+                .closed_observation(&f.session)
+                .unwrap()
+                .is_some()
+        );
         let closed = lifetime.join_close(&closing.handle).await;
         assert!(closed.is_ok());
         assert!(refused.is_err());
@@ -2666,174 +2790,206 @@ mod application_policy_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn application_policy_record_and_entry_do_not_invert_phase_and_approval_state() {
+        use meerkat_toolkit::host_lifetime::control::{
+            HostCloseReason, PrivateHostLifetimeControl,
+        };
         use std::sync::mpsc;
-        for entry_check in [false, true] {
-            let (f, policy, _) = policy_fixture(0, 0);
-            f.check().await;
-            let args = serde_json::value::to_raw_value(&install(true)).unwrap();
-            let call = ToolCallView {
-                id: "install",
-                name: f.install_name(),
-                args: &args,
-            };
-            let context =
-                ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
-            let installed_policy = f
-                .approvals
-                .shared
-                .installation_policy
-                .as_ref()
-                .unwrap()
-                .resolve()
-                .unwrap()
-                .unwrap();
-            let lifetime = installed_policy.lifetime().clone();
-            let retained = if entry_check {
-                f.approvals
-                    .await_service_dispatch(&f.owner, call, &context, None)
-                    .await
-                    .unwrap();
-                None
-            } else {
-                // Reserve before holding phase so this reaches the real decision
-                // seam, not the earlier reserve-time selection observation.
-                let held = f.owner.retain_action(call, &f.session).unwrap();
-                let mut reviewed = held.review();
-                reviewed["tool"] = call.name.into();
-                reviewed["call_id"] = call.id.into();
-                let entry = installed_policy
-                    .reserve(held.realm(), call, &context, &reviewed)
-                    .unwrap()
-                    .unwrap();
-                Some((held, reviewed, entry))
-            };
-            // Keep this wrapper alive through settlement: its Drop retires Shared.
-            let approvals = Arc::new(LocalApprovals {
-                shared: f.approvals.shared.clone(),
-                service_tasks: None,
-            });
-            let (phase_ready, phase_observed) = tokio::sync::oneshot::channel();
-            let (phase_release, release) = mpsc::sync_channel(1);
-            let observing = approvals.clone();
-            let phase = tokio::task::spawn_blocking(move || {
-                lifetime.with_current_setup(|| {
-                    // Nonblocking acquisition only: never wait for State under entry.
-                    // A contender's phase observation reads the phase machine and
-                    // does not take entry, so it passes and then waits for this
-                    // State; it cannot complete or reach an effect meanwhile.
-                    let state = observing.shared.state.try_lock().map_err(|_| {
-                        meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
-                    })?;
-                    let custody = state.attempt.as_ref().map(|attempt| attempt.custody);
-                    let _ = phase_ready.send(custody);
-                    let released = release.recv_timeout(Duration::from_secs(5)).is_ok();
-                    drop(state);
-                    Ok((released, custody))
-                })
-            });
-            let ready = tokio::time::timeout(Duration::from_secs(2), phase_observed).await;
-            let runtime = tokio::runtime::Handle::current();
-            let owner = f.owner.clone();
-            let worker_approvals = approvals.clone();
-            let (attempt_completed, mut completed) = tokio::sync::oneshot::channel();
-            let operation = tokio::task::spawn_blocking(move || {
+        for closed_phase in [false, true] {
+            for entry_check in [false, true] {
+                let (f, policy, _) = policy_fixture(0, 0);
+                f.check().await;
+                let args = serde_json::value::to_raw_value(&install(true)).unwrap();
                 let call = ToolCallView {
                     id: "install",
-                    name: "setup_selected_install",
+                    name: f.install_name(),
                     args: &args,
                 };
-                let result = match retained {
-                    Some((held, reviewed, entry)) => {
-                        runtime.block_on(worker_approvals.shared.review_dispatch(
-                            call,
-                            Some(&context),
-                            Some(HeldAction::Service(held)),
-                            reviewed,
-                            None,
-                            Some(entry),
-                            |held| match held {
-                                HeldAction::Service(held) => owner.arm_action(held),
-                                _ => Err(ToolError::access_denied(call.name)),
-                            },
-                        ))
-                    }
-                    None => worker_approvals.check_service_entry(call, &context),
+                let context =
+                    ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
+                let installed_policy = f
+                    .approvals
+                    .shared
+                    .installation_policy
+                    .as_ref()
+                    .unwrap()
+                    .resolve()
+                    .unwrap()
+                    .unwrap();
+                let lifetime = installed_policy.lifetime().clone();
+                let retained = if entry_check {
+                    f.approvals
+                        .await_service_dispatch(&f.owner, call, &context, None)
+                        .await
+                        .unwrap();
+                    None
+                } else {
+                    let held = f.owner.retain_action(call, &f.session).unwrap();
+                    let mut reviewed = held.review();
+                    reviewed["tool"] = call.name.into();
+                    reviewed["call_id"] = call.id.into();
+                    let entry = installed_policy
+                        .reserve(held.realm(), call, &context, &reviewed)
+                        .unwrap()
+                        .unwrap();
+                    Some((held, reviewed, entry))
                 };
-                let _ = attempt_completed.send(result);
-            });
-            // While setup holds entry and State, neither path may complete or
-            // reach an effect: the record keeps its reservation and the spent
-            // attempt keeps its own. Release and join before inspecting any
-            // result, then let the contender finish.
-            let while_held = tokio::time::timeout(Duration::from_secs(2), &mut completed).await;
-            let completed_while_held = while_held.is_ok();
-            let effects_while_held = f.count();
-            let released_while_held = policy.released.load(Ordering::SeqCst);
-            let _ = phase_release.send(());
-            let phase_result = phase.await;
-            let contended = match while_held {
-                Ok(result) => Ok(result),
-                Err(_) => tokio::time::timeout(Duration::from_secs(10), completed).await,
-            };
-            let operation_result = operation.await;
+                // Healthy setup owns callback entry, but current phase observations do
+                // not borrow that entry. A closed phase must instead refuse before
+                // approval State. These are separate real-owner conditions.
+                let closing = closed_phase.then(|| {
+                    lifetime
+                        .begin_close_activation(HostCloseReason::OperatorDisable)
+                        .unwrap()
+                });
+                // Keep this wrapper alive through settlement: its Drop retires Shared.
+                let approvals = Arc::new(LocalApprovals {
+                    shared: f.approvals.shared.clone(),
+                    service_tasks: None,
+                });
+                let (holder_ready, holder_observed) = tokio::sync::oneshot::channel();
+                let (holder_release, release) = mpsc::sync_channel(1);
+                let observing = approvals.clone();
+                let holder_lifetime = lifetime.clone();
+                let holder = tokio::task::spawn_blocking(move || {
+                    let hold = || {
+                        let state = observing.shared.state.try_lock().map_err(|_| {
+                            meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
+                        })?;
+                        let custody = state.attempt.as_ref().map(|attempt| attempt.custody);
+                        // Hold State only for the closed-phase ordering control. With
+                        // healthy setup, State must stay free so the real operation can
+                        // complete while callback entry remains held.
+                        let state = if closed_phase {
+                            Some(state)
+                        } else {
+                            drop(state);
+                            None
+                        };
+                        let _ = holder_ready.send(custody);
+                        let released = release.recv_timeout(Duration::from_secs(5)).is_ok();
+                        drop(state);
+                        Ok((released, custody))
+                    };
+                    if closed_phase {
+                        hold()
+                    } else {
+                        holder_lifetime.with_current_setup(hold)
+                    }
+                });
+                let ready = tokio::time::timeout(Duration::from_secs(2), holder_observed).await;
+                let runtime = tokio::runtime::Handle::current();
+                let owner = f.owner.clone();
+                let worker_approvals = approvals.clone();
+                let (attempt_completed, completed) = tokio::sync::oneshot::channel();
+                let operation = tokio::task::spawn_blocking(move || {
+                    let call = ToolCallView {
+                        id: "install",
+                        name: "setup_selected_install",
+                        args: &args,
+                    };
+                    let result = match retained {
+                        Some((held, reviewed, entry)) => {
+                            runtime.block_on(worker_approvals.shared.review_dispatch(
+                                call,
+                                Some(&context),
+                                Some(HeldAction::Service(held)),
+                                reviewed,
+                                None,
+                                Some(entry),
+                                |held| match held {
+                                    HeldAction::Service(held) => owner.arm_action(held),
+                                    _ => Err(ToolError::access_denied(call.name)),
+                                },
+                            ))
+                        }
+                        None => worker_approvals.check_service_entry(call, &context),
+                    };
+                    let _ = attempt_completed.send(result);
+                });
+                // Open: success before setup callback entry releases. Closed: refusal
+                // before State releases. A State-first closed path times out. Release
+                // and join both tasks before asserting, including on failure.
+                let contended = tokio::time::timeout(Duration::from_secs(2), completed).await;
+                let effects_while_held = f.count();
+                let released_while_held = policy.released.load(Ordering::SeqCst);
+                let _ = holder_release.send(());
+                let holder_result = holder.await;
+                let operation_result = operation.await;
 
-            // Once setup released State, the record completed as the
-            // policy-approved dispatch of its own reservation, and entry admits
-            // that exact spent attempt without changing authority.
-            let args = serde_json::value::to_raw_value(&install(true)).unwrap();
-            let call = ToolCallView {
-                id: "install",
-                name: f.install_name(),
-                args: &args,
-            };
-            let context =
-                ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
-            let uncontended_entry = f.approvals.check_service_entry(call, &context);
-            let current = f.approvals.check_session(&f.session);
-            let records = f.approvals.shared.service.list(Default::default());
-            // No installation is dispatched. Settle the unused arm with a known
-            // failure, then check that real policy/custody/arm ownership was released.
-            let guard = f.approvals.service_dispatch_guard(call, &context).ok();
-            let had_guard = guard.is_some();
-            let settled = f.approvals.settle_service_result(
-                &f.owner,
-                call,
-                &context,
-                LiveBridgeEffectOutcome::Failed,
-                Err(ToolError::access_denied(call.name)),
-            );
-            drop(guard);
-            let reusable = f.owner.retain_action(call, &f.session).is_ok();
+                let args = serde_json::value::to_raw_value(&install(true)).unwrap();
+                let call = ToolCallView {
+                    id: "install",
+                    name: f.install_name(),
+                    args: &args,
+                };
+                let context =
+                    ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
+                let should_have_arm = !closed_phase || entry_check;
+                let records = f.approvals.shared.service.list(Default::default()).unwrap();
+                let entry_after_release = f.approvals.check_service_entry(call, &context);
+                let guard = f.approvals.service_dispatch_guard(call, &context).ok();
+                let had_guard = guard.is_some();
+                // No installation is dispatched. Settle any existing arm with a known
+                // failure, then verify policy/custody/arm ownership was released.
+                let settled = if should_have_arm {
+                    Some(f.approvals.settle_service_result(
+                        &f.owner,
+                        call,
+                        &context,
+                        LiveBridgeEffectOutcome::Failed,
+                        Err(ToolError::access_denied(call.name)),
+                    ))
+                } else {
+                    None
+                };
+                drop(guard);
+                let reusable = f.owner.retain_action(call, &f.session).is_ok();
 
-            let expected_custody = if entry_check {
-                Some(Custody::SpentUncertain)
-            } else {
-                None
-            };
-            assert_eq!(ready.unwrap().unwrap(), expected_custody);
-            assert_eq!(phase_result.unwrap().unwrap(), (true, expected_custody));
-            assert!(operation_result.is_ok());
-            assert!(!completed_while_held);
-            assert_eq!(contended.unwrap().unwrap(), Ok(()));
-            assert_eq!(effects_while_held, 0);
-            assert_eq!(released_while_held, 0);
-            assert!(uncontended_entry.is_ok());
-            assert!(current.is_ok());
-            let records = records.unwrap();
-            assert_eq!(records.len(), 1);
-            assert_eq!(records[0].status, ApprovalStatus::Approved);
-            assert!(had_guard);
-            assert_eq!(
-                settled.unwrap_err(),
-                ToolError::access_denied(f.install_name())
-            );
-            assert!(!f.approvals.has_uncertain_dispatch());
-            assert!(reusable);
-            assert_eq!(f.count(), 0);
-            assert!(policy.lock.try_write().is_ok());
-            // One reservation in either path, released once by settlement.
-            assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(policy.released.load(Ordering::SeqCst), 1);
+                let expected_custody = if entry_check {
+                    Some(Custody::SpentUncertain)
+                } else {
+                    None
+                };
+                assert_eq!(ready.unwrap().unwrap(), expected_custody);
+                assert_eq!(holder_result.unwrap().unwrap(), (true, expected_custody));
+                assert!(operation_result.is_ok());
+                let expected = if closed_phase {
+                    Err(ToolError::access_denied(f.install_name()))
+                } else {
+                    Ok(())
+                };
+                assert_eq!(
+                    contended.unwrap().unwrap(),
+                    expected,
+                    "closed_phase={closed_phase}, entry_check={entry_check}"
+                );
+                assert_eq!(effects_while_held, 0);
+                assert_eq!(
+                    released_while_held,
+                    usize::from(closed_phase && !entry_check)
+                );
+                assert_eq!(records.len(), usize::from(should_have_arm));
+                if should_have_arm {
+                    assert_eq!(records[0].status, ApprovalStatus::Approved);
+                }
+                assert_eq!(had_guard, should_have_arm);
+                if let Some(settled) = settled {
+                    assert_eq!(
+                        settled.unwrap_err(),
+                        ToolError::access_denied(f.install_name())
+                    );
+                }
+                assert_eq!(entry_after_release.is_ok(), !closed_phase);
+                assert!(!f.approvals.has_uncertain_dispatch());
+                assert!(reusable);
+                assert_eq!(f.count(), 0);
+                assert!(policy.lock.try_write().is_ok());
+                assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
+                assert_eq!(policy.released.load(Ordering::SeqCst), 1);
+                if let Some(closing) = closing {
+                    assert!(lifetime.join_close(&closing.handle).await.is_ok());
+                }
+            }
         }
     }
 
@@ -3325,6 +3481,7 @@ mod application_policy_tests {
         assert!(matches!(
             participant
                 .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    member_admissions: &[],
                     decision: &decision,
                     canonical_json: &canonical
                 })
@@ -3336,6 +3493,7 @@ mod application_policy_tests {
         assert!(
             participant
                 .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    member_admissions: &[],
                     decision: &wrong,
                     canonical_json: &canonical
                 })
@@ -3346,6 +3504,7 @@ mod application_policy_tests {
         assert!(
             participant
                 .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    member_admissions: &[],
                     decision: &wrong,
                     canonical_json: &canonical
                 })
@@ -3356,6 +3515,7 @@ mod application_policy_tests {
         assert!(
             participant
                 .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    member_admissions: &[],
                     decision: &decision,
                     canonical_json: &changed
                 })
@@ -3377,6 +3537,7 @@ mod application_policy_tests {
             legacy_binding
                 .participant()
                 .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    member_admissions: &[],
                     decision: &decision,
                     canonical_json: &canonical
                 })
@@ -3402,6 +3563,7 @@ mod application_policy_tests {
         assert!(matches!(
             default_participant()
                 .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    member_admissions: &[],
                     decision: &decision,
                     canonical_json: &canonical
                 })
@@ -3461,6 +3623,7 @@ mod application_policy_tests {
             assert!(matches!(
                 participant
                     .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                        member_admissions: &[],
                         decision: &human,
                         canonical_json: &canonical
                     })
@@ -3477,6 +3640,7 @@ mod application_policy_tests {
             assert!(matches!(
                 participant
                     .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                        member_admissions: &[],
                         decision: &service_only,
                         canonical_json: &canonical
                     })
@@ -3489,6 +3653,7 @@ mod application_policy_tests {
             assert!(matches!(
                 participant
                     .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                        member_admissions: &[],
                         decision: &changed,
                         canonical_json: &canonical
                     })

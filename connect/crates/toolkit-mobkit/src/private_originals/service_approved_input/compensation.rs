@@ -150,9 +150,17 @@ impl PrivateOriginals {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let operator = self
-            .service_operator_setup(lifetime)
-            .map_err(application::policy_error)?;
+        let selected = lifetime.selected_policy();
+        let native = selected
+            .native_host
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        if self.scope.realm != native.realm.to_string()
+            || self.scope.owner != selected.deployment.to_string()
+            || self.owner.ingress_domain() != &native.ingress_domain
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
         let machine = self.machine()?;
         // Canonical pre-bind setup intent is already stored. Only observed
         // exact task children are revoked, never configured shared parents.
@@ -162,96 +170,46 @@ impl PrivateOriginals {
         };
         for grant in task.grants() {
             let result = async {
-                let access = self
-                    .store
-                    .get(&self.access_key(grant)?)
-                    .await
-                    .map_err(store_error)?
+                let access = self.store.get(&self.access_key(grant)?).await.map_err(store_error)?
                     .ok_or(PrivateOriginalError::Unavailable)?;
                 let access = self.decode_access(&access, grant)?;
-                if access.parent.len() != 1 {
-                    return Err(PrivateOriginalError::Conflict);
-                }
+                if access.parent.len() != 1 { return Err(PrivateOriginalError::Conflict); }
                 let parent = &access.parent[0];
-                let key = StoreKey {
-                    realm: self.scope.realm.clone(),
-                    owner: self.scope.owner.clone(),
-                    id: parent.grant_id.as_str().to_owned(),
-                };
-                let saved = self
-                    .store
-                    .get(&key)
-                    .await
-                    .map_err(store_error)?
-                    .ok_or(PrivateOriginalError::Unavailable)?;
-                let approved = operator
-                    .retained_service_approval(&saved)
-                    .map_err(application::policy_error)?
+                let key = StoreKey { realm: self.scope.realm.clone(), owner: self.scope.owner.clone(),
+                    id: parent.grant_id.as_str().to_owned() };
+                let saved = self.store.get(&key).await.map_err(store_error)?.ok_or(PrivateOriginalError::Unavailable)?;
+                let approved = crate::installed_host::operator_setup::OperatorSetup::retained_service_approval_for_cleanup(
+                    lifetime.clone(), self.store.clone(), self.owner.clone(), &saved,
+                ).map_err(application::policy_error)?
                     .ok_or(PrivateOriginalError::Conflict)?;
-                if approved.context.fresh_original != reference.original
-                    || approved.context.business_task != task.acquisition
+                if approved.context.fresh_original != reference.original || approved.context.business_task != task.acquisition
                     || approved.context.prior_original.work != task.parent.original
                     || !approved.cleanup.belongs_to(&self.owner)
-                    || approved
-                        .cleanup
-                        .issued()
-                        .await
-                        .map_err(application::policy_error)?
-                        .as_ref()
-                        != Some(parent)
-                {
+                    || approved.cleanup.issued().await.map_err(application::policy_error)?.as_ref() != Some(parent) {
                     return Err(PrivateOriginalError::Conflict);
                 }
                 let selected = match (&approved.decision, &approved.selection) {
-                    (
-                        super::super::service_grants::AccessDecision::Mcp(decision),
-                        Some(selection),
-                    ) => {
-                        self.retained_service_selection(decision, selection, &approved.requested)?
-                    }
-                    (super::super::service_grants::AccessDecision::Catalog(decision), None) => {
-                        self.retained_catalog_selection(decision, &approved.requested)?
-                    }
+                    (super::super::service_grants::AccessDecision::Mcp(decision), Some(selection)) =>
+                        self.retained_service_selection(decision, selection, &approved.requested)?,
+                    (super::super::service_grants::AccessDecision::Catalog(decision), None) =>
+                        self.retained_catalog_selection(decision, &approved.requested)?,
                     _ => return Err(PrivateOriginalError::Conflict),
                 };
-                if &selected.reference != grant {
-                    return Err(PrivateOriginalError::Conflict);
-                }
-                let child = self
-                    .service_compensation_child(grant, parent)
-                    .await?
+                if &selected.reference != grant { return Err(PrivateOriginalError::Conflict); }
+                let child = self.service_compensation_child(grant, parent).await?
                     .ok_or(PrivateOriginalError::Unavailable)?;
                 let parent_result = {
-                    let mut custody = machine
-                        .try_controller_grant_mutation()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    self.owner
-                        .grants()
-                        .revoke(
-                            &meerkat_core::AdmissionGuard::none(),
-                            approved.cleanup.issuer(),
-                            parent,
-                            &mut custody,
-                        )
+                    let mut custody = machine.try_controller_grant_mutation().map_err(|_| PrivateOriginalError::Unavailable)?;
+                    self.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), approved.cleanup.issuer(), parent, &mut custody)
                         .map_err(|_| PrivateOriginalError::Unavailable)
                 };
                 let child_result = {
-                    let mut custody = machine
-                        .try_controller_grant_mutation()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    self.owner
-                        .grants()
-                        .revoke(
-                            &meerkat_core::AdmissionGuard::none(),
-                            &child.0,
-                            &child.1,
-                            &mut custody,
-                        )
+                    let mut custody = machine.try_controller_grant_mutation().map_err(|_| PrivateOriginalError::Unavailable)?;
+                    self.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &child.0, &child.1, &mut custody)
                         .map_err(|_| PrivateOriginalError::Unavailable)
                 };
                 parent_result.and(child_result)
-            }
-            .await;
+            }.await;
             if let Err(error) = result {
                 failed = Some(error);
             }

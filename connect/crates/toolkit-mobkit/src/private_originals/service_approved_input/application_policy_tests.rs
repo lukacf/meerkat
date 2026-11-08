@@ -210,7 +210,7 @@ async fn policy_for_with_late(
         .unwrap()
         .unwrap();
     let parent = task.source.decode_record(&row, &task.parent).unwrap();
-    let route = task.source.route(&task.parent.route).unwrap();
+    let route = &task.source.route(&task.parent.route).unwrap();
     let permission = PrivateServiceMcpPermission {
         target: route.grant_target.clone(),
         connection: id(&config.name),
@@ -241,6 +241,7 @@ async fn policy_for_with_late(
         permission: &permission,
         attachment: &attachment,
         tool_policy: None,
+        member_admissions: &[],
     });
     let probe = Arc::new(PolicyProbe::default());
     let current = Arc::new(AtomicBool::new(true));
@@ -350,7 +351,7 @@ async fn application_evidence_rejects_swapped_acquisition_scopes() {
     let result = AssertUnwindSafe(Box::pin(async {
         let (task, snapshot, _, _) = task(&fixture).await;
         let selected = fixture.lifetime().selected_policy();
-        let route = fixture.source.route(&task.parent.route).unwrap();
+        let route = &fixture.source.route(&task.parent.route).unwrap();
         let evidence = ApplicationServiceEvidence {
             owner: route.grant_caller.clone(),
             deployment: selected.deployment.clone(),
@@ -489,7 +490,7 @@ async fn positive(source_kind: ApplicationServiceSource, connector: bool) {
             .unwrap()
             .unwrap();
         let a_record = fixture.source.decode_record(&a_row, &parent).unwrap();
-        let route = fixture.source.route(&parent.route).unwrap();
+        let route = &fixture.source.route(&parent.route).unwrap();
         let configured_parent = route.application_parent.clone().unwrap();
         assert_eq!(
             configured_parent.len(),

@@ -1,4 +1,5 @@
 //! Configured acquisition is selected only by the existing first source bind.
+mod late_workflow;
 use super::*;
 use crate::installed_host::application_operations;
 use meerkat_authorization::grants::GrantRefusal;
@@ -10,7 +11,10 @@ use meerkat_authorization_contracts::{
 use meerkat_toolkit::host_lifetime::{
     NativeHostLifetime,
     control::HostLifetimeError,
-    policy::{CompiledAgentSetupCapability, CompiledNativeMember, CompiledNativeSourceRoute},
+    policy::{
+        CompiledAgentSetupCapability, CompiledNativeMember, CompiledNativeSourceRoute,
+        PreparedNativeMember,
+    },
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +28,7 @@ struct ConfiguredSetup {
     lifetime: Arc<NativeHostLifetime>,
     application: PrincipalRef,
     route: CompiledNativeSourceRoute,
-    member: CompiledNativeMember,
+    member: PreparedNativeMember,
     selection: Option<CompiledAgentSetupCapability>,
 }
 impl ConfiguredSetup {
@@ -60,26 +64,37 @@ impl PrivateOriginals {
         lifetime
             .validate_current_selection()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
+        self.retained_configured_setup(reference, lifetime)
+    }
+
+    /// Immutable selected facts for exact cancelled-source compensation only.
+    /// Callers that can issue or bind must first enter configured_setup above.
+    fn retained_configured_setup(
+        &self,
+        reference: &PrivateOriginalRef,
+        lifetime: Arc<NativeHostLifetime>,
+    ) -> Result<ConfiguredSetup, PrivateOriginalError> {
         let selected = lifetime.selected_policy();
         let native = selected
             .native_host
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let route = native
-            .routes
-            .iter()
-            .find(|route| route.id == reference.route)
-            .ok_or(PrivateOriginalError::Denied)?;
+        if self.scope.realm != native.realm.to_string()
+            || self.scope.owner != selected.deployment.to_string()
+            || self.owner.ingress_domain() != &native.ingress_domain
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        // Resolve the same authenticated source used by ordinary input binding.
+        // A current class member has no setup capability, but its absence from
+        // the static roster must not prevent controller-only input admission.
+        let (route, member, _) = self.selected_source_route(&reference.route)?;
         let (binding, requester, actor) = route
             .source_binding(selected)
             .map_err(|_| PrivateOriginalError::Denied)?;
-        let member = native
-            .members
-            .iter()
-            .find(|member| &member.member == binding)
-            .ok_or(PrivateOriginalError::Denied)?;
-        let source = self.route(&reference.route)?;
-        if source.grant_target.as_str() != binding.member
+        let source = &self.route(&reference.route)?;
+        if &member.member != binding
+            || source.grant_target.as_str() != binding.member
             || source.grant_caller != native.grant_administrator
             || &source.requester != requester
             || &source.ingress_actor != actor
@@ -98,14 +113,14 @@ impl PrivateOriginals {
             .cloned();
         Ok(ConfiguredSetup {
             application: native.grant_administrator.clone(),
-            route: route.clone(),
-            member: member.clone(),
+            route,
+            member,
             selection,
             lifetime,
         })
     }
 
-    fn configured_child_id(
+    pub(super) fn configured_child_id(
         &self,
         reference: &PrivateOriginalRef,
     ) -> Result<EvidenceId, PrivateOriginalError> {
@@ -222,15 +237,33 @@ impl PrivateOriginals {
                 .capability
         };
         let origin = self.setup_origin_for(reference)?;
-        let selected_targets = selection.helper_targets.clone();
+        let shared = !selection.workflow_targets.is_empty();
+        if shared
+            && !matches!(
+                &record.planning_source_evidence,
+                Some(super::planning_source_evidence::PlanningSourceEvidence::EffectWaiter { .. })
+            )
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let selected_targets = if shared {
+            selection.workflow_targets.clone()
+        } else {
+            selection.helper_targets.clone()
+        };
         let owner = self.owner.clone();
         let parent = selection.parent.clone();
         let child_id = self.configured_child_id(reference)?;
         let bounds = facts.child_bounds(session);
         let grants = self.owner.grants();
+        // The bind attempt, for the blocking writer's issuance.
+        let attempt = meerkat_core::protected_section::effect_mark();
         // The blocking writer keeps the exact verified login alive if its
         // waiting binder disappears. No Python callback or mutex spans await.
         let basis = tokio::task::spawn_blocking(move || {
+            let _attempt = attempt
+                .as_ref()
+                .map(meerkat_core::protected_section::EffectMark::enter);
             super::first_input::with_controller_login(console.as_ref(), None, || {
                 facts.lifetime.with_current_setup(|| {
                     let issue = || {
@@ -251,14 +284,21 @@ impl PrivateOriginals {
                             .map_err(|_| GrantRefusal::Unavailable)?;
                         let child = match grants.issued_reference(&child_id)? {
                             Some(child) => child,
-                            None => grants.issue_child(
-                                &meerkat_core::AdmissionGuard::none(),
-                                &facts.application,
-                                &parent,
-                                child_id.clone(),
-                                facts.route.logical_executor.clone(),
-                                bounds,
-                            )?,
+                            None => {
+                                // A bind attempt's durable effect: no "not
+                                // now" may follow it.
+                                if let Some(attempt) = &attempt {
+                                    attempt.note("original.configured_setup_grant");
+                                }
+                                grants.issue_child(
+                                    &meerkat_core::AdmissionGuard::none(),
+                                    &facts.application,
+                                    &parent,
+                                    child_id.clone(),
+                                    facts.route.logical_executor.clone(),
+                                    bounds,
+                                )?
+                            }
                         };
                         let lineage = vec![parent, child];
                         let current = grants.resolve_lineage(
@@ -275,7 +315,12 @@ impl PrivateOriginals {
                         Ok(lineage)
                     };
                     let lineage = issue().map_err(|_| HostLifetimeError::Unavailable)?;
-                    let targets = super::setup_targets::issue_targets(
+                    let issue_targets = if shared {
+                        super::setup_targets::issue_workflow_targets
+                    } else {
+                        super::setup_targets::issue_targets
+                    };
+                    let targets = issue_targets(
                         &owner,
                         &facts.application,
                         &facts.route.logical_executor,
@@ -283,13 +328,18 @@ impl PrivateOriginals {
                         &origin,
                         &child_id,
                         &selected_targets,
+                        attempt.as_ref(),
                     )?;
                     super::setup_targets::project(lineage, targets)
                 })
             })
         })
         .await
-        .map_err(|_| PrivateOriginalError::Unavailable)?
+        .map_err(|_| {
+            crate::aa1_failure("binding.setup.writer_join", "JoinError");
+            PrivateOriginalError::Unavailable
+        })?
+        .inspect_err(|error| first_input::binding_host_failure("binding.setup.writer", error))
         .map_err(|_| PrivateOriginalError::Unavailable)?;
         Ok(Some(basis))
     }
@@ -322,74 +372,54 @@ impl PrivateOriginals {
             &capability.helper_targets,
         )
         .map_err(|_| PrivateOriginalError::Denied)?;
+        if !capability.workflow_targets.is_empty() {
+            if !capability.helper_targets.is_empty() || capability.helper.is_none() {
+                return Err(PrivateOriginalError::Denied);
+            }
+            crate::installed_host::operator_setup::setup_targets::validate_workflow_compiled(
+                &capability.workflow_targets,
+            )
+            .map_err(|_| PrivateOriginalError::Denied)?;
+        }
         let selection = ConfiguredSetupSelection {
             capability,
             session_id: session.clone(),
         };
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
             authority: route.source_authority.clone(),
             work: reference.original.clone(),
         };
-        self.owner
-            .with_unbound_source_selection(&route.realm, &original, || async {
-                let key = self.key(reference)?;
-                let saved = self
-                    .store
-                    .get(&key)
-                    .await
-                    .map_err(store_error)?
-                    .ok_or(PrivateOriginalError::Unavailable)?;
-                let mut record = self.decode_record(&saved, reference)?;
-                if record.operation_cancelled
-                    || record.final_association.is_some()
-                    || record.setup_request.is_some()
-                    || record.approved_task.is_some()
-                    || record.service_admission.is_some()
-                {
-                    return Err(PrivateOriginalError::Denied);
-                }
-                if let Some(prior) = record.configured_setup {
-                    return if prior == selection {
-                        Ok(prior)
-                    } else {
-                        Err(PrivateOriginalError::Conflict)
-                    };
-                }
-                // A legacy or damaged row cannot use a previously entered child
-                // as permission to adopt a wider present-day target selection.
-                if !selection.capability.helper_targets.is_empty()
-                    && self
-                        .owner
-                        .grants()
-                        .issued_reference(&self.configured_child_id(reference)?)
-                        .map_err(|_| PrivateOriginalError::Unavailable)?
-                        .is_some()
-                {
-                    return Err(PrivateOriginalError::Conflict);
-                }
-                record.configured_setup = Some(selection.clone());
-                self.store
-                    .compare_and_swap(Transition {
-                        key,
-                        expected_revision: saved.revision,
-                        expected_digest: Some(saved.content_digest),
-                        claim: None,
-                        data: encode(record)?,
-                        events: vec![],
-                        effects: vec![],
-                    })
-                    .await
-                    .map_err(store_error)?;
-                Ok(selection)
-            })
-            .await
-            .map_err(|error| match error {
-                OriginalWriterError::Conflict | OriginalWriterError::OperationCancelled => {
-                    PrivateOriginalError::Denied
-                }
-                _ => PrivateOriginalError::Unavailable,
-            })?
+        self.owner.with_unbound_source_selection(&route.realm, &original, || async {
+            let key = self.key(reference)?;
+            let saved = self.store.get(&key).await.map_err(store_error)?.ok_or(PrivateOriginalError::Unavailable)?;
+            let mut record = self.decode_record(&saved, reference)?;
+            if record.operation_cancelled || record.final_association.is_some() || record.setup_request.is_some()
+                || record.approved_task.is_some() || record.service_admission.is_some()
+            { return Err(PrivateOriginalError::Denied); }
+            if let Some(prior) = record.configured_setup {
+                return if prior == selection { Ok(prior) } else { Err(PrivateOriginalError::Conflict) };
+            }
+            // A legacy or damaged row cannot use a previously entered child
+            // as permission to adopt a wider present-day target selection.
+            if (!selection.capability.helper_targets.is_empty() || !selection.capability.workflow_targets.is_empty())
+                && self.owner.grants().issued_reference(&self.configured_child_id(reference)?)
+                    .map_err(|_| PrivateOriginalError::Unavailable)?.is_some()
+            { return Err(PrivateOriginalError::Conflict); }
+            if !selection.capability.workflow_targets.is_empty()
+                && !matches!(&record.planning_source_evidence, Some(super::planning_source_evidence::PlanningSourceEvidence::EffectWaiter { .. }))
+            { return Err(PrivateOriginalError::Denied); }
+            record.configured_setup = Some(selection.clone());
+            // A bind attempt's durable effect: no "not now" may follow it.
+            meerkat_core::protected_section::note_effect("original.configured_setup");
+            self.store.compare_and_swap(Transition { key, expected_revision: saved.revision,
+                expected_digest: Some(saved.content_digest), claim: None, data: encode(record)?,
+                events: vec![], effects: vec![], }).await.map_err(store_error)?;
+            Ok(selection)
+        }).await.map_err(|error| match error {
+            OriginalWriterError::Conflict | OriginalWriterError::OperationCancelled => PrivateOriginalError::Denied,
+            _ => PrivateOriginalError::Unavailable,
+        })?
     }
 
     /// Runs after the canonical read under the existing original mutation
@@ -401,6 +431,19 @@ impl PrivateOriginals {
         record: &SourceRecord,
         association: &InputAuthorityAssociation,
     ) -> Result<(), OriginalWriterError> {
+        if record.peer_ingress.is_some() {
+            return peer_ingress::check_binding(record, association)
+                .map_err(|_| OriginalWriterError::Conflict);
+        }
+        if let Some((base_record, base_association)) =
+            native_operations::base_projection(record, association)
+                .map_err(|_| OriginalWriterError::Conflict)?
+        {
+            return self.check_configured_setup_binding(reference, &base_record, &base_association);
+        }
+        if self.check_class_input_binding(reference, record, association)? {
+            return Ok(());
+        }
         if record.setup_request.is_some()
             || record.approved_task.is_some()
             || record.service_admission.is_some()
@@ -427,10 +470,20 @@ impl PrivateOriginals {
                 if retained.session_id != session || retained.capability.route != reference.route {
                     return Err(PrivateOriginalError::Conflict);
                 }
-                super::setup_targets::check_structure(
+                let shared = !retained.capability.workflow_targets.is_empty();
+                let check = if shared {
+                    super::setup_targets::check_workflow_structure
+                } else {
+                    super::setup_targets::check_structure
+                };
+                check(
                     std::slice::from_ref(&retained.capability.parent),
                     &self.configured_child_id(reference)?,
-                    &retained.capability.helper_targets,
+                    if shared {
+                        &retained.capability.workflow_targets
+                    } else {
+                        &retained.capability.helper_targets
+                    },
                     &claims.authority_basis,
                 )
                 .map_err(|_| PrivateOriginalError::Conflict)?;

@@ -41,7 +41,8 @@ pub use audit::{
 };
 mod owner_change_wait;
 pub use owner_change_wait::{
-    OWNER_CHANGE_FREE_REBUILDS, OWNER_CHANGE_WAIT_BOUND, OwnerChangeChurn, OwnerChangeWait,
+    NotNowWait, OWNER_CHANGE_FREE_REBUILDS, OWNER_CHANGE_WAIT_BOUND, OwnerChangeChurn,
+    OwnerChangeWait,
 };
 mod refusal_observer;
 pub use refusal_observer::{
@@ -94,6 +95,42 @@ pub enum ControllerReadinessFailure {
     /// verdict; asking again after the boundary is released may succeed.
     #[error("the session's turn boundary is held")]
     TurnBoundaryHeld,
+    /// The input's source is held now by another of its owner's writers
+    /// (its collection, its publication or its source writer), and the host
+    /// does not wait for it inside a protected section: it answers this
+    /// instead. Not a verdict; asking again once the writer released it may
+    /// succeed.
+    #[error("the input's source is held by another of its owner's writers")]
+    SourceHeld,
+    /// What the host prepared outside protection names another session or
+    /// incarnation than the one bound now: it prepares again and the caller
+    /// asks again. Not a verdict.
+    #[error("the host's preparation names another session or incarnation")]
+    PreparationStale,
+}
+
+impl ControllerReadinessFailure {
+    /// The cause's stable snake_case name, for structured data on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PolicyUnavailable => "policy_unavailable",
+            Self::ExecutorUnavailable => "executor_unavailable",
+            Self::FactsUnavailable => "facts_unavailable",
+            Self::Busy => "busy",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::AuthorityChanged => "authority_changed",
+            Self::UnsupportedScope => "unsupported_scope",
+            Self::CredentialUnusable { .. } => "credential_unusable",
+            Self::CredentialPreparationFailed { .. } => "credential_preparation_failed",
+            Self::PolicyChanged => "policy_changed",
+            Self::ReplacementNotEmpty => "replacement_not_empty",
+            Self::OriginalAdmissionPending => "original_admission_pending",
+            Self::TurnBoundaryHeld => "turn_boundary_held",
+            Self::SourceHeld => "source_held",
+            Self::PreparationStale => "preparation_stale",
+        }
+    }
 }
 
 /// A domain owner's external resource or physical destination coordinates.

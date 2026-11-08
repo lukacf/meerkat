@@ -1076,7 +1076,7 @@ async fn a_managed_edge_between_unmaterialized_identities_is_unwired_once_droppe
 }
 
 mod no_registration_reload {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -1291,6 +1291,16 @@ mod no_registration_reload {
             self.inner.member_binding_history().await
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &meerkat_meta::identity_first::AgentIdentity,
+        ) -> Result<
+            meerkat_meta::identity_first::CoreIdentityEntry,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            meerkat_meta::identity_first::SessionBridge::identity_entry(&self.inner, identity).await
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -1340,12 +1350,6 @@ mod no_registration_reload {
             &self,
         ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
             self.inner.identity_labelled_members().await
-        }
-
-        async fn broken_members(
-            &self,
-        ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-            self.inner.broken_members().await
         }
 
         async fn durable_session_held(

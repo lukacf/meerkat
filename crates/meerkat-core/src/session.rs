@@ -5719,6 +5719,7 @@ impl Session {
             messages_after: self.messages.len(),
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         };
         self.add_compaction_projection_intent(intent.clone())
             .map_err(|error| error.to_string())?;

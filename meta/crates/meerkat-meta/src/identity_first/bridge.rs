@@ -3225,9 +3225,14 @@ pub enum GovernedInputError {
     /// The member's session changed or is missing; the input was not
     /// retargeted.
     BindingChanged,
-    /// The trusted host binder could not bind the input for the member's
-    /// session.
-    Bind(String),
+    /// The trusted host binder refused the input for the member's session:
+    /// nothing was submitted and no custody existed.
+    Refused(GovernedBindRefusal),
+    /// Every bind of the send answered "not now" until its door's wait
+    /// budget ended (or the door waits for nothing): nothing was submitted,
+    /// no custody existed, and the same input can be sent again as is. Not a
+    /// refusal, not a native outcome.
+    Held(GovernedHold),
     /// The input reached admission without its authority association or
     /// trusted ingress observation.
     Unbound,
@@ -3242,7 +3247,12 @@ pub enum GovernedInputError {
     /// The input may have run. The host's settlement custody was neither
     /// promoted nor withdrawn: it was handed to the binder's
     /// [`GovernedInputBinder::retain_unresolved`].
-    AdmissionUnresolved { detail: String },
+    AdmissionUnresolved {
+        detail: String,
+        /// Where the submission's outcome is read by its key, through Core,
+        /// when the bound input carried its raw key.
+        receipt: Option<Box<GovernedSubmissionReceipt>>,
+    },
     /// The bound input's host entry fence refused it at the final protected
     /// entry, immediately before native admission: nothing was submitted and
     /// the host's settlement custody was withdrawn.
@@ -3337,7 +3347,15 @@ impl GovernedDeliveryCustody {
     {
         self.custody.as_ref()?;
         if let Some((fence, record)) = self.entry.take() {
-            match fence.enter() {
+            // The final protected entry: the host's fence answers without
+            // waiting.
+            let entered = {
+                let _section = meerkat_core::protected_section::enter(
+                    meerkat_core::protected_section::ProtectedSection::GovernedEntry,
+                );
+                fence.enter()
+            };
+            match entered {
                 Ok(permit) => record.entered(permit),
                 Err(refusal) => {
                     record.refused(refusal);
@@ -3373,12 +3391,24 @@ impl std::fmt::Display for GovernedInputError {
             Self::BindingChanged => f.write_str(
                 "governed input binding changed or is missing; input was not retargeted",
             ),
-            Self::Bind(reason) => write!(f, "governed input could not be bound: {reason}"),
+            Self::Refused(refusal) => write!(
+                f,
+                "governed input refused ({}): {}",
+                refusal.kind.as_str(),
+                refusal.detail
+            ),
+            Self::Held(hold) => write!(
+                f,
+                "governed input held ({}) after {} binds and {} ms; nothing was submitted",
+                hold.condition.as_str(),
+                hold.binds,
+                hold.waited.as_millis()
+            ),
             Self::Unbound => f.write_str(
                 "governed input carries no authority association or ingress observation",
             ),
             Self::Mob(error) => write!(f, "governed input refused: {error}"),
-            Self::AdmissionUnresolved { detail } => write!(
+            Self::AdmissionUnresolved { detail, .. } => write!(
                 f,
                 "governed input admission is unresolved: {detail}; the input may have run \
                  and its settlement is retained unsettled by the host"
@@ -3407,11 +3437,11 @@ impl std::error::Error for GovernedInputError {
 /// The row is read with the Active/session check, under the identity's
 /// lifecycle lock, which this delivery holds through native submission and
 /// which every row writer takes: a host that compares it with the row its
-/// input was authored from, inside [`GovernedInputBinder::bind`], checks the
-/// row the input is admitted under, and refusing there submits nothing. It
-/// is the registered row, not the roster provider's desired row and not
-/// proof that the member's actor adopted every field. `bind` must not await
-/// any operation on the same identity that takes its lifecycle lock (a
+/// input was authored from, inside [`GovernedInputBinder::try_bind`], checks
+/// the row the input is admitted under, and refusing there submits nothing.
+/// It is the registered row, not the roster provider's desired row and not
+/// proof that the member's actor adopted every field. `try_bind` must not
+/// await any operation on the same identity that takes its lifecycle lock (a
 /// reset, send, materialization or row update): that lock is held here.
 pub struct GovernedBindContext {
     pub session_id: meerkat_core::types::SessionId,
@@ -3586,7 +3616,12 @@ impl GovernedEntryRecord {
     pub(crate) fn finish(&self, outcome: GovernedEntryOutcome) {
         let state = std::mem::replace(&mut *self.state(), GovernedEntryState::Finished);
         match state {
-            GovernedEntryState::Entered(permit) => permit.finish(outcome),
+            GovernedEntryState::Entered(permit) => {
+                let _section = meerkat_core::protected_section::enter(
+                    meerkat_core::protected_section::ProtectedSection::GovernedEntry,
+                );
+                permit.finish(outcome);
+            }
             other => *self.state() = other,
         }
     }
@@ -3600,19 +3635,204 @@ impl GovernedEntryRecord {
 /// Meta never mints, alters, drops or retargets the association; it carries
 /// the bound input to the member's native admission under the identity's
 /// lease and settles the custody from that admission's answer.
+///
+/// Meta calls [`Self::try_bind`] under the identity's lifecycle lock: a
+/// protected section ([`meerkat_core::protected_section`]), where the binder
+/// never blocks, sleeps or waits for a lock another actor may hold across
+/// I/O. Whatever it cannot answer now it answers [`GovernedBindError::NotNow`]:
+/// Meta then releases the lock, waits for the answer's
+/// [`GovernedNotNow::until`] within [`Self::wait_budget`], reads the
+/// identity's target, row and controller again and binds again, on the same
+/// binder, for the same input (the same input id and idempotency key).
+/// "Not now" is an answer only before the attempt's first durable effect
+/// ([`meerkat_core::protected_section::effect_recorded`]); after one, the
+/// binder answers what its door shipped.
 #[async_trait]
 pub trait GovernedInputBinder: Send + Sync {
-    async fn bind(
+    /// Bind the raw input for the member's exact current session now, or
+    /// say why not.
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: meerkat_runtime::Input,
-    ) -> Result<BoundGovernedInput, String>;
+    ) -> Result<BoundGovernedInput, GovernedBindError>;
+
+    /// How long this door waits, in total, for its binds' "not now" answers:
+    /// Core's owner-change bound unless the door says otherwise.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        GovernedWaitBudget::Bounded(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND)
+    }
+
+    /// Called once, after a bind answered bound and before the bound input
+    /// is submitted: outside the protected section, under the identity's
+    /// lifecycle lock. `session_id` is the session the bind bound. A door
+    /// that records its send's state records the submission here, so nothing
+    /// records the send held after it. An `Err` refuses the send: nothing is
+    /// submitted. Answers `Ok` unless the door says otherwise.
+    ///
+    /// Every lifecycle operation of the identity waits while it runs, so it
+    /// answers within a bound of its own (a local store write, for example)
+    /// and never waits for the identity runtime, nor for an actor that may
+    /// wait for it.
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), GovernedBindRefusal> {
+        let _ = session_id;
+        Ok(())
+    }
 
     /// Take back custody whose submission's native admission is unresolved,
     /// to keep it until the host can settle it from the native owner's
     /// actual record. Called from the runtime-owned operation, whether or
     /// not its caller is still waiting.
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str);
+}
+
+/// Why a governed bind bound nothing.
+#[derive(Debug)]
+pub enum GovernedBindError {
+    /// This send ends here; nothing was submitted.
+    Refused(GovernedBindRefusal),
+    /// Not answerable now. Nothing was written, staged, issued or enrolled
+    /// for this send that a later bind would see as an earlier attempt.
+    NotNow(GovernedNotNow),
+}
+
+impl From<GovernedBindRefusal> for GovernedBindError {
+    fn from(refusal: GovernedBindRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+/// A binder's refusal: its kind, and a detail for operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GovernedBindRefusal {
+    pub kind: GovernedBindRefusalKind,
+    pub detail: String,
+}
+
+impl GovernedBindRefusal {
+    pub fn new(kind: GovernedBindRefusalKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    /// A [`GovernedBindRefusalKind::Denied`] refusal.
+    pub fn denied(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Denied, detail)
+    }
+
+    /// A [`GovernedBindRefusalKind::Closed`] refusal.
+    pub fn closed(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Closed, detail)
+    }
+
+    /// A [`GovernedBindRefusalKind::Unavailable`] refusal.
+    pub fn unavailable(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Unavailable, detail)
+    }
+
+    /// A [`GovernedBindRefusalKind::Withheld`] refusal.
+    pub fn withheld(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Withheld, detail)
+    }
+}
+
+/// Why a binder refused. A closed set: adding a kind is Breaking, in Rust
+/// and on the wire (`refusal` in the structured data).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedBindRefusalKind {
+    /// A verdict on this input: authority, access, consent, conflicting
+    /// custody, a changed source.
+    Denied,
+    /// The input's owner ended: source admission stopped, retired,
+    /// cancelled, revoked, expired.
+    Closed,
+    /// No verdict: the host could not decide or complete the bind and offers
+    /// no wait (a failed read or write). What it wrote stays in its own
+    /// custody. Never a "not now".
+    Unavailable,
+    /// The host binds nothing for this send by design: a preparation that
+    /// only reads the bind context. Not a verdict on the input.
+    Withheld,
+}
+
+impl GovernedBindRefusalKind {
+    /// The kind's stable wire name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::Closed => "closed",
+            Self::Unavailable => "unavailable",
+            Self::Withheld => "withheld",
+        }
+    }
+}
+
+/// A binder's "not now": its typed condition and what Meta awaits before it
+/// binds again.
+#[derive(Debug)]
+pub struct GovernedNotNow {
+    /// Typed and advisory (an open set): Core's own not-ready vocabulary.
+    pub condition: meerkat_core::authorization::ControllerReadinessFailure,
+    /// What Meta awaits, outside every protected section and only within the
+    /// door's budget, before it binds again.
+    pub until: meerkat_core::authorization::NotNowWait,
+}
+
+/// A door's wait budget for its binds' "not now" answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedWaitBudget {
+    /// Wait up to this long in total, clamped to Core's owner-change bound.
+    Bounded(std::time::Duration),
+    /// Never wait: the door gets [`GovernedInputError::Held`] at the first
+    /// "not now" and decides itself.
+    None,
+}
+
+/// Every bind of a send answered "not now" until its door's budget ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GovernedHold {
+    /// The last answer's condition.
+    pub condition: meerkat_core::authorization::ControllerReadinessFailure,
+    /// The send's total wait.
+    pub waited: std::time::Duration,
+    /// Binds made, each answered "not now".
+    pub binds: u32,
+    /// The held input: sending exactly this input again enters the loop
+    /// again.
+    pub input_id: meerkat_core::lifecycle::InputId,
+    /// Its raw idempotency key, unchanged.
+    pub idempotency_key: Option<meerkat_runtime::IdempotencyKey>,
+}
+
+/// The version of [`GovernedSubmissionReceipt`] this build writes and reads.
+pub const GOVERNED_SUBMISSION_RECEIPT_VERSION: u8 = 1;
+
+/// An opaque, versioned locator of one governed submission: where its
+/// outcome is read by key, through Core
+/// ([`meerkat_runtime::MeerkatMachine::governed_input_by_key`], with the
+/// reader's own association, whose digest must equal `association_digest`).
+/// It is no evidence of admission and no permission. A reader refuses a
+/// version it does not know, as unresolved, never as absence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedSubmissionReceipt {
+    /// [`GOVERNED_SUBMISSION_RECEIPT_VERSION`].
+    pub v: u8,
+    /// The session the submission was made to.
+    pub session_id: meerkat_core::types::SessionId,
+    /// The submitter's raw idempotency key (Core qualifies it).
+    pub idempotency_key: meerkat_runtime::IdempotencyKey,
+    /// The submitted association's digest.
+    pub association_digest: meerkat_runtime::AssociationDigest,
+    /// The submitted input: a secondary witness only (a deduplicated
+    /// submission's canonical input is another one).
+    pub input_id: meerkat_core::lifecycle::InputId,
 }
 
 /// The session owner's actor operations, captured where the concrete session
@@ -4732,6 +4952,239 @@ impl MemberStanding {
     }
 }
 
+/// What Core's MobMachine records for one identity's name
+/// ([`SessionBridge::identity_entry`], `MobHandle::identity_entry`): how
+/// Core holds the name, the member that holds it, the host preparation its
+/// entry owes and the session its last member's retirement archived. Read
+/// from the machine state the mob's actor last published: no store read, no
+/// actor command, and it never wakes a member. The identity runtime builds
+/// every view of an identity's lifecycle from it. Build one with its
+/// constructors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreIdentityEntry {
+    /// How Core holds the name.
+    pub kind: CoreNameKind,
+    /// Where the entry comes from, when Core holds the name as an identity
+    /// entry: a host's declaration (its roster), or a creation at runtime,
+    /// whose record the mob's identity store owns. `None` for a name that is
+    /// no entry, that Core reserves, or a removed identity's.
+    pub origin: Option<meerkat_mob::IdentityEntryOrigin>,
+    /// The member that holds the name, if one does: the entry's member, or
+    /// the worker member that holds a name Core holds as no entry.
+    pub member: Option<CoreMember>,
+    /// The host preparation Core holds the entry's member for, with its
+    /// cause: while one is owed, Core refuses the member's wakes.
+    pub host_preparation: Option<meerkat_mob::HostPreparationCause>,
+    /// The session Core archived the entry's last member on, while no member
+    /// holds the entry: the entry's next seat revives it.
+    pub archived_session: Option<meerkat_core::types::SessionId>,
+}
+
+impl CoreIdentityEntry {
+    /// Core holds the name as an identity entry a host declared;
+    /// [`Self::with_origin`] names another origin.
+    pub fn entry() -> Self {
+        Self::of_kind(CoreNameKind::Entry).with_origin(meerkat_mob::IdentityEntryOrigin::Declared)
+    }
+
+    /// Core holds the name as no identity entry: a worker member holds it
+    /// ([`Self::with_member`]), or nothing does.
+    pub fn not_an_entry() -> Self {
+        Self::of_kind(CoreNameKind::NotAnEntry)
+    }
+
+    /// Core reserves the name: its entry is one this build of Core cannot
+    /// read.
+    pub fn reserved() -> Self {
+        Self::of_kind(CoreNameKind::Reserved)
+    }
+
+    /// Core holds the name as a removed identity's: never an entry or a
+    /// member again.
+    pub fn removed() -> Self {
+        Self::of_kind(CoreNameKind::Removed)
+    }
+
+    fn of_kind(kind: CoreNameKind) -> Self {
+        Self {
+            kind,
+            origin: None,
+            member: None,
+            host_preparation: None,
+            archived_session: None,
+        }
+    }
+
+    /// The read, with the entry's origin.
+    #[must_use]
+    pub fn with_origin(mut self, origin: meerkat_mob::IdentityEntryOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The read, with the member that holds the name.
+    #[must_use]
+    pub fn with_member(mut self, member: CoreMember) -> Self {
+        self.member = Some(member);
+        self
+    }
+
+    /// The read, with the host preparation the entry owes.
+    #[must_use]
+    pub fn with_host_preparation(mut self, cause: meerkat_mob::HostPreparationCause) -> Self {
+        self.host_preparation = Some(cause);
+        self
+    }
+
+    /// The read, with the session the entry's last member's retirement
+    /// archived.
+    #[must_use]
+    pub fn with_archived_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
+        self.archived_session = Some(session_id);
+        self
+    }
+
+    /// Whether Core holds the name as an identity entry a host declared:
+    /// the one kind of name a roster pass registers with this runtime. A
+    /// created entry (the mob's identity store owns its record), a name Core
+    /// reserves and a removed identity's name are never registered by a
+    /// roster pass.
+    pub fn is_declared_entry(&self) -> bool {
+        self.kind == CoreNameKind::Entry
+            && self.origin == Some(meerkat_mob::IdentityEntryOrigin::Declared)
+    }
+
+    /// The member's role move Core holds: the host's roster moved the
+    /// member to another role without declaring the migration.
+    pub fn holds_role_migration(&self) -> bool {
+        self.host_preparation == Some(meerkat_mob::HostPreparationCause::RoleMigrationUndeclared)
+    }
+}
+
+/// How Core holds a name ([`CoreIdentityEntry::kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreNameKind {
+    /// An identity entry: a host declared it, or it was created.
+    Entry,
+    /// No identity entry: a worker member holds it, or nothing does.
+    NotAnEntry,
+    /// Reserved: the name's entry is one this build of Core cannot read (its
+    /// created entry row is in a format this build does not know, or the
+    /// journal contradicts it). A repair of the mob's store, or a release
+    /// that reads it, is needed before anything acts on the name.
+    Reserved,
+    /// Removed: the identity was removed, and its name is never an entry or
+    /// a member again.
+    Removed,
+}
+
+/// The member that holds a name in Core's mob ([`CoreIdentityEntry::member`]),
+/// as MobMachine records it. It never says whether the member is
+/// materialized in this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreMember {
+    /// The incarnation's generation.
+    pub generation: u64,
+    /// The session the member is bound to; `None` for a member bound to no
+    /// session.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+    /// The role the incarnation runs.
+    pub profile: meerkat_mob::ProfileName,
+    /// The runtime mode the incarnation runs in.
+    pub runtime_mode: meerkat_mob::MobRuntimeMode,
+    /// The member's retirement started and has not ended.
+    pub retiring: bool,
+    /// Set while Core holds the member Broken.
+    pub broken: Option<CoreBrokenMember>,
+}
+
+impl CoreMember {
+    /// The incarnation `generation` holds the name, bound to `session_id`
+    /// under `profile` in `runtime_mode`.
+    pub fn seated(
+        generation: u64,
+        session_id: Option<meerkat_core::types::SessionId>,
+        profile: meerkat_mob::ProfileName,
+        runtime_mode: meerkat_mob::MobRuntimeMode,
+    ) -> Self {
+        Self {
+            generation,
+            session_id,
+            profile,
+            runtime_mode,
+            retiring: false,
+            broken: None,
+        }
+    }
+
+    /// The member, with its retirement started.
+    #[must_use]
+    pub fn retiring(mut self) -> Self {
+        self.retiring = true;
+        self
+    }
+
+    /// The member, held Broken by Core.
+    #[must_use]
+    pub fn with_broken(mut self, broken: CoreBrokenMember) -> Self {
+        self.broken = Some(broken);
+        self
+    }
+}
+
+/// A member Core holds Broken ([`CoreMember::broken`]): its restore failed,
+/// or its host refused its restored registration. Core answers every later
+/// wake of it the same until a lifecycle step replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreBrokenMember {
+    /// Core's reason.
+    pub reason: String,
+    /// The stable refusal code, when the host refused the member.
+    pub code: Option<String>,
+    /// Core's durable resume hold, when the failed restore was a resume Core
+    /// held: the session is kept, and the hold names what clears it.
+    pub hold: Option<meerkat_core::service::DurableResumeHold>,
+    /// The session the failed restore named.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+}
+
+impl CoreBrokenMember {
+    /// Core holds the member Broken for `reason`.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            code: None,
+            hold: None,
+            session_id: None,
+        }
+    }
+
+    /// The fact, with the stable refusal code of the host's refusal.
+    #[must_use]
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// The fact, with Core's durable resume hold.
+    #[must_use]
+    pub fn with_hold(mut self, hold: meerkat_core::service::DurableResumeHold) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+
+    /// The fact, with the session the failed restore named.
+    #[must_use]
+    pub fn with_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+}
+
 /// A [`MemberLifecycleFact`] at its journal cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -4898,6 +5351,108 @@ fn member_standing_of(
         Some(other) => {
             return Err(BridgeError::Mob(format!(
                 "Core answered a member standing this build cannot read: {other:?}"
+            )));
+        }
+    })
+}
+
+/// For a name Core holds as an identity entry, or reserves unreadable, with
+/// a member, whether that member's runtime admits external work (Core's
+/// machine fact); `None` otherwise: a name that is no entry, or holds no
+/// member, takes the external door as external work, and Core answers it.
+fn entry_member_externally_addressable(read: &meerkat_mob::IdentityEntryRead) -> Option<bool> {
+    let standing = match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => &view.standing,
+        meerkat_mob::IdentityEntryRead::Unreadable {
+            member: Some(standing),
+            ..
+        } => standing,
+        _ => return None,
+    };
+    match standing {
+        meerkat_mob::EntryStanding::Seated(member)
+        | meerkat_mob::EntryStanding::Retiring(member) => Some(member.externally_addressable),
+        _ => None,
+    }
+}
+
+/// Meta's [`CoreIdentityEntry`] of Core's read of one identity
+/// (`MobHandle::identity_entry`). The resume hold of a member Core holds
+/// Broken is not part of Core's read; [`MobSessionBridge`] adds it from
+/// Core's own answer for the member. A read this build cannot read is
+/// answered as an error, never as one it can.
+fn core_identity_entry_of(
+    read: &meerkat_mob::IdentityEntryRead,
+) -> Result<CoreIdentityEntry, BridgeError> {
+    fn member_of(
+        standing: &meerkat_mob::EntryStanding,
+        broken: Option<&meerkat_mob::MemberBrokenFact>,
+    ) -> Result<Option<CoreMember>, BridgeError> {
+        let (seated, retiring) = match standing {
+            meerkat_mob::EntryStanding::Seated(member) => (member, false),
+            meerkat_mob::EntryStanding::Retiring(member) => (member, true),
+            meerkat_mob::EntryStanding::Unseated(_) => return Ok(None),
+            other => {
+                return Err(BridgeError::Mob(format!(
+                    "Core answered a member standing this build cannot read: {other:?}"
+                )));
+            }
+        };
+        let mut member = CoreMember::seated(
+            seated.generation.get(),
+            seated.session_id.clone(),
+            seated.profile.clone(),
+            seated.runtime_mode,
+        );
+        if retiring {
+            member = member.retiring();
+        }
+        if let Some(fact) = broken {
+            let mut broken = CoreBrokenMember::new(fact.reason.clone());
+            if let Some(code) = &fact.code {
+                broken = broken.with_code(code.clone());
+            }
+            member = member.with_broken(broken);
+        }
+        Ok(Some(member))
+    }
+
+    Ok(match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => {
+            let mut entry = CoreIdentityEntry::entry().with_origin(view.origin);
+            if let Some(member) = member_of(&view.standing, view.broken.as_ref())? {
+                entry = entry.with_member(member);
+            }
+            if let Some(cause) = view.host_preparation {
+                entry = entry.with_host_preparation(cause);
+            }
+            if let Some(session_id) = &view.archived_session {
+                entry = entry.with_archived_session(session_id.clone());
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::NotAnEntry { worker } => {
+            let mut entry = CoreIdentityEntry::not_an_entry();
+            if let Some(worker) = worker
+                && let Some(member) = member_of(&worker.standing, worker.broken.as_ref())?
+            {
+                entry = entry.with_member(member);
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::Unreadable { member } => {
+            let mut entry = CoreIdentityEntry::reserved();
+            if let Some(standing) = member
+                && let Some(member) = member_of(standing, None)?
+            {
+                entry = entry.with_member(member);
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::Removed => CoreIdentityEntry::removed(),
+        other => {
+            return Err(BridgeError::Mob(format!(
+                "Core answered an identity read this build cannot read: {other:?}"
             )));
         }
     })
@@ -5426,6 +5981,37 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// Core's read of `identity`'s name (`MobHandle::identity_entry`): how
+    /// Core holds it (an identity entry, no entry, a reserved name or a
+    /// removed identity's), the member that holds it with Core's Broken fact
+    /// and that fact's resume hold, the host preparation its entry owes, and
+    /// the session its last member's retirement archived. Read from the
+    /// machine state the mob's actor last published: no store read and no
+    /// actor command, and it never wakes a member. The resume hold of a
+    /// member Core holds Broken, and the session whose restore failed, come
+    /// from Core's restore diagnostic, which [`MobSessionBridge`] reads
+    /// through `MobHandle::member`, with no actor command either: until Core
+    /// records that diagnostic (in the same actor step as the Broken fact,
+    /// or, for a warm revival, once the revival's off-actor cleanup commits
+    /// back), the answer reads the member Broken without them. The identity
+    /// runtime builds every view of an identity's lifecycle from it
+    /// (`status`, `statuses`, `member_health`, the bootstrap status) and
+    /// chooses an identity's door by it.
+    ///
+    /// The default fails closed: a bridge that cannot read Core's entry
+    /// answers [`BridgeError::Unsupported`], and every view of an identity
+    /// over it refuses typed (history unavailable, retryable) instead of
+    /// reading a member live, or not Broken, on a read that could not tell. A
+    /// bridge that wraps another forwards it.
+    async fn identity_entry(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "identity_entry",
+        })
+    }
+
     /// Whether Core holds an identity intent row for `identity` (a host
     /// adopted it), and whether that row reads.
     async fn identity_management(
@@ -5470,16 +6056,6 @@ pub trait SessionBridge: Send + Sync {
         Err(BridgeError::Unsupported {
             operation: "identity_labelled_members",
         })
-    }
-
-    /// Core's members it holds Broken (it could not restore them, for
-    /// example because a restored member's comms identity is missing on this
-    /// host), each with Core's reason, read from Core's member list without
-    /// the mob actor. A bridge without the read reports none.
-    async fn broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        Ok(BTreeMap::new())
     }
 
     /// Whether Core holds a durable copy of `session_id`: Core's latest
@@ -9831,6 +10407,55 @@ impl SessionBridge for MobSessionBridge {
         }
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        let member_id = member_id_for_identity(identity);
+        let read = match self.handle.identity_entry(&member_id) {
+            Ok(read) => read,
+            // The handle's principal may not list the mob's members: this
+            // bridge cannot read Core's entry, now or later.
+            Err(meerkat_mob::MobError::ScopeDenied(denial)) => {
+                tracing::warn!(
+                    ?denial,
+                    "the session bridge's mob handle may not read Core's entry of an identity"
+                );
+                return Err(BridgeError::Unsupported {
+                    operation: "identity_entry",
+                });
+            }
+            Err(error) => {
+                return Err(BridgeError::Mob(format!(
+                    "reading Core's entry of {identity}: {error}"
+                )));
+            }
+        };
+        let mut entry = core_identity_entry_of(&read)?;
+        // A member Core holds Broken: Core's answer for the member names the
+        // failed restore's session and its durable resume hold, which the
+        // machine's read does not carry. `MobHandle::member` answers it from
+        // Core's restore diagnostic without the mob actor (its fallback,
+        // `get_member`, reads the published state too). Until Core records
+        // the diagnostic (in the same actor step as the Broken fact, or, for
+        // a warm revival, once the revival's off-actor cleanup commits back)
+        // `member` answers the member, and the read goes on without the hold
+        // or the session; carrying the hold in Core's entry read is a tracked
+        // follow-up.
+        if let Some(broken) = entry
+            .member
+            .as_mut()
+            .and_then(|member| member.broken.as_mut())
+            && let Err(meerkat_mob::MobError::MemberRestoreFailed {
+                session_id, hold, ..
+            }) = self.handle.member(&member_id).await
+        {
+            broken.hold = hold;
+            broken.session_id = session_id;
+        }
+        Ok(entry)
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,
@@ -9871,15 +10496,6 @@ impl SessionBridge for MobSessionBridge {
                 )
             })
             .map(|entry| entry.agent_identity)
-            .collect())
-    }
-
-    async fn broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        Ok(crate::mob_handle_runtime::broken_members_of(&self.handle)
-            .await
-            .into_iter()
             .collect())
     }
 
@@ -10446,6 +11062,29 @@ impl MobSessionBridge {
         if entry.bridge_session_id() != Some(session_id) {
             return Err(governed(GovernedInputError::BindingChanged));
         }
+        // External work never reaches an identity entry in Core: the entry's
+        // host, this identity runtime, delivers to it through its own door,
+        // as internal work. The external door keeps Core's addressability
+        // rule for the entry's member: a runtime that admits no external
+        // work is refused as Core refuses one, before anything is submitted.
+        let door = match door {
+            GovernedDoor::External => {
+                let read = self
+                    .handle
+                    .identity_entry(&mid)
+                    .map_err(|error| BridgeAdmissionError::Mob(error.to_string()))?;
+                match entry_member_externally_addressable(&read) {
+                    None => GovernedDoor::External,
+                    Some(true) => GovernedDoor::TrustedHostInternal,
+                    Some(false) => {
+                        return Err(governed(GovernedInputError::Mob(Box::new(
+                            meerkat_mob::MobError::NotExternallyAddressable(mid.clone()),
+                        ))));
+                    }
+                }
+            }
+            door => door,
+        };
         // Once submitted, native admission owns the custody's settlement, and
         // its answer is awaited to its definitive acknowledgement or error: no
         // observation deadline drops it, since native admission can still
@@ -10455,17 +11094,34 @@ impl MobSessionBridge {
         let Some(custody) = custody.submit() else {
             return Err(governed(GovernedInputError::AdmissionUnresolved {
                 detail: "the native admission custody was already handed off".to_string(),
+                receipt: None,
             }));
         };
+        // Submitted at the incarnation read above, its runtime id, fence and
+        // session: a member rotated since the reads (by a caller outside
+        // this runtime's verbs) is refused stale, never admitted to its
+        // successor, whose addressability nothing here read.
         let turn = match door {
             GovernedDoor::External => {
                 self.handle
-                    .start_governed_input_with_custody(&mid, input, custody)
+                    .start_governed_input_with_custody_at(
+                        &entry.agent_runtime_id,
+                        entry.fence_token,
+                        session_id,
+                        input,
+                        custody,
+                    )
                     .await
             }
             GovernedDoor::TrustedHostInternal => {
                 self.handle
-                    .start_internal_governed_input_with_custody(&mid, input, custody)
+                    .start_internal_governed_input_with_custody_at(
+                        &entry.agent_runtime_id,
+                        entry.fence_token,
+                        session_id,
+                        input,
+                        custody,
+                    )
                     .await
             }
         }
@@ -10993,6 +11649,13 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.member_standing(identity).await
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        self.bridge.identity_entry(identity).await
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,
@@ -11010,12 +11673,6 @@ impl SessionBridge for super::PublicSessionBridge {
         &self,
     ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
         self.bridge.identity_labelled_members().await
-    }
-
-    async fn broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        self.bridge.broken_members().await
     }
 
     async fn durable_session_held(

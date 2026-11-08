@@ -443,7 +443,10 @@ impl RetainedOverlays {
 /// the child's application context, labels and per-spawn tool overlay from the
 /// source. A value the child's own spawn request states explicitly is kept: the
 /// source supplies the default, the request is the override. For labels that
-/// holds per key.
+/// holds per key. The source's exemption from the definition's wiring rules is
+/// the one input a request cannot override: a fork of a member seated
+/// [`crate::DefinitionWiring::Exempt`] is seated exempt too, so no fork moves
+/// a member's conversation into the definition's shared topology.
 #[derive(Clone)]
 pub struct ForkBuildInheritance {
     source: ForkBuildSource,
@@ -459,6 +462,8 @@ pub struct ForkBuildInheritance {
     /// child resolves its own admission from it with MobMachine
     /// ([`MemberDispatchAdmissionLineage`]).
     dispatch_admission_lineage: MemberDispatchAdmissionLineage,
+    /// The source's seating under the definition's wiring rules.
+    definition_wiring: crate::DefinitionWiring,
 }
 
 impl ForkBuildInheritance {
@@ -469,6 +474,8 @@ impl ForkBuildInheritance {
     /// source's retained overlay, from `external_tools_origin`.
     /// `dispatch_admission_lineage` is what the source's mob observed of the
     /// source's tool dispatch admission lineage.
+    /// `definition_wiring` is the source's seating under the definition's
+    /// wiring rules.
     pub(crate) fn new(
         source: ForkBuildSource,
         app_context: Option<serde_json::Value>,
@@ -476,6 +483,7 @@ impl ForkBuildInheritance {
         external_tools: Option<Arc<dyn AgentToolDispatcher>>,
         external_tools_origin: RetainedOverlayOrigin,
         dispatch_admission_lineage: MemberDispatchAdmissionLineage,
+        definition_wiring: crate::DefinitionWiring,
     ) -> Self {
         labels.retain(|key, _| !crate::build::is_standard_mob_member_label(key));
         Self {
@@ -486,6 +494,7 @@ impl ForkBuildInheritance {
             external_tools,
             external_tools_origin,
             dispatch_admission_lineage,
+            definition_wiring,
         }
     }
 
@@ -543,12 +552,16 @@ impl ForkBuildInheritance {
             // The child's seat resolves its own admission from it with
             // MobMachine before this inheritance is applied.
             dispatch_admission_lineage: _,
+            definition_wiring,
         } = self;
         spec.fork_source = Some(source);
         spec.creation_origin = creation_source.map_or(
             crate::member_creation::MemberCreationOrigin::Unproven,
             crate::member_creation::MemberCreationOrigin::Source,
         );
+        if definition_wiring.is_exempt() {
+            spec.definition_wiring = crate::DefinitionWiring::Exempt;
+        }
         spec.fork_overlay = match (spec.external_tools.is_some(), external_tools_origin) {
             (true, _) => ForkOverlayOrigin::Caller,
             (false, RetainedOverlayOrigin::Inherited) => ForkOverlayOrigin::Source,
@@ -1742,6 +1755,7 @@ mod tests {
             tools,
             RetainedOverlayOrigin::Own,
             MemberDispatchAdmissionLineage::NoneRecorded,
+            crate::DefinitionWiring::Applies,
         )
     }
 
@@ -1915,6 +1929,7 @@ mod tests {
             None,
             RetainedOverlayOrigin::Own,
             MemberDispatchAdmissionLineage::NoneRecorded,
+            crate::DefinitionWiring::Applies,
         );
         let app_labels = BTreeMap::from([
             ("domain".to_string(), "calendar".to_string()),

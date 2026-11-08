@@ -711,11 +711,13 @@ impl AgentMemoryRuntimeInjector {
         self.distiller.is_some()
     }
 
-    /// The Distiller's harvest of a compaction `session_key` ended owing
+    /// The Distiller's harvest of the compactions `session_key` holds
     /// (`DistillerEngine::harvest_compaction_within_bound`), bounded like
     /// the pre-rotation distillation: of `discards`, the batch Core's cold
     /// settle answered, or, with none, of the session's compaction
-    /// discards read from its memory. `Ok` once the discards reached the
+    /// discards read from its memory. `follow_up` fires the compaction
+    /// follow-up, for a session that goes on; a retirement's harvest of a
+    /// session it ends passes `false`. `Ok` once the discards reached the
     /// distiller, or there was nothing to read; `Err` with why they did
     /// not (a timeout, a denial of the realm's budget, a failed read or
     /// extraction). Without a Distiller there is nothing to harvest.
@@ -724,12 +726,13 @@ impl AgentMemoryRuntimeInjector {
         identity: &AgentIdentity,
         session_key: &str,
         discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
+        follow_up: bool,
     ) -> Result<(), String> {
         let Some(distiller) = self.distiller.as_ref() else {
             return Ok(());
         };
         match distiller
-            .harvest_compaction_within_bound(identity.as_str(), session_key, discards)
+            .harvest_compaction_within_bound(identity.as_str(), session_key, discards, follow_up)
             .await
         {
             Ok(outcome) if outcome.compaction_harvest_satisfied() => Ok(()),
@@ -1582,15 +1585,36 @@ impl RecorderToolDispatcher {
         inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
         recorder: MemoryRecorder,
     ) -> Self {
+        Self::composed(inner, recorder, true)
+    }
+
+    /// The `memory` tool of `inner`, a build's tool overlay that already
+    /// carries one bound to another identity (a console side chat inherits
+    /// its source's overlay), bound to `recorder` instead: the inner `memory`
+    /// tool is replaced, and every other tool stays `inner`'s, in its order.
+    pub(crate) fn rebinding(
+        inner: Arc<dyn meerkat_core::agent::AgentToolDispatcher>,
+        recorder: MemoryRecorder,
+    ) -> Self {
+        Self::composed(Some(inner), recorder, false)
+    }
+
+    fn composed(
+        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+        recorder: MemoryRecorder,
+        warn_on_shadow: bool,
+    ) -> Self {
         let mut tools: Vec<Arc<meerkat_core::ToolDef>> = Vec::new();
         if let Some(inner) = inner.as_ref() {
             for tool in inner.tools().iter() {
                 if tool.name.as_ref() == MEMORY_TOOL_NAME {
-                    tracing::warn!(
-                        "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
-                         memory recorder; rename the external tool or disable \
-                         agent_memory.recorder_tool"
-                    );
+                    if warn_on_shadow {
+                        tracing::warn!(
+                            "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
+                             memory recorder; rename the external tool or disable \
+                             agent_memory.recorder_tool"
+                        );
+                    }
                     continue;
                 }
                 tools.push(tool.clone());

@@ -2617,9 +2617,12 @@ export function parseErrorEvent(raw: unknown): ErrorEvent {
       const runtimeId = String(context.agent_runtime_id ?? "");
       const effect = String(context.effect ?? "");
       const attempts = Number(context.attempts ?? 0);
+      // A compaction harvest's error says itself whether a fallback harvest
+      // follows; any other side effect is not run again.
+      const settled = effect === "compaction_harvest" ? "" : ", and is not run again";
       message =
         `the ${effect} of ${identity} (${runtimeId}) failed after ${attempts} ` +
-        `attempts, and is not run again: ${error}`;
+        `attempts${settled}: ${error}`;
       break;
     }
     case ErrorCategory.LIFECYCLE_PROJECTION_OFF:

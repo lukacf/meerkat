@@ -52,6 +52,24 @@ pub struct ConsoleSetupBinding {
     access_policy: Option<ConsoleAccessPolicy>,
     recovery_policy: Option<ConsoleRecoveryPolicy>,
 }
+/// Currentness of the selected native policy and exact mechanical login.
+/// This does not authenticate a person or select a consent audience. Observe
+/// through the actual host outside approval locks; final checks are passive.
+pub struct ObservedConsoleConsent {
+    login: ConsoleLoginHandle,
+    login_current: crate::private_host::ObservedConsoleLogin,
+    native: meerkat_authorization::publication::LocalPublicationStamp,
+}
+impl ObservedConsoleConsent {
+    pub fn check_current(&self) -> Result<(), meerkat_core::approval::consent::ConsentIneligible> {
+        use meerkat_core::approval::consent::ConsentIneligible;
+        self.login_current
+            .check_current(&self.login)
+            .map_err(|_| ConsentIneligible)?;
+        self.native.check_current().map_err(|_| ConsentIneligible)
+    }
+}
+
 /// A bounded current read with private canonical positions. Browser IDs may
 /// select this presentation but never construct a source or an access grant.
 pub struct ConsoleStatusPage {
@@ -123,6 +141,105 @@ impl ConsoleSetupBinding {
             access_policy: None,
             recovery_policy: None,
         }
+    }
+
+    /// Read the canonical durable identity for an exact Core approval scope.
+    /// This is historical attribution, not an Active-incarnation or hosting
+    /// claim. The selected factory forbids changing a resumed mob/member;
+    /// native consent transfer and entry remain responsible for current work.
+    pub async fn consent_session_owner(
+        &self,
+        scope: &meerkat_core::approval::ApprovalConsentScope,
+    ) -> Result<meerkat_mobkit::identity_first::AgentIdentity, HostLifetimeError> {
+        self.owner.validate_current_selection()?;
+        let machine = self
+            .source
+            .machine()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        if machine
+            .hosting_authority()
+            .capability()
+            .domain_ref()
+            .as_ref()
+            != Some(&scope.domain)
+        {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        let runtime = self
+            .source
+            .bound_identity_runtime()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        let identity = runtime
+            .core_session_owner(&scope.session_id)
+            .await
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .ok_or(HostLifetimeError::Denied)?;
+        self.owner.validate_current_selection()?;
+        Ok(identity)
+    }
+
+    /// Capture actual event resolution and application policy under this host's
+    /// joined native publication. The callback runs outside Core approval locks.
+    /// Access-controller, login and host changes share this same publication.
+    pub fn observe_consent_event<T>(
+        &self,
+        event: impl FnOnce() -> Result<(T, ConsoleViewerContext), HostLifetimeError>,
+    ) -> Result<(T, ObservedConsoleConsent), HostLifetimeError> {
+        let (observed, native) = self
+            .source
+            .authorization_publication()
+            .observe(|| -> Result<_, HostLifetimeError> {
+                let (value, viewer) = event()?;
+                let login = self.current_login(&viewer)?;
+                self.owner.validate_native_entry(None)?;
+                let login_current = self
+                    .logins
+                    .observe_login(&login)
+                    .map_err(|_| HostLifetimeError::Unavailable)?;
+                Ok((value, login, login_current))
+            })
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        let (value, login, login_current) = observed?;
+        Ok((
+            value,
+            ObservedConsoleConsent {
+                login,
+                login_current,
+                native,
+            },
+        ))
+    }
+
+    /// Changes to a selected Console route (policy, verifier/record or issuer
+    /// retirement) must publish before becoming visible. This is the actual
+    /// installed owner publication, not a route-local revision or timer.
+    pub fn change_consent_selection<T>(
+        &self,
+        change: impl FnOnce() -> Result<T, HostLifetimeError>,
+    ) -> Result<T, HostLifetimeError> {
+        let publication = self.source.authorization_publication();
+        let _change = publication
+            .begin_owner_change()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        change()
+    }
+
+    /// Retain selected-file custody only for the synchronous native decision.
+    /// The returned final proof never reenters this owner or its phase locks.
+    pub fn with_current_consent<T>(
+        &self,
+        decide: impl FnOnce() -> T,
+    ) -> Result<T, HostLifetimeError> {
+        self.owner.with_current_consent(decide)
+    }
+
+    /// Bind an explicitly selected issuer to this host, before event handling.
+    pub fn with_consent_host<T>(
+        &self,
+        bind: impl FnOnce(&NativeHostLifetime) -> Result<T, HostLifetimeError>,
+    ) -> Result<T, HostLifetimeError> {
+        self.owner.validate_current_selection()?;
+        bind(&self.owner)
     }
 
     /// A page position retains no authorization snapshot. Every refresh/next
@@ -394,6 +511,28 @@ impl ToolkitGatewayHost {
             recovery_policy: None,
         })
     }
+    /// Add a disjoint trusted route to the already-selected setup router.
+    /// Every callback receives the same actual post-installation resolver.
+    pub fn augment_console_routes(
+        mut self,
+        routes: ConsoleRouteComposition,
+    ) -> Result<Self, HostLifetimeError> {
+        if self.machine.get().is_some()
+            || self.setup_application.is_none()
+            || self.private_closed.is_closed()
+        {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
+        self.owner.validate_current_selection()?;
+        self.console_routes = Some(match self.console_routes.take() {
+            Some(prior) => {
+                Arc::new(move |viewer| Ok(prior(viewer.clone())?.merge(routes(viewer)?)))
+            }
+            None => routes,
+        });
+        Ok(self)
+    }
+
     pub fn with_console_routes(
         mut self,
         routes: ConsoleRouteComposition,

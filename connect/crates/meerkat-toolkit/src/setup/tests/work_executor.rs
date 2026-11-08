@@ -93,11 +93,16 @@ impl SetupWorkObservationAuthorizer for Policy {
         Ok(())
     }
 }
+// Each step makes real WorkGraph SQLite owner calls on a blocking thread. A
+// loaded runner can stall one of them past 100 ms; the step then answers a
+// truthful Timeout, which these tests would read as a failure, so the ordinary
+// bound leaves room. The deliberate timeout test sets its own bound.
+// validate_options needs lease_ms >= 2 * owner_timeout_ms + settlement_budget_ms.
 fn options(worker: &str) -> WorkAdmissionStepOptions {
     WorkAdmissionStepOptions {
         worker: id(worker),
-        lease_ms: 2000,
-        owner_timeout_ms: 100,
+        lease_ms: 4000,
+        owner_timeout_ms: 1000,
         settlement_budget_ms: 1000,
     }
 }

@@ -52,6 +52,24 @@ All notable changes to the Python SDK are documented here.
   `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
   `"decide_inside_tool_callback"`) and sends nothing.
 
+- `MetaRuntime.set_instruction(namespace, key, revision, body, target, *,
+  content_sha256=None)`, `MetaRuntime.revoke_instruction(namespace, key,
+  revision)` and `MetaRuntime.instruction_status(*, namespace, key,
+  identity, profile, offset, limit)` call `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status`: operator
+  instructions for the members of the gateway's mob, by slot and revision,
+  for every member (`{"kind": "mob"}`), one profile (`{"kind": "profile",
+  "profile": ...}`) or one identity (`{"kind": "member", "identity": ...}`).
+  The results are the gateway's, unchanged; a refusal raises `RpcError`
+  with `data["instruction_set_code"]`.
+- `MetaRuntime.activate_member_instruction` is deprecated in favour of
+  `set_instruction` in the docs; it keeps working.
+
+- `ErrorEvent.from_dict`: the message of a `lifecycle_effect_failed` event
+  of the `compaction_harvest` effect (the harvest of the compactions a
+  retired session holds failed) does not say the effect is not run again:
+  its error says whether a fallback harvest follows.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

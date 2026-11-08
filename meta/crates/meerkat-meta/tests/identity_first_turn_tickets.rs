@@ -339,6 +339,16 @@ impl SessionBridge for TicketBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,

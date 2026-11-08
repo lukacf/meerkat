@@ -5,6 +5,7 @@ import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import { GatewayStartupCleanupError, MetaBuilder, PersistentTransport } from "@rkat/meta-sdk";
+import type { MemberMcpApplication } from "./member-classes.js";
 import type { GatewayTransportFactory, MetaRuntime } from "@rkat/meta-sdk";
 import { copyApplicationPreparation, copyApplicationUpdateStartup, copyHostBootstrapSelection, HostControlError,
   HostTransportError, PrivateHostClient } from "./private-host.js";
@@ -14,6 +15,14 @@ import type { ApplicationPreparation, ApplicationPreparationAttempt, Application
 const MAX_SELECTION = 16 * 1024 * 1024;
 const MAX_PLAN = 256 * 1024;
 type PrivateSelection = void | ApplicationPreparationAttempt;
+
+/** Shape only: native Core owns URL/origin validation. Never model/RPC config. */
+function hostedRedirectBase(value: string | undefined): string | undefined {
+  if (value !== undefined && (typeof value !== "string" || !value.trim() || /\p{Cc}/u.test(value))) {
+    throw new HostControlError("hosted MCP redirect base must be a nonempty string without controls");
+  }
+  return value;
+}
 
 function requireNativeHooks(builder: MetaBuilder): void {
   if (process.platform === "win32") throw new HostControlError("Toolkit native host requires POSIX");
@@ -36,17 +45,21 @@ class ToolkitPersistentTransport extends PersistentTransport {
   #initSent = false;
   readonly #checkInit: ((request: Record<string, unknown>) => void) | undefined;
   readonly #privateTimeoutMs: number | undefined;
+  readonly #memberMcp: MemberMcpApplication | undefined;
   readonly #release: (transport: ToolkitPersistentTransport) => void;
 
   constructor(gatewayBin: string, timeoutMs: number | undefined,
     select: (client: PrivateHostClient) => Promise<PrivateSelection>,
     release: (transport: ToolkitPersistentTransport) => void,
-    checkInit?: (request: Record<string, unknown>) => void) {
+    checkInit?: (request: Record<string, unknown>) => void, memberMcp?: MemberMcpApplication, privateWorkflowLaunch = false, hostedMcpRedirectBase?: string) {
     super(gatewayBin, { ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
-      extraArgs: ["--host-control-read-fd", "3", "--host-control-write-fd", "4"],
+      extraArgs: ["--host-control-read-fd", "3", "--host-control-write-fd", "4",
+        ...(privateWorkflowLaunch ? ["--private-workflow-launch"] : []),
+        ...(hostedMcpRedirectBase === undefined ? [] : ["--hosted-mcp-redirect-base", hostedMcpRedirectBase])],
       extraStdio: ["pipe", "pipe"] });
     this.#select = select; this.#privateTimeoutMs = timeoutMs;
     this.#release = release;
+    this.#memberMcp = memberMcp;
     this.#checkInit = checkInit;
   }
 
@@ -68,7 +81,8 @@ class ToolkitPersistentTransport extends PersistentTransport {
         throw new HostControlError("native host private endpoints are unavailable");
       }
       const client = new PrivateHostClient(commands, responses,
-        this.#privateTimeoutMs === undefined ? {} : { timeoutMs: this.#privateTimeoutMs });
+        { ...(this.#privateTimeoutMs === undefined ? {} : { timeoutMs: this.#privateTimeoutMs }),
+          ...(this.#memberMcp === undefined ? {} : { memberMcp: this.#memberMcp }) });
       this.#client = client;
       const selected = await this.#select(client);
       if (selected) {
@@ -83,7 +97,7 @@ class ToolkitPersistentTransport extends PersistentTransport {
       try {
         if (this.#client !== null) await this.#client.close();
         else { commands?.destroy(); responses?.destroy(); }
-      } catch { /* Preserve the original startup failure; native still joins stop. */ }
+      } catch { /* Same client retains cleanup failure; native stop joins it below. */ }
       throw error;
     }
   }
@@ -153,9 +167,14 @@ class SelectedHostBinding {
   #current: ToolkitPersistentTransport | null = null;
   readonly #select: (client: PrivateHostClient) => Promise<PrivateSelection>;
   readonly #replacement: boolean;
+  readonly #memberMcp: MemberMcpApplication | undefined;
+  readonly #privateWorkflowLaunch: boolean;
+  readonly #hostedMcpRedirectBase: string | undefined;
 
-  constructor(select: (client: PrivateHostClient) => Promise<PrivateSelection>, replacement: boolean) {
-    this.#select = select; this.#replacement = replacement;
+  constructor(select: (client: PrivateHostClient) => Promise<PrivateSelection>, replacement: boolean, memberMcp?: MemberMcpApplication, privateWorkflowLaunch = false, hostedMcpRedirectBase?: string) {
+    this.#select = select; this.#replacement = replacement; this.#memberMcp = memberMcp;
+    this.#privateWorkflowLaunch = privateWorkflowLaunch;
+    this.#hostedMcpRedirectBase = hostedRedirectBase(hostedMcpRedirectBase);
   }
 
   protected configureBuilder<T extends MetaBuilder>(builder: T, project?: () => void,
@@ -171,7 +190,7 @@ class SelectedHostBinding {
       // failed start or second runtime cannot replay an admitted replacement.
       this.#attempted = true;
       const transport = new ToolkitPersistentTransport(gatewayBin, timeoutMs, this.#select,
-        stopped => { if (this.#current === stopped) this.#current = null; }, checkInit);
+        stopped => { if (this.#current === stopped) this.#current = null; }, checkInit, this.#memberMcp, this.#privateWorkflowLaunch, this.#hostedMcpRedirectBase);
       this.#current = transport;
       return transport;
     };
@@ -190,9 +209,10 @@ class SelectedHostBinding {
 
 /** Select ordinary original-owner Restore on a native Meta builder. */
 export class ToolkitHost extends SelectedHostBinding {
-  constructor(selection: HostBootstrapSelection) {
+  constructor(selection: HostBootstrapSelection, options: { memberMcp?: MemberMcpApplication; hostedMcpRedirectBase?: string } = {}) {
+    const redirectBase = hostedRedirectBase(options.hostedMcpRedirectBase);
     const selected = copyHostBootstrapSelection(selection);
-    super(client => client.bootstrap(selected), false);
+    super(client => client.bootstrap(selected), false, options.memberMcp, false, redirectBase);
   }
 
   /** Configure a dedicated builder before build(); Meta owns connect/shutdown. */
@@ -207,7 +227,8 @@ export class ToolkitApplicationUpdate extends SelectedHostBinding {
   readonly #bytes: Uint8Array;
   readonly #digest: string;
 
-  constructor(startup: ApplicationUpdateStartup) {
+  constructor(startup: ApplicationUpdateStartup, options: { memberMcp?: MemberMcpApplication; hostedMcpRedirectBase?: string } = {}) {
+    const redirectBase = hostedRedirectBase(options.hostedMcpRedirectBase);
     const selected = copyApplicationUpdateStartup(startup);
     if (process.platform === "win32") throw new HostControlError("Toolkit native host requires POSIX");
     const descriptor = openSync(selected.selection.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -226,7 +247,7 @@ export class ToolkitApplicationUpdate extends SelectedHostBinding {
         throw new HostControlError("application update selection changed or exceeds its limit");
       }
     } finally { closeSync(descriptor); }
-    super(client => client.replaceApplication(selected), true);
+    super(client => client.replaceApplication(selected), true, options.memberMcp, false, redirectBase);
     this.#bytes = bytes; this.#digest = selected.selection.sha256;
   }
 
@@ -276,6 +297,8 @@ function closePreparation(state: PreparationState): void {
  * child. The application's real finalizer owns validation and publication.
  * Use build(), which joins the ordinary native build and that finalizer;
  * ordinary Restore and replacement keep their existing configure() APIs.
+ * Explicit privateWorkflowLaunch selects the fresh host's workflow-child path,
+ * but does not commission G or supply real parent/planning authority.
  */
 export class ToolkitApplicationPreparation extends SelectedHostBinding {
   readonly #plan: ApplicationPreparation;
@@ -286,7 +309,11 @@ export class ToolkitApplicationPreparation extends SelectedHostBinding {
 
   constructor(preparation: ApplicationPreparation,
     finalize: (manifest: SelectedHostArtifact) => Promise<HostBootstrapSelection>,
-    options: { timeoutMs?: number } = {}) {
+    options: { timeoutMs?: number; memberMcp?: MemberMcpApplication; privateWorkflowLaunch?: boolean; hostedMcpRedirectBase?: string } = {}) {
+    const redirectBase = hostedRedirectBase(options.hostedMcpRedirectBase);
+    if (options.privateWorkflowLaunch !== undefined && typeof options.privateWorkflowLaunch !== "boolean") {
+      throw new HostControlError("private workflow launch must be an explicit boolean");
+    }
     const selected = copyApplicationPreparation(preparation);
     if (typeof finalize !== "function") throw new HostControlError("application finalizer is required");
     if (process.platform === "win32") throw new HostControlError("Toolkit native host requires POSIX");
@@ -329,7 +356,7 @@ export class ToolkitApplicationPreparation extends SelectedHostBinding {
         state.finish(result);
       });
       return attempt;
-    }, true);
+    }, true, options.memberMcp, options.privateWorkflowLaunch ?? false, redirectBase);
     this.#plan = selected; this.#bytes = bytes; this.#state = state;
   }
 

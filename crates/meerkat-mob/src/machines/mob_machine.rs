@@ -1137,6 +1137,10 @@ pub enum SubmitWorkRejectReasonKind {
     /// A scope-bound submit named a member session that is no longer the
     /// member's current session binding.
     StaleSessionBinding,
+    /// External work addressed to an identity entry, or to a name reserved
+    /// unreadable: only the entry's host delivers to it, through its own
+    /// door, as internal work.
+    IdentityMember,
 }
 
 /// Typed public rejection class for [`MobMachineInput::CancelAllWork`].

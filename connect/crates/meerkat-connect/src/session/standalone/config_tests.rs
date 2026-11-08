@@ -296,6 +296,15 @@ async fn partial_config_publication_scenario() {
 
 #[tokio::test]
 async fn ordinary_continuation_reopens_exact_history_and_current_config_without_reissuing() {
+    continuation_store_scenario(false).await;
+}
+
+#[tokio::test]
+async fn continuation_reopens_the_trusted_native_provider_store() {
+    continuation_store_scenario(true).await;
+}
+
+async fn continuation_store_scenario(selected_store: bool) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         use meerkat::governed_realm::stock::{StockPrincipals, govern_stock_realm};
         let directory = tempfile::tempdir().unwrap();
@@ -325,12 +334,24 @@ async fn ordinary_continuation_reopens_exact_history_and_current_config_without_
         // The store's own writes publish generations; a reopen publishes none.
         let state_path = config_path.with_file_name("config_state.json");
         let published = || std::fs::read(&state_path).ok();
-        let continuation = StandaloneContinuation { storage:storage.clone(), session_id:history.id().clone(), server:server.clone() };
+        let provider_store_root=selected_store.then(||directory.path().join("provider-credentials"));
+        let key=meerkat_core::auth::token_store::TokenKey::from_auth_binding(&meerkat_core::AuthBindingRef {
+            realm:storage.locator.realm.clone(),binding:meerkat_core::BindingId::parse("fixture").unwrap(),
+            profile:None,origin:meerkat_core::BindingOrigin::Configured });
+        if let Some(root)=&provider_store_root {
+            let persistence=meerkat_auth_core::auth_store::TokenStoreBackend::File { root:root.clone() }.open_with_refresh_authority().unwrap();
+            persistence.token_store().save(&key,&meerkat_core::auth::token_store::PersistedTokens::api_key("fixture-store-marker")).await.unwrap();
+        }
+        let continuation = StandaloneContinuation { provider_store_root:provider_store_root.clone(), storage:storage.clone(), session_id:history.id().clone(), server:server.clone() };
         let owner_before = std::fs::read(&owner_path).unwrap();
         let config_before = std::fs::read(&config_path).unwrap();
         let generation = published();
         let resumed = continuation.reopen().await.unwrap();
         assert_eq!(published(), generation, "read-only reopen never publishes a configuration generation");
+        assert_eq!(resumed.startup.provider_store_root,provider_store_root);
+        if selected_store {
+            assert!(resumed.startup.factory.resolution_provider_auth_persistence().unwrap().unwrap().token_store().load(&key).await.unwrap().is_some());
+        }
         assert_eq!(resumed.session.id(), history.id());
         assert_eq!(resumed.session.messages(), history.messages());
         assert_eq!(resumed.server, server);
@@ -367,11 +388,72 @@ async fn ordinary_continuation_reopens_exact_history_and_current_config_without_
             assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
         }
         file.patch(ConfigDelta(serde_json::json!({"tools":{"mcp_servers":[server.clone(),unrelated]}}))).await.unwrap();
-        let absent = StandaloneContinuation { storage:storage.clone(), session_id:SessionId::new(), server };
+        let absent = StandaloneContinuation { provider_store_root:None, storage:storage.clone(), session_id:SessionId::new(), server };
         let generation = published();
         let error = absent.reopen().await.err().expect("missing history is not a new setup session");
         assert!(error.to_string().contains("committed setup conversation is unavailable"));
         assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
         assert_eq!(published(), generation, "read-only reopen never publishes a configuration generation");
     }).await.expect("ordinary reopen custody controls must settle");
+}
+
+#[tokio::test]
+async fn trusted_provider_store_reaches_actual_prepared_stage_and_continuation() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = crate::RealmOptions {
+        context_root: directory.path().to_owned(),
+        state_root: Some(directory.path().join("state")),
+        user_config_root: Some(directory.path().join("home")),
+    }
+    .resolve("provider-stage")
+    .unwrap();
+    let artifacts = directory.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    let raw=br#"{"mcpServers":{"toolkit-setup":{"command":"/usr/bin/env","args":["-i","/bin/true","reviewed-helper"]}}}"#;
+    let prepared = crate::resources::PreparedResources {
+        connection: crate::setup::PreparedSetupConnection::from_preparer_output(raw).unwrap(),
+        artifact_directory: artifacts.clone(),
+    };
+    let session = Session::new();
+    let (approvals, mut presenter) = LocalApprovals::create_paired_host(&artifacts).unwrap();
+    approvals.bind_session(session.id()).unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut input = TerminalInput::scripted(rx);
+    let mut output = ApproveRenderedReview {
+        bytes: Vec::new(),
+        input: tx,
+        decisions: 0,
+    };
+    let interrupt = std::future::pending::<io::Result<()>>();
+    tokio::pin!(interrupt);
+    let selected = directory.path().join("explicit-provider-store");
+    let mut startup = SessionStartup::prepare_standalone_with_provider_store(
+        storage,
+        session,
+        prepared,
+        selected.clone(),
+        &approvals,
+        &mut presenter,
+        &mut input,
+        &mut output,
+        interrupt.as_mut(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let observed = std::panic::AssertUnwindSafe(async {
+        assert!(startup.standalone.is_some());
+        assert_eq!(startup.provider_store_root, Some(selected.clone()));
+        let continuation = startup.standalone_continuation().unwrap();
+        assert_eq!(continuation.provider_store_root, Some(selected));
+        assert_eq!(output.decisions, 1);
+    })
+    .catch_unwind()
+    .await;
+    approvals.retire();
+    let closed = startup.abort_standalone(&mut output).await;
+    if let Err(panic) = observed {
+        std::panic::resume_unwind(panic);
+    }
+    closed.unwrap();
 }

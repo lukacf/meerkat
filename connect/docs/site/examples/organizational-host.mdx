@@ -30,4 +30,4 @@ Use `ToolkitStore` for setup records, events and effects. The SQLite backend sup
 
 A notification subscription binds content class, recipient audience, destination, trigger and lifetime. The outbound owner rechecks current audience before each permitted attempt. Pause or unsubscribe handles already queued output according to the binding's policy.
 
-Shared multi-caller setup is planned for 0.9.5. It will serve several waiting tasks while preserving their separate authority, conversation and result destinations. Ordinary 0.9.4 setup keeps each caller and continuation separate.
+Shared setup work can serve several waiting tasks, but it cannot merge their authority, conversation or result destinations. Each waiter receives only its own allowed continuation and observations.

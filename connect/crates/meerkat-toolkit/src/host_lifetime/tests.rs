@@ -95,6 +95,9 @@ impl Fixture {
         policy.native_host = Some(policy::CompiledNativeHost {
             setup: None,
             service_parent_administration: None,
+            authentication_domain: None,
+            event_domain: None,
+            member_classes: vec![],
             remote_operator: None,
             realm: row.realm.clone(),
             grant_administrator: principal(PrincipalKind::ServiceAccount, "grant-owner"),
@@ -531,6 +534,108 @@ fn selected_member_destination_refuses_other_member_realm_or_duplicate_members()
     assert!(destination.get("context").is_none());
     assert!(destination.get("logical_runtime").is_none());
     assert!(compiled["channels"][0].get("destination").is_none());
+}
+
+#[test]
+fn installed_console_domains_preserve_legacy_and_bind_only_console_routes() {
+    let f = Fixture::new();
+    let legacy = f.owner.selected_policy();
+    let bytes = canonical_json(legacy).unwrap();
+    let decoded: policy::CompiledLocalPolicy = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(canonical_json(&decoded).unwrap(), bytes);
+    let old = serde_json::to_value(decoded.native_host.as_ref().unwrap().preparation()).unwrap();
+    assert!(old.get("authentication_domain").is_none() && old.get("event_domain").is_none());
+    let mut selected = decoded.clone();
+    let native = selected.native_host.as_mut().unwrap();
+    let authentication = ResourceDomain {
+        authority: native.ingress_domain.authority.clone(),
+        namespace: "application-login".into(),
+    };
+    let event = ResourceDomain {
+        authority: native.ingress_domain.authority.clone(),
+        namespace: "application-events".into(),
+    };
+    native.authentication_domain = Some(authentication.clone());
+    native.event_domain = Some(event.clone());
+    assert!(native.routes.is_empty());
+    selected.validate().unwrap();
+    let prepared = policy::PreparedLocalPolicy {
+        deployment: selected.deployment.clone(),
+        components: selected.components.clone(),
+        channels: selected.channels.clone(),
+        native_host: selected.native_host.as_ref().unwrap().preparation(),
+    };
+    prepared.validate().unwrap();
+    assert!(prepared.matches(&selected));
+    let encoded = canonical_json(&prepared).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<policy::PreparedLocalPolicy>(&encoded).unwrap(),
+        prepared
+    );
+    for field in ["authentication_domain", "event_domain"] {
+        for wrong in [
+            serde_json::Value::Null,
+            serde_json::json!({"authority": authentication.authority, "namespace": ""}),
+            serde_json::json!({"authority": principal(PrincipalKind::ServiceAccount, "foreign"), "namespace": "selected"}),
+        ] {
+            let mut value = serde_json::to_value(&selected).unwrap();
+            value["native_host"][field] = wrong;
+            let invalid: policy::CompiledLocalPolicy = serde_json::from_value(value).unwrap();
+            assert_eq!(invalid.validate(), Err(HostLifetimeError::InvalidSelection));
+            assert!(!prepared.matches(&invalid));
+        }
+    }
+    let member = selected.native_host.as_ref().unwrap().members[0]
+        .member
+        .clone();
+    let channel = &selected.channels[0];
+    let route = policy::CompiledNativeSourceRoute {
+        id: Id::new("console-original").unwrap(),
+        origin: policy::CompiledNativeSourceOrigin::LocalConsole {
+            member,
+            requester: channel.requester.clone(),
+            ingress_actor: channel.ingress_actor.clone(),
+        },
+        application_parent: None,
+        controller_parent: None,
+        logical_executor: selected.native_host.as_ref().unwrap().members[0]
+            .logical_owner
+            .clone(),
+        represented_subject: None,
+        source_authority: channel.ingress_actor.clone(),
+        authentication_domain: authentication,
+        event_domain: event,
+    };
+    selected
+        .native_host
+        .as_mut()
+        .unwrap()
+        .routes
+        .push(route.clone());
+    selected.validate().unwrap();
+    for field in ["authentication_domain", "event_domain"] {
+        let mut value = serde_json::to_value(&selected).unwrap();
+        value["native_host"]["routes"][0][field]["namespace"] = "foreign".into();
+        let invalid: policy::CompiledLocalPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(invalid.validate(), Err(HostLifetimeError::InvalidSelection));
+    }
+    // Provider-event domains remain selected by their own source, not Console.
+    let mut provider = route;
+    provider.origin = policy::CompiledNativeSourceOrigin::ProviderEvent {
+        channel_id: channel.channel_id.clone(),
+        sender_id: channel.sender_id.clone(),
+        target_identity: channel.target_identity.clone(),
+    };
+    provider.authentication_domain = ResourceDomain {
+        authority: channel.ingress_actor.clone(),
+        namespace: "provider-login".into(),
+    };
+    provider.event_domain = ResourceDomain {
+        authority: channel.ingress_actor.clone(),
+        namespace: "provider-events".into(),
+    };
+    selected.native_host.as_mut().unwrap().routes = vec![provider];
+    selected.validate().unwrap();
 }
 
 #[test]

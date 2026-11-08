@@ -1809,12 +1809,15 @@ async fn a_governed_console_send_reaches_only_the_hosts_binder_for_the_verified_
 
     #[async_trait::async_trait]
     impl GovernedInputBinder for Unreached {
-        async fn bind(
+        async fn try_bind(
             &self,
             _context: &GovernedBindContext,
             _input: meerkat_runtime::Input,
-        ) -> Result<BoundGovernedInput, String> {
-            Err("this member has no governed admission to bind for".to_string())
+        ) -> Result<BoundGovernedInput, GovernedBindError> {
+            Err(
+                GovernedBindRefusal::denied("this member has no governed admission to bind for")
+                    .into(),
+            )
         }
 
         fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}
@@ -1992,12 +1995,12 @@ struct PinnedBinder;
 
 #[async_trait::async_trait]
 impl GovernedInputBinder for PinnedBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         _context: &GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<BoundGovernedInput, String> {
-        Err("this fixture member has no governed admission".to_string())
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        Err(GovernedBindRefusal::denied("this fixture member has no governed admission").into())
     }
 
     fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}

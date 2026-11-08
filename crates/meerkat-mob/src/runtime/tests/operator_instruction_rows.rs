@@ -383,12 +383,19 @@ struct CrashedInstructionMob {
 impl CrashedInstructionMob {
     /// Resume the mob over the restarted service: every member is dormant.
     async fn resume(&self) -> MobHandle {
+        self.resume_as(crate::MobCompositionAuthority::Authoritative)
+            .await
+    }
+
+    /// [`Self::resume`] with `authority` speaking for the mob's composition.
+    async fn resume_as(&self, authority: crate::MobCompositionAuthority) -> MobHandle {
         let mut builder = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
             self.events.clone(),
             self.runtime_metadata.clone(),
         ))
         .with_session_service(self.service.clone())
-        .notify_orchestrator_on_resume(false);
+        .notify_orchestrator_on_resume(false)
+        .with_composition_authority(authority);
         if let Some(concurrency) = self.concurrency {
             builder = builder.with_member_instruction_delivery_concurrency(concurrency);
         }
@@ -736,6 +743,96 @@ async fn restart_replay_restores_desired_and_owed() {
             "{identity} is written once"
         );
     }
+}
+
+/// How many delivery waves the mob's journal records.
+async fn recorded_target_events(events: &Arc<dyn MobEventStore>) -> usize {
+    events
+        .replay_all()
+        .await
+        .expect("replay the mob journal")
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                crate::event::MobEventKind::MemberInstructionTargetsRecorded(_)
+            )
+        })
+        .count()
+}
+
+/// A non-authoritative launch over the mob's store (a host's candidate
+/// launch, which may not act on the store) delivers no operator instruction:
+/// a member owed a snapshot when it starts stays owed, its session records
+/// nothing and the journal gains no delivery wave. The next authoritative
+/// launch over the store delivers it, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_authoritative_launch_delivers_nothing_and_owed_members_stay_owed() {
+    let mob = InstructionMob::new("oi-candidate", &[("oi-candidate-w1", "worker")]).await;
+    let _held = mob.service.hold_instruction_records();
+    let written = mob
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    let crashed = mob.crash().await;
+    let (identity, session) = crashed.members[0].clone();
+    let waves_before = recorded_target_events(&crashed.events).await;
+
+    let candidate = crashed
+        .resume_as(crate::MobCompositionAuthority::NonAuthoritative)
+        .await;
+    // An authoritative launch's delivery owner scans 20 ms after it starts
+    // and records an owed dormant member at once.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let status = member_status(&candidate, &identity)
+        .await
+        .expect("the status page lists the member");
+    assert!(
+        matches!(
+            status.delivery.state,
+            MemberInstructionDeliveryState::Owed { generation, .. }
+                if generation == written.generation
+        ),
+        "the member stays owed on the non-authoritative launch: {status:?}"
+    );
+    assert_eq!(
+        writes_to(&crashed.service, &session),
+        0,
+        "the non-authoritative launch wrote no member session"
+    );
+    assert_eq!(
+        recorded_target_events(&crashed.events).await,
+        waves_before,
+        "the non-authoritative launch journaled no delivery wave"
+    );
+    assert_eq!(
+        candidate.operator_instruction_owed_members(),
+        1,
+        "the launch counts the member it leaves owed"
+    );
+    crash_stop_and_release_routes(candidate).await;
+
+    let authoritative = CrashedInstructionMob {
+        service: Arc::new(
+            crashed
+                .service
+                .cold_restart_preserving_durable_state()
+                .await,
+        ),
+        events: crashed.events.clone(),
+        runtime_metadata: crashed.runtime_metadata.clone(),
+        members: crashed.members.clone(),
+        concurrency: crashed.concurrency,
+    };
+    let _ = authoritative.service.enable_runtime_adapter();
+    let handle = authoritative.resume().await;
+    current(&handle, &identity).await;
+    assert_eq!(
+        writes_to(&authoritative.service, &session),
+        1,
+        "the authoritative launch records the member once"
+    );
 }
 
 /// A reset clears the records and moves the generation past the one the mob
@@ -1675,4 +1772,72 @@ async fn a_dormant_resume_seat_binds_the_hosts_session_at_the_seat() {
         builds,
         "nothing built the member's session"
     );
+}
+
+/// On a governed runtime (a native work authorization host is installed) a
+/// mob's operator-instruction write needs prepared authorization, which this
+/// release does not mint: the write and the revoke are refused typed, a
+/// retry is refused the same way, and nothing is journaled, so no member is
+/// ever owed a snapshot nothing authorized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn governed_realm_mob_write_requires_prepared_authorization() {
+    let service = Arc::new(MockSessionService::new());
+    service.set_runtime_adapter(Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_with_unavailable_scoped_governance(
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            None,
+        )
+        .expect("a governed machine"),
+    ));
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "oi-governed"),
+        storage,
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create the mob");
+
+    for attempt in 0..2 {
+        let refused = handle
+            .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+            .await
+            .expect_err("a governed runtime refuses an unauthorized write");
+        assert!(
+            matches!(
+                refused,
+                OperatorInstructionError::Refused(
+                    meerkat_core::InstructionWriteError::PreparedAuthorizationRequired
+                )
+            ),
+            "attempt {attempt}: {refused:?}"
+        );
+        assert_eq!(
+            refused.code(),
+            Some(InstructionSetErrorCode::PreparedAuthorizationRequired)
+        );
+    }
+    let revoke = handle
+        .revoke_operator_instruction(slot("tone"), revision(2))
+        .await
+        .expect_err("a governed runtime refuses an unauthorized revoke");
+    assert_eq!(
+        revoke.code(),
+        Some(InstructionSetErrorCode::PreparedAuthorizationRequired)
+    );
+    assert_eq!(
+        status(&handle).await.generation,
+        0,
+        "no refused write moved the generation"
+    );
+    let journaled = events
+        .replay_all()
+        .await
+        .expect("the mob's journal reads")
+        .iter()
+        .filter(|event| event.kind.journals_operator_instructions())
+        .count();
+    assert_eq!(journaled, 0, "nothing was journaled");
 }

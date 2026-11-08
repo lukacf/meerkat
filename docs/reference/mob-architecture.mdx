@@ -181,6 +181,54 @@ name.
   agent calls: the agent mob tools of `meerkat-mob-mcp` (`mob_retire_member`,
   `mob_wire`, `mob_unwire` and the others) use it. The host acts on its own
   entries.
+- External work does not reach an entry, nor a member whose name is reserved
+  unreadable: a member send from outside the mob (`MemberHandle::send`, a
+  submit of `WorkOrigin::External`) addressed to one is refused
+  `MobError::IdentityMember` before anything is submitted, whatever its
+  profile's `external_addressable` says (0.9.11). The host delivers to its
+  entries through its own door, as internal work (`submit_work_with_mode`
+  with `WorkOrigin::Internal`), which MobMachine admits as for any member.
+- Core's mob doors on the wire (the `mob/*` methods of rkat-rpc, the public
+  MCP mob tools, the web runtime's mob exports) keep the same split
+  (0.9.11):
+  - An external-work door refuses an entry, and a member whose name is
+    reserved unreadable, `identity_member` for every caller, the owner
+    included: `mob/member_send` with or without `idempotency_key`,
+    `mob/ingress_interaction`, `mob/submit_work` with the default `external`
+    origin, `meerkat_mob_member_send` and the web runtime's `mob_member_send`.
+    A keyed send (`MobMcpState::mob_member_send_keyed`) answers exactly as
+    the unkeyed send: before its first commit it asks MobMachine the same
+    external admission (`MobHandle::admit_external_work`), and a refusal
+    (`identity_member`, `NotExternallyAddressable` for a member whose
+    runtime admits no external work) commits nothing. Its delivery asks
+    again: a keyed send committed before its member became an entry, or
+    before its name became reserved unreadable, settles `refused` (reason
+    `authority_denied`), final, and nothing is admitted. MobMachine records
+    a runtime's external addressability when it seats that runtime, so a
+    member stops admitting external work only as a new incarnation (a
+    respawn or a rotation, onto a profile that admits none included); a
+    keyed send committed to the earlier incarnation settles `stranded`,
+    final, as for any replaced incarnation.
+  - A host door acts on a member's session as its host: `mob/turn_start`,
+    `mob/append_system_context` (`meerkat_mob_append_system_context`, the web
+    runtime's `mob_append_system_context`), `mob/member_live_open`,
+    `mob/member_live_control` and `mob/member_live_close`. It reaches an
+    entry, or a member whose name is reserved unreadable, only for a
+    principal that holds `AdminHost`; any other caller is refused
+    `identity_member` before anything runs
+    (`MobHandle::admit_member_host_door`). On every other member it is
+    unchanged: a host door never consulted `external_addressable`. The owner
+    holds every scope, so a local console reaches its entries as before.
+  - The `internal` origin of `mob/submit_work` acts as the mob's host: it
+    needs `AdminHost`, and a caller without it is refused `ScopeDenied`
+    (`required: admin_host`) before anything is submitted. The public MCP
+    tools and the web runtime take no origin.
+  - The host's own keyed send to its member is
+    `MobMcpState::mob_member_send_keyed_as_host`: internal work, under the
+    host door's rule, never asked the external admission.
+  - Session-level methods addressed to a session a mob owns, by its id
+    (`session/inject_context`, `comms/send`), are not mob doors: no mob gate
+    runs on them, and they act with the host's authority.
 - A respawn of an entry's member rotates it onto its own session (see
   [Respawn, rotation and scoped release](#respawn-rotation-and-scoped-release)):
   the identity stays seated and an entry throughout, and a rotation

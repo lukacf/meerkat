@@ -14,7 +14,7 @@ use crate::installed_host::{
     prepared_registration::PreparedMemberRegistration,
 };
 use meerkat_mobkit::{
-    console_governed_ingress::ConsoleGovernedIngress,
+    console_governed_ingress::{ConsoleGovernedIngress, ConsoleSendContext},
     identity_first::{AgentIdentity, GovernedInputBinder},
     runtime::AuthenticatedConsoleHuman,
     storage_health::ResolvedStorageSummary,
@@ -24,8 +24,7 @@ pub struct PreparedGatewayRuntime {
     originals: Arc<PrivateOriginals>,
     registration: Arc<PreparedMemberRegistration>,
     registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
-    tools: InstalledAcquisitionTools,
-    continuation: Arc<InstalledNativeContinuation>,
+    acquisition_runtime: Option<(InstalledAcquisitionTools, Arc<InstalledNativeContinuation>)>,
     construction: OnceLock<Construction>,
     acquisition: Arc<Mutex<AcquisitionBootstrap>>,
     console: Arc<PreparedConsoleIngress>,
@@ -60,6 +59,18 @@ impl ConsoleGovernedIngress for PreparedConsoleIngress {
             .ok_or("application preparation is not installed")?
             .binder_for(identity, human)
     }
+
+    fn binder_for_send(
+        &self,
+        identity: &AgentIdentity,
+        human: &AuthenticatedConsoleHuman,
+        send: &ConsoleSendContext,
+    ) -> Result<Arc<dyn GovernedInputBinder>, String> {
+        self.installed
+            .get()
+            .ok_or("application preparation is not installed")?
+            .binder_for_send(identity, human, send)
+    }
 }
 
 // Failure-only local diagnostic. Fixed labels and unit variants contain no owner data.
@@ -81,6 +92,13 @@ fn adoption_refusal(stage: &'static str, error: HostLifetimeError) -> HostLifeti
 }
 
 impl PreparedGatewayRuntime {
+    pub fn capture_member_mcp_factory(
+        &self,
+        construction: &GatewayFactoryConstruction<'_>,
+    ) -> Result<(), HostLifetimeError> {
+        self.originals.capture_member_mcp_factory(construction)
+    }
+
     pub(crate) fn new(
         originals: Arc<PrivateOriginals>,
         registration: Arc<PreparedMemberRegistration>,
@@ -88,12 +106,33 @@ impl PreparedGatewayRuntime {
         tools: InstalledAcquisitionTools,
         continuation: Arc<InstalledNativeContinuation>,
     ) -> Self {
+        Self::new_selected(
+            originals,
+            registration,
+            registry,
+            Some((tools, continuation)),
+        )
+    }
+
+    pub(crate) fn without_acquisition(
+        originals: Arc<PrivateOriginals>,
+        registration: Arc<PreparedMemberRegistration>,
+        registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
+    ) -> Self {
+        Self::new_selected(originals, registration, registry, None)
+    }
+
+    fn new_selected(
+        originals: Arc<PrivateOriginals>,
+        registration: Arc<PreparedMemberRegistration>,
+        registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
+        acquisition_runtime: Option<(InstalledAcquisitionTools, Arc<InstalledNativeContinuation>)>,
+    ) -> Self {
         Self {
             originals,
             registration,
             registry,
-            tools,
-            continuation,
+            acquisition_runtime,
             construction: OnceLock::new(),
             acquisition: Arc::new(Mutex::new(AcquisitionBootstrap::default())),
             console: Arc::new(PreparedConsoleIngress::default()),
@@ -107,12 +146,10 @@ impl PreparedGatewayRuntime {
         InstalledServiceTaskSource::new(&self.acquisition)
     }
 
-    pub fn tools(&self) -> InstalledAcquisitionTools {
-        self.tools.clone()
-    }
-
-    pub fn continuation(&self) -> Arc<InstalledNativeContinuation> {
-        self.continuation.clone()
+    pub fn acquisition(
+        &self,
+    ) -> Option<(InstalledAcquisitionTools, Arc<InstalledNativeContinuation>)> {
+        self.acquisition_runtime.clone()
     }
 
     pub fn prepare_bootstrap(
@@ -134,6 +171,9 @@ impl PreparedGatewayRuntime {
         self.originals
             .bind_machine(machine.clone())
             .map_err(|_| GatewayHostError::Denied)?;
+        self.originals
+            .install_peer_receiver(&machine)
+            .map_err(|_| GatewayHostError::Denied)?;
         self.construction
             .set(Construction {
                 machine,
@@ -141,25 +181,34 @@ impl PreparedGatewayRuntime {
                 storage: spec.resolved_storage.clone(),
             })
             .map_err(|_| GatewayHostError::Denied)?;
-        let source = meerkat_mob_mcp::HostJobSource::new(
-            [self.continuation.namespace().to_owned()],
-            self.continuation.clone(),
-        )
-        .map_err(|_| GatewayHostError::Denied)?;
-        let spec = spec
-            .with_host_job_source(source)
-            .map_err(|_| GatewayHostError::Unavailable)?;
-        Ok(spec
+        let mut spec = spec
             .with_member_runtime_registration_hook(self.registration.clone())
-            .with_tool_consequence_policy_registry(self.registry.clone())
-            .register_tool_bundle(
-                crate::FIND_AND_INSTALL_BUNDLE,
-                self.tools.acquisition_tool(),
+            .with_tool_consequence_policy_registry(self.registry.clone());
+        if let Some((tools, continuation)) = &self.acquisition_runtime {
+            let source = meerkat_mob_mcp::HostJobSource::new(
+                [continuation.namespace().to_owned()],
+                continuation.clone(),
             )
-            .register_tool_bundle(
-                meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
-                self.tools.result_tool(),
-            ))
+            .map_err(|_| GatewayHostError::Denied)?;
+            // This exact local Find operation uses no service account. The
+            // outer native registration preserves the inner declared target.
+            let find = Arc::new(
+                meerkat_core::RegisteredToolBundleDispatcher::new(
+                    crate::FIND_AND_INSTALL_BUNDLE,
+                    tools.acquisition_tool(),
+                )
+                .with_account(meerkat_core::OperationAccount::DeclaredNone),
+            );
+            spec = spec
+                .with_host_job_source(source)
+                .map_err(|_| GatewayHostError::Unavailable)?
+                .register_tool_bundle(crate::FIND_AND_INSTALL_BUNDLE, find)
+                .register_tool_bundle(
+                    meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
+                    tools.result_tool(),
+                );
+        }
+        Ok(spec)
     }
 
     pub fn bind_runtime(&self, runtime: &UnifiedRuntime) -> Result<(), GatewayHostError> {
@@ -177,9 +226,25 @@ impl PreparedGatewayRuntime {
         if !Arc::ptr_eq(&expected.machine, &actual) {
             return Err(GatewayHostError::Denied);
         }
-        self.continuation
-            .bind_native(runtime.mob_runtime())
-            .map_err(host_error)
+        match &self.acquisition_runtime {
+            Some((_, continuation)) => continuation
+                .bind_native(runtime.mob_runtime())
+                .map_err(host_error),
+            None => Ok(()),
+        }
+    }
+
+    // Reuse the actual prepared wrapper in native HTTP ingress controls. No
+    // synthetic Console context, input, or successful child binder is created.
+    #[cfg(test)]
+    pub(crate) fn console_ingress_for_test(
+        installed: Option<Arc<dyn ConsoleGovernedIngress>>,
+    ) -> Arc<dyn ConsoleGovernedIngress> {
+        let console = PreparedConsoleIngress::default();
+        if let Some(installed) = installed {
+            assert!(console.installed.set(installed).is_ok());
+        }
+        Arc::new(console)
     }
 
     // Observe only this Toolkit-owned object in empty-roster hook controls.
@@ -214,6 +279,14 @@ impl PreparedGatewayRuntime {
         // adoption it refuses; it cannot select an ungoverned Console path.
         runtime.set_console_governed_ingress(self.console.clone());
         Ok(())
+    }
+
+    /// Fence new source work before final host adoption while preserving an
+    /// entered held-bootstrap callback and its original custody owner.
+    pub fn stop_admitting_work(&self) -> Result<(), GatewayHostError> {
+        self.originals
+            .stop_admitting_work()
+            .map_err(|_| GatewayHostError::Unavailable)
     }
 
     /// Stop the same source-owned recovery task even if final host adoption
@@ -266,11 +339,12 @@ impl PreparedGatewayRuntime {
                 HostLifetimeError::InvalidSelection,
             ));
         }
-        if !host
-            .native_continuation
-            .as_ref()
-            .is_some_and(|owner| Arc::ptr_eq(owner, &self.continuation))
-        {
+        let same_continuation = match (&self.acquisition_runtime, &host.native_continuation) {
+            (Some((_, retained)), Some(actual)) => Arc::ptr_eq(retained, actual),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_continuation {
             return Err(adoption_refusal(
                 "runtime.same_continuation",
                 HostLifetimeError::InvalidSelection,

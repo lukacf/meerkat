@@ -14,21 +14,31 @@ the direct preparation and bootstrap interfaces.
 
 ## Maintaining the ordinary starter
 
-`current-distribution.json` is the current-selection authority. It points to a
-frozen publication manifest and binds its exact hash; the manifest owns platform
-filenames, sizes and archive digests. The starter never uses a manifest supplied
-by a downloads directory and never chooses an archive by modification time.
+An exported starter's `current-distribution.json` binds its adjacent frozen
+manifest by exact hash; the manifest owns platform filenames, sizes and archive
+digests. The starter never uses a manifest supplied by a downloads directory and
+never chooses an archive by modification time.
 
-After reviewing an accepted successor's platform support and operation evidence,
-update that one pointer and export a new starter:
+The source checkout retains a historical pointer to
+`docs/verification/20261008-native-connector-delivery/candidate.json`. That
+manifest is not included in the public source, so the checkout does not provide
+a usable default distribution. Direct source startup and default export refuse
+when the selected manifest is absent. They do not substitute another release.
+
+To export from source, select a trusted manifest and its independently accepted
+SHA-256 digest explicitly:
 
 ```sh
-python3 scripts/export-setup-starter.py --destination /absolute/new-starter
+python3 scripts/export-setup-starter.py --destination /absolute/new-starter \
+  --manifest /absolute/trusted-release-manifest.json \
+  --manifest-sha256 '<accepted-64-character-sha256>'
 ```
 
 Run this command from the repository root. The export contains the scripts and
-an exact projection of the selected manifest. A previously delivered starter
-retains its old selection. Do not silently retarget it, mutate a frozen manifest
+an exact projection of the selected manifest. Packaged starters are self-contained
+and use their included selection without these export options. Explicit export
+does not change the source pointer, and a previously delivered starter retains
+its old selection. Do not silently retarget it, mutate a frozen manifest
 or interpret installing a new environment as permission to replay provider writes.
 Retiring an unsafe version means withdrawing its distribution and notifying its
 host owners; no starter background process revokes or updates installations.
@@ -434,7 +444,7 @@ still requires the separately pinned `--verifier` and `--verifier-sha256`; selec
 a version with the official readback contract.
 
 Prepare validates official metadata only, without copying or starting GitHub.
-The installer owns the one `selected-reads` profile and its help/check behavior.
+The original bundle exposes the `selected-reads` profile and its help/check behavior.
 Select all three operations, in their displayed order: `get_me`, `list_commits`,
 `get_file_contents`. Supply `token_env` as exactly `GITHUB_PERSONAL_ACCESS_TOKEN`.
 This is a variable name, never a token. Custom GitHub hosts, operation subsets,
@@ -467,6 +477,55 @@ MCP installation, replay and fresh-process recovery on CPython 3.11.16,
 Linux x86_64/glibc 2.39. Its target is reported by help, check, install and readback;
 the installer rejects a different host before destination work. This test does
 not launch GitHub, sign in, or establish browser UI support.
+
+### Separate GitHub Enterprise source profile
+
+`enterprise-selected-reads` is a distinct Linux x86_64 profile for the pinned
+GitHub MCP server v2.0.3 release at source revision
+`b98d115bbb080e9555466a96656ec4df605aea21`. It is available through an explicitly
+selected enterprise bundle and supporting installer; existing distributions and
+the original GitHub.com profile are unchanged.
+
+Assemble its offline input bundle from the exact retained upstream release
+archive. The helper validates fixed archive, binary and license hashes, copies
+bytes into a fresh directory, and reports the resulting `contents_sha256`:
+
+```sh
+python3 scripts/package-github-enterprise.py \
+  --archive /absolute/path/github-mcp-server_Linux_x86_64.tar.gz \
+  --destination /absolute/new/github-enterprise-bundle
+```
+
+Use that directory and digest with the `--official-bundle` and
+`--official-contents-sha256` flags above. Select and pin the corresponding updated
+installer and verifier. This direct source route does not retarget an archived
+starter or the current distribution selector. The selected enterprise bundle
+advertises only the enterprise profile.
+
+Select a nonempty subset of these raw tools in catalog order:
+`list_pull_requests`, `pull_request_read`, `list_commits`, `get_commit`,
+`actions_list`, `actions_get`, `list_issues`, `issue_read`. Supply
+`token_env: GITHUB_PERSONAL_ACCESS_TOKEN` and an explicit `github_host`, for example
+`https://github.enterprise.example`. The host must be a canonical lowercase HTTPS
+DNS origin without a port, path, userinfo, query or fragment. IP literals,
+localhost and GitHub.com are refused. No arbitrary flags or environment values
+are accepted. The installer retains the selected host and operations in the
+configuration, launch and receipt; readback checks their exact binding.
+The fixed `--toolsets=` argument suppresses additive inherited toolsets while
+`--tools` retains the explicit selected subset.
+
+The native host supplies the protected PAT and controls inherited environment
+variables. Selecting raw read tools does not restrict repository arguments or
+establish that a semantic collection program covers every required read. Trusted
+caller programs and provider permissions still own repository and method scope.
+Exact repository metadata and arbitrary historical commit-status coverage remain
+unsupported by the retained operation mapping. Full-history collection requires
+separate qualification.
+
+Assembly and setup never execute the GitHub binary or access credentials. Local
+software installation/readback is separate from target-host executable, provider,
+native attachment and Ready qualification. This bundle retains the release
+archive's upstream MIT license; a complete dependency-notice audit is not claimed.
 
 
 ## Optional official Playwright route (source candidate)
@@ -601,8 +660,8 @@ profile is reported without choosing a replacement. The current installed
 profile supplies all help and field definitions. Current fields receive only
 exact structurally representable prior values; new fields remain blank. Prior
 operation names are shown. Select current operations again for selectable
-profiles. Official profiles display their complete current fixed list for
-review; Playwright exposes the whole endpoint. A historical subset does not
+profiles, including the enterprise GitHub profile. Fixed official profiles display
+their complete current list for review; Playwright exposes the whole endpoint. A historical subset does not
 filter the endpoint or restore an earlier permission. Both cases require an
 explicit current check and install.
 

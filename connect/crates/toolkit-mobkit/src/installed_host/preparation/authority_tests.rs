@@ -35,6 +35,7 @@ fn fixture() -> (
     };
     let key = ControllerRouteKey::parse(&format!("model-route/v1/{}", "a".repeat(64))).unwrap();
     let requests = PreparationAuthorities {
+        shared_workflow_setup: vec![],
         helper_mcp: None,
         helper_catalog: None,
         controllers: vec![
@@ -1578,4 +1579,65 @@ fn helper_catalog_successor_does_not_reinterpret_existing_original_catalog_targe
             &owner.selected.native_host.members[0].audience
         )
     );
+}
+
+#[test]
+fn helperless_authorities_keep_only_explicit_original_requests_and_refuse_before_issuance() {
+    let (_directory, root, selected, _, requests) = fixture();
+    let mut owner = initialize(root, selected.clone());
+    let before = bytes(&owner);
+    owner
+        .configure_authorities_without_helper(&PreparationAuthorities::default())
+        .unwrap();
+    assert_eq!(owner.selected(), &selected);
+    assert_eq!(bytes(&owner), before);
+    for invalid in [
+        requests.clone(),
+        PreparationAuthorities {
+            controllers: vec![requests.controllers[1].clone()],
+            ..Default::default()
+        },
+        PreparationAuthorities {
+            helper_mcp: Some(PreparedHelperMcpRequest {
+                issuance_id: EvidenceId::new("unselected-helper-mcp").unwrap(),
+            }),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            owner
+                .configure_authorities_without_helper(&invalid)
+                .is_err()
+        );
+        assert_eq!(bytes(&owner), before);
+    }
+    let original = PreparationAuthorities {
+        controllers: vec![requests.controllers[0].clone()],
+        ..Default::default()
+    };
+    owner
+        .configure_authorities_without_helper(&original)
+        .unwrap();
+    let issued = bytes(&owner);
+    let current = owner.selected().clone();
+    assert!(
+        current
+            .native_host
+            .members
+            .iter()
+            .all(|row| row.setup_capability.is_none())
+    );
+    owner
+        .configure_authorities_without_helper(&original)
+        .unwrap();
+    assert_eq!(bytes(&owner), issued);
+    let mut changed = original;
+    changed.controllers[0].issuance_id = EvidenceId::new("replacement-controller").unwrap();
+    assert!(
+        owner
+            .configure_authorities_without_helper(&changed)
+            .is_err()
+    );
+    assert_eq!(bytes(&owner), issued);
+    assert_eq!(owner.selected(), &current);
 }

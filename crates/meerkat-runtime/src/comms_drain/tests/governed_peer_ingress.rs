@@ -34,6 +34,10 @@ enum Answer {
     NotOffered,
     /// Wait until the test releases the bind, then bind.
     Stall,
+    /// Not ready for this long from the bind's start: the binder waits it
+    /// out with the request's waiter inside the same bind, then binds, or
+    /// answers `NotReady` once the wait does not settle.
+    HeldFor(Duration),
 }
 
 /// One bind the test binder was asked for.
@@ -200,6 +204,30 @@ impl PeerIngressBinder for TestBinder {
                     self.release.notified().await;
                     let requester = self.enrolled_requester(&request);
                     Ok(self.binding(&request, requester, request.delivery_work.clone()))
+                }
+                Answer::HeldFor(hold) => {
+                    let release_at = crate::tokio::time::Instant::now() + hold;
+                    let waiter = request.not_now_waiter();
+                    loop {
+                        if crate::tokio::time::Instant::now() >= release_at {
+                            let requester = self.enrolled_requester(&request);
+                            break Ok(self.binding(
+                                &request,
+                                requester,
+                                request.delivery_work.clone(),
+                            ));
+                        }
+                        let wait = waiter
+                            .wait_until_clear(meerkat_core::authorization::NotNowWait::until_clear(
+                                move || crate::tokio::time::Instant::now() < release_at,
+                            ))
+                            .await;
+                        if !wait.settled() {
+                            break Err(PeerIngressBindRefusal::NotReady(
+                                meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+                            ));
+                        }
+                    }
                 }
             }
         })
@@ -1860,4 +1888,210 @@ mod governed_origin {
             );
         }
     }
+}
+
+/// A binder whose decision is not ready for a short while waits it out with
+/// the request's waiter inside its one bind call, then decides again: the
+/// durable delivery is offered once and admitted once, never released to
+/// the FIFO head and offered again.
+///
+/// RED before the waiter waits: the binder answers `NotReady`, the claim is
+/// kept and the next drain offers it again.
+#[tokio::test]
+async fn a_binder_waiting_out_not_now_inside_its_bind_is_offered_once() {
+    let fixture = Governed::storeless(true);
+    let session_id = fixture.session().await;
+    fixture
+        .binder
+        .answer(&session_id, [Answer::HeldFor(Duration::from_millis(100))]);
+    let runtime = message_runtime(actionable_message_candidate(0));
+
+    for _ in 0..2 {
+        fixture
+            .drain(
+                &session_id,
+                &runtime,
+                SenderAuthentication::SignatureVerified,
+            )
+            .await;
+    }
+
+    assert_eq!(
+        fixture.binder.calls().len(),
+        1,
+        "the delivery is offered once"
+    );
+    assert_eq!(fixture.input_count(&session_id).await, 1, "admitted once");
+    assert!(
+        matches!(
+            runtime.queue.committed_outcomes().as_slice(),
+            [Some(Terminal::RuntimeAccepted { .. })]
+        ),
+        "{:?}",
+        runtime.queue.committed_outcomes()
+    );
+    assert_eq!(fixture.binder.settlements(), vec![Settlement::Admitted]);
+}
+
+/// A volatile delivery whose binding is pending for a moment (a held turn
+/// boundary, a held source) is parked by Core and offered again within its
+/// one deadline: it is admitted once, not dropped.
+///
+/// RED on the base: a volatile delivery keeps nothing to retry, so the
+/// pending answer drops it and nothing is admitted.
+#[tokio::test]
+async fn a_volatile_delivery_meeting_a_brief_not_ready_is_admitted_once() {
+    let fixture = Governed::storeless(true);
+    let session_id = fixture.session().await;
+    fixture.binder.answer(&session_id, [Answer::NotReady]);
+    let runtime = message_runtime(terminal_response());
+
+    fixture
+        .drain(
+            &session_id,
+            &runtime,
+            SenderAuthentication::SignatureVerified,
+        )
+        .await;
+
+    assert_eq!(
+        fixture.input_count(&session_id).await,
+        1,
+        "the parked volatile delivery is admitted once"
+    );
+    assert_eq!(
+        fixture.binder.calls().len(),
+        2,
+        "offered again after the pending answer"
+    );
+    assert_eq!(fixture.binder.settlements(), vec![Settlement::Admitted]);
+}
+
+/// The input a governed submission made under `raw_key` and `association`,
+/// read by the key, and whether a read by `other`'s id finds anything.
+async fn by_key_and_by_id(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+    raw_key: &str,
+    association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+    other: &meerkat_core::lifecycle::InputId,
+) -> (Option<meerkat_core::lifecycle::InputId>, bool) {
+    let by_key = machine
+        .governed_input_by_key(session_id, raw_key, association)
+        .await
+        .expect("the read by key")
+        .map(|read| read.report.input_id().clone());
+    let by_id = machine
+        .input_terminal_receipt_observation(
+            session_id,
+            crate::terminal_status::InteractionSelector::InputId(other.clone()),
+        )
+        .await
+        .expect("the read by id")
+        .is_some();
+    (by_key, by_id)
+}
+
+/// A governed submission is read by its key. B (the same raw key and
+/// association as A, another input id) deduplicates onto A before any row of
+/// its own is written, so a read by B's id misses, while the read by key
+/// observes A: live, and from the store after a restart.
+///
+/// RED before the read by key exists: it answers `Ok(None)`.
+#[tokio::test]
+async fn a_governed_submission_is_read_by_its_key_live_and_after_a_restart() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let custody = Arc::<Custody>::default();
+    let session_id = SessionId::new();
+    let supervisor = PeerId::parse(PEER_ID_SUPERVISOR).expect("supervisor peer id");
+    let interaction = InteractionId(Uuid::new_v4());
+    let a = supervisor_delivery_input(&session_id);
+    let a_id = a.id().clone();
+    let raw_key = a
+        .header()
+        .idempotency_key
+        .clone()
+        .expect("the delivery's raw key")
+        .0;
+    let mut b = a.clone();
+    b.header_mut().id = meerkat_core::lifecycle::InputId::new();
+    let b_id = b.id().clone();
+
+    let first = Governed::persistent(Arc::clone(&store), None, Arc::clone(&custody));
+    first.register(&session_id).await;
+    let mut association = None;
+    for (input, deduplicated) in [(a, false), (b, true)] {
+        let GovernedPeerBind::Bound { input, custody } = bind_supervisor_member_delivery(
+            &first.adapter,
+            &session_id,
+            SenderAuthentication::SignatureVerified,
+            supervisor,
+            interaction,
+            true,
+            input,
+            None,
+        )
+        .await
+        else {
+            panic!("an established supervisor's delivery is bound");
+        };
+        let bound = input
+            .header()
+            .authority_association
+            .clone()
+            .expect("a bound association");
+        if let Some(first) = &association {
+            assert_eq!(first, &bound, "both are bound under one association");
+        } else {
+            association = Some(bound);
+        }
+        let (outcome, _) = first
+            .adapter
+            .accept_governed_peer_input(
+                &session_id,
+                input,
+                crate::meerkat_machine_types::MemberResidencyExpectation::PeerOnly,
+                Some(custody),
+            )
+            .await
+            .expect("admission answers");
+        if deduplicated {
+            assert!(
+                matches!(
+                    &outcome,
+                    crate::accept::AcceptOutcome::Deduplicated { existing_id, .. }
+                        if *existing_id == a_id
+                ),
+                "B deduplicates onto A: {outcome:?}"
+            );
+        } else {
+            assert!(
+                matches!(&outcome, crate::accept::AcceptOutcome::Accepted { input_id, .. } if *input_id == a_id),
+                "A is admitted: {outcome:?}"
+            );
+        }
+    }
+    let association = association.expect("the association");
+    let selection = first.binder.selection.clone();
+
+    assert_eq!(
+        by_key_and_by_id(&first.adapter, &session_id, &raw_key, &association, &b_id).await,
+        (Some(a_id.clone()), false),
+        "live: the key observes A; B's id names nothing"
+    );
+
+    drop(first);
+    let restarted = Governed::restarted(Arc::clone(&store), selection, custody).await;
+    assert_eq!(
+        by_key_and_by_id(
+            &restarted.adapter,
+            &session_id,
+            &raw_key,
+            &association,
+            &b_id
+        )
+        .await,
+        (Some(a_id), false),
+        "after a restart over the same store: the key still observes A; B's id still names nothing"
+    );
 }

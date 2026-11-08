@@ -165,6 +165,10 @@ pub(crate) struct SideChatLineage {
     /// opened by a caller without one, or forked before the fork recorded
     /// its creator.
     pub(crate) creator: Option<String>,
+    /// The private-owner key the fork recorded
+    /// ([`crate::access::PRIVATE_TO_LABEL`]): the person who opened the side
+    /// chat on a console with sign-in. `None` for a shared side chat.
+    pub(crate) private_to: Option<String>,
 }
 
 /// The creator a side chat's own roster labels record: the non-blank
@@ -225,6 +229,7 @@ pub(crate) fn side_chat_lineages(
                     source_identity,
                     source_session_id,
                     creator: recorded_creator(row.labels),
+                    private_to: crate::access::private_owner(row.labels).map(str::to_string),
                 },
             ))
         })
@@ -429,14 +434,17 @@ pub(crate) async fn verified_side_chat_lineage(
 }
 
 /// Write a verified side chat's lineage into its console labels: its
-/// source's console identity ([`SIDE_CHAT_OF_LABEL`]), the source session
-/// it was forked from ([`SIDE_CHAT_OF_SESSION_LABEL`]) and, when the fork
-/// recorded one, who opened it ([`SIDE_CHAT_CREATOR_LABEL`]). Applied after
-/// the roster labels lost every unverified lineage claim and took the spawn
-/// registry's gaps. The access rules follow the label to the source, so a
-/// side chat's audience is its source's. Meerkat's roster says no agent
-/// spawned a side chat, so a spawn lineage the registry holds under its
-/// identity names an earlier member and is dropped.
+/// source's console identity ([`SIDE_CHAT_OF_LABEL`]), the source session it
+/// was forked from ([`SIDE_CHAT_OF_SESSION_LABEL`]), when the fork recorded
+/// one, who opened it ([`SIDE_CHAT_CREATOR_LABEL`]) and, for a side chat
+/// opened on a console with sign-in, the person it is private to
+/// ([`crate::access::PRIVATE_TO_LABEL`]). Applied after the roster labels
+/// lost every unverified lineage claim and took the spawn registry's gaps.
+/// The access rules follow the label to the source, so a side chat's
+/// audience is its source's, narrowed to its private owner when it has one.
+/// Meerkat's roster says no agent spawned a side chat, so a spawn lineage
+/// the registry holds under its identity names an earlier member and is
+/// dropped.
 pub(crate) fn project_side_chat_lineage(
     labels: &mut BTreeMap<String, String>,
     lineage: Option<&SideChatLineage>,
@@ -455,6 +463,9 @@ pub(crate) fn project_side_chat_lineage(
     );
     if let Some(creator) = &lineage.creator {
         labels.insert(SIDE_CHAT_CREATOR_LABEL.to_string(), creator.clone());
+    }
+    if let Some(owner) = &lineage.private_to {
+        labels.insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner.clone());
     }
 }
 
@@ -688,7 +699,10 @@ pub struct SideChatFork {
 /// Fork `source_member_alias` into a side chat seated as `child_alias`,
 /// opened by `creator`: the console principal of the caller, recorded in the
 /// side chat's [`SIDE_CHAT_CREATOR_LABEL`] (`None` records that the caller
-/// had none).
+/// had none). It is private to `private_to` when that names a person's
+/// private-owner key (the person who opens it on a console with sign-in),
+/// else shared: recorded in the side chat's
+/// [`crate::access::PRIVATE_TO_LABEL`] roster label.
 ///
 /// Refuses, before anything is forked, a source the roster does not hold and
 /// a source whose session was never born (seated and never woken: there is
@@ -710,11 +724,13 @@ pub async fn fork_side_chat(
     child_alias: &str,
     display_name: Option<&str>,
     creator: Option<&str>,
+    private_to: Option<&str>,
 ) -> Result<SideChatFork, SideChatError> {
     let creator = creator
         .map(str::trim)
         .filter(|creator| !creator.is_empty())
         .map(str::to_string);
+    let private_to = private_to.map(str::trim).filter(|owner| !owner.is_empty());
     let display_name = match display_name.map(str::trim) {
         None | Some("") => None,
         Some(name) if name.chars().count() > MAX_DISPLAY_NAME_CHARS => {
@@ -788,7 +804,9 @@ pub async fn fork_side_chat(
     // The child's own labels win over the ones it inherits from its source,
     // key by key: the marker names this source, the creator names who opened
     // this side chat (empty for a caller without a principal, so a creator
-    // the source carries never follows the fork), the display name keeps the
+    // the source carries never follows the fork), the private owner names the
+    // person it is private to (empty for a shared side chat, so an owner the
+    // source carries never follows the fork), the display name keeps the
     // side chat apart from the agent it branched from, and the source's own
     // console flags do not follow it.
     let mut labels = BTreeMap::from([
@@ -796,6 +814,10 @@ pub async fn fork_side_chat(
         (
             SIDE_CHAT_CREATOR_LABEL.to_string(),
             creator.clone().unwrap_or_default(),
+        ),
+        (
+            crate::access::PRIVATE_TO_LABEL.to_string(),
+            private_to.unwrap_or_default().to_string(),
         ),
         (DISPLAY_NAME_LABEL.to_string(), display_name.clone()),
     ]);
@@ -1623,6 +1645,7 @@ mod tests {
                     source_identity: "domain:alpha".to_string(),
                     source_session_id: session,
                     creator: None,
+                    private_to: None,
                 },
             )]),
             "only the side chat has a lineage, and it names the source's console identity"
@@ -1662,15 +1685,18 @@ mod tests {
     }
 
     /// A verified side chat's console labels name its source, the forked
-    /// session and the creator the fork recorded, and lose any spawn lineage
-    /// the registry held under its identity and any creator label no fork
-    /// recorded; without a lineage nothing changes.
+    /// session, and the creator and the private owner its fork recorded, and
+    /// lose any spawn lineage the registry held under its identity and any
+    /// creator no fork recorded; a private owner on the member's own roster
+    /// row stays (only Meta writes one there). Without a lineage nothing
+    /// changes.
     #[test]
     fn the_projection_writes_only_the_verified_lineage() {
         let lineage = SideChatLineage {
             source_identity: "alpha".to_string(),
             source_session_id: "alpha-session".to_string(),
             creator: None,
+            private_to: None,
         };
         let mut labels = BTreeMap::from([
             ("team".to_string(), "review".to_string()),
@@ -1686,6 +1712,10 @@ mod tests {
                 SIDE_CHAT_CREATOR_LABEL.to_string(),
                 "unrecorded@example.test".to_string(),
             ),
+            (
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "console-caller:v1:unrecorded".to_string(),
+            ),
         ]);
         let unchanged = labels.clone();
         project_side_chat_lineage(&mut labels, None);
@@ -1700,10 +1730,15 @@ mod tests {
                     SIDE_CHAT_OF_SESSION_LABEL.to_string(),
                     "alpha-session".to_string()
                 ),
+                (
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:unrecorded".to_string()
+                ),
             ])
         );
         let opened = SideChatLineage {
             creator: Some("alice@example.test".to_string()),
+            private_to: Some("console-caller:v1:alice".to_string()),
             ..lineage
         };
         project_side_chat_lineage(&mut labels, Some(&opened));
@@ -1711,6 +1746,13 @@ mod tests {
             labels.get(SIDE_CHAT_CREATOR_LABEL).map(String::as_str),
             Some("alice@example.test"),
             "the creator the fork recorded is projected"
+        );
+        assert_eq!(
+            labels
+                .get(crate::access::PRIVATE_TO_LABEL)
+                .map(String::as_str),
+            Some("console-caller:v1:alice"),
+            "the private owner the fork recorded is projected"
         );
     }
 

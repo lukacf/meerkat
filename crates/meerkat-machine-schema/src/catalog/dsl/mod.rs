@@ -4876,6 +4876,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "StaleFenceToken",
                     "NotExternallyAddressable",
                     "StaleSessionBinding",
+                    "IdentityMember",
                 ],
             ),
             NamedTypeBinding::string_enum(

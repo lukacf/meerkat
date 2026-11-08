@@ -114,18 +114,24 @@ impl PrivateOriginals {
         // exact replay and authority witnesses. Reuse only input bytes already
         // persisted by this canonical source; never reconstruct them from IDs.
         let retained = match kind {
-            Kind::Original => self.cold_original(row)?.bound_service_input,
+            Kind::Original => {
+                let record = self.cold_original(row)?;
+                record
+                    .custody_input
+                    .as_ref()
+                    .or(record.bound_service_input.as_ref())
+                    .map(|input| cold_service_admission::decode_source_input(&record, input))
+                    .transpose()?
+            }
             Kind::Helper => helper_originals::cold_bound_input(&self.scope, row)
-                .map_err(cold_service_admission::writer_error)?,
+                .map_err(cold_service_admission::writer_error)?
+                .as_ref()
+                .map(RetainedBoundInput::decode)
+                .transpose()?,
         };
-        let input = match retained {
-            Some(input) => input.decode()?,
-            None => stored
-                .state
-                .persisted_input
-                .clone()
-                .ok_or(PrivateOriginalError::Unavailable)?,
-        };
+        let input = retained
+            .or_else(|| stored.state.persisted_input.clone())
+            .ok_or(PrivateOriginalError::Unavailable)?;
         if stored.state.input_id != *attempt.input_id()
             || !attempt
                 .matches_input(&input)
@@ -140,11 +146,35 @@ impl PrivateOriginals {
     /// A newly reconstructed enrolled source cannot infer admitted custody from a
     /// terminal marker alone. Before a later input binds, rejoin the original
     /// exact native input and current runtime owners, without staging Candidate.
-    pub(crate) async fn restore_promoted_custody(
+    pub(crate) fn restore_promoted_custody<'a>(
+        &'a self,
+        key: &'a StoreKey,
+        original: &'a Arc<RetainedToolkitOriginal>,
+    ) -> impl std::future::Future<Output = Result<(), PrivateOriginalError>> + 'a {
+        // Ordinary callers select no observation. Return the same single
+        // restoration future directly; no wrapper await or second path.
+        self.restore_promoted_custody_observed(key, original, None)
+    }
+
+    pub(crate) async fn restore_promoted_custody_observed(
         &self,
         key: &StoreKey,
         original: &Arc<RetainedToolkitOriginal>,
+        observation: Option<&std::sync::atomic::AtomicU16>,
     ) -> Result<(), PrivateOriginalError> {
+        // The only supplied observation belongs to the test-support binder.
+        // Record fixed stages only; output belongs after its governed await.
+        macro_rules! observe {
+            ($stage:expr) => {
+                #[cfg(feature = "test-support")]
+                if let Some(observation) = observation {
+                    observation.store($stage, std::sync::atomic::Ordering::Relaxed);
+                }
+            };
+        }
+        #[cfg(not(feature = "test-support"))]
+        let _ = observation;
+        observe!(1);
         if original.first_binding_for(key)
             || self
                 .owner
@@ -153,14 +183,17 @@ impl PrivateOriginals {
         {
             return Ok(());
         }
+        observe!(2);
         self.owner
             .check_canonical_source(self.store.as_ref(), &self.scope)
             .map_err(cold_service_admission::writer_error)?;
+        observe!(3);
         let (_, stamp) = self
             .owner
             .publication()
             .observe(|| ())
             .map_err(|_| PrivateOriginalError::Unavailable)?;
+        observe!(4);
         let row = self
             .store
             .get(key)
@@ -173,6 +206,7 @@ impl PrivateOriginals {
             Kind::Helper
         };
         let attempt = if matches!(kind, Kind::Original) {
+            observe!(5);
             let record = self.cold_original(&row)?;
             if record.operation_cancelled
                 || record.final_association.as_ref() != Some(original.association())
@@ -181,12 +215,14 @@ impl PrivateOriginals {
             }
             record.custody_attempt
         } else {
+            observe!(6);
             helper_originals::cold_bound_attempt(&self.scope, &row, original.association())
                 .map_err(cold_service_admission::writer_error)?
         };
         let Some(attempt) = attempt else {
             return Ok(());
         }; // Existing legacy restoration stays unchanged.
+        observe!(7);
         if !self
             .owner
             .has_installed_pair_recovery()
@@ -194,65 +230,96 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Unavailable);
         }
+        observe!(8);
         match attempt.decision() {
             CustodyDecision::Promoted => (),
             CustodyDecision::Pending => return Err(PrivateOriginalError::Unavailable),
             CustodyDecision::Withdrawn => return Err(PrivateOriginalError::Conflict),
         }
+        observe!(9);
         let machine = self.machine()?;
+        observe!(10);
         let stored = machine
             .input_state(attempt.session(), attempt.input_id())
             .await
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .ok_or(PrivateOriginalError::Unavailable)?;
+        observe!(11);
         let input = self.verified_cold_input(kind, &row, &attempt, &stored)?;
+        observe!(12);
         let registration = machine
             .current_session_registration_witness(attempt.session())
             .await
             .ok_or(PrivateOriginalError::Unavailable)?;
+        observe!(13);
         let attachment = machine
             .current_executor_attachment_witness(attempt.session())
             .await
             .ok_or(PrivateOriginalError::Unavailable)?;
+        observe!(14);
         let pins = self
             .controller_pin_source
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
+        observe!(15);
         let actor = pins
             .live_actor(attempt.session())
             .await
             .ok_or(PrivateOriginalError::Unavailable)?;
-        machine
+        observe!(16);
+        let observed = machine
             .with_admitted_original(
                 &registration,
                 &attachment,
                 &actor.executor_actor_identity(),
                 &input,
                 |admitted| {
-                    let control = self
-                        .custody_recovery
-                        .control
-                        .state
-                        .lock()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    if !control.selected || control.stopped {
-                        return Err(PrivateOriginalError::Unavailable);
-                    }
-                    let _writer = self
-                        .owner
-                        .try_source_writer()
-                        .map_err(cold_service_admission::writer_error)?;
-                    stamp
-                        .check_current()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    self.owner
-                        .recover_retained_custody(original, admitted)
-                        .map_err(cold_service_admission::writer_error)
+                    observe!(17);
+                    // The control lock, then the shared publication: the
+                    // whole publication waits inside the historical
+                    // admission callback.
+                    crate::no_wait::wait_at("custody_recovery.cold_publish", || {
+                        let _control = self
+                            .custody_recovery
+                            .control
+                            .state
+                            .lock()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        observe!(18);
+                        let readiness = self.custody_recovery.control.readiness();
+                        if !readiness.selected() || readiness.stopped() {
+                            return Err(PrivateOriginalError::Unavailable);
+                        }
+                        observe!(19);
+                        let _writer = self
+                            .owner
+                            .try_source_writer()
+                            .map_err(cold_service_admission::writer_error)?;
+                        observe!(20);
+                        stamp
+                            .check_current()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        observe!(21);
+                        self.owner
+                            .recover_retained_custody(original, admitted)
+                            .map_err(cold_service_admission::writer_error)
+                    })
                 },
             )
-            .await
-            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .await;
+        // The native callback has returned and released its guards. Preserve
+        // its closed refusal before the existing Unavailable projection.
+        #[cfg(feature = "test-support")]
+        if let Err(error) = &observed {
+            use meerkat_runtime::meerkat_machine::AdmittedOriginalRefusal;
+            observe!(match error {
+                AdmittedOriginalRefusal::Unavailable => 100,
+                AdmittedOriginalRefusal::NotAdmitted => 101,
+                AdmittedOriginalRefusal::Conflict => 102,
+            });
+        }
+        observed.map_err(|_| PrivateOriginalError::Unavailable)?
     }
 
     fn cold_original(&self, row: &StoredRecord) -> Result<SourceRecord, PrivateOriginalError> {

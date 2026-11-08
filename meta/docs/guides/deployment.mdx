@@ -122,7 +122,8 @@ none was declared) and TypeScript as `rustHttpPublicBaseUrl`.
 An open console (sign-in off) answers only requests whose `Host` names a
 loopback name, the listen address or the host of `http_public_base_url`;
 any other host gets 403 `host_not_served`. The plain health check
-(`/healthz`) answers any host; its JSON summary, which names members, answers
+(`/healthz`) answers any host; its JSON summary, which describes the
+runtime's health, answers
 only the hosts above. Declare `http_public_base_url` when a proxy or another
 name fronts an open console.
 
@@ -300,23 +301,38 @@ that store:
   journal's head: side effects an earlier release still owed when it stopped
   (it kept them in memory) are not run.
 
-A compaction a dormant member still owed is distilled only when one of
-Meta's verbs ends its session. A delete distills the discards it settles in
-Core at once; a reset, a role move or the roster's unlisting keeps them in
-process until the retirement's side effects run. When Core's settle answers
-no discards, those side effects read the compaction's discards from the
-session's memory instead. When the settle fails, they read them there once
-Core ended the session, which publishes them only for a reset, a role move
-or a delete, and only when Core's own settle of the session it leaves
-succeeds; the roster's unlisting leaves them owed in Core for the session's
-next settle or wake. A harvest that fails is recorded
-(`lifecycle_effect_failed`, effect `compaction_harvest`) and attempted again
-through that read, bounded like the other side effects, and its record goes
-once that read harvested the discards. A step Core refuses keeps its
-session, and harvests what of the compaction is already published. A kill
-before the side effects ran leaves the discards searchable in the old
-session's memory but never distilled. A rotation a host starts directly on
-the mob finalizes the projection without distilling its discards.
+A retirement that distills the session it ends, or drops its memory scope,
+first harvests the compactions that session holds: a delete, a reset, a
+role move, the roster's unlisting, and a rotation a host starts directly on
+the mob. Each of Meta's verbs settles in Core a compaction projection the
+session still owes before it asks Core to end the session, and hands the
+batch Core answered to those side effects. Without one (the settle answered
+no discards, failed, or met a session Core hosts live), they read the
+compactions the session's memory holds. Core's rotation onto a fresh
+session settles the session it leaves after its archive and publishes there
+what it still owed, when that settle succeeds; the roster's unlisting is
+not a rotation, so a batch its own settle could not publish stays owed in
+Core for the session's next settle or wake. A harvest that fails is
+recorded (`lifecycle_effect_failed`, effect `compaction_harvest`) and
+attempted again through that read, bounded like the other side effects,
+and its record goes once that read harvested the discards. A step Core
+refuses keeps its session, and harvests what of the compaction is already
+published (a delete before it answers the refusal, since the retry drops
+the session's memory scope); so does a roster declaration whose unlisting
+Core does not carry out (it refuses the declaration, or its seal fails to
+retire the member): it hands the batch it settled back at once and records
+no unlisted intent.
+
+The read of the session's memory costs a distiller run at each retirement
+of a session that ever compacted, even when nothing is owed. The
+distiller's budget is 12 runs an hour by default (`runtime_options.agent_memory.distiller.runs_per_hour`),
+one run at a time, and a run the budget does not admit is refused, not
+queued: a burst of such retirements (a roster pass that unlists several
+identities, resets across a mob) can crowd out the retirements' transcript
+distillations, and a read the budget refuses records a failed compaction
+harvest (`lifecycle_effect_failed`, effect `compaction_harvest`). When many
+compacted members retire at once, raise the budget or space the retirements
+out.
 
 What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)

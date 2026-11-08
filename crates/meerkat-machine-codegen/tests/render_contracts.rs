@@ -1022,10 +1022,14 @@ fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
 /// MobMachine's arms of a host's adoption over a declared identity entry
 /// (0.9.11: the archive terminals that end the entry, the takeover's
 /// verdicts and the replay of its mark) are emitted on the machine's late
-/// tail after the legacy adoption's arms, so no `TransitionId`
-/// discriminant 0.9.10 renders moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
-/// its last variant, keeps index 1902. The build preparation retry's arms
-/// follow them directly
+/// tail after the legacy adoption's arms. 0.9.11 removes the two arms that
+/// blocked a placed member's instruction delivery
+/// (`PrepareMemberInstructionDeliveryPlacedRunning` and
+/// `PrepareMemberInstructionDeliveryPlacedStopped`, declared Breaking),
+/// which moves every later 0.9.10 `TransitionId` variant down by two:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, 0.9.10's last variant, is
+/// at index 1900, and this pin guards that order from here on. The build
+/// preparation retry's arms follow them directly
 /// (`mob_build_preparation_retry_arms_precede_the_seal_refusal`).
 #[test]
 fn mob_host_adoption_arms_follow_every_earlier_variant() {
@@ -1037,7 +1041,7 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
             .position(|variant| variant == name)
             .expect("the named variant is a rendered TransitionId variant")
     };
-    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
     let host_adoption_arms = [
         "ObserveMemberRetirementArchivedLiveHostAdopted",
         "ObserveMemberRetirementArchivedRetiredHostAdopted",
@@ -1054,7 +1058,7 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
     ];
     for arm in host_adoption_arms {
         assert!(
-            index(arm) > 1902,
+            index(arm) > 1900,
             "{arm} follows every variant 0.9.10 renders"
         );
     }
@@ -1064,8 +1068,15 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         host_adoption_arms.to_vec(),
         "the host adoption's arms are the TransitionId variants directly before the build preparation retry's"
     );
+    // The refusals of external work to an identity entry (0.9.11) are the
+    // last TransitionId variants.
+    assert_eq!(
+        variants[variants.len() - MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len()..].to_vec(),
+        MOB_IDENTITY_MEMBER_REFUSAL_ARMS.to_vec(),
+        "the identity member refusals of external work are the last TransitionId variants"
+    );
     assert!(
-        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1902,
+        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1900,
         "the legacy adoption's arms follow every variant 0.9.10 renders"
     );
 }
@@ -1081,12 +1092,19 @@ const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
     "ResolveMemberBuildPreparationCompleted",
 ];
 
+/// MobMachine's refusals of external work to an identity entry and to a
+/// name reserved unreadable (0.9.11): the last `TransitionId` variants.
+const MOB_IDENTITY_MEMBER_REFUSAL_ARMS: [&str; 2] = [
+    "ResolveSubmitWorkRejectionIdentityMember",
+    "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+];
+
 /// The build preparation retry's arms are contiguous, after every variant
 /// 0.9.10 renders, and the seal's refusal (`SealDeclaredRosterRefused`,
 /// 0.9.11) is appended after them: the tail pins each arm group by its
 /// neighbours, not by the end of the enum, which later groups extend. Every
 /// arm it names follows `UnlistIdentityEntryMobNotRunningDestroyed`, the
-/// last variant 0.9.10 published, which keeps index 1902.
+/// last variant 0.9.10 published, which is at index 1900.
 #[test]
 fn mob_build_preparation_retry_arms_precede_the_seal_refusal() {
     let rendered = render_machine_kernel_module(&mob_machine());
@@ -1097,13 +1115,13 @@ fn mob_build_preparation_retry_arms_precede_the_seal_refusal() {
             .position(|variant| variant == name)
             .expect("the named variant is a rendered TransitionId variant")
     };
-    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
     for arm in MOB_BUILD_PREPARATION_RETRY_ARMS
         .into_iter()
         .chain(["SealDeclaredRosterRefused"])
     {
         assert!(
-            index(arm) > 1902,
+            index(arm) > 1900,
             "{arm} follows every variant 0.9.10 renders"
         );
     }
@@ -1153,10 +1171,9 @@ fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
 
 /// MobMachine's stale respawn abandonment arm (0.9.11) is declared beside
 /// its siblings in the catalog and emitted on the late tail, after every
-/// variant 0.9.10 published and after the arms 0.9.11 appended before it,
-/// so no `TransitionId` discriminant moves:
+/// variant 0.9.10 published and after the arms 0.9.11 appended before it:
 /// `UnlistIdentityEntryMobNotRunningDestroyed`, the variant 0.9.10 published
-/// last, keeps index 1902.
+/// last, is at index 1900.
 #[test]
 fn mob_stale_abandonment_arm_follows_every_published_variant() {
     let rendered = render_machine_kernel_module(&mob_machine());
@@ -1167,7 +1184,7 @@ fn mob_stale_abandonment_arm_follows_every_published_variant() {
             .position(|variant| variant == name)
             .expect("the named variant is a rendered TransitionId variant")
     };
-    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
     let stale = index("ObserveRespawnTopologyAbandonedStaleEndedSuccessor");
     for earlier in [
         "UnlistIdentityEntryMobNotRunningDestroyed",
@@ -1182,9 +1199,9 @@ fn mob_stale_abandonment_arm_follows_every_published_variant() {
     }
 }
 /// MobMachine's member dispatch admission arms (0.9.11) sit on the machine's
-/// late tail after every variant 0.9.10 published, so no published
-/// `TransitionId` discriminant moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
-/// the variant 0.9.10 published last, keeps index 1902. The arms are
+/// late tail after every variant 0.9.10 published:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, the variant 0.9.10 published
+/// last, is at index 1900. The arms are
 /// rendered as one block, each verdict in every phase, in this order, and
 /// the record of a member incarnation's lineage follows them.
 #[test]
@@ -1198,7 +1215,7 @@ fn mob_dispatch_admission_arms_follow_every_published_variant() {
             .expect("the named variant is a rendered TransitionId variant")
     };
     // The last TransitionId variant 0.9.10 published.
-    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
     let arms = ["AskHost", "Inherit", "Refused", "NoneRequired"]
         .into_iter()
         .flat_map(|verdict| {
@@ -1214,7 +1231,7 @@ fn mob_dispatch_admission_arms_follow_every_published_variant() {
         .collect::<Vec<_>>();
     let first = index(&arms[0]);
     assert!(
-        first > 1902,
+        first > 1900,
         "`{}` must follow every variant 0.9.10 published",
         arms[0]
     );

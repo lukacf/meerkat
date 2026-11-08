@@ -57326,8 +57326,18 @@ function renderHistoryUserEntry(frame2, entryId, blobBaseUrl, textMode = "markdo
     ...origin ? { origin } : {}
   };
 }
+function hasDeliveryRecord(frame2, field) {
+  const data = frame2.data;
+  if (!data || typeof data !== "object") return false;
+  const record10 = data[field];
+  return Boolean(record10) && typeof record10 === "object";
+}
 function renderUserDeliveryFailureEntry(frame2, entryId) {
-  if (frame2.event !== "user_input" || frame2.status !== "delivery_failed") return null;
+  if (frame2.event !== "user_input") return null;
+  const failed = frame2.status === "delivery_failed";
+  const held = frame2.status === "accepted" && hasDeliveryRecord(frame2, "delivery_hold");
+  const unresolved = frame2.status === "submitted" && hasDeliveryRecord(frame2, "delivery_unresolved");
+  if (!failed && !held && !unresolved) return null;
   return {
     kind: "message",
     id: "".concat(entryId, ":delivery-status"),
@@ -57335,7 +57345,7 @@ function renderUserDeliveryFailureEntry(frame2, entryId) {
     variant: "meta",
     createdAt: isoFromTimestampMs(frame2.timestampMs),
     ...frame2.interactionId ? { interactionId: frame2.interactionId } : {},
-    text: "Message delivery failed.",
+    text: failed ? "Message delivery failed." : unresolved ? "Message may have run. Check before sending it again." : "Message held: nothing was delivered yet. Check before sending it again.",
     runtimeEvent: runtimeEventFromFrame(frame2.event, {
       status: frame2.status,
       input_frame_id: frame2.id,
@@ -59646,6 +59656,9 @@ function lastActivityField(...values) {
   }
   return {};
 }
+function sideChatAudienceField(value) {
+  return value === "private_to_you" || value === "private_to_creator" || value === "shared" ? { side_chat_audience: value } : {};
+}
 function normalizeAgents(experience, modules) {
   const identityStatusRows = Array.isArray(experience?.identity_status?.rows) ? experience.identity_status.rows : [];
   const normalizedIdentityStatusRows = identityStatusRows.map((entry) => normalizeIdentityStatusRow(entry)).filter((entry) => entry !== null);
@@ -59686,6 +59699,7 @@ function normalizeAgents(experience, modules) {
         ...entry.addressable !== void 0 ? { addressable: Boolean(entry.addressable) } : statusRow?.addressability ? { addressable: statusRow.addressability === "addressable" } : {},
         ...entry.affordances !== void 0 && { affordances: entry.affordances },
         ...typeof entry.side_chat_of === "string" && entry.side_chat_of.trim() ? { side_chat_of: entry.side_chat_of.trim() } : {},
+        ...sideChatAudienceField(entry.side_chat_audience),
         ...lastActivityField(entry.last_activity_ms, statusRow?.last_activity_ms),
         model_capabilities: modelCapabilities,
         ...watchFields,
@@ -62490,6 +62504,18 @@ function nonEmptyString2(value) {
 }
 function sideChatSource(agent) {
   return nonEmptyString2(agent?.side_chat_of);
+}
+function sideChatAudienceText(agent, sourceLabel2) {
+  switch (agent?.side_chat_audience) {
+    case "private_to_you":
+      return "Private: only you and access admins can see it.";
+    case "private_to_creator":
+      return "Private to the person who opened it. You see it as an access admin.";
+    case "shared":
+      return "Shared: everyone who can see ".concat(sourceLabel2, " can see it.");
+    default:
+      return null;
+  }
 }
 function sideChatAlias(sourceIdentity, nonce) {
   let base = sourceIdentity.trim();
@@ -88997,6 +89023,7 @@ function ChatPane({
       publishDraft();
     }
   };
+  const sideChatAudience = sideChatOfLabel ? sideChatAudienceText(agent, sideChatOfLabel) : null;
   return /* @__PURE__ */ (0, import_jsx_runtime123.jsx)(ConversationPresentationProvider, { labels: presentationLabels, viewportKey, autoFold: scroll.mode === "following-end", children: /* @__PURE__ */ (0, import_jsx_runtime123.jsx)(ConversationBlobReaderProvider, { reader: blobReader, children: /* @__PURE__ */ (0, import_jsx_runtime123.jsxs)(
     "div",
     {
@@ -89038,7 +89065,11 @@ function ChatPane({
           /* @__PURE__ */ (0, import_jsx_runtime123.jsxs)("span", { className: "conv__notice-text", children: [
             "Side chat of ",
             /* @__PURE__ */ (0, import_jsx_runtime123.jsx)("strong", { children: /* @__PURE__ */ (0, import_jsx_runtime123.jsx)(SideChatSourceName, { id: agent?.side_chat_of, label: sideChatOfLabel }) }),
-            ". It started from the agent's conversation; the agent itself is unchanged."
+            ". It started from the agent's conversation; the agent itself is unchanged.",
+            sideChatAudience ? /* @__PURE__ */ (0, import_jsx_runtime123.jsxs)(import_jsx_runtime123.Fragment, { children: [
+              " ",
+              /* @__PURE__ */ (0, import_jsx_runtime123.jsx)("span", { "data-testid": "side-chat-audience:".concat(identity), children: sideChatAudience })
+            ] }) : null
           ] }),
           onCloseSideChat ? /* @__PURE__ */ (0, import_jsx_runtime123.jsx)(
             Button,

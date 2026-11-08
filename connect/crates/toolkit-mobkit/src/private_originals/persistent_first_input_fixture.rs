@@ -97,6 +97,29 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         (fixture, store, continuation.unwrap())
     }
 
+    /// Keep the real restored member seated without the fixture's controller
+    /// pin read, which would otherwise require an already materialized actor.
+    pub(crate) async fn reopen_seated_durable_continuation(
+        retained: DurableFirstInput,
+    ) -> (
+        Self,
+        Arc<dyn meerkat_runtime::RuntimeStore>,
+        Arc<crate::installed_host::acquisition::InstalledNativeContinuation>,
+    ) {
+        let (fixture, store, _, continuation) = Self::construct_persistent_reopen_mode(
+            true,
+            Some(retained),
+            None,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await;
+        (fixture, store, continuation.unwrap())
+    }
+
     pub(crate) async fn reopen_durable_continuation_with_source(
         retained: DurableFirstInput,
         decorate: crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
@@ -320,6 +343,40 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         Option<DurableFirstInput>,
         Option<Arc<crate::installed_host::acquisition::InstalledNativeContinuation>>,
     ) {
+        Self::construct_persistent_reopen_mode(
+            durable,
+            retained,
+            decorate,
+            human_policy,
+            console_human,
+            observations,
+            source_store,
+            true,
+        )
+        .await
+    }
+
+    async fn construct_persistent_reopen_mode(
+        durable: bool,
+        retained: Option<DurableFirstInput>,
+        decorate: Option<AttachmentModelDecorator>,
+        human_policy: bool,
+        console_human: Option<meerkat_core::PrincipalRef>,
+        observations: Option<NativeIngressObservations>,
+        source_store: Option<
+            crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
+        >,
+        publish_controller: bool,
+    ) -> (
+        Self,
+        Arc<dyn meerkat_runtime::RuntimeStore>,
+        Option<DurableFirstInput>,
+        Option<Arc<crate::installed_host::acquisition::InstalledNativeContinuation>>,
+    ) {
+        assert!(
+            publish_controller || (durable && retained.is_some()),
+            "seat-only mode requires an actual durable reopen"
+        );
         let mut opened = None;
         let mut owners = None;
         let built = std::panic::AssertUnwindSafe(tokio::time::timeout(
@@ -334,6 +391,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 console_human,
                 observations,
                 source_store,
+                publish_controller,
             )),
         ))
         .catch_unwind()
@@ -383,6 +441,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         source_store: Option<
             crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
         >,
+        publish_controller: bool,
     ) -> (
         Self,
         Arc<dyn meerkat_runtime::RuntimeStore>,
@@ -729,15 +788,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             }
             // Each activation publishes the current actor's actual pin. No
             // controller witness is retained across the joined close/reopen.
-            // The roster pass seats the identity without building it, so the
-            // member is woken first for its actor to exist.
-            native
-                .identity_runtime()
-                .unwrap()
-                .materialize(&identity)
-                .await
-                .unwrap();
-            Self::publish_fixture_controller(&service, &machine, &session).await;
+            if publish_controller {
+                let scope = native
+                    .identity_runtime()
+                    .unwrap()
+                    .materialize_tracked(&identity)
+                    .await
+                    .unwrap()
+                    .expect("the live fixture requires a session-backed member");
+                assert_eq!(
+                    scope.session_id(),
+                    &session,
+                    "fixture materialization keeps the selected session"
+                );
+                Self::publish_fixture_controller(&service, &machine, &session).await;
+            }
             session
         } else {
             native.attach_identity_first_context(context);

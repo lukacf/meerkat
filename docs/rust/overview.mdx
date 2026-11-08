@@ -479,6 +479,10 @@ match event {
     // The check that consumed a host's compaction request compacted nothing
     AgentEvent::RequestedCompactionSkipped { run_id, reason } => {}
 
+    // Operator instructions: an applied entry (a run start's delta or a
+    // compaction's snapshot), now in effect for the live session
+    AgentEvent::OperatorInstructionsApplied { session_id, entry_sequence, kind, run_id, active, changes } => {}
+
     // Budget
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}
 

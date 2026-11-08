@@ -5,6 +5,7 @@ use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_core::ControllerModelFacts;
 use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
 use meerkat_toolkit::host_lifetime::policy::CompiledLocalPolicy;
+use toolkit_package::Id;
 
 pub(crate) struct Host {
     pub selection: HostBootstrapSelection,
@@ -12,12 +13,37 @@ pub(crate) struct Host {
     pub source_path: PathBuf,
     pub source_scope: StoreScope,
     pub tool_policy_registry: Arc<meerkat_core::ToolConsequencePolicyRegistry>,
+    pub tool_policy: PreparedInstalledToolPolicy,
     pub directory: Arc<tempfile::TempDir>,
     pub lifetime: Arc<NativeHostLifetime>,
     pub originals: Arc<PrivateOriginals>,
     pub configuration: NativeGrantWorkConfiguration,
+    policy: Arc<InstalledApplicationPolicy>,
     pub registration: Arc<dyn MemberRuntimeRegistrationHook>,
     pub acquisition_helper: Option<acquisition::InstalledSetupSelection>,
+}
+
+impl Host {
+    /// Test-only fixture selection before this configuration is handed to the
+    /// persistent service. All installed source, native and lifetime owners
+    /// stay identical; this optional floor can only raise review.
+    pub(crate) fn select_fixture_review_before_service(
+        &mut self,
+        review: Arc<dyn InstalledOperationReviewPolicy>,
+    ) {
+        assert!(self.policy.operation_review_policy.is_none());
+        let policy = Arc::new(InstalledApplicationPolicy {
+            operation_review_policy: Some(review),
+            originals: self.policy.originals.clone(),
+            lifetime: self.policy.lifetime.clone(),
+            native: self.policy.native.clone(),
+            selected: self.policy.selected.clone(),
+        });
+        assert!(Arc::ptr_eq(&policy.originals, &self.originals));
+        assert!(Arc::ptr_eq(&policy.lifetime, &self.lifetime));
+        self.configuration = self.originals.configuration(policy.clone());
+        self.policy = policy;
+    }
 }
 
 pub(crate) async fn open_with_probe(
@@ -338,7 +364,7 @@ async fn open_selected_source_with_profile(
     catalog_probe: bool,
     warm_profile: Option<WarmHelperProfile>,
 ) -> Host {
-    let (directory, selection, acquisition_helper, prepare_source) = provision_selected_source(
+    open_selected_source_with_workflow_members(
         facts,
         select_controller,
         probe,
@@ -356,18 +382,392 @@ async fn open_selected_source_with_profile(
         human_policy,
         catalog_probe,
         warm_profile,
-    );
-    restore_selected(
-        directory,
-        selection,
-        acquisition_helper,
-        prepare_source,
-        human_policy,
+        false,
     )
     .await
 }
 
-fn provision_selected_source(
+/// The dedicated path retains the actual public installed composition until
+/// its caller has reserved the selected member. No lifetime is prebound here.
+pub(crate) struct DedicatedHost {
+    pub selection: HostBootstrapSelection,
+    pub store: Arc<SqliteStore>,
+    pub source_path: PathBuf,
+    pub source_scope: StoreScope,
+    pub directory: Arc<tempfile::TempDir>,
+    pub lifetime: Arc<NativeHostLifetime>,
+    pub originals: Arc<PrivateOriginals>,
+    pub installed: Option<InstalledToolkitHost>,
+}
+
+impl DedicatedHost {
+    /// Adversarial composition over the same real source and selected artifacts.
+    /// Only this losing host uses the fixture's private artifact access. The
+    /// accepted host below exercises public open/compose without prebinding.
+    pub fn competing_gateway(
+        &self,
+        lifetime: Arc<NativeHostLifetime>,
+        closed: PrivateHostClosed,
+    ) -> ToolkitGatewayHost {
+        let installed = self.installed.as_ref().unwrap();
+        let policy = Arc::new(installed.final_policy(lifetime.clone()));
+        let registration = Arc::new(InstalledMemberRegistration {
+            originals: installed.originals.clone(),
+            owner: lifetime.clone(),
+            native: installed.native.clone(),
+            surfaces: installed.surfaces.clone(),
+            tool_policy: installed.tool_policy.clone(),
+            update_associations: installed.update_associations.clone(),
+        });
+        ToolkitGatewayHost::with_private_originals(
+            lifetime,
+            closed,
+            self.originals.clone(),
+            policy,
+            registration,
+        )
+        .with_installed_tool_policy(installed.tool_policy.registry())
+    }
+}
+
+pub(crate) async fn open_for_dedicated_workflow(facts: &ControllerModelFacts) -> DedicatedHost {
+    let (directory, selection, helper, prepare) = provision_selected_source_with_workflow_members(
+        facts, true, true, true, false, None, false, None, false, false, None, None, false, false,
+        false, false, None, true,
+    );
+    assert!(helper.is_none() && prepare.is_none());
+    reopen_for_dedicated_workflow(directory, selection).await
+}
+
+pub(crate) async fn open_for_operational_dedicated_workflow(
+    facts: &ControllerModelFacts,
+) -> DedicatedHost {
+    let (directory, mut selection, helper, prepare) =
+        provision_selected_source_with_workflow_members(
+            facts, true, true, true, false, None, false, None, false, false, None, None, false,
+            false, false, true, None, true,
+        );
+    assert!(helper.is_none() && prepare.is_none());
+    let mut local: CompiledLocalPolicy =
+        serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
+    local.native_host.as_mut().unwrap().member_classes = vec![
+        meerkat_toolkit::host_lifetime::policy::CompiledMemberClass {
+            id: Id::new("operational-parent-class").unwrap(),
+            purpose:
+                meerkat_toolkit::host_lifetime::policy::CompiledMemberClassPurpose::SharedWorkflow,
+            profile: "worker".into(),
+            factory: Id::new("host:planning").unwrap(),
+            callback_account: None,
+            callbacks: vec![],
+            grants: [
+                "setup_state",
+                "tool_catalog_load",
+                "tool_catalog_search",
+                "toolkit_request_public_service",
+            ]
+            .into_iter()
+            .map(|name| meerkat_core::CompiledMemberToolGrant {
+                tool_name: name.into(),
+                action: meerkat_core::CompiledMemberToolAction::Invoke,
+                consequence: meerkat_core::CompiledToolConsequence::R2,
+            })
+            .collect(),
+        },
+    ];
+    super::tests::replace_local(&mut selection, &local);
+    reopen_for_dedicated_workflow(directory, selection).await
+}
+
+pub(crate) async fn open_for_configured_dedicated_workflow(
+    facts: &ControllerModelFacts,
+) -> DedicatedHost {
+    let (directory, selection, helper, prepare) = provision_selected_source_with_workflow_members(
+        facts,
+        true,
+        true,
+        true,
+        false,
+        None,
+        false,
+        None,
+        true,
+        false,
+        None,
+        Some(super::tests::principal("workflow-human")),
+        false,
+        false,
+        false,
+        false,
+        None,
+        true,
+    );
+    assert!(helper.is_some() && prepare.is_none());
+    reopen_for_dedicated_workflow(directory, selection).await
+}
+
+/// Explicit unit-test composition: the selected surface is the same actual
+/// enrolled Find leaf used by the persistent native workflow fixture.
+pub(crate) async fn open_for_reviewed_dedicated_workflow(
+    facts: &ControllerModelFacts,
+    acquisition: Arc<dyn meerkat_core::AgentToolDispatcher>,
+) -> (DedicatedHost, acquisition::InstalledSetupSelection) {
+    let (directory, selection, helper, prepare) = provision_selected_source_with_workflow_members(
+        facts,
+        true,
+        false,
+        true,
+        false,
+        Some(acquisition),
+        false,
+        None,
+        true,
+        false,
+        None,
+        Some(super::tests::principal("workflow-human")),
+        false,
+        false,
+        false,
+        false,
+        None,
+        true,
+    );
+    assert!(prepare.is_none());
+    (
+        reopen_for_dedicated_workflow(directory, selection).await,
+        helper.unwrap(),
+    )
+}
+
+/// Fresh explicit shared profile through the real stopped-owner producer.
+/// The two real native MCP roots are component-test inputs, not live services.
+pub(crate) async fn open_for_effect_dedicated_workflow(
+    facts: &ControllerModelFacts,
+) -> DedicatedHost {
+    open_for_effect_dedicated_workflow_selected(facts, false, false).await
+}
+
+/// Explicit public-service selection only for the workflow origin regression.
+pub(crate) async fn open_for_public_dedicated_workflow(
+    facts: &ControllerModelFacts,
+) -> DedicatedHost {
+    open_for_effect_dedicated_workflow_selected(facts, true, false).await
+}
+
+/// Case20 keeps the public waiter but selects a finite class for P's genuine
+/// operation ceiling before any original is admitted.
+pub(crate) async fn open_for_operational_public_dedicated_workflow(
+    facts: &ControllerModelFacts,
+) -> DedicatedHost {
+    open_for_effect_dedicated_workflow_selected(facts, true, true).await
+}
+
+async fn open_for_effect_dedicated_workflow_selected(
+    facts: &ControllerModelFacts,
+    public: bool,
+    operational_parent: bool,
+) -> DedicatedHost {
+    use meerkat_authorization_contracts::work_association::{
+        GrantTarget, TargetGrantLineage, WorkAuthorityBasis,
+    };
+    let (directory, mut selection, _, _) = provision_selected_source_with_workflow_members(
+        facts,
+        true,
+        true,
+        true,
+        false,
+        None,
+        false,
+        None,
+        false,
+        false,
+        None,
+        Some(super::tests::principal("workflow-human")),
+        false,
+        false,
+        false,
+        false,
+        None,
+        true,
+    );
+    // Select the same actual operator that initialized these durable grants.
+    // The base controller-only fixture deliberately has no remote setup owner.
+    let mut local: CompiledLocalPolicy =
+        serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
+    let native = local.native_host.as_mut().unwrap();
+    let operator =
+        meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&native.realm)
+            .unwrap()
+            .operator;
+    assert_eq!(
+        native.routes[0].controller_parent.as_ref().unwrap()[0].root_authority,
+        operator
+    );
+    native.remote_operator = Some(operator);
+    if operational_parent {
+        assert!(public);
+        assert!(
+            !native
+                .member_classes
+                .iter()
+                .any(|class| class.id.as_str() == "operational-parent-class")
+        );
+        native.member_classes.push(meerkat_toolkit::host_lifetime::policy::CompiledMemberClass {
+            id: Id::new("operational-parent-class").unwrap(),
+            purpose: meerkat_toolkit::host_lifetime::policy::CompiledMemberClassPurpose::SharedWorkflow,
+            profile: "worker".into(), factory: Id::new("host:planning").unwrap(),
+            callback_account: None, callbacks: vec![],
+            grants: ["setup_state", "tool_catalog_load", "tool_catalog_search", "toolkit_request_public_service"]
+                .into_iter().map(|name| meerkat_core::CompiledMemberToolGrant {
+                    tool_name: name.into(), action: meerkat_core::CompiledMemberToolAction::Invoke,
+                    consequence: meerkat_core::CompiledToolConsequence::R2,
+                }).collect(),
+        });
+    }
+    super::tests::replace_local(&mut selection, &local);
+    let capability = NativeHostLifetime::with_candidate_installation(&selection, |policy| {
+        let native = policy.native_host.as_ref().unwrap();
+        let operator = native.remote_operator.as_ref().unwrap();
+        let directory = state_directory(&selection, native, NativeOwnerStartup::Restore)?;
+        let (source, originals) = operator_setup::open_owner_pair_in(
+            &directory,
+            &native.ingress_domain,
+            Some(operator),
+            operator_setup::OperatorOwnerStartup::Restore,
+            false,
+        )?;
+        let member = &native.members[2];
+        let route = &native.routes[2];
+        let mut targets = Vec::new();
+        let mut requests = Vec::new();
+        for server in ["restore-read-a", "restore-read-b"] {
+            let parent = source
+                .grants()
+                .issue_root(
+                    operator,
+                    EvidenceId::new(format!("helper-{server}")).unwrap(),
+                    route.logical_executor.clone(),
+                    route.represented_subject.clone(),
+                    application_operations::mcp_access_restrictions(
+                        &native.grant_administrator,
+                        &route.logical_executor,
+                        &member.audience,
+                        server,
+                        ["read"],
+                        &meerkat_core::mcp_config::McpConnectorApproval::NoConnector,
+                    ),
+                )
+                .unwrap();
+            let target = GrantTarget::McpServer {
+                server: server.into(),
+            };
+            targets.push(TargetGrantLineage {
+                target: target.clone(),
+                lineage: vec![parent],
+            });
+            requests.push(operator_setup::SetupTargetRequest {
+                target: Some(target),
+                issuance_id: EvidenceId::new(format!("waiter-{server}")).unwrap(),
+            });
+        }
+        let mut helper = acquisition::InstalledSetupSelection {
+            catalog_capability: None,
+            report_capability: None,
+            member: member.member.clone(),
+            ingress_actor: native.grant_administrator.clone(),
+            logical_executor: route.logical_executor.clone(),
+            represented_subject: route.represented_subject.clone(),
+            controller_parent: route.controller_parent.clone().unwrap(),
+            operation_basis: WorkAuthorityBasis::TargetedGrantLineages {
+                base: None,
+                targets,
+            },
+        };
+        if public {
+            helper.report_capability = Some(operator_setup::configured_report::issue_or_recover(
+                &source,
+                &native.grant_administrator,
+                operator,
+                &helper,
+                &operator_setup::HelperReportCapabilityRequest {
+                    member: member.member.clone(),
+                    issuance_id: EvidenceId::new("workflow-origin-report-parent").unwrap(),
+                    account_issuance_id: None,
+                    public_issuance_id: Some(
+                        EvidenceId::new("workflow-origin-public-parent").unwrap(),
+                    ),
+                },
+                operator_setup::configured_report::report_parent(
+                    &native.grant_administrator,
+                    &route.logical_executor,
+                    &member.audience,
+                ),
+                &member.audience,
+            )?);
+            requests.push(operator_setup::SetupTargetRequest {
+                target: Some(acquisition::ConfiguredHelperReportCapability::public_target()),
+                issuance_id: EvidenceId::new("waiter-public-service").unwrap(),
+            });
+            requests.sort_by(|left, right| left.target.cmp(&right.target));
+        }
+        let result = operator_setup::configured_setup::configure_shared_prepared(
+            &native.preparation(),
+            &policy.channels,
+            &source,
+            operator,
+            &operator_setup::SharedWorkflowSetupRequest {
+                member: native.members[0].member.clone(),
+                route: native.routes[0].id.clone(),
+                issuance_id: EvidenceId::new("effect-configured-acquisition-parent").unwrap(),
+                helper: member.member.clone(),
+                targets: requests,
+            },
+            &helper,
+        );
+        drop(originals);
+        drop(source);
+        result
+    })
+    .unwrap();
+    let mut local: meerkat_toolkit::host_lifetime::policy::CompiledLocalPolicy =
+        serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
+    local.native_host.as_mut().unwrap().members[0].setup_capability = Some(capability);
+    super::tests::replace_local(&mut selection, &local);
+    reopen_for_dedicated_workflow(directory, selection).await
+}
+
+pub(crate) async fn reopen_for_dedicated_workflow(
+    directory: Arc<tempfile::TempDir>,
+    selection: HostBootstrapSelection,
+) -> DedicatedHost {
+    let (lifetime, installed) =
+        InstalledToolkitHost::open(selection.clone(), NativeOwnerStartup::Restore)
+            .await
+            .unwrap();
+    let lifetime = Arc::new(lifetime);
+    let source_path = state_directory(
+        &selection,
+        lifetime.selected_policy().native_host.as_ref().unwrap(),
+        NativeOwnerStartup::Restore,
+    )
+    .unwrap()
+    .join("originals.sqlite3");
+    DedicatedHost {
+        selection,
+        store: installed.store.clone(),
+        source_path,
+        source_scope: installed.source_scope.clone(),
+        directory,
+        lifetime,
+        originals: installed.originals(),
+        installed: Some(installed),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test fixture; each argument selects one fixture variant"
+)]
+async fn open_selected_source_with_workflow_members(
     facts: &ControllerModelFacts,
     select_controller: bool,
     probe: bool,
@@ -385,6 +785,62 @@ fn provision_selected_source(
     human_policy: bool,
     catalog_probe: bool,
     warm_profile: Option<WarmHelperProfile>,
+    workflow_members: bool,
+) -> Host {
+    let (directory, selection, acquisition_helper, prepare_source) =
+        provision_selected_source_with_workflow_members(
+            facts,
+            select_controller,
+            probe,
+            local_operator,
+            source_subject,
+            acquisition,
+            helper,
+            report,
+            configured_setup,
+            configured_report,
+            prepare_source,
+            console_human,
+            task_parent_administration,
+            private_helper_entry,
+            human_policy,
+            catalog_probe,
+            warm_profile,
+            workflow_members,
+        );
+    restore_selected(
+        directory,
+        selection,
+        acquisition_helper,
+        prepare_source,
+        human_policy,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test fixture; each argument selects one fixture variant"
+)]
+fn provision_selected_source_with_workflow_members(
+    facts: &ControllerModelFacts,
+    select_controller: bool,
+    probe: bool,
+    local_operator: bool,
+    source_subject: bool,
+    acquisition: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    helper: bool,
+    report: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    configured_setup: bool,
+    configured_report: bool,
+    prepare_source: Option<PrepareOriginalSource>,
+    console_human: Option<meerkat_core::PrincipalRef>,
+    task_parent_administration: bool,
+    private_helper_entry: bool,
+    human_policy: bool,
+    catalog_probe: bool,
+    warm_profile: Option<WarmHelperProfile>,
+    workflow_members: bool,
 ) -> (
     Arc<tempfile::TempDir>,
     HostBootstrapSelection,
@@ -522,8 +978,8 @@ fn provision_selected_source(
             Arc::new(meerkat_tools::CatalogControlVisibilityProvider::new()),
         );
         surface.extend(catalog.tools().iter().map(|tool| tool.identity()));
-    } else if !probe || human_policy {
-        // Plain, configured and exact human-policy fixtures compose native
+    } else if !probe || human_policy || catalog_probe {
+        // Plain, configured and exact catalog/human-policy fixtures compose native
         // catalog controls from their initially empty MCP router. Select the native
         // definitions in the artifact without granting operation authority.
         use meerkat_core::AgentToolDispatcher;
@@ -573,6 +1029,27 @@ fn provision_selected_source(
         canonical_json(&manifest).unwrap(),
     )
     .unwrap();
+    if workflow_members {
+        assert!(!helper && !human_policy && !configured_report);
+        for name in ["planning_parent", "planning_lead"] {
+            let mut member = native.members[0].clone();
+            member.member.member = name.into();
+            member.logical_owner = super::tests::principal(name);
+            let mut route = native.routes[0].clone();
+            route.id = Id::new(name).unwrap();
+            route.logical_executor = member.logical_owner.clone();
+            let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole {
+                member: target,
+                ..
+            } = &mut route.origin
+            else {
+                panic!("local fixture")
+            };
+            *target = member.member.clone();
+            native.members.push(member);
+            native.routes.push(route);
+        }
+    }
     if helper {
         let mut selected = native.members[0].clone();
         selected.member.member = HELPER.into();
@@ -599,7 +1076,7 @@ fn provision_selected_source(
         }
         native.members.push(selected);
     }
-    if helper || human_policy {
+    if helper || human_policy || workflow_members {
         // Only A may invoke the installed acquisition leaf at the application
         // policy layer. Its separate native setup authority is still required;
         // ordinary AA retains an independent controller-only helper. The separate
@@ -624,7 +1101,10 @@ fn provision_selected_source(
                                 action: meerkat_core::CompiledMemberToolAction::Invoke,
                                 consequence: meerkat_core::CompiledToolConsequence::R2,
                             }]
-                        } else if catalog_probe && member.member.member == HELPER {
+                        } else if catalog_probe
+                            && (member.member.member == HELPER
+                                || (workflow_members && member.member.member == "planning_lead"))
+                        {
                             ["tool_catalog_load", "tool_catalog_search"]
                                 .into_iter()
                                 .map(|name| meerkat_core::CompiledMemberToolGrant {
@@ -726,6 +1206,44 @@ fn provision_selected_source(
                 )
                 .unwrap();
             native.routes[0].controller_parent = Some(vec![parent]);
+        }
+        if workflow_members {
+            for index in 1..native.routes.len() {
+                let route = &mut native.routes[index];
+                let member = &native.members[index];
+                let parent = source
+                    .grants()
+                    .issue_root(
+                        &root,
+                        EvidenceId::new(format!("workflow-controller-parent-{index}")).unwrap(),
+                        native.grant_administrator.clone(),
+                        route.represented_subject.clone(),
+                        application_operations::parent_restrictions(
+                            application_operations::controller(
+                                &native.grant_administrator,
+                                &route.logical_executor,
+                                &member.audience,
+                                &facts.route_key(),
+                                application_operations::ControllerAction::Inference,
+                            ),
+                        ),
+                    )
+                    .unwrap();
+                route.controller_parent = Some(vec![parent]);
+            }
+            if configured_setup {
+                let member = &native.members[2];
+                let route = &native.routes[2];
+                acquisition_helper = Some(acquisition::InstalledSetupSelection {
+                    catalog_capability: None, report_capability: None,
+                    member: member.member.clone(), ingress_actor: native.grant_administrator.clone(),
+                    logical_executor: route.logical_executor.clone(), represented_subject: route.represented_subject.clone(),
+                    controller_parent: route.controller_parent.clone().unwrap(),
+                    operation_basis: meerkat_authorization_contracts::work_association::WorkAuthorityBasis::TargetedGrantLineages {
+                        base: None, targets: vec![],
+                    },
+                });
+            }
         }
         if helper {
             let member = &native.members[1];
@@ -856,6 +1374,11 @@ fn provision_selected_source(
             route: native.routes[0].id.clone(),
             issuance_id: EvidenceId::new("configured-acquisition-parent").unwrap(),
         };
+        if workflow_members {
+            request.helper = acquisition_helper
+                .as_ref()
+                .map(|helper| helper.member.clone());
+        }
         if human_policy && configured_report {
             request
                 .helper_targets
@@ -900,6 +1423,14 @@ pub(crate) async fn reopen_for_continuation(
     selection: HostBootstrapSelection,
 ) -> Host {
     restore_selected(directory, selection, None, None, false).await
+}
+
+pub(crate) async fn reopen_for_member_classes(
+    directory: Arc<tempfile::TempDir>,
+    selection: HostBootstrapSelection,
+    participant: Arc<dyn crate::private_originals::ApplicationServicePolicy>,
+) -> Host {
+    restore_selected_participant(directory, selection, None, None, Some(participant), None).await
 }
 
 pub(crate) async fn reopen_for_continuation_with_source(
@@ -1062,30 +1593,60 @@ async fn restore_selected(
     human_policy: bool,
 ) -> Host {
     let participant = human_policy.then(|| human_policy_recovery::selected(&selection));
-    let (lifetime, installed) = match prepare_source {
-        Some(prepare_source) => {
-            InstalledToolkitHost::open_with_source_store(
-                selection.clone(),
-                NativeOwnerStartup::Restore,
-                participant.clone(),
-                prepare_source,
-            )
-            .await
-        }
-        None => match &participant {
-            Some(participant) => {
-                InstalledToolkitHost::open_with_application_service_policy(
+    restore_selected_participant(
+        directory,
+        selection,
+        acquisition_helper,
+        prepare_source,
+        participant,
+        None,
+    )
+    .await
+}
+
+async fn restore_selected_participant(
+    directory: Arc<tempfile::TempDir>,
+    selection: HostBootstrapSelection,
+    acquisition_helper: Option<acquisition::InstalledSetupSelection>,
+    prepare_source: Option<PrepareOriginalSource>,
+    participant: Option<Arc<dyn crate::private_originals::ApplicationServicePolicy>>,
+    prepare_policy: Option<PrepareOriginalSource>,
+) -> Host {
+    let (lifetime, installed) = if let Some(decorate) = prepare_policy {
+        assert!(prepare_source.is_none());
+        InstalledToolkitHost::open_with_member_policy_store(
+            selection.clone(),
+            NativeOwnerStartup::Restore,
+            participant.clone().unwrap(),
+            decorate,
+        )
+        .await
+    } else {
+        match prepare_source {
+            Some(prepare_source) => {
+                InstalledToolkitHost::open_with_source_store(
                     selection.clone(),
                     NativeOwnerStartup::Restore,
-                    None,
                     participant.clone(),
+                    prepare_source,
                 )
                 .await
             }
-            None => {
-                InstalledToolkitHost::open(selection.clone(), NativeOwnerStartup::Restore).await
-            }
-        },
+            None => match &participant {
+                Some(participant) => {
+                    InstalledToolkitHost::open_with_application_service_policy(
+                        selection.clone(),
+                        NativeOwnerStartup::Restore,
+                        None,
+                        participant.clone(),
+                    )
+                    .await
+                }
+                None => {
+                    InstalledToolkitHost::open(selection.clone(), NativeOwnerStartup::Restore).await
+                }
+            },
+        }
     }
     .unwrap();
     if let Some(participant) = &participant {
@@ -1105,7 +1666,9 @@ async fn restore_selected(
     let originals = installed.originals;
     originals.bind_host_lifetime(&lifetime).unwrap();
     let tool_policy_registry = installed.tool_policy.registry();
+    let tool_policy = installed.tool_policy.clone();
     let registration = Arc::new(InstalledMemberRegistration {
+        originals: originals.clone(),
         owner: lifetime.clone(),
         native: installed.native.clone(),
         surfaces: installed.surfaces,
@@ -1113,12 +1676,13 @@ async fn restore_selected(
         update_associations: None,
     });
     let policy = Arc::new(InstalledApplicationPolicy {
+        operation_review_policy: None,
         originals: originals.clone(),
         lifetime: lifetime.clone(),
         native: installed.native,
         selected: lifetime.selected_policy().clone(),
     });
-    let configuration = originals.configuration(policy);
+    let configuration = originals.configuration(policy.clone());
     let directory_path = state_directory(
         &selection,
         lifetime.selected_policy().native_host.as_ref().unwrap(),
@@ -1131,10 +1695,12 @@ async fn restore_selected(
         source_path: directory_path.join("originals.sqlite3"),
         source_scope,
         tool_policy_registry,
+        tool_policy,
         directory,
         lifetime,
         originals,
         configuration,
+        policy,
         registration,
         acquisition_helper,
     }
@@ -1155,6 +1721,55 @@ pub(crate) fn bind_acquisition(
         &host.source_path,
         tools,
         None,
+    )
+}
+
+/// Same installed owner, selected only by the workflow worker control. No
+/// helper dispatch is exercised; the actual recovery worker consumes close.
+pub(crate) fn bind_workflow_recovery(
+    store: &Arc<toolkit_store::SqliteStore>,
+    source_scope: &toolkit_store::StoreScope,
+    originals: &Arc<crate::private_originals::PrivateOriginals>,
+    lifetime: &Arc<NativeHostLifetime>,
+    source_path: &std::path::Path,
+) -> Arc<acquisition::InstalledAcquisition> {
+    let timeout = acquisition::InstalledSetupLimits::default().admission_timeout_ms;
+    let tools =
+        acquisition::InstalledAcquisitionTools::new(std::time::Duration::from_millis(timeout))
+            .unwrap();
+    bind_acquisition_parts(
+        store,
+        source_scope,
+        originals,
+        lifetime,
+        source_path,
+        tools,
+        None,
+    )
+}
+
+/// Lifecycle-only continuation port. Native source/G ownership is real; the
+/// supplied delivery owner is explicitly a protocol fixture, not native input.
+pub(crate) fn bind_workflow_lifecycle_recovery(
+    store: &Arc<toolkit_store::SqliteStore>,
+    source_scope: &toolkit_store::StoreScope,
+    originals: &Arc<crate::private_originals::PrivateOriginals>,
+    lifetime: &Arc<NativeHostLifetime>,
+    source_path: &std::path::Path,
+    continuation: Arc<dyn acquisition::InstalledOriginalTaskOwner>,
+) -> Arc<acquisition::InstalledAcquisition> {
+    let timeout = acquisition::InstalledSetupLimits::default().admission_timeout_ms;
+    let tools =
+        acquisition::InstalledAcquisitionTools::new(std::time::Duration::from_millis(timeout))
+            .unwrap();
+    bind_acquisition_parts(
+        store,
+        source_scope,
+        originals,
+        lifetime,
+        source_path,
+        tools,
+        Some(continuation),
     )
 }
 
@@ -1182,7 +1797,8 @@ fn bind_acquisition_parts(
     };
     use meerkat_workgraph::{SqliteWorkGraphStore, WorkGraphService};
     let id = |value: &str| toolkit_package::Id::new(value).unwrap();
-    let native = lifetime.selected_policy().native_host.as_ref().unwrap();
+    let policy = lifetime.selected_policy();
+    let native = policy.native_host.as_ref().unwrap();
     let continuation = selected_continuation.unwrap_or_else(|| {
         InstalledNativeContinuation::new(
             store.clone(),
@@ -1211,6 +1827,52 @@ fn bind_acquisition_parts(
         )],
     )
     .unwrap();
+    let mut helper = InstalledSetupSelection {
+        catalog_capability: None,
+        report_capability: None,
+        member: native.members[0].member.clone(),
+        ingress_actor: native.grant_administrator.clone(),
+        logical_executor: native.members[0].logical_owner.clone(),
+        represented_subject: None,
+        controller_parent: native.routes[0].controller_parent.clone().unwrap(),
+        operation_basis: WorkAuthorityBasis::TargetedGrantLineages {
+            base: None,
+            targets: vec![],
+        },
+    };
+    if let Some(binding) = native.members[0]
+        .setup_capability
+        .as_ref()
+        .and_then(|value| value.helper.as_ref())
+    {
+        // A configured workflow already selects its helper. Preserve that
+        // exact member and route instead of substituting the original caller.
+        // This fixture still supplies no helper operation authority or entry.
+        let mut members = native
+            .members
+            .iter()
+            .filter(|member| &member.member == binding);
+        let member = members
+            .next()
+            .expect("configured helper is a compiled member");
+        assert!(
+            members.next().is_none(),
+            "configured helper member is unique"
+        );
+        let mut routes = native.routes.iter().filter_map(|route| {
+            let (member, _, actor) = route.source_binding_in(&policy.channels).ok()?;
+            (member == binding).then_some((route, actor))
+        });
+        let (route, actor) = routes
+            .next()
+            .expect("configured helper has a compiled source route");
+        assert!(routes.next().is_none(), "configured helper route is unique");
+        helper.member = member.member.clone();
+        helper.ingress_actor = actor.clone();
+        helper.logical_executor = route.logical_executor.clone();
+        helper.represented_subject = route.represented_subject.clone();
+        helper.controller_parent = route.controller_parent.clone().unwrap();
+    }
     let owner = Arc::new(
         InstalledAcquisition::from_defaults_with_tools(
             store.clone(),
@@ -1218,19 +1880,7 @@ fn bind_acquisition_parts(
             originals.clone(),
             native,
             InstalledSetupDefaults {
-                helper: InstalledSetupSelection {
-                    catalog_capability: None,
-                    report_capability: None,
-                    member: native.members[0].member.clone(),
-                    ingress_actor: native.grant_administrator.clone(),
-                    logical_executor: native.members[0].logical_owner.clone(),
-                    represented_subject: None,
-                    controller_parent: native.routes[0].controller_parent.clone().unwrap(),
-                    operation_basis: WorkAuthorityBasis::TargetedGrantLineages {
-                        base: None,
-                        targets: vec![],
-                    },
-                },
+                helper,
                 proposal_ceiling: Ceiling {
                     actions: Default::default(),
                     services: Default::default(),
@@ -1671,4 +2321,67 @@ mod human_policy_recovery {
             self.selected.check(&self.decision, &self.canonical)
         }
     }
+}
+
+/// The ordinary coordinator remains selected while a finite class has no
+/// initial instances. Only the real native add creates the later instance.
+pub(crate) async fn open_for_member_classes(
+    facts: &ControllerModelFacts,
+    class: meerkat_toolkit::host_lifetime::policy::CompiledMemberClass,
+    participant: Arc<dyn crate::private_originals::ApplicationServicePolicy>,
+    prepare_policy: Option<PrepareOriginalSource>,
+    prepare_source: Option<PrepareOriginalSource>,
+) -> Host {
+    let (directory, mut selection, helper, source) =
+        provision_selected_source_with_workflow_members(
+            facts, true, false, true, false, None, false, None, false, false, None, None, false,
+            false, false, false, None, false,
+        );
+    let mut local: CompiledLocalPolicy =
+        serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
+    let native = local.native_host.as_mut().unwrap();
+    native.member_classes = vec![class];
+    // Held completion issues the new member's controller parent through the
+    // same actual local operator that provisioned this fixture's grant store.
+    let operator =
+        meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&native.realm)
+            .unwrap()
+            .operator;
+    assert_eq!(
+        native.routes[0].controller_parent.as_ref().unwrap()[0].root_authority,
+        operator
+    );
+    native.remote_operator = Some(operator);
+    native.authentication_domain = Some(
+        meerkat_authorization_contracts::constraints::ResourceDomain {
+            authority: native.ingress_domain.authority.clone(),
+            namespace: "factory-console-authentication".into(),
+        },
+    );
+    native.event_domain = Some(
+        meerkat_authorization_contracts::constraints::ResourceDomain {
+            authority: native.ingress_domain.authority.clone(),
+            namespace: "factory-console-events".into(),
+        },
+    );
+    for route in &mut native.routes {
+        if matches!(
+            &route.origin,
+            meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { .. }
+        ) {
+            route.authentication_domain = native.authentication_domain.clone().unwrap();
+            route.event_domain = native.event_domain.clone().unwrap();
+        }
+    }
+    super::tests::replace_local(&mut selection, &local);
+    assert!(source.is_none());
+    restore_selected_participant(
+        directory,
+        selection,
+        helper,
+        prepare_source,
+        Some(participant),
+        prepare_policy,
+    )
+    .await
 }

@@ -786,6 +786,16 @@ pub(super) enum ScopeAdmissionSubject {
     /// The declared apply of a host's roster of identity entries: a host
     /// verb, which an agent never runs.
     DeclaredApply,
+    /// A door that acts on this member's session as its host (a turn start,
+    /// a system context append, a live channel's open, control or close): it
+    /// reaches an identity entry, or a member whose name is reserved
+    /// unreadable, only for a principal that holds `AdminHost`, and an agent
+    /// never acts on an entry's member through it.
+    MemberHost(crate::ids::AgentIdentity),
+    /// External work for this member, asked before anything is submitted:
+    /// MobMachine's SubmitWork admission of `WorkOrigin::External` answers
+    /// it, as it answers an unkeyed member send.
+    ExternalWork(crate::ids::AgentIdentity),
 }
 
 pub(super) enum MobCommand {

@@ -634,3 +634,162 @@ fn report_parent_recovery_refuses_legacy_unrestricted_id_and_new_id_selects_owne
     })
     .unwrap();
 }
+
+#[test]
+fn shared_effect_configuration_requires_fresh_exact_roots_and_keeps_ordinary_depth_zero() {
+    use super::super::configured_setup::{SharedWorkflowSetupRequest, configure_shared_prepared};
+    let mut fixture = Fixture::new();
+    fixture.request.public_issuance_id = Some(EvidenceId::new("shared-helper-public").unwrap());
+    let mut helper = fixture.helper.clone();
+    helper.report_capability = Some(fixture.configure(helper.clone(), &fixture.request).unwrap());
+    NativeHostLifetime::with_candidate_installation(&fixture.selection, |policy| {
+        let native = policy.native_host.as_ref().unwrap();
+        let operator = native.remote_operator.as_ref().unwrap();
+        let (source, originals) = open_owner_pair(
+            &fixture.selection,
+            native,
+            operator,
+            OperatorOwnerStartup::Restore,
+        )?;
+        let ordinary = AgentSetupCapabilityRequest {
+            member: native.members[0].member.clone(),
+            route: native.routes[0].id.clone(),
+            issuance_id: EvidenceId::new("shared-find").unwrap(),
+            helper: Some(helper.member.clone()),
+            helper_targets: vec![SetupTargetRequest {
+                target: Some(ConfiguredHelperReportCapability::public_target()),
+                issuance_id: EvidenceId::new("ordinary-public-target").unwrap(),
+            }],
+        };
+        let old = super::super::configured_setup::configure_prepared(
+            &native.preparation(),
+            &policy.channels,
+            &source,
+            operator,
+            &ordinary,
+            Some(&helper),
+        )?;
+        assert_eq!(
+            old.helper_targets[0].restrictions.delegation_depth,
+            DelegationDepth::remaining(1)
+        );
+        assert!(old.workflow_targets.is_empty());
+        let mut shared = SharedWorkflowSetupRequest {
+            member: ordinary.member.clone(),
+            route: ordinary.route.clone(),
+            issuance_id: ordinary.issuance_id.clone(),
+            helper: helper.member.clone(),
+            targets: ordinary.helper_targets.clone(),
+        };
+        let before = fixture.bytes();
+        assert!(matches!(
+            configure_shared_prepared(
+                &native.preparation(),
+                &policy.channels,
+                &source,
+                operator,
+                &shared,
+                &helper
+            ),
+            Err(HostLifetimeError::Denied)
+        ));
+        assert_eq!(
+            fixture.bytes(),
+            before,
+            "ordinary depth-one root cannot be reinterpreted or replaced"
+        );
+        shared.targets[0].issuance_id = EvidenceId::new("fresh-shared-public-target").unwrap();
+        let selected = configure_shared_prepared(
+            &native.preparation(),
+            &policy.channels,
+            &source,
+            operator,
+            &shared,
+            &helper,
+        )?;
+        assert!(selected.helper_targets.is_empty());
+        assert_eq!(
+            selected.workflow_targets[0].restrictions.delegation_depth,
+            DelegationDepth::remaining(2)
+        );
+        let after = fixture.bytes();
+        assert_eq!(
+            configure_shared_prepared(
+                &native.preparation(),
+                &policy.channels,
+                &source,
+                operator,
+                &shared,
+                &helper
+            )?,
+            selected
+        );
+        assert_eq!(fixture.bytes(), after);
+        let origin = crate::original_ingress::helper_originals::HelperSetupOrigin {
+            realm: native.realm.clone(),
+            source_owner: native.ingress_domain.clone(),
+            original_authority: native.routes[0].source_authority.clone(),
+            original: crate::private_originals::PrivateOriginalRef {
+                route: ordinary.route.clone(),
+                original: meerkat_authorization_contracts::evidence::EvidenceId::new(
+                    "shared-source",
+                )
+                .unwrap(),
+                event_sha256: "a".repeat(64),
+            },
+        };
+        let ordinary_bounds = super::super::setup_targets::child_bounds(
+            &native.grant_administrator,
+            &origin,
+            &old.helper_targets[0].target,
+            &old.helper_targets[0].restrictions,
+        )?;
+        assert_eq!(
+            ordinary_bounds.delegation_depth,
+            DelegationDepth::remaining(0)
+        );
+        for target in [
+            None,
+            Some(ConfiguredHelperReportCapability::target()),
+            Some(ConfiguredHelperReportCapability::account_target()),
+            Some(
+                meerkat_authorization_contracts::work_association::GrantTarget::McpServer {
+                    server: String::new(),
+                },
+            ),
+        ] {
+            let mut invalid = shared.clone();
+            invalid.targets[0].target = target;
+            assert!(
+                configure_shared_prepared(
+                    &native.preparation(),
+                    &policy.channels,
+                    &source,
+                    operator,
+                    &invalid,
+                    &helper
+                )
+                .is_err()
+            );
+            assert_eq!(fixture.bytes(), after);
+        }
+        let mut duplicate = shared.clone();
+        duplicate.targets.push(duplicate.targets[0].clone());
+        assert!(
+            configure_shared_prepared(
+                &native.preparation(),
+                &policy.channels,
+                &source,
+                operator,
+                &duplicate,
+                &helper
+            )
+            .is_err()
+        );
+        assert_eq!(fixture.bytes(), after);
+        drop(originals);
+        drop(source);
+        Ok(())
+    })
+    .unwrap();
+}

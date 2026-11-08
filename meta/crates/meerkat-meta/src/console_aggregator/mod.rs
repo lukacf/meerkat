@@ -67,11 +67,11 @@ use crate::unified_runtime::{ConsoleEventStore, UnifiedRuntime};
 pub use query_error::{ConsoleTimelineQueryError, ConsoleTimelineQueryResult};
 pub(crate) use send_recovery::{
     ConsoleSendRecovery, INTERACTIVE_SEND_READ_BOUND, NativeSendObservation, ScopedReservation,
-    SendDispatchClaim,
+    SendDispatchClaim, governed_delivery_key, governed_input_id,
 };
 use send_recovery::{SendDispatchClaims, SendSweepOutcome};
 pub(crate) use send_scope::ConsoleSendScope;
-use state::SendEvidence;
+use state::{AbsentRead, SendEvidence};
 pub use state::{
     ReplaySubscriptionEffect, ReplaySubscriptionState, ReplaySubscriptionTransition, SendEffect,
     SendState, SendTransition, SourceIngestionEffect, SourceIngestionState,
@@ -93,6 +93,10 @@ pub use types::{
     ConsoleTimelineWindowQuery, ConsoleTurnOrigin, ConsoleVisibility, IdentityFirstReservation,
     NewConsoleFrame,
 };
+
+// The admission evidence reader, for the send-evidence test seam.
+#[cfg(test)]
+pub(crate) use send_recovery::{AdmittedInput, SendAdmissionReader};
 
 const TIMELINE_CHANNEL_CAP: usize = 1024;
 const SESSION_HISTORY_PAGE_LIMIT: usize = 500;
@@ -463,7 +467,10 @@ impl ClassicResend<'_> {
         let Some(identity_runtime) = self.resolved.entry.identity_runtime.as_ref() else {
             return false;
         };
-        let Some(identity) = identity_runtime
+        // A name the runtime refuses (Core holds it for an identity the
+        // runtime has not registered, or its entry could not be read) is no
+        // keyed identity delivery: never dispatched again.
+        let Ok(Some(identity)) = identity_runtime
             .identity_for_member_mutation(&self.resolved.runtime_identity)
             .await
         else {
@@ -473,6 +480,30 @@ impl ClassicResend<'_> {
             .console_human_delivery_is_keyed(&identity)
             .await
     }
+}
+
+/// The payload field of a governed send's `user_input` frame recording that
+/// this Console reserved it as governed: `true`. A frame without it (an
+/// earlier version's) is settled from evidence only.
+pub(crate) const GOVERNED_SEND_FIELD: &str = "governed";
+
+/// Whether an unsettled governed send whose dispatch has no live owner
+/// submitted nothing, so a replay of its key may dispatch it again: it
+/// records a hold (a dispatch held before any submission), or this Console
+/// reserved it as governed ([`GOVERNED_SEND_FIELD`]) and it is not
+/// `submitted`. Every submission of such a send is recorded first
+/// (`submitted`), and with no live owner no runtime-owned operation can
+/// still submit it. A send an earlier version left unsettled carries
+/// neither and is settled from evidence only: its input may have been
+/// admitted under an id its replay cannot read.
+pub(crate) fn governed_send_submitted_nothing(frame: &ConsoleFrame) -> bool {
+    frame.status != ConsoleFrameStatus::Submitted
+        && (frame.payload.get("delivery_hold").is_some()
+            || frame
+                .payload
+                .get(GOVERNED_SEND_FIELD)
+                .and_then(Value::as_bool)
+                == Some(true))
 }
 
 /// An existing console send found for a replay.
@@ -1851,8 +1882,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the request,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let mut record = identity_record_for_status(entry, &status);
                     let topology_peers =
@@ -2040,7 +2079,13 @@ impl MetaConsoleAggregator {
                 && let Some(parsed_identity) = identity_runtime
                     .owned_identity_for_member_alias(&resolved.runtime_identity)
                     .await
-                && let Ok(status) = identity_runtime.status(&parsed_identity).await
+                && let Some(status) = match identity_runtime.status(&parsed_identity).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    // A read Core could not serve fails the inspection,
+                    // typed, never an answer without the identity's record.
+                    Err(error) => return Err(error.into()),
+                }
             {
                 let durable_record = identity_record_for_status(&resolved.entry, &status);
                 let durable_live_records = Box::pin(self.live_records_for_durable_record(
@@ -2141,8 +2186,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the retire,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let record = identity_record_for_status(entry, &status);
                     if !Box::pin(console_identity_record_visible(entry, &record)).await {
@@ -2250,10 +2303,17 @@ impl MetaConsoleAggregator {
             {
                 return Err(stale_error.into());
             }
-            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
-                && let Some(parsed_identity) = identity_runtime
+            let mutation_identity = match resolved.entry.identity_runtime.as_ref() {
+                Some(identity_runtime) => identity_runtime
                     .identity_for_member_mutation(&resolved.runtime_identity)
                     .await
+                    .map_err(|err| -> ConsoleLogError {
+                        format!("retire failed for {identity}: {err}").into()
+                    })?,
+                None => None,
+            };
+            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+                && let Some(parsed_identity) = mutation_identity
             {
                 let status = identity_runtime.status(&parsed_identity).await.map_err(
                     |err| -> ConsoleLogError {
@@ -3179,6 +3239,34 @@ impl MetaConsoleAggregator {
         Ok(state)
     }
 
+    /// A held governed send's replay, as the frame's one dispatch owner,
+    /// reconciled on the send's own hold: whatever the runtime's evidence
+    /// reads short of an admission, it is dispatched again (the caller then
+    /// takes the hold, [`Self::take_interaction_delivery_hold`]).
+    pub(crate) fn begin_held_send_redispatch(
+        &self,
+        frame: &ConsoleFrame,
+        _owner: &SendDispatchClaim,
+    ) -> Result<SendState, ConsoleSendError> {
+        let state = SendState::from_send_frame_status(frame.status)
+            .ok_or(ConsoleSendError::State("not a console send frame"))?;
+        let (state, _effects) = state
+            .reconcile(SendEvidence::Held)
+            .map_err(ConsoleSendError::State)?;
+        Ok(state)
+    }
+
+    /// Test seam: every send observation reads `reader`'s admission
+    /// evidence, in place of a registered runtime's.
+    #[cfg(test)]
+    pub(crate) fn read_send_admission_from(&self, reader: Arc<dyn SendAdmissionReader>) {
+        *self
+            .inner
+            .send_admission_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reader);
+    }
+
     /// What the runtime holding `frame`'s recorded session has admitted
     /// under the send's delivery keys, all keys read within one deadline
     /// `bound` from now: the boot reconciliation's
@@ -3268,6 +3356,11 @@ impl MetaConsoleAggregator {
             && let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id)
         {
             accepted = self.settle_admitted_send(&frame, &claim).await?;
+        } else if frame.status == ConsoleFrameStatus::Submitted
+            && native == NativeSendObservation::Absent
+            && let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id)
+        {
+            accepted = self.settle_absent_submission(&frame, &claim).await?;
         }
         Ok(Some(ConsoleSendRecovery { accepted, native }))
     }
@@ -3280,7 +3373,9 @@ impl MetaConsoleAggregator {
     /// runs before the gateway serves; a send whose evidence the store did
     /// not answer in time stays unsettled for its sender's recovery, which
     /// waits longer. Evidence only: a send whose input was admitted is
-    /// settled delivered, and nothing is ever dispatched or failed here.
+    /// settled delivered; a submitted send whose input the runtime does not
+    /// hold (the previous process stopped before submitting it) fails, its
+    /// outcome unknown. Nothing is ever dispatched here.
     pub(crate) async fn reconcile_interrupted_sends(&self) -> SendSweepOutcome {
         let deadline = tokio::time::Instant::now() + send_recovery::SEND_SWEEP_DEADLINE;
         let frames = match self
@@ -3311,19 +3406,34 @@ impl MetaConsoleAggregator {
             let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id) else {
                 continue;
             };
-            if matches!(
-                self.observe_native_send(&frame, send_recovery::BOOT_SEND_READ_BOUND)
-                    .await,
-                NativeSendObservation::Admitted { .. }
-            ) {
-                match self.settle_admitted_send(&frame, &claim).await {
-                    Ok(_) => outcome.delivered += 1,
-                    Err(error) => tracing::warn!(
-                        frame_id = %frame.id,
-                        %error,
-                        "console send reconciliation could not settle an admitted send"
-                    ),
+            match self
+                .observe_native_send(&frame, send_recovery::BOOT_SEND_READ_BOUND)
+                .await
+            {
+                NativeSendObservation::Admitted { .. } => {
+                    match self.settle_admitted_send(&frame, &claim).await {
+                        Ok(_) => outcome.delivered += 1,
+                        Err(error) => tracing::warn!(
+                            frame_id = %frame.id,
+                            %error,
+                            "console send reconciliation could not settle an admitted send"
+                        ),
+                    }
                 }
+                NativeSendObservation::Absent if frame.status == ConsoleFrameStatus::Submitted => {
+                    match self.settle_absent_submission(&frame, &claim).await {
+                        Ok(settled) if settled.status == ConsoleFrameStatus::DeliveryFailed => {
+                            outcome.lost += 1;
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::warn!(
+                            frame_id = %frame.id,
+                            %error,
+                            "console send reconciliation could not settle a lost submission"
+                        ),
+                    }
+                }
+                NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {}
             }
         }
         outcome
@@ -3410,6 +3520,29 @@ impl MetaConsoleAggregator {
         session_id: Option<&str>,
         scope: &ConsoleSendScope,
         sender: Option<&ConsoleSender>,
+    ) -> Result<ScopedReservation, ConsoleSendError> {
+        Box::pin(self.reserve_identity_first_send(request, session_id, scope, sender, false)).await
+    }
+
+    /// [`Self::reserve_identity_first_interaction_scoped`] for a governed
+    /// send: a host's binder admits it.
+    pub(crate) async fn reserve_governed_interaction_scoped(
+        &self,
+        request: ConsoleSendRequest,
+        session_id: Option<&str>,
+        scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
+    ) -> Result<ScopedReservation, ConsoleSendError> {
+        Box::pin(self.reserve_identity_first_send(request, session_id, scope, sender, true)).await
+    }
+
+    async fn reserve_identity_first_send(
+        &self,
+        request: ConsoleSendRequest,
+        session_id: Option<&str>,
+        scope: &ConsoleSendScope,
+        sender: Option<&ConsoleSender>,
+        governed: bool,
     ) -> Result<ScopedReservation, ConsoleSendError> {
         validate_send_request(&request)?;
         let _content = content_input_from_value(&request.content)?;
@@ -3508,6 +3641,13 @@ impl MetaConsoleAggregator {
             caused_by_frame_id: None,
         };
         redact_frame(host_policy.as_ref(), &mut new_frame);
+        // A governed send's frame records that this Console reserved it as
+        // governed, kept over a redacted payload: its every submission is
+        // recorded first, so while unsettled with no owner it submitted
+        // nothing ([`governed_send_submitted_nothing`]).
+        if governed && let Some(payload) = new_frame.payload.as_object_mut() {
+            payload.insert(GOVERNED_SEND_FIELD.to_string(), Value::Bool(true));
+        }
         let outcome = append_frame(&self.inner, new_frame)
             .await
             .map_err(ConsoleSendError::Log)?;
@@ -3666,6 +3806,235 @@ impl MetaConsoleAggregator {
         .await
         .map_err(ConsoleSendError::Log)?;
         Ok(())
+    }
+
+    /// A governed dispatch held past its door's budget: nothing was
+    /// submitted (a held answer comes only from the bind loop, before any
+    /// submission). `MarkHeld`, applied to the send's own state: a send
+    /// dispatching before its submission returns to accepted and its frame
+    /// records the hold in its `delivery_hold` (the condition, the wait, the
+    /// binds, retryable); a replay of the send's key dispatches it again. A
+    /// send in any other state (submitted, settled, or accepted with no
+    /// dispatch in flight) records no hold: the mark is refused and the frame
+    /// left as it is.
+    pub async fn mark_interaction_delivery_held(
+        &self,
+        input_frame_id: &str,
+        hold: &crate::identity_first::GovernedHold,
+    ) -> Result<(), ConsoleSendError> {
+        let delivery_hold = json!({
+            "condition": hold.condition.as_str(),
+            "waited_ms": u64::try_from(hold.waited.as_millis()).unwrap_or(u64::MAX),
+            "binds": hold.binds,
+            "retryable": true,
+        });
+        self.transition_send(
+            input_frame_id,
+            SendTransition::MarkHeld,
+            Some(("delivery_hold", delivery_hold)),
+            "a hold is recorded only on a send dispatching before its submission",
+        )
+        .await
+    }
+
+    /// A governed send's dispatch begins: `StartDispatch`, applied to the
+    /// send's own state (accepted).
+    pub(crate) async fn mark_interaction_dispatching(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        self.transition_send(
+            input_frame_id,
+            SendTransition::StartDispatch,
+            None,
+            "only an accepted send starts a dispatch",
+        )
+        .await
+    }
+
+    /// A governed send's bind answered bound, before its input is
+    /// submitted: `MarkSubmitted`, applied to the send's own state
+    /// (dispatching), recording `session_id`, the session the bind bound
+    /// (its `bound_session_id`): the runtime's evidence of the send is read
+    /// there from now on. From here the send is delivered or fails, and is
+    /// never held.
+    pub(crate) async fn mark_interaction_submitted(
+        &self,
+        input_frame_id: &str,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), ConsoleSendError> {
+        self.transition_send(
+            input_frame_id,
+            SendTransition::MarkSubmitted,
+            Some((
+                send_recovery::BOUND_SESSION_FIELD,
+                json!(session_id.to_string()),
+            )),
+            "only a dispatching send is submitted",
+        )
+        .await
+    }
+
+    /// A governed send whose submission's native admission answered
+    /// unresolved (its answer was lost: its input may have run):
+    /// `MarkUnresolved`, applied to the send's own state (submitted), keeps
+    /// it submitted and records `delivery_unresolved`
+    /// (`admission_unresolved`, not retryable as a new send). This process
+    /// notes that its submission answered unresolved
+    /// ([`Self::note_submission_unresolved`]), so an absent read here never
+    /// fails it; a replay of its key or its recovery settles it `delivered`
+    /// once the runtime's evidence shows its input admitted, and a later
+    /// process settles it from evidence as any send a stopped process left
+    /// submitted.
+    pub(crate) async fn mark_interaction_unresolved(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        self.note_submission_unresolved(input_frame_id);
+        self.transition_send(
+            input_frame_id,
+            SendTransition::MarkUnresolved,
+            Some((
+                "delivery_unresolved",
+                json!({"reason": "admission_unresolved", "retryable": false}),
+            )),
+            "only a submitted send is unresolved",
+        )
+        .await
+    }
+
+    /// This process saw the submission of the send `frame_id` answer
+    /// unresolved: an absent read of it here is read as made where that
+    /// answer was seen ([`AbsentRead::SubmissionUnresolvedHere`]).
+    /// Synchronous and without I/O, so the runtime-owned operation notes it
+    /// inside its final protected entry, whether or not the send's request
+    /// is still waiting.
+    pub(crate) fn note_submission_unresolved(&self, frame_id: &str) {
+        self.inner.send_dispatch_claims.mark_unresolved(frame_id);
+    }
+
+    /// Where an absent read of the send `frame_id` is made, against the
+    /// answers of its submission: the evidence on which the send machine
+    /// decides whether the absence is final. A later process starts with no
+    /// unresolved answer noted.
+    fn absent_read(&self, frame_id: &str) -> AbsentRead {
+        if self.inner.send_dispatch_claims.unresolved_here(frame_id) {
+            AbsentRead::SubmissionUnresolvedHere
+        } else {
+            AbsentRead::NoUnresolvedAnswerHere
+        }
+    }
+
+    /// Whether this Console's log store moves a send through the send
+    /// machine's own states, which a governed send needs
+    /// ([`ConsoleLogStore::supports_send_transitions`]).
+    pub(crate) fn supports_send_transitions(&self) -> bool {
+        self.inner.store.supports_send_transitions()
+    }
+
+    /// Apply `transition` to the send's own state, atomically in the store,
+    /// recording `note`; `refused` when the send machine refuses it from
+    /// the state the frame records (nothing changed).
+    async fn transition_send(
+        &self,
+        input_frame_id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, Value)>,
+        refused: &'static str,
+    ) -> Result<(), ConsoleSendError> {
+        let Some(updated) = self
+            .inner
+            .store
+            .transition_send_frame(input_frame_id, transition, note)
+            .await
+            .map_err(ConsoleSendError::Log)?
+        else {
+            return Err(ConsoleSendError::State(refused));
+        };
+        emit_frame_updated(&self.inner, updated)
+            .await
+            .map_err(ConsoleSendError::Log)?;
+        Ok(())
+    }
+
+    /// Settle, from an absent read, a submitted send whose input the runtime
+    /// does not hold, its dispatch owner gone, as the send machine decides on
+    /// where the read was made ([`AbsentRead`]). Where no unresolved answer
+    /// of its submission was seen (a later process, the one that bound it
+    /// having stopped before its input reached the runtime), its outcome is
+    /// unknown, so it fails, recording why (`delivery_failure`,
+    /// `outcome_unknown`, retryable), and is never dispatched again: its
+    /// sender can send it again. In the process that saw its submission
+    /// answer unresolved its input may still be admitted: it stays submitted
+    /// and nothing is recorded. Only the frame's dispatch owner settles it.
+    pub(crate) async fn settle_absent_submission(
+        &self,
+        frame: &ConsoleFrame,
+        _owner: &SendDispatchClaim,
+    ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
+        let state = SendState::from_send_frame_status(frame.status)
+            .ok_or(ConsoleSendError::State("not a console send frame"))?;
+        match state
+            .reconcile(SendEvidence::Absent(self.absent_read(&frame.id)))
+            .map_err(ConsoleSendError::State)?
+        {
+            (SendState::DeliveryFailed, _) => {}
+            // The machine keeps the send as it is, with no effect.
+            (kept, effects) if kept == state && effects.is_empty() => {
+                return Ok(accepted_from_frame(frame));
+            }
+            _ => return Err(ConsoleSendError::State("illegal send reconciliation")),
+        }
+        let Some(updated) = self
+            .inner
+            .store
+            .transition_send_frame(
+                &frame.id,
+                SendTransition::MarkDeliveryFailed,
+                Some((
+                    "delivery_failure",
+                    json!({"reason": "outcome_unknown", "retryable": true}),
+                )),
+            )
+            .await
+            .map_err(ConsoleSendError::Log)?
+        else {
+            return Ok(accepted_from_frame(frame));
+        };
+        let accepted = accepted_from_frame(&updated);
+        emit_frame_updated(&self.inner, updated)
+            .await
+            .map_err(ConsoleSendError::Log)?;
+        Ok(accepted)
+    }
+
+    /// A held send about to be dispatched again takes its hold: a
+    /// compare-and-set, so of concurrent replays exactly one gets `true` and
+    /// dispatches; one that finds the hold taken gets `false` and dispatches
+    /// nothing.
+    pub(crate) async fn take_interaction_delivery_hold(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<bool, ConsoleSendError> {
+        let Some(taken) = self
+            .inner
+            .store
+            .take_send_frame_hold(input_frame_id)
+            .await
+            .map_err(ConsoleSendError::Log)?
+        else {
+            return Ok(false);
+        };
+        emit_frame_updated(&self.inner, taken)
+            .await
+            .map_err(ConsoleSendError::Log)?;
+        Ok(true)
+    }
+
+    /// Whether a live dispatch owns the send frame `frame_id`.
+    #[cfg(test)]
+    pub(crate) fn send_dispatch_claimed(&self, frame_id: &str) -> bool {
+        self.inner.send_dispatch_claims.is_claimed(frame_id)
     }
 
     pub async fn mark_interaction_delivered(
@@ -4879,10 +5248,18 @@ async fn dispatch_message_to_resolved_member(
     accepted: &ConsoleInteractionAccepted,
     attribution: &ConsoleHumanAttribution,
 ) -> Result<String, ConsoleSendError> {
-    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
-        && let Some(identity) = identity_runtime
+    // A name the identity runtime refuses (Core holds it for an identity the
+    // runtime has not registered, or its entry could not be read) is refused
+    // typed, never sent through the raw member door.
+    let identity = match resolved.entry.identity_runtime.as_ref() {
+        Some(identity_runtime) => identity_runtime
             .identity_for_member_mutation(&resolved.runtime_identity)
             .await
+            .map_err(|error| ConsoleSendError::RuntimeOperation(Box::new(error)))?,
+        None => None,
+    };
+    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+        && let Some(identity) = identity
     {
         identity_runtime
             .send_console_human_input_tracked(
@@ -8526,6 +8903,14 @@ async fn update_frame_status_and_emit(
     let Some(updated) = inner.store.update_frame_status(frame_id, status).await? else {
         return Ok(None);
     };
+    emit_frame_updated(inner, updated).await
+}
+
+/// Emit `updated` as a `frame_updated` marker (once per frame version).
+async fn emit_frame_updated(
+    inner: &AggregatorInner,
+    updated: ConsoleFrame,
+) -> ConsoleLogResult<Option<ConsoleFrame>> {
     let update_marker = NewConsoleFrame {
         id: None,
         dedupe_key: format!("frame-update:{}:{}", updated.id, updated.frame_version),
@@ -9785,13 +10170,14 @@ enum FrameProjection {
 /// - a member frame without it fails closed under any applicable deny its
 ///   bare identity cannot decide
 ///   ([`crate::access::AccessView::can_view_uncaptured_member`]).
+///
+/// With the access configuration enabled or not: a member private to
+/// another person ([`crate::access::PRIVATE_TO_LABEL`]) is hidden whatever
+/// the configuration says.
 pub(crate) fn timeline_frame_visible_to(
     view: &crate::access::AccessView,
     frame: &ConsoleFrame,
 ) -> bool {
-    if !view.enforced() {
-        return true;
-    }
     // An update marker cannot reveal a frame the same view hides.
     if frame.kind == "frame_updated" {
         let Some(value) = frame.payload.get("frame") else {
@@ -9837,11 +10223,13 @@ fn captured_lineage(
         // Lineage capture predates side chats, so a provenance captured
         // without it names a spawner at most: a `side_chat_of` (or side chat
         // creator) label a member carried then is an ordinary label, neither
-        // a parent nor a side chat's lineage.
+        // a parent nor a side chat's lineage, and a private owner, which Meta
+        // writes only since lineage capture exists, is none.
         let mut labels = record.labels.clone();
         labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
+        labels.remove(crate::access::PRIVATE_TO_LABEL);
         let parent =
             crate::console_spawn::lineage_parent(&labels).map(|parent| parent.identity.to_string());
         let mut lineage = vec![crate::access::CapturedLineageLink {
@@ -9900,9 +10288,6 @@ impl TimelineFrameDecider {
     }
 
     pub(crate) fn visible(&self, frame: &ConsoleFrame) -> bool {
-        if !self.view.enforced() {
-            return true;
-        }
         // Update markers carry a second frame; they are decided whole.
         if frame.kind == "frame_updated" {
             return timeline_frame_visible_to(&self.view, frame);

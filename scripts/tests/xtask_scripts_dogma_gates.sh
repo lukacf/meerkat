@@ -405,16 +405,17 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count for each of its seventeen runs (at or above the floor of each
+# count for each of its eighteen runs (at or above the floor of each
 # measured one), a coverage block in which each covered action of every run
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
 # wrappers print so below, and a check further down drops each wrapper's
-# line in turn), its one hundred and thirteen
+# line in turn), its one hundred and twenty
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
-# violated and its created_custody_local_kept, recovered_removal_unmarked
-# and accepted_ladder_refused mutants' runs to end without an error (the
+# violated and its created_custody_local_kept, recovered_removal_unmarked,
+# accepted_ladder_refused, stale_session_spares_no_external and
+# stale_session_spares_no_entry mutants' runs to end without an error (the
 # success line below).
 # activation_body_retirement_audit.sh (session_document) requires its three
 # witnesses violated, and with --mutants each seeded defect's target
@@ -1278,6 +1279,17 @@ printf '%s\n' \
   'echo "<CycleRestoresArchived line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<CycleRestoresTombstone line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<CycleRestoresByAdoption line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'for action in SubmitWorkRunningExternal SubmitWorkRunningExternalPeerOnly SubmitWorkRunningInternal SubmitWorkRunningInternalPeerOnly ResolveSubmitWorkRejectionMemberNotFound ResolveSubmitWorkRejectionStaleFenceToken ResolveSubmitWorkRejectionIdentityMember ResolveSubmitWorkRejectionIdentityMemberUnreadableName ResolveSubmitWorkRejectionNotExternallyAddressable ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable ResolveSubmitWorkRejectionStaleSessionBinding; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalWorkerAdmitted is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsInternalEntryAdmitted is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalEntryRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalCreatedRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalEntryMovedSessionRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalWorkerMovedSessionRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsInternalEntryMovedSessionRefused is violated."' \
+  'echo "Error: Invariant AuditDoorsNoExternalEntryAdmission is violated."' \
+  'echo "Error: Invariant AuditDoorsAtMostOne is violated."' \
+  'echo "Error: Invariant AuditDoorsEntryExactlyOne is violated."' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
@@ -1291,7 +1303,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiringReleasable is violated."' \
   'echo "Error: Action property AuditWriteOwesExactlyTheSelected is violated."' \
-  'echo "Error: Invariant AuditDeliversOnlyToBoundLocalBornMembers is violated."' \
+  'echo "Error: Invariant AuditDeliversOnlyToBoundBornMembers is violated."' \
   'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \
   'echo "Error: Action property AuditUnseatLeavesNoFact is violated."' \
   'echo "Error: Invariant NotAuditWitnessReviseDropsEarlierAck is violated."' \

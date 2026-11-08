@@ -23,6 +23,9 @@ use crate::types::SessionId;
 /// retained attempt included, once the attempt has resolved its candidate)
 /// and compaction summaries, and the owner-change waits of a tool's delegate
 /// operations that use [`crate::ToolDispatchContext::owner_change_churn`].
+/// A host that waits out its own operations reports their waits to it too,
+/// through [`super::OwnerChangeChurn::reporting_to`] (a governed input's "not
+/// now" waits, on [`OperationRefusalSurface::GovernedInput`]).
 /// Exact-control refusals (MCP attachments, tool applications, context
 /// controls), a consent attempt refused before it resolved its candidate, and
 /// review outcomes, which are not operation refusals, are not observed.
@@ -54,6 +57,10 @@ pub enum OperationRefusalSurface {
     ToolCall { tool_use_id: String },
     /// A compaction summary request.
     Compaction,
+    /// A host's governed input to the session: the waits of its binder's "not
+    /// now" answers, which the host reports itself
+    /// ([`super::OwnerChangeChurn::reporting_to`]).
+    GovernedInput,
 }
 
 /// What the operation's owners answered.

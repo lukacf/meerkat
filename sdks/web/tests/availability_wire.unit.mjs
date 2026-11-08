@@ -113,3 +113,31 @@ test('a requested compaction skip survives session polling with its whole payloa
   assert.deepEqual(session.pollEvents(), [skipped, control]);
   assert.deepEqual(session.subscribe().poll(), [skipped, control]);
 });
+
+test('an applied operator-instruction observation survives session polling with its whole payload', () => {
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const applied = {
+    type: 'operator_instructions_applied',
+    session_id: '00000000-0000-4000-8000-000000000001',
+    entry_sequence: 3,
+    kind: 'delta',
+    run_id: '00000000-0000-4000-8000-000000000002',
+    active: [
+      { namespace: 'app.example', key: 'tone', revision: 1, content_sha256: digest, body_bytes: 16 },
+    ],
+    changes: [
+      {
+        change: 'activate',
+        namespace: 'app.example',
+        key: 'tone',
+        revision: 1,
+        content_sha256: digest,
+        body_bytes: 16,
+      },
+    ],
+  };
+  const control = { type: 'text_delta', delta: 'ordinary text' };
+  const session = sessionWith([applied, control]);
+  assert.deepEqual(session.pollEvents(), [applied, control]);
+  assert.deepEqual(session.subscribe().poll(), [applied, control]);
+});

@@ -18,6 +18,7 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs" / "site"
 DOCS_JSON = DOCS / "docs.json"
+ENTRYPOINTS = (ROOT / "crates" / "meerkat-connect" / "README.md",)
 # Research, coordination and verification notes belong outside docs/site.
 
 FRONTMATTER_REQUIRED = {"title", "description"}
@@ -185,6 +186,28 @@ def extract_links(path: Path) -> Iterable[str]:
         yield match.group(1) or match.group(2)
 
 
+def check_entrypoint(path: Path) -> list[str]:
+    """Check repository-relative links separately from docs-site routes."""
+    if not path.is_file():
+        return [f"missing documentation entrypoint: {public_path(path)}"]
+    errors: list[str] = []
+    if has_unclosed_fence(path.read_text(encoding="utf-8")):
+        errors.append(f"{public_path(path)} has an unclosed code fence")
+    for target in extract_links(path):
+        if target.startswith(("http://", "https://", "mailto:", "tel:")):
+            continue
+        relative, _, anchor = target.partition("#")
+        resolved = (path.parent / relative).resolve() if relative else path.resolve()
+        if not resolved.is_relative_to(ROOT.resolve()):
+            errors.append(f"{public_path(path)} links outside the source tree: '{target}'")
+        elif not resolved.exists():
+            errors.append(f"{public_path(path)} links to missing target '{target}'")
+        elif anchor and resolved.suffix in {".md", ".mdx"}:
+            if normalize_anchor(anchor) not in heading_slugs(resolved):
+                errors.append(f"{public_path(path)} links to missing anchor '{target}'")
+    return errors
+
+
 def main() -> int:
     errors: list[str] = []
     config = json.loads(DOCS_JSON.read_text(encoding="utf-8"))
@@ -246,12 +269,15 @@ def main() -> int:
             if not (DOCS / asset.lstrip("/")).is_file():
                 errors.append(f"docs.json references missing logo {asset!r}")
 
+    for entrypoint in ENTRYPOINTS:
+        errors.extend(check_entrypoint(entrypoint))
+
     if errors:
         for error in errors:
             fail(error)
         return 1
 
-    print(f"docs-check: ok ({len(public_files)} public pages)")
+    print(f"docs-check: ok ({len(public_files)} public pages, {len(ENTRYPOINTS)} repository entrypoint)")
     return 0
 
 

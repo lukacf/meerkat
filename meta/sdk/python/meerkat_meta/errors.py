@@ -560,6 +560,13 @@ class StorageResolutionError(RpcError):
       identity) or ``"wake_identity"`` (the roster lists it and its row waits
       to be carried out). Retryable.
 
+    A send, a dispatch or a member mutation by a name the gateway has not
+    registered whose record Core cannot read (written by a newer release, or
+    contradicted by the mob's journal) is refused for good with
+    ``kind`` ``"identity_name_unreadable"``, the name in ``identity`` and
+    ``remedy`` ``"repair_or_upgrade"``: repair the mob's store, or run a
+    release that reads the record.
+
     ``retryable`` is ``True`` only when the gateway says so. The other
     fields are ``None`` when the gateway did not send them; the full
     refusal stays available as ``data``.
@@ -1105,7 +1112,11 @@ class IdentityHistoryUnavailableError(RpcError):
     ``"identity_session_absent"`` when a delivery reached a member whose
     session ``session_id`` Core holds no durable copy of: nothing was
     delivered, and Core settles the member; deliver again. A failed read of
-    the whole roster's history names no ``identity``.
+    the whole roster's history names no ``identity``. ``kind`` is
+    ``"governed_input_held"`` when every bind of a governed send answered
+    "not now" until its door's budget ended: nothing was submitted, and the
+    same input may be sent again (``data`` carries the condition, the wait
+    and the input id).
     ``kind``, ``identity`` and ``session_id`` are ``None`` when the gateway
     did not send them.
     """

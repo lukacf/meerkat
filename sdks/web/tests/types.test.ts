@@ -558,6 +558,12 @@ function handleEvent(event: AgentEvent): string {
       // compacted nothing: the run whose check it was, and why
       // (`first_model_request` or `nothing_to_fold`).
       return `${event.type}:${event.run_id}:${event.reason}`;
+    case 'operator_instructions_applied':
+      // An observation of one applied operator-instruction entry: a delta
+      // a fresh run start appended (its `run_id` and `changes`) or a
+      // compaction's snapshot, with the whole active set after it. The
+      // session's instruction status read is the authority.
+      return `${event.type}:${event.session_id}:${event.entry_sequence}:${event.kind}:${event.run_id ?? 'none'}:${(event.active ?? []).length}:${(event.changes ?? []).length}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

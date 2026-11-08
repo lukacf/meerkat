@@ -65,10 +65,10 @@ use meerkat_meta::UnifiedRuntimeBuilder;
 use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider, TopologyProvider};
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, BoundGovernedInput,
-    CustomizerError, DurableAgentSpec, GovernedBindContext, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityBootstrapMode, IdentityLifecycleState,
-    IdentityRuntimeError, IdentityStatus, LocalExternalToolOverlay, ManagedPeerEdge, MemberRestore,
-    RosterContext, RosterError, TopologyContext, TopologyError,
+    CustomizerError, DurableAgentSpec, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedInputBinder, GovernedInputError, GovernedSettlement, IdentityBootstrapMode,
+    IdentityLifecycleState, IdentityRuntimeError, IdentityStatus, LocalExternalToolOverlay,
+    ManagedPeerEdge, MemberRestore, RosterContext, RosterError, TopologyContext, TopologyError,
 };
 use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
 use meerkat_mob::{MobDefinition, ProfileName};
@@ -825,16 +825,22 @@ async fn a_held_member_whose_publication_fails_starts_no_run_until_a_delivery_pu
         "the member stays held until its tools publish"
     );
 
-    // Work Core admits for the held member waits behind the hold.
-    let member = runtime
-        .mob_handle()
-        .member(&meerkat_meta::member_comms_id::mob_member_id(MEMBER))
+    // Work Core admits for the held member waits behind the hold. The
+    // member is an identity entry, so the work is the host's own (internal):
+    // Core admits no external work to an entry.
+    let handle = runtime.mob_handle();
+    let member = handle
+        .get_member(&meerkat_meta::member_comms_id::mob_member_id(MEMBER))
         .await
+        .expect("Core's roster read")
         .expect("Core holds the member");
     tokio::time::timeout(
         Duration::from_secs(10),
-        member.send(
-            meerkat_core::ContentInput::Text(QUEUED_WORK.to_string()),
+        handle.submit_work_with_mode(
+            member.agent_runtime_id,
+            member.fence_token,
+            meerkat_mob::WorkRef::new(),
+            meerkat_mob::WorkSpec::new(QUEUED_WORK, meerkat_mob::WorkOrigin::Internal),
             meerkat_core::types::HandlingMode::Queue,
         ),
     )
@@ -3146,18 +3152,18 @@ impl RefusingBinder {
 
 #[async_trait]
 impl GovernedInputBinder for RefusingBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         let handed = HandedBind {
             session_id: context.session_id.clone(),
             controller: context.controller.selection().clone(),
             builds: self.customizer.builds().len(),
         };
         self.binds.lock().unwrap().push(handed);
-        Err(BIND_REFUSED.to_string())
+        Err(GovernedBindRefusal::denied(BIND_REFUSED).into())
     }
 
     fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -3364,8 +3370,8 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
     assert!(
         matches!(
             &sent,
-            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-                if reason.as_str() == BIND_REFUSED
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                if refusal.detail == BIND_REFUSED
         ),
         "the governed input reaches the host's bind: {sent:?}"
     );
@@ -3470,8 +3476,8 @@ async fn a_builder_runtime_pins_the_member_controller_so_governed_input_reaches_
         assert!(
             matches!(
                 outcome,
-                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-                    if reason.as_str() == BIND_REFUSED
+                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                    if refusal.detail == BIND_REFUSED
             ),
             "the governed {door} reaches the host's bind: {outcome:?}"
         );

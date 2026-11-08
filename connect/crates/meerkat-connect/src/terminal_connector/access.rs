@@ -951,6 +951,7 @@ mod tests {
             )),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.join("factory"))
@@ -975,6 +976,7 @@ mod tests {
             )),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.join("factory"))

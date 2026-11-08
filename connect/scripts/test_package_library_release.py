@@ -261,6 +261,91 @@ class ReleaseTests(unittest.TestCase):
         return release.package(self.root, target or value["target"], self.base / name,
             input_selection=path, input_selection_sha256=sha(raw))
 
+    def enterprise_inputs(self):
+        value = self.explicit_inputs("linux-x86_64")
+        directory = self.root / "dist/selected-enterprise"
+        binary = b"inert enterprise input, never executed"
+        delivery = {"format":"meerkat-toolkit.official-consumers.v1", "components":[{
+            "catalog_id":"github", "profile":"enterprise-selected-reads", "target":"linux-x86_64",
+            "artifact":"github/github-mcp-server", "artifact_sha256":sha(binary)}]}
+        write(directory / "github/github-mcp-server", binary, 0o600)
+        write(directory / "delivery.json", json.dumps(delivery).encode(), 0o600)
+        # Match the offline helper's CONTENTS-only, non-executable input layout.
+        manifest(directory)
+        (directory / "SHA256SUMS").unlink()
+        value['official'] = {'bundle':'dist/selected-enterprise',
+            'contents':sha((directory / 'CONTENTS.json').read_bytes()), 'profile':'enterprise-selected-reads'}
+        source, pin = self.targets['linux-x86_64']['setup_installer']
+        value['sources']['setup/install-library-consumer.py'] = {'path':source,'sha256':pin}
+        source, pin = self.targets['linux-x86_64']['setup_backend']
+        value['sources']['setup/backend.py'] = {'path':source,'sha256':pin}
+        return value, directory
+
+    def test_explicit_enterprise_bundle_preserves_bytes_and_does_not_retarget_catalog(self):
+        value, directory = self.enterprise_inputs()
+        before = copy.deepcopy((release.TARGETS, release.OFFICIAL_ROUTE_BINDINGS))
+        original = {str(path.relative_to(directory)):path.read_bytes() for path in directory.rglob('*') if path.is_file()}
+        # Default GitHub.com associations must not run for this explicit family.
+        with patch.object(release, 'compose_official_routes', side_effect=AssertionError('implicit route')):
+            result = self.explicit_package(value, name='enterprise')
+        prefix = 'toolkit-library-controlled-selected-inputs-linux-x86_64/'
+        with tarfile.open(result['archive']) as archive:
+            for name, raw in original.items():
+                self.assertEqual(archive.extractfile(prefix+'official/'+name).read(), raw)
+            self.assertEqual(archive.getmember(prefix+'official/github/github-mcp-server').mode,0o755)
+            self.assertNotIn(prefix+'official/SHA256SUMS', archive.getnames())
+            selected = json.load(archive.extractfile(prefix+'selected/provenance/current-input-selection.json'))
+            self.assertEqual(selected['official'],value['official'])
+        self.assertEqual((release.TARGETS,release.OFFICIAL_ROUTE_BINDINGS),before)
+        self.assertEqual((directory/'github/github-mcp-server').stat().st_mode & 0o777,0o600)
+
+    def test_enterprise_selection_requires_profile_target_installer_and_exact_inventory(self):
+        value, directory = self.enterprise_inputs()
+        cases = []
+        for key,new in [('profile','selected-reads'),('contents','bad'),('bundle','../escape')]:
+            bad=copy.deepcopy(value);bad['official'][key]=new;cases.append(bad)
+        bad=copy.deepcopy(value);bad['sources'].clear();cases.append(bad)
+        bad=copy.deepcopy(value);del bad['sources']['setup/backend.py'];cases.append(bad)
+        bad=copy.deepcopy(value);del bad['sources']['setup/install-library-consumer.py'];cases.append(bad)
+        bad=copy.deepcopy(value);bad['official']['sums']='a'*64;cases.append(bad)
+        bad=copy.deepcopy(value);bad['target']='macos-arm64';cases.append(bad)
+        for i,bad in enumerate(cases):
+            with self.subTest(case=i),self.assertRaises(release.PackageError):
+                self.explicit_package(bad,name='enterprise-invalid-'+str(i))
+            self.assertFalse((self.base/('enterprise-invalid-'+str(i))).exists())
+        bad=copy.deepcopy(value);bad['official']['contents']='a'*64
+        with self.assertRaisesRegex(release.PackageError,'selected_manifest_digest_mismatch'):
+            self.explicit_package(bad,name='enterprise-digest')
+        binary=directory/'github/github-mcp-server'
+        binary.write_bytes(binary.read_bytes()+b'changed')
+        with self.assertRaisesRegex(release.PackageError,'selected_payload_digest_mismatch'):
+            self.explicit_package(value,name='enterprise-drift')
+
+    def test_enterprise_delivery_cannot_masquerade_as_selected_profile(self):
+        value,directory=self.enterprise_inputs()
+        original=(directory/'delivery.json').read_bytes()
+        for i,(key,new) in enumerate((('profile','selected-reads'),('target','macos-arm64'),
+                ('artifact','github/other'),('artifact_sha256','a'*64))):
+            delivery=json.loads(original);delivery['components'][0][key]=new
+            (directory/'delivery.json').write_bytes(json.dumps(delivery).encode())
+            manifest(directory);(directory/'SHA256SUMS').unlink()
+            value['official']['contents']=sha((directory/'CONTENTS.json').read_bytes())
+            with self.subTest(key=key),self.assertRaises(release.PackageError):
+                self.explicit_package(value,name='enterprise-delivery-'+str(i))
+
+    def test_enterprise_output_cannot_overlap_selected_input_and_legacy_routes_are_refused(self):
+        value,directory=self.enterprise_inputs()
+        path=self.base/'enterprise-inputs.json';raw=json.dumps(value).encode();path.write_bytes(raw)
+        with self.assertRaisesRegex(release.PackageError,'output_inside_input'):
+            release.package(self.root,'linux-x86_64',directory/'output',
+                input_selection=path,input_selection_sha256=sha(raw))
+        valid={'components':{'services':{}},'routes':[{'family':'services'}]}
+        release.require_explicit_official_family({'consumers/routes.json':(json.dumps(valid).encode(),0o644)})
+        for index in ({**valid,'components':{'official-github':{}}},
+                      {**valid,'routes':[{'family':'official-github','profile':'selected-reads'}]}):
+            with self.assertRaisesRegex(release.PackageError,'requires_uncomposed_routes'):
+                release.require_explicit_official_family({'consumers/routes.json':(json.dumps(index).encode(),0o644)})
+
     def test_explicit_inputs_retain_exact_current_source_tool_and_frozen_donor(self):
         value = self.explicit_inputs()
         self.select_recipe_tool(value)

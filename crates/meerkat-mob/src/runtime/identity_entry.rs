@@ -371,6 +371,12 @@ pub struct SeatedMember {
     pub profile: ProfileName,
     /// The incarnation's runtime mode.
     pub runtime_mode: crate::MobRuntimeMode,
+    /// Whether the incarnation's runtime admits external work by its
+    /// profile (or its host's override at spawn). For an identity entry it
+    /// is the rule the entry's host applies to the external work it delivers
+    /// on the entry's behalf: MobMachine admits no external work to an entry
+    /// itself.
+    pub externally_addressable: bool,
 }
 
 /// Where an identity's member stands.
@@ -1116,6 +1122,9 @@ fn seated_member(
         session_id,
         profile,
         runtime_mode,
+        externally_addressable: state
+            .externally_addressable_runtime_ids
+            .contains(runtime_id),
     };
     Ok(Some(
         if state.member_state_markers.get(runtime_id) == Some(&mob_dsl::MobMemberState::Retiring) {

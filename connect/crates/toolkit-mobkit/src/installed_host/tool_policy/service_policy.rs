@@ -163,6 +163,9 @@ pub struct ActiveMemberToolPolicyDecision {
 pub struct ApplicationToolPolicyRecoveryRequest<'a> {
     pub decision: &'a ActiveMemberToolPolicyDecision,
     pub canonical_json: &'a [u8],
+    /// Same validated canonical slot as the saved decision. These are retained
+    /// membership facts, not current grants or permission to restore a row.
+    pub member_admissions: &'a [super::super::dynamic_members::MemberClassAdmission],
 }
 pub enum ApplicationToolPolicyRecoveryDecision {
     RequiresHuman,
@@ -205,6 +208,12 @@ struct Slot {
     current: String,
     decision: Option<ActiveMemberToolPolicyDecision>,
     pending: Option<Pending>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    admissions: Vec<super::super::dynamic_members::MemberClassAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    member_decision: Option<member_classes::MemberPolicyDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    member_pending: Option<member_classes::MemberPolicyDecision>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,17 +234,37 @@ pub(crate) struct ServicePolicyOwner {
     application: PrincipalRef,
     provider: Arc<CompiledPolicyProvider>,
     bootstrap: String,
+    classes: Vec<meerkat_toolkit::host_lifetime::policy::CompiledMemberClass>,
     participant: Option<Arc<dyn ApplicationServicePolicy>>,
     exclusion: Arc<tokio::sync::Mutex<()>>,
     observed_current: Mutex<Option<Arc<ObservedPolicy>>>,
+    // Exact native registration correlations only. Nothing here survives a
+    // process or grants native liveness; the canonical slot owns generations.
+    member_registrations:
+        Mutex<std::collections::BTreeMap<String, member_classes::MemberRegistrationSelection>>,
+    // Weak reverse reference to the existing source owner, for its native
+    // grant authority and real controller-mutation custody. No new issuer.
+    callback_source:
+        std::sync::OnceLock<std::sync::Weak<crate::private_originals::PrivateOriginals>>,
     // Actual return retained until its terminal Store write settles. This is
     // not a second journal; a process loss before persistence stays unknown.
     known_refusal: Mutex<Option<String>>,
 }
+/// Each current admission id with the outcome of its member reservation.
+type MemberReservations = Vec<(
+    String,
+    Result<Arc<dyn ApplicationServicePolicyReservation>, HostLifetimeError>,
+)>;
 struct ObservedPolicy {
+    authority: Arc<ObservedPolicyAuthority>,
+    admissions: Vec<super::super::dynamic_members::MemberClassAdmission>,
+    member_reservations: MemberReservations,
+}
+// An actual accepted policy observation. Registration metadata can retain this
+// same owner observation; recovery creates a new one even for identical bytes.
+struct ObservedPolicyAuthority {
     canonical: String,
-    // This reservation is for the durable complete policy decision. It is
-    // never the task/login reservation that approved the initial service use.
+    // Never the task/login reservation that approved the initial service use.
     reservation: Option<Arc<dyn ApplicationServicePolicyReservation>>,
 }
 
@@ -243,6 +272,9 @@ pub(crate) struct PreparedServiceToolPolicy {
     owner: Arc<ServicePolicyOwner>,
     prior: StoredRecord,
     pub(crate) proposal: ServiceToolPolicyProposal,
+    /// Captured from the same decoded slot as prior; begin checks that exact
+    /// revision and digest before this proposal can change native policy.
+    pub(crate) member_admissions: Vec<super::super::dynamic_members::MemberClassAdmission>,
     original: PrivateOriginalRef,
     acquisition: StoreKey,
     already_current: bool,
@@ -329,6 +361,7 @@ impl ServicePolicyOwner {
         provider: Arc<CompiledPolicyProvider>,
         bootstrap: String,
         participant: Option<Arc<dyn ApplicationServicePolicy>>,
+        classes: Vec<meerkat_toolkit::host_lifetime::policy::CompiledMemberClass>,
     ) -> Result<Arc<Self>, HostLifetimeError> {
         let policy = CompiledApplicationToolPolicy::parse_canonical_json(bootstrap.as_bytes())
             .map_err(|_| invalid())?;
@@ -344,6 +377,9 @@ impl ServicePolicyOwner {
             current: bootstrap.clone(),
             decision: None,
             pending: None,
+            admissions: vec![],
+            member_decision: None,
+            member_pending: None,
         };
         let admitted = store
             .admit(AdmissionRequest {
@@ -362,9 +398,12 @@ impl ServicePolicyOwner {
             provider,
             bootstrap,
             participant,
+            classes,
             exclusion: Arc::new(tokio::sync::Mutex::new(())),
             observed_current: Mutex::new(None),
             known_refusal: Mutex::new(None),
+            member_registrations: Mutex::new(Default::default()),
+            callback_source: std::sync::OnceLock::new(),
         });
         owner.decode(admitted.record())?;
         owner.recover().await?;
@@ -382,8 +421,10 @@ impl ServicePolicyOwner {
         scope: &StoreScope,
         application: &PrincipalRef,
         participant: &Option<Arc<dyn ApplicationServicePolicy>>,
+        classes: &[meerkat_toolkit::host_lifetime::policy::CompiledMemberClass],
     ) -> bool {
-        Arc::ptr_eq(&self.store, store)
+        self.classes == classes
+            && Arc::ptr_eq(&self.store, store)
             && self.key.scope() == *scope
             && &self.application == application
             && match (&self.participant, participant) {
@@ -399,7 +440,7 @@ impl ServicePolicyOwner {
             .lock()
             .map_err(|_| unavailable())?
             .as_ref()
-            .is_some_and(|current| current.canonical.as_bytes() == bytes))
+            .is_some_and(|current| current.authority.canonical.as_bytes() == bytes))
     }
     pub(crate) fn check_current(&self) -> Result<(), HostLifetimeError> {
         let selected = self
@@ -408,13 +449,13 @@ impl ServicePolicyOwner {
             .map_err(|_| unavailable())?
             .clone()
             .ok_or_else(unavailable)?;
-        if let Some(reservation) = &selected.reservation
+        if let Some(reservation) = &selected.authority.reservation
             && let Err(error) = reservation.check_current()
         {
             let mut observed = self.observed_current.lock().map_err(|_| unavailable())?;
             if observed
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &selected))
+                .is_some_and(|current| Arc::ptr_eq(&current.authority, &selected.authority))
             {
                 *observed = None;
             }
@@ -425,11 +466,43 @@ impl ServicePolicyOwner {
             .lock()
             .map_err(|_| unavailable())?
             .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &selected))
+            .is_some_and(|current| Arc::ptr_eq(&current.authority, &selected.authority))
         {
             return Err(unavailable());
         }
         Ok(())
+    }
+    /// Registration reads the same accepted policy used by invocation and
+    /// recovery. The immutable bootstrap artifact cannot admit a member after
+    /// its policy was superseded, or hide a member in an accepted successor.
+    pub(crate) fn contains_current_member(&self, member: &str) -> Result<bool, HostLifetimeError> {
+        self.check_current()?;
+        let selected = self
+            .observed_current
+            .lock()
+            .map_err(|_| unavailable())?
+            .clone()
+            .ok_or_else(unavailable)?;
+        let policy = CompiledApplicationToolPolicy::parse_canonical_json(
+            selected.authority.canonical.as_bytes(),
+        )
+        .map_err(|_| unavailable())?;
+        if let Some(reservation) = &selected.authority.reservation {
+            reservation.check_current()?;
+        }
+        if !self
+            .observed_current
+            .lock()
+            .map_err(|_| unavailable())?
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.authority, &selected.authority))
+        {
+            return Err(unavailable());
+        }
+        Ok(policy
+            .members
+            .iter()
+            .any(|row| row.member_identity == member))
     }
     fn acquisition_key_matches(&self, acquisition: &StoreKey) -> bool {
         let (Ok(realm), Ok(deployment), Ok(operation)) = (
@@ -488,10 +561,29 @@ impl ServicePolicyOwner {
             return Err(invalid());
         }
         match &slot.decision {
-            Some(decision) => self.decision(decision, slot.current.as_bytes())?,
-            None if slot.current != slot.bootstrap => return Err(invalid()),
+            Some(decision) => {
+                self.decision(
+                    decision,
+                    decision.proposal.candidate_canonical_json.as_bytes(),
+                )?;
+                if slot.member_decision.is_none()
+                    && decision.proposal.candidate_canonical_json != slot.current
+                {
+                    return Err(invalid());
+                }
+                // Class transitions add only a fresh member or remove that
+                // instance. Their unrelated preserved service rows still
+                // depend on this exact original complete-policy reservation.
+                if slot.member_decision.is_some() {
+                    self.validate_service_preservation(&slot, decision)?;
+                }
+            }
+            None if slot.current != slot.bootstrap && slot.member_decision.is_none() => {
+                return Err(invalid());
+            }
             None => {}
         }
+        self.validate_member_slot(&slot)?;
         if let Some(pending) = &slot.pending {
             self.decision(
                 &pending.decision,
@@ -561,12 +653,14 @@ impl ServicePolicyOwner {
         &self,
         decision: &ActiveMemberToolPolicyDecision,
         bytes: &[u8],
+        slot: &Slot,
     ) -> Result<Box<dyn ApplicationServicePolicyReservation>, HostLifetimeError> {
         let participant = self.participant.as_ref().ok_or_else(unavailable)?;
         let reserved = match participant.reserve_tool_policy_recovery(
             &ApplicationToolPolicyRecoveryRequest {
                 decision,
                 canonical_json: bytes,
+                member_admissions: &slot.admissions,
             },
         )? {
             ApplicationToolPolicyRecoveryDecision::RequiresHuman => return Err(unavailable()),
@@ -616,10 +710,15 @@ impl ServicePolicyOwner {
             .decision
             .as_ref()
             .map(|decision| {
-                self.recovery_reservation(decision, slot.current.as_bytes())
-                    .map(Arc::<dyn ApplicationServicePolicyReservation>::from)
+                self.recovery_reservation(
+                    decision,
+                    decision.proposal.candidate_canonical_json.as_bytes(),
+                    slot,
+                )
+                .map(Arc::<dyn ApplicationServicePolicyReservation>::from)
             })
             .transpose()?;
+        let member_reservations = self.member_reservations(slot)?;
         if let Some(reservation) = &reservation {
             reservation.check_current()?;
         }
@@ -631,8 +730,12 @@ impl ServicePolicyOwner {
         }
         *self.observed_current.lock().map_err(|_| unavailable())? =
             Some(Arc::new(ObservedPolicy {
-                canonical: slot.current.clone(),
-                reservation,
+                authority: Arc::new(ObservedPolicyAuthority {
+                    canonical: slot.current.clone(),
+                    reservation,
+                }),
+                admissions: slot.admissions.clone(),
+                member_reservations,
             }));
         Ok(())
     }
@@ -644,6 +747,9 @@ impl ServicePolicyOwner {
         let _exclusion = self.exclusion.lock().await;
         *self.observed_current.lock().map_err(|_| unavailable())? = None;
         let (stored, mut slot) = self.read().await?;
+        if slot.member_pending.is_some() {
+            return self.recover_member(stored, slot).await;
+        }
         let Some(pending) = &slot.pending else {
             *self.known_refusal.lock().map_err(|_| unavailable())? = None;
             return self.activate_current(&slot);
@@ -669,7 +775,7 @@ impl ServicePolicyOwner {
         }
         let bytes = pending.decision.proposal.candidate_canonical_json.clone();
         let reservation: Arc<dyn ApplicationServicePolicyReservation> =
-            Arc::from(self.recovery_reservation(&pending.decision, bytes.as_bytes())?);
+            Arc::from(self.recovery_reservation(&pending.decision, bytes.as_bytes(), &slot)?);
         reservation.check_current()?;
         if self
             .provider
@@ -684,12 +790,17 @@ impl ServicePolicyOwner {
         let pending = slot.pending.take().ok_or_else(invalid)?;
         slot.current = bytes.clone();
         slot.decision = Some(pending.decision);
+        slot.member_decision = None;
         self.change(&stored, &slot, "recovered-current").await?;
         reservation.check_current()?;
         *self.observed_current.lock().map_err(|_| unavailable())? =
             Some(Arc::new(ObservedPolicy {
-                canonical: bytes,
-                reservation: Some(reservation),
+                authority: Arc::new(ObservedPolicyAuthority {
+                    canonical: bytes,
+                    reservation: Some(reservation),
+                }),
+                admissions: slot.admissions.clone(),
+                member_reservations: self.member_reservations(&slot)?,
             }));
         Ok(())
     }
@@ -762,12 +873,16 @@ impl ServicePolicyOwner {
         self.recover().await?;
         let _exclusion = self.exclusion.lock().await;
         let (prior, slot) = self.read().await?;
-        if slot.pending.is_some() || selection.catalog.is_some() != catalog_session.is_some() {
+        if slot.pending.is_some()
+            || slot.member_pending.is_some()
+            || selection.catalog.is_some() != catalog_session.is_some()
+        {
             return Err(unavailable());
         }
         if let Some(decision) = &slot.decision
             && decision.original == original
             && decision.acquisition == acquisition
+            && decision.proposal.candidate_canonical_json == slot.current
         {
             if decision.proposal.member != member
                 || decision.proposal.selection != selection
@@ -779,6 +894,7 @@ impl ServicePolicyOwner {
                 owner: self.clone(),
                 prior,
                 proposal: decision.proposal.clone(),
+                member_admissions: slot.admissions,
                 original,
                 acquisition,
                 already_current: true,
@@ -803,6 +919,7 @@ impl ServicePolicyOwner {
             owner: self.clone(),
             prior,
             proposal,
+            member_admissions: slot.admissions,
             original,
             acquisition,
             already_current: false,
@@ -823,6 +940,7 @@ impl PreparedServiceToolPolicy {
         if stored.revision != self.prior.revision
             || stored.content_digest != self.prior.content_digest
             || slot.pending.is_some()
+            || slot.member_pending.is_some()
         {
             return Err(HostLifetimeError::Denied);
         }
@@ -834,10 +952,11 @@ impl PreparedServiceToolPolicy {
             {
                 return Err(HostLifetimeError::Denied);
             }
-            let member_reservation = Arc::from(
-                self.owner
-                    .recovery_reservation(decision, slot.current.as_bytes())?,
-            );
+            let member_reservation = Arc::from(self.owner.recovery_reservation(
+                decision,
+                slot.current.as_bytes(),
+                &slot,
+            )?);
             let observation = ServiceToolPolicyObservation {
                 proposal_sha256: self.proposal.sha256()?,
                 candidate: self.proposal.candidate.clone(),
@@ -883,6 +1002,7 @@ impl PreparedServiceToolPolicy {
             Arc::from(self.owner.recovery_reservation(
                 &decision,
                 decision.proposal.candidate_canonical_json.as_bytes(),
+                &slot,
             )?);
         slot.pending = Some(Pending {
             decision,
@@ -975,10 +1095,10 @@ impl ServiceToolPolicyTransaction {
                 // its still-current durable owner reservation, independently
                 // of whether the refusal write acknowledgment was available.
                 if let Some(prior) = &self.prior_observed {
-                    if prior.canonical != self.slot.current {
+                    if prior.authority.canonical != self.slot.current {
                         return Err(unavailable());
                     }
-                    if let Some(reservation) = &prior.reservation {
+                    if let Some(reservation) = &prior.authority.reservation {
                         reservation.check_current()?;
                     }
                     *self
@@ -995,6 +1115,7 @@ impl ServiceToolPolicyTransaction {
         let pending = self.slot.pending.take().ok_or_else(invalid)?;
         self.slot.current = bytes.clone();
         self.slot.decision = Some(pending.decision);
+        self.slot.member_decision = None;
         self.stored = self
             .owner
             .change(&self.stored, &self.slot, "accepted-current")
@@ -1007,8 +1128,12 @@ impl ServiceToolPolicyTransaction {
             .observed_current
             .lock()
             .map_err(|_| unavailable())? = Some(Arc::new(ObservedPolicy {
-            canonical: bytes,
-            reservation: Some(self.member_reservation.clone()),
+            authority: Arc::new(ObservedPolicyAuthority {
+                canonical: bytes,
+                reservation: Some(self.member_reservation.clone()),
+            }),
+            admissions: self.slot.admissions.clone(),
+            member_reservations: self.owner.member_reservations(&self.slot)?,
         }));
         Ok(RecordCondition {
             key: self.stored.key.clone(),
@@ -1019,6 +1144,10 @@ impl ServiceToolPolicyTransaction {
         })
     }
 }
+
+mod member_classes;
+#[cfg(test)]
+pub(crate) use member_classes::issue_callback_leaf;
 
 #[cfg(test)]
 mod tests;

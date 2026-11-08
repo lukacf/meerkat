@@ -94,12 +94,19 @@ impl BridgeProtocolVersion {
     /// `HostFeatures` probe and the member-addressed
     /// `ReadMemberVisibleTools`. A `MaterializeMember` that asks the host to
     /// report an adopted session's first turn
-    /// (`report_adopted_first_turn`) is a V7 command too. Accepted on decode
+    /// (`report_adopted_first_turn`) is a V7 command too, and so are a
+    /// `Fresh` `MaterializeMember` that carries the new member's
+    /// operator-instruction snapshot (`instruction_target`) and the
+    /// host-addressed `RecordMemberInstructionTarget` and
+    /// `ReleaseMemberInstructionTarget`. Accepted on decode
     /// and used per command, by shape, but never advertised: a 0.9.4
     /// controller cannot decode a capability report that lists it, so a
     /// controller asks a host with `HostFeatures` instead
     /// ([`HOST_FEATURE_PROMPT_CONTEXT_FORK`],
-    /// [`HOST_FEATURE_ADOPTED_FIRST_TURN`]).
+    /// [`HOST_FEATURE_ADOPTED_FIRST_TURN`],
+    /// [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]) before it extends a
+    /// command, and sends a new V7 command as it is: a host that does not
+    /// serve it refuses it typed.
     pub const V7: Self = Self(7);
     /// Current protocol version implemented by this bridge contract.
     pub const CURRENT: Self = Self::V6;
@@ -333,16 +340,23 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   of that reference's exact fork session. V2-V5 peers reject these fields
 ///   and commands with a typed minimum-version failure.
 /// - `7`: a `Fresh` `MaterializeMember` may carry `prompt_context_fork`, the
-///   child's fork seed and typed source, and a `Resume` `MaterializeMember`
+///   child's fork seed and typed source, and `instruction_target`, the new
+///   member's operator-instruction snapshot, which the host records in the
+///   session it mints; a `Resume` `MaterializeMember`
 ///   may set `report_adopted_first_turn`, asking the host to report whether
 ///   the adopted session's first turn already started; the host-addressed
-///   `HostFeatures` probe and the member-addressed `ReadMemberVisibleTools`
-///   are new. V7 is
+///   `HostFeatures` probe, the member-addressed `ReadMemberVisibleTools` and
+///   the host-addressed `RecordMemberInstructionTarget` and
+///   `ReleaseMemberInstructionTarget` (a placed member's operator
+///   instructions) are new. V7 is
 ///   accepted but never advertised, and `CURRENT` and `DEFAULT` stay V6, so
 ///   a 0.9.4 controller still binds, rebinds and reads the status of a host
-///   of this release. A controller sends V7 only to a host whose
-///   `HostFeatures` answer lists the feature; a host before V7 refuses the
-///   probe with `UnsupportedProtocolVersion` before reading it.
+///   of this release. A controller extends a command with a V7 field only
+///   for a host whose `HostFeatures` answer lists the feature; a host before
+///   V7 refuses the probe with `UnsupportedProtocolVersion` before reading
+///   it. The two operator-instruction commands are sent as they are: a host
+///   before V7 refuses them the same way, and a V7 host before them refuses
+///   a command it does not know with `Unsupported`.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
     BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
@@ -511,6 +525,12 @@ pub enum BridgeCommand {
     /// V7 member-addressed read of the member session's visible tool names
     /// (a prompt-context fork's source tools).
     ReadMemberVisibleTools(BridgeReadVisibleToolsPayload),
+    /// V7 host-addressed record of a placed member's operator-instruction
+    /// snapshot in its session on the host.
+    RecordMemberInstructionTarget(BridgeRecordInstructionTargetPayload),
+    /// V7 host-addressed release of a retired placed member's
+    /// operator-instruction target, once no member holds its session.
+    ReleaseMemberInstructionTarget(BridgeReleaseInstructionTargetPayload),
 }
 
 impl BridgeCommand {
@@ -554,6 +574,8 @@ impl BridgeCommand {
             Self::RevokeForkedParticipant(payload) => payload.protocol_version,
             Self::HostFeatures(payload) => payload.protocol_version,
             Self::ReadMemberVisibleTools(payload) => payload.protocol_version,
+            Self::RecordMemberInstructionTarget(payload) => payload.protocol_version,
+            Self::ReleaseMemberInstructionTarget(payload) => payload.protocol_version,
         }
     }
 }
@@ -662,6 +684,7 @@ pub fn decode_bridge_command_accepting(
     let command = serde_json::from_value(value).map_err(BridgeCommandDecodeError::Invalid)?;
     validate_v6_capability_shape(&command)?;
     validate_v7_prompt_context_fork_shape(&command)?;
+    validate_v7_instruction_target_shape(&command)?;
     validate_v7_adopted_first_turn_shape(&command)?;
     Ok(command)
 }
@@ -714,6 +737,28 @@ fn validate_v7_prompt_context_fork_shape(
     )))
 }
 
+/// The operator-instruction snapshot a materialize carries is the one a NEW
+/// session is born with: it rides only a `Fresh` launch, so a resumed
+/// member's session is recorded by delivery, never seeded.
+fn validate_v7_instruction_target_shape(
+    command: &BridgeCommand,
+) -> Result<(), BridgeCommandDecodeError> {
+    let BridgeCommand::MaterializeMember(payload) = command else {
+        return Ok(());
+    };
+    if payload.instruction_target.is_none()
+        || matches!(payload.launch, MaterializeLaunchMode::Fresh {})
+    {
+        return Ok(());
+    }
+    Err(BridgeCommandDecodeError::Invalid(serde_json::Error::io(
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "an operator-instruction snapshot at birth requires a Fresh launch",
+        ),
+    )))
+}
+
 /// Only a `Resume` launch adopts an existing session, so only a `Resume`
 /// launch may ask the host to report that session's first turn.
 fn validate_v7_adopted_first_turn_shape(
@@ -752,13 +797,19 @@ fn bridge_command_minimum_protocol(
                 .get("prompt_context_fork")
                 .is_some_and(|fork| !fork.is_null())
                 || value
+                    .get("instruction_target")
+                    .is_some_and(|target| !target.is_null())
+                || value
                     .get("report_adopted_first_turn")
                     .and_then(serde_json::Value::as_bool)
                     == Some(true) =>
         {
             BridgeProtocolVersion::V7
         }
-        "host_features" | "read_member_visible_tools" => BridgeProtocolVersion::V7,
+        "host_features"
+        | "read_member_visible_tools"
+        | "record_member_instruction_target"
+        | "release_member_instruction_target" => BridgeProtocolVersion::V7,
         "bind_member" | "retire_member" => BridgeProtocolVersion::V5,
         "create_forked_participant"
         | "revoke_forked_participant"
@@ -852,6 +903,8 @@ fn bridge_command_minimum_protocol(
         "declare_member_outbound_taint" => "DeclareMemberOutboundTaint(V4 target)",
         "host_features" => "HostFeatures",
         "read_member_visible_tools" => "ReadMemberVisibleTools",
+        "record_member_instruction_target" => "RecordMemberInstructionTarget",
+        "release_member_instruction_target" => "ReleaseMemberInstructionTarget",
         _ => unreachable!("minimum-version command table is exhaustive"),
     };
     Some((command, minimum))
@@ -1199,6 +1252,16 @@ pub struct BridgeMaterializePayload {
     /// before reading the payload.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub report_adopted_first_turn: bool,
+    /// V7: the operator-instruction snapshot of the member a `Fresh` launch
+    /// mints, at its mob's generation. The host records it in the session it
+    /// mints, before anything else, so the member's first run applies it,
+    /// and the mob's delivery of that generation then finds it recorded.
+    /// Carrying it is a V7 command, sent only to a host whose `HostFeatures`
+    /// answer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused
+    /// on any other launch, and a replay of the materialize at its tuple
+    /// records nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_target: Option<BridgeInstructionTarget>,
 }
 
 /// The prompt-context fork a V7 `MaterializeMember` carries. The host
@@ -1491,6 +1554,12 @@ pub const HOST_FEATURE_PROMPT_CONTEXT_FORK: &str = "prompt_context_fork";
 /// a `Resume` `MaterializeMember` setting `report_adopted_first_turn`.
 pub const HOST_FEATURE_ADOPTED_FIRST_TURN: &str = "adopted_first_turn";
 
+/// The `HostFeatures` feature that records a placed member's
+/// operator-instruction snapshot in the session its materialize mints: a
+/// `Fresh` `MaterializeMember` carrying `instruction_target`. A governed
+/// member host does not serve it.
+pub const HOST_FEATURE_INSTRUCTION_TARGET_BIRTH: &str = "instruction_target_birth";
+
 /// Reply to `HostFeatures`: an open vocabulary. Not `deny_unknown_fields`,
 /// and a reader ignores a feature it does not know, so a field or feature a
 /// later release adds never fails a reader of this release.
@@ -1527,6 +1596,138 @@ pub struct BridgeReadVisibleToolsPayload {
 pub struct BridgeMemberVisibleToolsResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<Vec<String>>,
+}
+
+/// V7 `RecordMemberInstructionTarget`: record a placed member's whole
+/// operator-instruction snapshot in the member's session on its host, as
+/// the member's mob decided to deliver it. Host-addressed like
+/// `ReleaseMember`. The host serves it for the member's exact incarnation
+/// only (`StaleFence` otherwise), through its own session service: through
+/// the member session at its turn boundary while it is live, store-only
+/// while it is dormant, never waking it. A generation the session already
+/// recorded answers `already_recorded` and writes nothing. A session's
+/// refusal travels as [`BridgeRejectionCause::InstructionTargetRefused`]. A
+/// host that does not serve the command refuses it before any effect:
+/// `UnsupportedProtocolVersion` before V7, `Unsupported` for a V7 host
+/// before it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeRecordInstructionTargetPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub binding_generation: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    /// The member's exact incarnation on the host. Its mob and identity own
+    /// the recorded target.
+    pub member: BridgeMemberIncarnation,
+    pub target: BridgeInstructionTarget,
+}
+
+/// A member's whole operator-instruction snapshot at one mob generation:
+/// every record of the mob, with its body where the record is Active for
+/// the member (none where it is revoked or does not select the member).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeInstructionTarget {
+    pub generation: u64,
+    pub slots: Vec<BridgeInstructionTargetSlot>,
+}
+
+/// One slot of a [`BridgeInstructionTarget`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeInstructionTargetSlot {
+    pub slot: meerkat_core::InstructionSlot,
+    pub revision: meerkat_core::InstructionRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+impl BridgeInstructionTarget {
+    /// The wire form of a member's snapshot. Its mob and identity travel in
+    /// the member's incarnation.
+    #[must_use]
+    pub fn from_record(record: &meerkat_core::InstructionTargetRecord) -> Self {
+        Self {
+            generation: record.generation,
+            slots: record
+                .slots
+                .iter()
+                .map(|slot| BridgeInstructionTargetSlot {
+                    slot: slot.slot.clone(),
+                    revision: slot.revision,
+                    body: slot.body.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The snapshot of member `agent_identity` of mob `mob_id`.
+    #[must_use]
+    pub fn into_record(
+        self,
+        mob_id: String,
+        agent_identity: String,
+    ) -> meerkat_core::InstructionTargetRecord {
+        meerkat_core::InstructionTargetRecord {
+            mob_id,
+            agent_identity,
+            generation: self.generation,
+            slots: self
+                .slots
+                .into_iter()
+                .map(|slot| meerkat_core::InstructionTargetRecordSlot {
+                    slot: slot.slot,
+                    revision: slot.revision,
+                    body: slot.body,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// V7 `ReleaseMemberInstructionTarget`: release a retired placed member's
+/// session target on behalf of its mob, when its host keeps the session.
+/// Host-addressed. The host serves it only once no member it holds is bound
+/// to the session (`StaleFence` while one is: the session was materialized
+/// again, and its member owns the target). The target then empties and is
+/// unowned, so the session's next fresh run start revokes what the mob had
+/// in effect. Another owner's target is refused typed; an archived or gone
+/// session has nothing to release.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeReleaseInstructionTargetPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub binding_generation: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub member_session_id: String,
+}
+
+/// Reply to `RecordMemberInstructionTarget`: what the member session did,
+/// and the generation it holds after it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeInstructionTargetRecordedResponse {
+    pub disposition: meerkat_core::InstructionRecordDisposition,
+    pub target_generation: u64,
+}
+
+/// Reply to `ReleaseMemberInstructionTarget`. `disposition` is absent when
+/// the member session is archived or gone: there is no target to release.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeInstructionTargetReleasedResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<meerkat_core::InstructionReleaseDisposition>,
 }
 
 /// Request the current host binding descriptor through an already-authorized
@@ -2155,6 +2356,10 @@ pub enum BridgeReply {
     HostFeatures(BridgeHostFeaturesResponse),
     /// Reply to [`BridgeCommand::ReadMemberVisibleTools`].
     MemberVisibleTools(BridgeMemberVisibleToolsResponse),
+    /// Reply to [`BridgeCommand::RecordMemberInstructionTarget`].
+    MemberInstructionTargetRecorded(BridgeInstructionTargetRecordedResponse),
+    /// Reply to [`BridgeCommand::ReleaseMemberInstructionTarget`].
+    MemberInstructionTargetReleased(BridgeInstructionTargetReleasedResponse),
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2801,6 +3006,15 @@ pub enum BridgeRejectionCause {
     /// controller's fork instruction policy does not carry into it.
     ForkInstructionRefused {
         refusal: meerkat_core::ForkInstructionRefusal,
+    },
+    /// A placed member's session refused an operator-instruction record or
+    /// release (V7 `RecordMemberInstructionTarget`,
+    /// `ReleaseMemberInstructionTarget`) for a reason in the closed refusal
+    /// vocabulary. The mob blocks the member's delivery for
+    /// `owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`
+    /// and `durability_unavailable`, and retries it for any other.
+    InstructionTargetRefused {
+        code: meerkat_core::InstructionSetErrorCode,
     },
 }
 
@@ -6416,6 +6630,7 @@ mod tests {
                 forked_participant_attachment: None,
                 prompt_context_fork: None,
                 report_adopted_first_turn: false,
+                instruction_target: None,
             })),
             BridgeCommand::ReleaseMember(BridgeReleasePayload {
                 supervisor: sample_peer_spec(),
@@ -6693,6 +6908,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         }));
         let mut value = serde_json::to_value(&cmd).expect("serialize command");
         value
@@ -6725,6 +6941,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         }));
         let mut value = serde_json::to_value(&cmd).expect("serialize command");
         value
@@ -7813,6 +8030,7 @@ mod tests {
             forked_participant_attachment: Some(attachment.clone()),
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         };
         let v5 = serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
             .expect("serialize V5 materialize");
@@ -7834,6 +8052,7 @@ mod tests {
             spec: crate::wire::portable_spec::sample_portable_member_spec(),
             spec_digest: "d".repeat(64),
             report_adopted_first_turn: false,
+            instruction_target: None,
         };
         assert!(matches!(
             decode_bridge_command(
@@ -7871,6 +8090,7 @@ mod tests {
                 source,
             }),
             report_adopted_first_turn: false,
+            instruction_target: None,
         };
         serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
             .expect("serialize materialize")
@@ -7958,6 +8178,243 @@ mod tests {
                 other => panic!("{command} stamped V6 must be refused typed: {other:?}"),
             }
         }
+    }
+
+    /// A Fresh materialize may carry the new member's operator-instruction
+    /// snapshot, which its member host records in the session it mints (the
+    /// member is born with it). Carrying it is a V7 command: stamped V7 it
+    /// decodes and reads back as sent, stamped below V7 it is refused typed
+    /// before it is read, and on a Resume launch, which mints nothing, it is
+    /// refused.
+    #[test]
+    fn a_materialize_carrying_a_birth_snapshot_is_a_fresh_v7_command() {
+        let target = instruction_target_record(BridgeProtocolVersion::V7)["target"].clone();
+        let carrying = |version, launch| {
+            let mut envelope = prompt_context_fork_materialize(version, launch);
+            let object = envelope
+                .as_object_mut()
+                .expect("a materialize envelope is an object");
+            object.remove("prompt_context_fork");
+            object.insert("instruction_target".to_string(), target.clone());
+            envelope
+        };
+        let payload = match decode_bridge_command(carrying(
+            BridgeProtocolVersion::V7,
+            MaterializeLaunchMode::Fresh {},
+        )) {
+            Ok(BridgeCommand::MaterializeMember(payload)) => payload,
+            other => panic!("a V7 Fresh materialize carrying a snapshot decodes: {other:?}"),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).expect("serialize the payload")["instruction_target"],
+            target,
+            "the carried snapshot reads back as sent"
+        );
+        match decode_bridge_command(carrying(
+            BridgeProtocolVersion::V6,
+            MaterializeLaunchMode::Fresh {},
+        )) {
+            Err(BridgeCommandDecodeError::UnsupportedProtocolVersion(error)) => assert_eq!(
+                error,
+                UnsupportedBridgeProtocolVersion {
+                    raw: 6,
+                    command: Some("MaterializeMember"),
+                    minimum: Some(7),
+                }
+            ),
+            other => panic!("a carried snapshot stamped V6 must be refused typed: {other:?}"),
+        }
+        assert!(
+            matches!(
+                decode_bridge_command(carrying(
+                    BridgeProtocolVersion::V7,
+                    MaterializeLaunchMode::Resume {
+                        session_id: "019f0000-0000-7000-8000-0000000000aa".to_string(),
+                        resume_from_role: None,
+                    },
+                )),
+                Err(BridgeCommandDecodeError::Invalid(_))
+            ),
+            "a Resume launch carries no birth snapshot"
+        );
+    }
+
+    fn instruction_target_member() -> BridgeMemberIncarnation {
+        BridgeMemberIncarnation {
+            mob_id: "mob-1".to_string(),
+            agent_identity: "worker-1".to_string(),
+            host_id: "host-1".to_string(),
+            binding_generation: 1,
+            member_session_id: "019f0000-0000-7000-8000-0000000000aa".to_string(),
+            generation: 2,
+            fence_token: 3,
+        }
+    }
+
+    fn instruction_target_record(version: BridgeProtocolVersion) -> serde_json::Value {
+        let slot: meerkat_core::InstructionSlot = serde_json::from_value(
+            serde_json::json!({ "namespace": "app.example", "key": "tone" }),
+        )
+        .expect("an instruction slot");
+        serde_json::to_value(BridgeCommand::RecordMemberInstructionTarget(
+            BridgeRecordInstructionTargetPayload {
+                supervisor: sample_peer_spec(),
+                epoch: 1,
+                binding_generation: 1,
+                protocol_version: version,
+                member: instruction_target_member(),
+                target: BridgeInstructionTarget::from_record(
+                    &meerkat_core::InstructionTargetRecord {
+                        mob_id: "mob-1".to_string(),
+                        agent_identity: "worker-1".to_string(),
+                        generation: 4,
+                        slots: vec![meerkat_core::InstructionTargetRecordSlot {
+                            slot,
+                            revision: meerkat_core::InstructionRevision::new(1)
+                                .expect("revision 1"),
+                            body: Some("Answer formally.".to_string()),
+                        }],
+                    },
+                ),
+            },
+        ))
+        .expect("serialize the record command")
+    }
+
+    fn instruction_target_release(version: BridgeProtocolVersion) -> serde_json::Value {
+        serde_json::to_value(BridgeCommand::ReleaseMemberInstructionTarget(
+            BridgeReleaseInstructionTargetPayload {
+                supervisor: sample_peer_spec(),
+                epoch: 1,
+                binding_generation: 1,
+                protocol_version: version,
+                mob_id: "mob-1".to_string(),
+                agent_identity: "worker-1".to_string(),
+                member_session_id: "019f0000-0000-7000-8000-0000000000aa".to_string(),
+            },
+        ))
+        .expect("serialize the release command")
+    }
+
+    /// A placed member's operator-instruction record and release are V7
+    /// commands. A host before V7 (a V6 table) refuses them before reading
+    /// them, and so does this release for a command stamped below V7; the
+    /// record carries the member's whole snapshot, which reads back as the
+    /// record its mob minted.
+    #[test]
+    fn the_operator_instruction_target_commands_are_v7_commands() {
+        let Ok(BridgeCommand::RecordMemberInstructionTarget(record)) =
+            decode_bridge_command(instruction_target_record(BridgeProtocolVersion::V7))
+        else {
+            panic!("a V7 record decodes");
+        };
+        assert_eq!(record.member, instruction_target_member());
+        let snapshot = record
+            .target
+            .clone()
+            .into_record("mob-1".to_string(), "worker-1".to_string());
+        assert_eq!(snapshot.generation, 4);
+        assert_eq!(
+            BridgeInstructionTarget::from_record(&snapshot),
+            record.target
+        );
+        assert!(matches!(
+            decode_bridge_command(instruction_target_release(BridgeProtocolVersion::V7)),
+            Ok(BridgeCommand::ReleaseMemberInstructionTarget(_))
+        ));
+        for (envelope, command) in [
+            (
+                instruction_target_record(BridgeProtocolVersion::V6),
+                "RecordMemberInstructionTarget",
+            ),
+            (
+                instruction_target_release(BridgeProtocolVersion::V6),
+                "ReleaseMemberInstructionTarget",
+            ),
+        ] {
+            match decode_bridge_command(envelope) {
+                Err(BridgeCommandDecodeError::UnsupportedProtocolVersion(error)) => {
+                    assert_eq!(
+                        error,
+                        UnsupportedBridgeProtocolVersion {
+                            raw: 6,
+                            command: Some(command),
+                            minimum: Some(7),
+                        }
+                    );
+                }
+                other => panic!("{command} stamped V6 must be refused typed: {other:?}"),
+            }
+        }
+        for envelope in [
+            instruction_target_record(BridgeProtocolVersion::V7),
+            instruction_target_release(BridgeProtocolVersion::V7),
+        ] {
+            assert!(
+                matches!(
+                    decode_bridge_command_accepting(envelope, BridgeProtocolVersion::V6),
+                    Err(BridgeCommandDecodeError::UnsupportedProtocolVersion(
+                        UnsupportedBridgeProtocolVersion {
+                            raw: 7,
+                            command: None,
+                            minimum: None,
+                        }
+                    ))
+                ),
+                "a host before V7 refuses the command before reading it"
+            );
+        }
+    }
+
+    /// The replies and the refusal the two commands answer, on the wire.
+    #[test]
+    fn the_operator_instruction_target_replies_and_refusal_round_trip() {
+        let recorded =
+            BridgeReply::MemberInstructionTargetRecorded(BridgeInstructionTargetRecordedResponse {
+                disposition: meerkat_core::InstructionRecordDisposition::AlreadyRecorded,
+                target_generation: 4,
+            });
+        let value = serde_json::to_value(&recorded).expect("serialize the recorded reply");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "result": "member_instruction_target_recorded",
+                "disposition": "already_recorded",
+                "target_generation": 4,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<BridgeReply>(value).expect("decode the recorded reply"),
+            recorded
+        );
+        let gone =
+            BridgeReply::MemberInstructionTargetReleased(BridgeInstructionTargetReleasedResponse {
+                disposition: None,
+            });
+        let value = serde_json::to_value(&gone).expect("serialize the released reply");
+        assert_eq!(
+            value,
+            serde_json::json!({ "result": "member_instruction_target_released" })
+        );
+        assert_eq!(
+            serde_json::from_value::<BridgeReply>(value).expect("decode the released reply"),
+            gone
+        );
+        let refused = BridgeReply::Rejected {
+            cause: BridgeRejectionCause::InstructionTargetRefused {
+                code: meerkat_core::InstructionSetErrorCode::OwnedBySession,
+            },
+            reason: "the member session refused it".to_string(),
+        };
+        let value = serde_json::to_value(&refused).expect("serialize the refusal");
+        assert_eq!(
+            value["cause"],
+            serde_json::json!({ "instruction_target_refused": { "code": "owned_by_session" } })
+        );
+        assert_eq!(
+            serde_json::from_value::<BridgeReply>(value).expect("decode the refusal"),
+            refused
+        );
     }
 
     /// A prompt-context fork seeds a NEW child: it rides only a Fresh launch.
@@ -8090,6 +8547,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: true,
+            instruction_target: None,
         };
         serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
             .expect("serialize materialize")

@@ -1600,7 +1600,10 @@ where
 
         let member_ids = identity_rt
             .identity_bootstrap_member_ids_for_status(&status)
-            .await;
+            .await
+            .map_err(|error| {
+                format!("identity bootstrap readiness could not read Core's members: {error}")
+            })?;
         let (mapped_generation, mapped_status) =
             identity_rt.identity_bootstrap_status_with_generation();
         if mapped_generation != generation || mapped_status != status {
@@ -2069,6 +2072,10 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/console/send",
     crate::console_voice::VOICE_OPEN_METHOD,
     "meta/console/recover_send",
+    // Operator instruction writes: the mob's journal, which the
+    // authoritative launch delivers to its members.
+    "meta/set_instruction",
+    "meta/revoke_instruction",
     // Console schedules: a deferred send's definition or its end, in the
     // schedule store the authoritative launch drains.
     "meta/schedule/create",
@@ -2816,6 +2823,9 @@ async fn handle_unified_rpc_json_inner(
                     "meta/prune_member_system_rows",
                     "meta/member_activate_instruction",
                     "meta/member_instruction_activations",
+                    "meta/set_instruction",
+                    "meta/revoke_instruction",
+                    "meta/instruction_status",
                     "meta/reconcile_identity",
                     "meta/status_identity_bootstrap",
                     "meta/wait_identity_bootstrap",
@@ -6385,6 +6395,45 @@ async fn handle_unified_rpc_json_inner(
             ))
             .await
         }
+        // The gateway mob's operator instructions (host verbs, listed with an
+        // identity runtime): a member target names a Meta identity.
+        "meta/set_instruction" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_set_instruction(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/revoke_instruction" => {
+            if identity_ctx.is_none() {
+                return maybe_identity_not_configured(is_notification, response_id);
+            }
+            Box::pin(operator_methods::handle_revoke_instruction(
+                runtime,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/instruction_status" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_instruction_status(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
         "meta/compact_member" => {
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
@@ -7469,12 +7518,12 @@ fn identity_lifecycle_state_json(
 /// The `meta/status_identity` answer of a registered identity: its
 /// roster policy and Core's facts, read per call. `agent_runtime_id`,
 /// `session_id` and `generation` are always present (null when Core holds
-/// no binding), and so are `runtime_mode` (null without a runtime mode
-/// override) and `customizer_tools_pending` (null while the identity's
-/// customizer tools are published); `convergence`, `wake_refusal` and
-/// `replaced_session` only when set. Every field comes from the one status
-/// read. The session repair hold is answered by `meta/member_health`, not
-/// here.
+/// no binding), and so are `runtime_mode` (the mode Core runs the identity's
+/// member in; null while Core holds no member of it) and
+/// `customizer_tools_pending` (null while the identity's customizer tools
+/// are published); `convergence`, `wake_refusal` and `replaced_session`
+/// only when set. Every field comes from the one status read. The session
+/// repair hold is answered by `meta/member_health`, not here.
 fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
     let mut result = serde_json::json!({
         "state": identity_lifecycle_state_json(status.state),
@@ -7840,12 +7889,19 @@ pub(crate) fn identity_error_code(err: &crate::identity_first::IdentityRuntimeEr
         | IdentityRuntimeError::MemberHistoryUnavailable { .. }
         | IdentityRuntimeError::IdentityWakeRetryable { .. }
         | IdentityRuntimeError::IdentitySessionAbsent { .. } => IDENTITY_HISTORY_UNAVAILABLE_CODE,
+        // A governed send held past its door's budget: retryable, nothing
+        // was submitted (data `kind` "governed_input_held").
+        IdentityRuntimeError::GovernedInput(crate::identity_first::GovernedInputError::Held(_)) => {
+            IDENTITY_HISTORY_UNAVAILABLE_CODE
+        }
         IdentityRuntimeError::IdentityHostAdopted { .. } => IDENTITY_HOST_ADOPTED_CODE,
         // The first-boot manifest: the migrated state directory and
-        // Core's stores disagree, the storage-resolution class.
+        // Core's stores disagree, the storage-resolution class. So does a
+        // name whose record Core cannot read.
         IdentityRuntimeError::FirstBootManifestUnreadable { .. }
         | IdentityRuntimeError::FirstBootRowRefused { .. }
-        | IdentityRuntimeError::FirstBootRowPending { .. } => STORAGE_RESOLUTION_CODE,
+        | IdentityRuntimeError::FirstBootRowPending { .. }
+        | IdentityRuntimeError::IdentityNameUnreadable { .. } => STORAGE_RESOLUTION_CODE,
         // Core's own class for its refusal: invalid params for an invalid key
         // or a conflict, a capability gap, an unreadable status.
         IdentityRuntimeError::KeyedSendRefused { error, .. } => {
@@ -8492,6 +8548,57 @@ mod tests {
             assert!(
                 !super::candidate_launch_refuses(method, params, None),
                 "a candidate serves {method} with {params}"
+            );
+        }
+    }
+
+    /// An operator instruction write changes the mob's journal, which the
+    /// authoritative launch delivers to its members: a candidate refuses
+    /// both writes typed, with the candidate refusal, and still answers the
+    /// status read; an authoritative launch serves all three.
+    #[test]
+    fn candidate_launch_refuses_instruction_writes() {
+        let refusal = |method: &str, params: &Value| {
+            super::candidate_launch_refusal(false, None, method, params, json!(7))
+                .and_then(|refusal| refusal.error)
+                .map(|error| (error.code, error.data))
+        };
+        let candidate_launch = Some((
+            crate::mob_announcements::rpc::ANNOUNCEMENTS_REFUSED_CODE,
+            Some(json!({ "kind": "candidate_launch" })),
+        ));
+        let write = json!({
+            "namespace": "host",
+            "key": "persona",
+            "revision": 1,
+            "body": "Answer as the release reviewer.",
+            "target": { "kind": "member", "identity": "review:singleton" },
+        });
+        let revoke = json!({ "namespace": "host", "key": "persona", "revision": 2 });
+        let read = json!({ "identity": "review:singleton" });
+        assert_eq!(
+            refusal("meta/set_instruction", &write),
+            candidate_launch,
+            "a candidate refuses meta/set_instruction"
+        );
+        assert_eq!(
+            refusal("meta/revoke_instruction", &revoke),
+            candidate_launch,
+            "a candidate refuses meta/revoke_instruction"
+        );
+        assert_eq!(
+            refusal("meta/instruction_status", &read),
+            None,
+            "a candidate still answers meta/instruction_status"
+        );
+        for (method, params) in [
+            ("meta/set_instruction", &write),
+            ("meta/revoke_instruction", &revoke),
+            ("meta/instruction_status", &read),
+        ] {
+            assert!(
+                super::candidate_launch_refusal(true, None, method, params, json!(7)).is_none(),
+                "an authoritative launch serves {method}"
             );
         }
     }
@@ -9214,6 +9321,14 @@ mod tests {
             &self,
         ) -> Result<meerkat_mob::MemberBindingHistory, BridgeError> {
             self.core.history()
+        }
+
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
         }
 
         async fn last_member_binding(
@@ -12773,13 +12888,18 @@ shell = true
         };
 
         // Every identity method the stale-binding refusal covers: the identity
-        // status, inspect and lifecycle methods, the delivery methods, and two
-        // operator member verbs (the operator path answers through its own
-        // response conversion). meta/member_activate_instruction and
+        // status, inspect and lifecycle methods, the delivery methods, and
+        // three operator member verbs (the operator path answers through its
+        // own response conversion). meta/member_activate_instruction and
         // meta/bound_member_transcript need an activation and a wired
         // transcript service before they resolve; the operator verb harness
         // covers them (operator_verbs_with_preconditions_refuse_a_stale_runtime_id).
-        let operator_methods = ["meta/member_instruction_activations", "meta/compact_member"];
+        // meta/set_instruction's member target is checked after the loop.
+        let operator_methods = [
+            "meta/member_instruction_activations",
+            "meta/compact_member",
+            "meta/instruction_status",
+        ];
         for method in [
             "meta/status_identity",
             "meta/inspect_identity",
@@ -12799,6 +12919,7 @@ shell = true
             "meta/completion_cursor",
             "meta/member_instruction_activations",
             "meta/compact_member",
+            "meta/instruction_status",
         ] {
             let response = Box::pin(call(method, "rt:review:singleton:0")).await?;
             assert_eq!(
@@ -12875,6 +12996,42 @@ shell = true
                 },
             }),
             "{member:#?}"
+        );
+        // An operator instruction's member target passes the same gate, and
+        // the refused write records nothing.
+        let write = Box::pin(handle_unified_rpc_json(
+            &runtime,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "meta/set_instruction",
+                "params": {
+                    "namespace": "host",
+                    "key": "persona",
+                    "revision": 1,
+                    "body": "Answer as the reviewer.",
+                    "target": { "kind": "member", "identity": "rt:review:singleton:0" },
+                },
+            })
+            .to_string(),
+            Duration::from_secs(1),
+            None,
+            Some(&identity_ctx),
+        ))
+        .await;
+        let write = serde_json::from_str::<Value>(&write)?;
+        assert_eq!(
+            write["error"]["data"]["kind"],
+            json!("stale_identity_runtime_binding"),
+            "{write:#?}"
+        );
+        let records = runtime
+            .mob_handle()
+            .operator_instruction_status(meerkat_mob::OperatorInstructionStatusQuery::default())
+            .await?;
+        assert!(
+            records.desired.is_empty(),
+            "the refused write records nothing: {records:?}"
         );
         let status = identity_runtime.status(&identity).await?;
         assert_eq!(
@@ -15831,6 +15988,165 @@ comms = true
         Ok(())
     }
 
+    /// `meta/retire_member` by a name this runtime has not registered, which
+    /// Core holds for an identity, answers the identity door's typed refusal,
+    /// and the mob's raw plane retires nothing, though a raw member holds the
+    /// name there: a created entry and a removed name answer `-32001`, an
+    /// unreadable name `-32014` (`identity_name_unreadable`), and an entry a
+    /// host declared, before this process's roster pass registered it,
+    /// `-32052` (`identity_history_unavailable`, retryable).
+    ///
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity" in
+    /// the RPC member verbs: the raw plane retires the member under the name,
+    /// and the verb answers it accepted.
+    #[tokio::test]
+    async fn retire_member_of_a_name_no_roster_pass_registers_is_refused_typed()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = Box::pin(
+            UnifiedRuntime::builder()
+                .mob_spec(rpc_test_mob_spec(&temp_dir)?)
+                .module_config(MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace: "rpc-unregistered-retire-test".to_string(),
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                })
+                .timeout(Duration::from_secs(5))
+                .build(),
+        )
+        .await?;
+        let names = [
+            "door-created",
+            "door-removed",
+            "door-unreadable",
+            "door-declared",
+        ];
+        // A raw member holds each name in the mob: what a raw retire ends.
+        for name in names {
+            runtime
+                .spawn(SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    name.to_string(),
+                    None,
+                    None,
+                    None,
+                ))
+                .await?;
+        }
+
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let created = AgentIdentity::parse("door-created")?;
+        let declared = AgentIdentity::parse("door-declared")?;
+        // Core holds a member of the created entry and of the declared one.
+        for identity in [&created, &declared] {
+            bind_live(
+                &core_bridge.core,
+                identity,
+                &meerkat_mob::ProfileName::from("worker"),
+                1,
+                Some(meerkat_core::types::SessionId::new()),
+            )
+            .map_err(|err| format!("Core's member of {identity}: {err:?}"))?;
+        }
+        core_bridge.hold_created(&created);
+        core_bridge.hold_declared(&declared);
+        core_bridge.hold_removed(&AgentIdentity::parse("door-removed")?);
+        core_bridge.hold_unreadable(&AgentIdentity::parse("door-unreadable")?);
+        // This process has run no roster pass: it registered nothing.
+        let identity_rt = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "rpc-unregistered-retire-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                Arc::clone(&identity_rt),
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: None,
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+
+        for (id, (name, code, data)) in [
+            ("door-created", -32001, Value::Null),
+            ("door-removed", -32001, Value::Null),
+            (
+                "door-unreadable",
+                crate::rpc::STORAGE_RESOLUTION_CODE,
+                json!({
+                    "kind": "identity_name_unreadable",
+                    "identity": "door-unreadable",
+                    "remedy": "repair_or_upgrade",
+                    "retryable": false,
+                }),
+            ),
+            (
+                "door-declared",
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "door-declared",
+                    "retryable": true,
+                }),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let raw = handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "meta/retire_member",
+                    "params": { "member_id": name },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                Some(&identity_ctx),
+            )
+            .await;
+            let response: Value = serde_json::from_str(&raw)?;
+            assert!(
+                response["result"].is_null(),
+                "{name}: meta/retire_member is refused: {response:#?}"
+            );
+            assert_eq!(
+                (
+                    response["error"]["code"].clone(),
+                    response["error"]["data"].clone()
+                ),
+                (json!(code), data),
+                "{name}: the identity door's typed refusal: {response:#?}"
+            );
+        }
+
+        let members = runtime.mob_handle().list_members().await;
+        for name in names {
+            assert!(
+                members
+                    .iter()
+                    .any(|entry| entry.agent_identity.as_str() == name),
+                "{name}: the raw plane retired nothing: {members:?}"
+            );
+        }
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
     /// Regression (meerkat 0.7.1 migration): an idle member's session
     /// machine sits in `Stopped`, where the archive step's final `Retire`
     /// transition is guard-rejected ("disposal completed but ArchiveSession
@@ -15983,6 +16299,7 @@ comms = true
                 None,
                 "alpha",
                 "alpha-side",
+                None,
                 None,
                 None,
             ))
@@ -16155,6 +16472,7 @@ comms = true
                 None,
                 "alpha",
                 "alpha-side",
+                None,
                 None,
                 None,
             ))

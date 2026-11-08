@@ -331,7 +331,11 @@ impl SqliteStore {
     ) -> StoreResult<T> {
         let connection = self.connection.clone();
         let store_id = self.store_id.clone();
+        let custody = crate::io_custody::capture();
         tokio::task::spawn_blocking(move || {
+            // Declare before the lock so connection/publication guards leave
+            // before the last caller hold, including on panic unwinding.
+            let _custody = custody;
             let mut slot = connection.lock().map_err(|_| StoreError::Synchronization)?;
             let owned = slot.as_mut().ok_or(StoreError::OwnerUnavailable)?;
             action(&mut owned.connection, &store_id)
@@ -778,6 +782,7 @@ impl ConditionalAdmissionStore for SqliteStore {
             &request.conditions,
             request.before_ms,
         )?;
+        crate::write_witness::witness("toolkit_store.admit_conditionally");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if let Some(record) = existing_admission(&tx, &request.admission)? {
@@ -821,6 +826,7 @@ impl ConditionalAdmissionStore for SqliteStore {
         }
         validate_conditions(&transition.key, &request.conditions, request.before_ms)?;
         let publication = self.record_publication.clone();
+        crate::write_witness::witness("toolkit_store.compare_and_swap_conditionally");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let transition = request.transition;
@@ -884,6 +890,7 @@ impl ToolkitStore for SqliteStore {
 
     async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
         validate_admission(&request)?;
+        crate::write_witness::witness("toolkit_store.admit");
         self.with(move |connection, _| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let outcome = admit_in_transaction(&tx, request)?;
@@ -935,6 +942,7 @@ impl ToolkitStore for SqliteStore {
         integer(transition.expected_revision)?;
         validate_effects_and_events(&transition.effects, &transition.events)?;
         let publication = self.record_publication.clone();
+        crate::write_witness::witness("toolkit_store.compare_and_swap");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let prior = read_record(&tx, &transition.key)?.ok_or(StoreError::NotFound)?;
@@ -985,6 +993,7 @@ impl ToolkitStore for SqliteStore {
         let ttl = validate_ttl(ttl_ms)?;
         let key = key.clone();
         let worker = worker.to_string();
+        crate::write_witness::witness("toolkit_store.claim_record");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let record = read_record(&tx, &key)?.ok_or(StoreError::NotFound)?;
@@ -1017,6 +1026,7 @@ impl ToolkitStore for SqliteStore {
         lease.key.validate()?;
         let ttl = validate_ttl(ttl_ms)?;
         let lease = lease.clone();
+        crate::write_witness::witness("toolkit_store.renew_record_claim");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let time = now(&tx)?;
@@ -1034,6 +1044,7 @@ impl ToolkitStore for SqliteStore {
     async fn release_record_claim(&self, lease: &RecordLease) -> StoreResult<()> {
         lease.key.validate()?;
         let lease = lease.clone();
+        crate::write_witness::witness("toolkit_store.release_record_claim");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             check_record_lease(&tx, store_id, &lease.key, &lease, now(&tx)?)?;
@@ -1051,6 +1062,7 @@ impl ToolkitStore for SqliteStore {
         identifier(&prior.worker)?;
         integer(prior.fence)?;
         let prior = prior.clone();
+        crate::write_witness::witness("toolkit_store.recover_record_claim");
         self.with(move |connection, store_id| {
             if prior.store_id != store_id {
                 return Err(StoreError::Fenced);
@@ -1146,6 +1158,7 @@ impl ToolkitStore for SqliteStore {
         let ttl = validate_ttl(ttl_ms)?;
         let key = key.clone();
         let worker = worker.to_string();
+        crate::write_witness::witness("toolkit_store.claim_effect");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let record = read_record(&tx, &key.record)?.ok_or(StoreError::NotFound)?;
@@ -1212,6 +1225,7 @@ impl ToolkitStore for SqliteStore {
         lease.key.validate()?;
         validate_outcome(&outcome)?;
         let lease = lease.clone();
+        crate::write_witness::witness("toolkit_store.acknowledge_effect");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let mut effect = read_effect(&tx, &lease.key)?.ok_or(StoreError::NotFound)?;
@@ -1252,6 +1266,7 @@ impl ToolkitStore for SqliteStore {
         let ttl = validate_ttl(ttl_ms)?;
         let key = key.clone();
         let worker = worker.to_string();
+        crate::write_witness::witness("toolkit_store.claim_reconciliation");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let mut effect = read_effect(&tx, &key)?.ok_or(StoreError::NotFound)?;
@@ -1302,6 +1317,7 @@ impl ToolkitStore for SqliteStore {
             | Reconciliation::Failed { evidence } => evidence.validate()?,
         }
         let lease = lease.clone();
+        crate::write_witness::witness("toolkit_store.reconcile_effect");
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let mut effect = read_effect(&tx, &lease.key)?.ok_or(StoreError::NotFound)?;

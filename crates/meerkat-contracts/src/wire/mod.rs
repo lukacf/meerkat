@@ -18,6 +18,7 @@ mod live;
 mod mcp_live;
 mod mob;
 mod models;
+mod operator_instruction;
 mod params;
 mod portable_spec;
 mod realtime;
@@ -100,6 +101,18 @@ pub use decision::{
     WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
     WireDecisionTier, WirePresentationAudience, WirePresentationLink, WirePresentationRecord,
     WireUnreadableDecision,
+};
+pub use operator_instruction::{
+    InstructionSetErrorData, MobInstructionStatusParams, MobInstructionStatusResult,
+    MobInstructionWriteResult, MobRevokeInstructionParams, MobSetInstructionParams,
+    RevokeSessionInstructionParams, SessionInstructionStatusParams, SessionInstructionStatusResult,
+    SessionInstructionWriteResult, SetSessionInstructionParams, WireInstructionBlockReason,
+    WireInstructionEffectiveRead, WireInstructionEffectiveSlot, WireInstructionLowering,
+    WireInstructionPendingReason, WireInstructionRecord, WireInstructionResidency,
+    WireInstructionSlotState, WireInstructionSlotView, WireInstructionTarget,
+    WireInstructionTargetOwner, WireMemberInstructionDelivery, WireMemberInstructionDeliveryState,
+    WireMemberInstructionSlot, WireMemberInstructionStatus, WireMobInstructionDisposition,
+    WireSessionInstructionDisposition, WireSessionInstructionSlot,
 };
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,

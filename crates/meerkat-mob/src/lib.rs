@@ -345,7 +345,7 @@ pub use runtime::stop_report::{
     MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport, NotHoldableReason,
     StopOptions,
 };
-pub use runtime::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
+pub use runtime::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,

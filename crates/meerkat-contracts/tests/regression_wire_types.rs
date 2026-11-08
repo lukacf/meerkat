@@ -655,6 +655,27 @@ fn agent_event_all_variants_roundtrip() {
             run_id: meerkat_core::lifecycle::RunId::new(),
             reason: meerkat_core::RequestedCompactionSkipReason::FirstModelRequest,
         },
+        AgentEvent::OperatorInstructionsApplied {
+            session_id: SessionId::new(),
+            entry_sequence: 2,
+            kind: meerkat_core::InstructionEntryKind::Delta,
+            run_id: Some(meerkat_core::lifecycle::RunId::new()),
+            active: vec![meerkat_core::InstructionActiveRef {
+                namespace: meerkat_core::InstructionNamespace::new("host").expect("namespace"),
+                key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                revision: meerkat_core::InstructionRevision::new(2).expect("revision"),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body("Be brief."),
+                body_bytes: 9,
+            }],
+            changes: vec![meerkat_core::InstructionChange::Activate {
+                namespace: meerkat_core::InstructionNamespace::new("host").expect("namespace"),
+                key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                revision: meerkat_core::InstructionRevision::new(2).expect("revision"),
+                supersedes: Some(meerkat_core::InstructionRevision::new(1).expect("revision")),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body("Be brief."),
+                body_bytes: 9,
+            }],
+        },
     ];
 
     for event in &direct_variants {
@@ -993,6 +1014,14 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::RequestedCompactionSkipped {
             run_id: meerkat_core::lifecycle::RunId::new(),
             reason: meerkat_core::RequestedCompactionSkipReason::NothingToFold,
+        },
+        AgentEvent::OperatorInstructionsApplied {
+            session_id: SessionId::new(),
+            entry_sequence: 1,
+            kind: meerkat_core::InstructionEntryKind::Delta,
+            run_id: Some(meerkat_core::lifecycle::RunId::new()),
+            active: Vec::new(),
+            changes: Vec::new(),
         },
     ];
 

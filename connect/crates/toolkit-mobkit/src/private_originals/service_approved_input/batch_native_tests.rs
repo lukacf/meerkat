@@ -263,7 +263,7 @@ async fn revoke_alpha(
     b: &PrivateOriginalRef,
     task: &ApprovedTaskLink,
 ) {
-    let route = fixture.source.route(&b.route).unwrap();
+    let route = &fixture.source.route(&b.route).unwrap();
     let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
         authority: route.source_authority.clone(),
         work: b.original.clone(),
@@ -438,9 +438,9 @@ impl BatchScript {
 }
 
 // ToolResult is the public transcript projection, not the typed terminal cause.
-// Core intentionally renders Denied and ReprepareRequired identically here.
-// The known alpha revocation plus zero server entry proves nonentry; independent
-// beta/catalog success is required separately. Do not infer an internal kind.
+// Core certifies the Denied refusal, met before any effect, as not dispatched
+// (tool_invoked false). The known alpha revocation plus zero server entry
+// proves nonentry; independent beta/catalog success is required separately.
 fn native_public_failure(result: &ToolResult) -> &'static str {
     for (kind, error) in [
         (
@@ -456,9 +456,15 @@ fn native_public_failure(result: &ToolResult) -> &'static str {
             meerkat_core::ToolError::OperationAuthorizationUnavailable,
         ),
     ] {
-        let expected =
+        let mut expected =
             meerkat_core::ops::terminal_tool_outcome_for_error(result.tool_use_id.clone(), error)
                 .result;
+        if kind == "authorization_refused" {
+            let mut body: serde_json::Value =
+                serde_json::from_str(&expected.text_content()).unwrap();
+            body["data"]["tool_invoked"] = serde_json::json!(false);
+            expected.set_text_content(body.to_string());
+        }
         if serde_json::to_value(result).unwrap() == serde_json::to_value(expected).unwrap() {
             return kind;
         }

@@ -1,6 +1,21 @@
 //! Same canonical SQLite/grant-owner controls, not live native dispatch proof.
 use super::*;
 
+/// The report check answers a lineage resolution the grant owner cannot
+/// answer now unavailable, never a denial, through the pure check it calls.
+#[tokio::test]
+async fn the_report_check_answers_an_owner_that_cannot_say_now_unavailable() {
+    let fixture = Fixture::build(true).await;
+    let candidate = fixture.candidate();
+    let intent = candidate
+        .report
+        .as_ref()
+        .expect("a report intent")
+        .native(&fixture.admitted.facts)
+        .unwrap();
+    assert_lineage_refusals(&intent);
+}
+
 pub(super) async fn issued(fixture: &Fixture) -> (HelperNativeBinding, ChildGrantIntent) {
     let candidate = fixture.candidate();
     let (_, report) = fixture

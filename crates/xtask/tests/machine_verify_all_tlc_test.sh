@@ -1203,7 +1203,8 @@ fi
 # committed write owes the new generation to exactly the members the slot's
 # old or new target selects, a seat owes the mob's generation, an unseat
 # leaves no delivery fact, a delivery is prepared only for an owed, bound,
-# born, local member, and no region step touches residency or wakes. It
+# born member (a placed member as a local one), and no region step touches
+# residency or wakes. It
 # first checks that the generated model defines every arm it drives,
 # requires each run's covered arms to fire and its eleven witnesses reached
 # (among them a retiring member's release, after its retire unbound it), one
@@ -1228,7 +1229,7 @@ fi
 # either. A hand-written audit over the same generated model
 # (created_identity_audit.tla, shards audits-q, audits-r and audits-t
 # through audits-v) checks
-# seventeen runs over their whole reachable space, in two parts. Its
+# eighteen runs over their whole reachable space, in three parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
 # or after the scan of its rows: no replay turns a Created entry Declared;
@@ -1298,7 +1299,13 @@ fi
 # purge; a purge changing nothing of the machine but its own fact; an
 # import restoring a record only over no row of its name and binding a
 # member in place on its incarnation; a Created entry whose row was
-# purged reserved). They require every listed arm to fire, a floor of
+# purged reserved). Its doors
+# part (0.9.11) drives work of either origin to a Declared entry, a Created
+# entry, a reserved name and a worker, each bound to its session or
+# reachable by its peer: no external work is admitted to an entry or a
+# reserved name, at most one arm answers every piece of work, and an
+# entry's external work is refused as an identity member. They require every
+# listed arm to fire, a floor of
 # distinct states (the changes part's printed until its
 # first green run sets them) and their witnesses reached, and --mutants
 # refuses the seeded defects named in the runner: the created entries'
@@ -1317,7 +1324,9 @@ fi
 # adoption that rotates its member, runs beside an open declared apply or
 # takes an entry its unlisting retires, a purge that drops the archived
 # session records, a start's pass that leaves a purged row's name
-# readable).
+# readable, external work admitted to an entry or a reserved name, an
+# identity member refusal of a worker's work, an entry's external work
+# answered by no arm).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -1325,10 +1334,10 @@ if [[ ! -x "${created_identity_audit}" ]]; then
 fi
 # Its runs are split over five shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
-# audits-v; the changes part's admit, commit, update and adoption runs in
-# audits-r, its archive, unlist, placement, recovered and edges runs in
-# audits-t, and its removal, preparation, prepverdicts and cycle runs in
-# audits-u.
+# audits-v; the changes part's admit, commit, update and adoption runs and
+# the doors part's doors run in audits-r, its archive, unlist, placement,
+# recovered and edges runs in audits-t, and its removal, preparation,
+# prepverdicts and cycle runs in audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
@@ -1338,8 +1347,8 @@ if run_part audits-v; then
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part reseat,names
 fi
 if run_part audits-r; then
-  echo "running bounded created identity admissions, records and adoptions TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update,adoption
+  echo "running bounded created identity admissions, records, adoptions and doors TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update,adoption,doors
 fi
 if run_part audits-u; then
   echo "running bounded created identity removals TLC audit"
@@ -1690,11 +1699,12 @@ run_machine_verify() {
 # the 1.13-1.66x its archive, unlist, placement and recovered runs took
 # hosted over their 202 s there), the scoped tool grant gate audit with
 # --mutants (0.9.11; its runs 144 s locally, not yet measured on a hosted
-# runner, about 180-270 s at that shard's 1.24-1.88x) and the
+# runner, about 180-270 s at that shard's 1.24-1.88x), the
 # GrantAuthorityMachine custody end audit with --mutants (nineteen runs over
 # the spend arms too, not yet measured hosted; 109 s locally with 4 TLC
-# workers, about 250 s at 2.3x): about 810-1085 s without the settle audit,
-# past the 720 s target below (to be rebalanced);
+# workers, about 250 s at 2.3x) and the doors run with --mutants (52 s
+# locally with 4 TLC workers, up to about 200 s hosted): about 920-1285 s
+# without the settle audit, past the 720 s target below (to be rebalanced);
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s, plus the requester

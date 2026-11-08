@@ -172,15 +172,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arc-swap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1568,17 +1559,6 @@ name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
 
 [[package]]
 name = "digest"
@@ -3280,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-connect"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -3316,6 +3296,7 @@ dependencies = [
  "nix 0.31.3",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3327,6 +3308,7 @@ dependencies = [
  "toolkit-package",
  "toolkit-store",
  "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -4214,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-toolkit"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6828,7 +6810,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "toolkit-catalog"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "indexmap",
  "meerkat-machine-codegen",
@@ -6840,7 +6822,7 @@ dependencies = [
 
 [[package]]
 name = "toolkit-mobkit"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -6850,6 +6832,7 @@ dependencies = [
  "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-mcp",
  "meerkat-meta",
  "meerkat-mob",
  "meerkat-mob-mcp",
@@ -6873,7 +6856,7 @@ dependencies = [
 
 [[package]]
 name = "toolkit-package"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "cap-std",
@@ -6896,7 +6879,7 @@ dependencies = [
 
 [[package]]
 name = "toolkit-store"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "hex",
@@ -7135,6 +7118,12 @@ dependencies = [
  "tokio-util",
  "webrtc-util",
 ]
+
+[[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
 
 [[package]]
 name = "typenum"
@@ -8316,18 +8305,16 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.4.2"
+version = "9.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
 dependencies = [
- "arbitrary",
  "crc32fast",
- "crossbeam-utils",
- "displaydoc",
  "flate2",
  "indexmap",
  "memchr",
- "thiserror 2.0.21",
+ "nix 0.31.3",
+ "typed-path",
 ]
 
 [[package]]

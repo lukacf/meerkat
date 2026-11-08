@@ -1065,6 +1065,13 @@ impl SessionBridge for MachineReadsBridge {
         self.reads.member_binding_history().await
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &crate::identity_first::AgentIdentity,
+    ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError> {
+        crate::identity_first::SessionBridge::identity_entry(&self.reads, identity).await
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,

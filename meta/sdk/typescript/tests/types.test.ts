@@ -1757,6 +1757,28 @@ describe("parseErrorEvent", () => {
     assert.equal(isResolutionErrorEvent(result), false);
   });
 
+  it("parses a failed compaction_harvest without saying it is not run again", () => {
+    const result = parseErrorEvent({
+      category: "lifecycle_effect_failed",
+      identity: "keeper",
+      agent_runtime_id: "rt:keeper:2",
+      session_id: "s-1",
+      effect: "compaction_harvest",
+      attempts: 1,
+      error:
+        "the harvest of the settled compaction batch failed (timed out); " +
+        "a fallback harvest of the session's memory follows",
+    });
+    assert.equal(result.category, ErrorCategory.LIFECYCLE_EFFECT_FAILED);
+    assert.equal(
+      result.message,
+      "the compaction_harvest of keeper (rt:keeper:2) failed after 1 attempts: " +
+        "the harvest of the settled compaction batch failed (timed out); " +
+        "a fallback harvest of the session's memory follows",
+    );
+    assert.equal(result.context.effect, "compaction_harvest");
+  });
+
   it("parses lifecycle_projection_off with its detail", () => {
     const result = parseErrorEvent({
       category: "lifecycle_projection_off",

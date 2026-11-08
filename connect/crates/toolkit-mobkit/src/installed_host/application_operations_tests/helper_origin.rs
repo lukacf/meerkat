@@ -40,6 +40,17 @@ impl HelperFixture {
         session: SessionId,
         deadline_ms: Option<u64>,
     ) -> Self {
+        Self::from_installed_targets(installed, session, deadline_ms, None).await
+    }
+
+    // Opt-in target-policy fixture only. The ordinary helper controls keep
+    // their original memory-only basis and do not gain these operations.
+    async fn from_installed_targets(
+        installed: Fixture,
+        session: SessionId,
+        deadline_ms: Option<u64>,
+        public_target: Option<bool>,
+    ) -> Self {
         let native = &installed.application.native;
         assert!(
             installed.association.candidate().original_work.authority
@@ -71,8 +82,50 @@ impl HelperFixture {
         // Independent real children preserve the existing fixture's memory
         // ceiling. The local operation projection below is not a report grant.
         let controller = child(&controller_parent, "origin-policy-controller");
-        let basis = WorkAuthorityBasis::GrantLineage {
-            lineage: child(&operation_parent, "origin-policy-memory"),
+        let base = child(&operation_parent, "origin-policy-memory");
+        let basis = if let Some(public_target) = public_target {
+            use crate::installed_host::operator_setup::{workflow_mcp, workflow_public};
+            let grants = installed.source.grants();
+            let envelope = grants
+                .resolve_lineage(&base, &executor, None)
+                .unwrap()
+                .restrictions()
+                .clone();
+            let mut server = meerkat_core::McpServerConfig::stdio(
+                "toolkit-setup",
+                "unused",
+                vec![],
+                Default::default(),
+            );
+            server.access = Some(meerkat_core::McpServerAccess::allowing(["setup_state"]));
+            let mcp = crate::installed_host::operator_setup::issue_mcp_target_for_policy_test(
+                &grants,
+                &base[0].root_authority,
+                &native.grant_administrator,
+                &executor,
+                &base,
+                &envelope,
+                &server,
+            );
+            let public = if public_target {
+                workflow_public::select(
+                    &grants,
+                    &native.grant_administrator,
+                    &executor,
+                    None,
+                    &base,
+                    &envelope,
+                    None,
+                    true,
+                )
+                .unwrap()
+            } else {
+                None
+            };
+            assert_eq!(public.is_some(), public_target);
+            workflow_mcp::basis_with_public(base, mcp, public)
+        } else {
+            WorkAuthorityBasis::GrantLineage { lineage: base }
         };
         let member = native.members[0].clone();
         let selection = HelperAdmissionSelection {
@@ -152,12 +205,19 @@ impl HelperFixture {
     }
 
     fn binding(&self, call: &SetupBundleCall) -> PreparedAuthorizationBinding {
+        self.binding_from_operation(AuthorizationOperation::Tool(call.facts.clone()))
+    }
+
+    fn binding_from_operation(
+        &self,
+        operation: AuthorizationOperation,
+    ) -> PreparedAuthorizationBinding {
         PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
             operation_id: serde_json::from_str("\"00000000-0000-0000-0000-000000000005\"").unwrap(),
             execution_scope: scope(&self.session),
             run_id: None,
             context_revision: None,
-            operation: AuthorizationOperation::Tool(call.facts.clone()),
+            operation,
         })
     }
 
@@ -189,6 +249,126 @@ fn calls() -> [SetupBundleCall; 3] {
             meerkat_toolkit::setup::SETUP_PUBLIC_SERVICE_REQUEST,
         ),
     ]
+}
+
+#[tokio::test]
+async fn explicit_workflow_public_target_reaches_native_grant_policy_and_revokes_locally() {
+    use crate::installed_host::operator_setup::{workflow_mcp, workflow_public};
+    use meerkat_authorization_contracts::constraints::LifetimeRestriction;
+    for selected in [false, true] {
+        let clock = ReviewClock::new();
+        let expiry = clock.deadline(180_000);
+        let installed = Fixture::with_operations(move |native, _| {
+            let mut envelope = application_operations::mcp_access_restrictions(
+                &native.grant_administrator,
+                &native.routes[0].logical_executor,
+                &native.members[0].audience,
+                "toolkit-setup",
+                ["setup_state"],
+                &meerkat_core::McpConnectorApproval::NoConnector,
+            );
+            let meerkat_authorization_contracts::constraints::SetBound::Exact(actions) =
+                envelope.actions.bound()
+            else {
+                panic!("exact MCP selection")
+            };
+            envelope.actions = ExactRestriction::exact(actions.iter().cloned().chain([
+                ActionRef {
+                    feature: "toolkit".into(),
+                    action: "catalog-read".into(),
+                },
+                ActionRef {
+                    feature: "toolkit".into(),
+                    action: "setup-public-service-request".into(),
+                },
+            ]));
+            envelope.resource_domains =
+                DomainRestriction::owned_by([native.grant_administrator.clone()]);
+            envelope.delegation_depth = DelegationDepth::remaining(1);
+            envelope.lifetime = LifetimeRestriction::window(0, expiry);
+            envelope
+        })
+        .await;
+        let fixture = HelperFixture::from_installed_targets(
+            installed,
+            SessionId::new(),
+            Some(expiry),
+            Some(selected),
+        )
+        .await;
+        let context = fixture.native_context(clock.clone());
+        let [report, account, public] = calls();
+        let binding = fixture.binding(&public);
+        // The actual installed projection allows both cases. Native target
+        // lookup, not an inert operation owner, distinguishes the missing row.
+        fixture.values(&public).unwrap();
+        let basis = &fixture.association.candidate().authority_basis;
+        let (base, mcp) = workflow_mcp::split(basis).unwrap();
+        let public_lineage = workflow_mcp::public_lineage(basis).unwrap();
+        assert_eq!(public_lineage.is_some(), selected);
+        assert!(mcp.is_some());
+        if !selected {
+            denied(context.authorization().prepare(&binding));
+            assert!(
+                basis
+                    .lineage_for(Some(&workflow_public::target()))
+                    .is_none()
+            );
+        } else {
+            let public_lineage = public_lineage.unwrap();
+            assert_eq!(public_lineage[0], base[0]);
+            assert_ne!(public_lineage[1], base[1]);
+            let prepared = context.authorization().prepare(&binding).unwrap();
+            prepared.check_current(&binding).unwrap();
+            // Adjacent registered operations cannot inherit the public leaf.
+            denied(context.authorization().prepare(&fixture.binding(&account)));
+            denied(context.authorization().prepare(&fixture.binding(&report)));
+            let machine = crate::original_ingress::tests::machine(&fixture.installed.source);
+            {
+                let mut custody = machine.try_controller_grant_mutation().unwrap();
+                fixture
+                    .installed
+                    .source
+                    .grants()
+                    .revoke(
+                        &fixture.installed.application.native.grant_administrator,
+                        &public_lineage[1],
+                        &mut custody,
+                    )
+                    .unwrap();
+            }
+            assert!(prepared.check_current(&binding).is_err());
+            denied(context.authorization().prepare(&binding));
+            // The same historical references still parse for restoration.
+            // Only public use is revoked; actual native catalog authorization
+            // continues with the base. The producer control separately resolves
+            // the existing exact MCP authority after public revocation.
+            assert_eq!(
+                workflow_mcp::planning_lineages(basis).unwrap(),
+                vec![base, mcp.unwrap()]
+            );
+            let catalog = CatalogCall::new("tool_catalog_search");
+            let catalog_binding =
+                fixture.binding_from_operation(AuthorizationOperation::Tool(catalog.facts.clone()));
+            context
+                .authorization()
+                .prepare(&catalog_binding)
+                .unwrap()
+                .check_current(&catalog_binding)
+                .unwrap();
+            fixture
+                .installed
+                .application
+                .originals
+                .record_operation_cancelled(&fixture.installed.reference)
+                .await
+                .unwrap();
+            denied(context.authorization().prepare(&catalog_binding));
+        }
+        for call in [&report, &account, &public] {
+            assert_eq!(call.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
 }
 
 #[tokio::test]
@@ -408,6 +588,98 @@ impl HelperFixture {
 }
 
 #[tokio::test]
+async fn ordinary_review_window_and_shorter_native_expiry_remain_fixed() {
+    // Same prepared authorization throughout each case. The real grant owner,
+    // installed policy and native validity checks run against the fixed clock;
+    // no human presentation, effect, timer sleep or re-preparation is simulated.
+    for (purpose, grant_ms, cutoff_ms) in [
+        (LocalPolicyPurpose::Operation, 3_600_000, 1_800_000),
+        (LocalPolicyPurpose::Operation, 90_000, 90_000),
+        (LocalPolicyPurpose::Controller, 3_600_000, 1_800_000),
+    ] {
+        let clock = ReviewClock::new();
+        let grant_deadline = clock.deadline(grant_ms);
+        let fixture = Fixture::with_operations(move |native, session| {
+            let mut bounds = memory_bounds(native, session);
+            bounds.lifetime =
+                meerkat_authorization_contracts::constraints::LifetimeRestriction::window(
+                    0,
+                    grant_deadline,
+                );
+            bounds
+        })
+        .await;
+        let binding = if purpose == LocalPolicyPurpose::Operation {
+            fixture.memory(fixture.session.clone(), SourceAuthorizationUse::Read)
+        } else {
+            fixture.model_binding(fixture.facts.clone())
+        };
+        let claims = fixture.association.candidate();
+        let grant = if purpose == LocalPolicyPurpose::Operation {
+            fixture
+                .source
+                .grants()
+                .resolve_lineage(
+                    claims.authority_basis.lineage_for(None).unwrap(),
+                    &claims.logical_executor,
+                    claims.represented_subject.as_ref(),
+                )
+                .unwrap()
+        } else {
+            fixture
+                .source
+                .grants()
+                .resolve_controller_lineage(
+                    &claims.controller_grant_lineage,
+                    &claims.logical_executor,
+                    claims.represented_subject.as_ref(),
+                )
+                .unwrap()
+        };
+        if purpose == LocalPolicyPurpose::Operation {
+            assert_eq!(grant.expires_at_ms(), grant_deadline);
+        } else {
+            assert!(grant.expires_at_ms() > clock.deadline(cutoff_ms));
+        }
+        for expiry in [
+            fixture
+                .application
+                .authorize_admitted_work(
+                    &fixture.association,
+                    &binding,
+                    purpose,
+                    clock.start.unix_ms,
+                )
+                .unwrap()
+                .expires_at_ms,
+            fixture
+                .application
+                .authorize_operation(&fixture.association, &binding, purpose, clock.start.unix_ms)
+                .unwrap()
+                .expires_at_ms,
+        ] {
+            assert_eq!(expiry, clock.deadline(1_800_000));
+        }
+        let context = WorkAuthorizationContext::new(
+            Arc::new(meerkat_authorization::work::LocalWorkAuthorization::new(
+                Arc::new(fixture.association.clone()),
+                fixture.policy.clone(),
+                fixture.source.publication(),
+                clock.clone(),
+            )),
+            scope(&fixture.session),
+        );
+        let prepared = context.authorization().prepare(&binding).unwrap();
+        clock.at(60_001);
+        prepared.check_current(&binding).unwrap();
+        clock.at(cutoff_ms - 1);
+        prepared.check_current(&binding).unwrap();
+        clock.at(cutoff_ms);
+        denied(prepared.check_current(&binding));
+    }
+}
+
+#[tokio::test]
 async fn helper_review_lifetime_keeps_same_native_preparation_current_past_sixty_seconds() {
     let clock = ReviewClock::new();
     let fixture = HelperFixture::with_deadline(Some(clock.deadline(180_000)), None).await;
@@ -424,7 +696,7 @@ async fn helper_review_lifetime_keeps_same_native_preparation_current_past_sixty
         let expected = if purpose == LocalPolicyPurpose::Operation {
             clock.deadline(180_000)
         } else {
-            now + 60_000
+            now + 1_800_000
         };
         assert_eq!(
             fixture
@@ -509,7 +781,7 @@ async fn helper_review_lifetime_missing_live_deadline_never_falls_back_to_ordina
             )
             .unwrap()
             .expires_at_ms,
-        clock.deadline(60_000)
+        clock.deadline(1_800_000)
     );
     assert_eq!(
         fixture
@@ -521,7 +793,7 @@ async fn helper_review_lifetime_missing_live_deadline_never_falls_back_to_ordina
                 clock.start.unix_ms,
             )
             .unwrap(),
-        clock.deadline(60_000)
+        clock.deadline(1_800_000)
     );
     let mut foreign = fixture.association.candidate().clone();
     foreign.target.context = id(&SessionId::new().to_string());

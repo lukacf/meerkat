@@ -134,13 +134,15 @@ impl ConsoleSpawnSink {
             .await;
 
         let mut labels = seed.labels.clone();
-        // A spawn never names a side chat's source or creator: only the
-        // console's projection of Meerkat's fork record writes them
+        // A spawn never names a side chat's source, creator or private
+        // owner: only the console's projection of Meerkat's fork record
+        // writes them
         // (`crate::side_chat::project_side_chat_lineage`), so the registry
         // never holds them.
         labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
+        labels.remove(crate::access::PRIVATE_TO_LABEL);
         // Lineage is runtime-derived truth: ABAC inheritance hangs off
         // `spawned_by`, so a caller-supplied label must never spoof (or
         // erase) who actually performed the spawn.
@@ -292,6 +294,10 @@ pub(crate) fn spawned_by_from_comms_name(comms_name: &str) -> Option<String> {
 /// A side chat's lineage goes too: the console writes a side chat's source
 /// and creator only where Meerkat's roster agrees
 /// ([`crate::side_chat::project_side_chat_lineage`]), never from a label.
+/// A private owner ([`crate::access::PRIVATE_TO_LABEL`]) stays: only Meta
+/// writes it on a roster (a side chat fork, a spawn or fork by a private
+/// member) or the host declares it, since every caller label path refuses
+/// it, so a member's own roster label is the owner, whatever its lineage.
 pub(crate) fn sanitize_unverified_lineage_labels(labels: &mut BTreeMap<String, String>) {
     labels.remove(SPAWNED_BY_LABEL);
     labels.remove(SPAWNED_BY_SESSION_LABEL);
@@ -422,6 +428,22 @@ fn spawn_arg_record(value: &Value, default_mob_id: Option<&str>) -> Option<Spawn
         initial_message,
         labels,
     })
+}
+
+/// The first label only Meta writes
+/// ([`crate::member_comms_id::RESERVED_AUTHORITY_LABELS`]) among the labels a
+/// spawn-tool call supplies: its own `labels`, or those of an entry of its
+/// `specs` or `members` array. An agent's spawn refuses it, naming it.
+pub(crate) fn reserved_label_in_spawn_args(args: &Value) -> Option<&'static str> {
+    let label_maps = std::iter::once(args).chain(
+        ["specs", "members"]
+            .into_iter()
+            .filter_map(|key| args.get(key).and_then(Value::as_array))
+            .flatten(),
+    );
+    label_maps
+        .filter_map(|value| value.get("labels").and_then(Value::as_object))
+        .find_map(|labels| crate::member_comms_id::reserved_authority_label(labels.keys()))
 }
 
 fn spawn_arg_records(args: &Value) -> Vec<SpawnArgRecord> {
@@ -630,9 +652,10 @@ pub(crate) fn merge_registered_labels(
         } else if key != crate::side_chat::SIDE_CHAT_OF_LABEL
             && key != crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL
             && key != crate::side_chat::SIDE_CHAT_CREATOR_LABEL
+            && key != crate::access::PRIVATE_TO_LABEL
         {
-            // A spawn's own labels never name a side chat's source or
-            // creator.
+            // A spawn's own labels never name a side chat's source, creator
+            // or private owner.
             labels.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }

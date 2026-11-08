@@ -1,4 +1,4 @@
-//! The real configured helper context exercises the ordinary preparation APIs.
+//! The real configured helper context exercises the shared preparation APIs.
 //! The model is mechanical; there is no account/provider I/O or service grant.
 use super::*;
 use crate::installed_host::acquisition::{AcquisitionBootstrap, InstalledServiceTaskSource};

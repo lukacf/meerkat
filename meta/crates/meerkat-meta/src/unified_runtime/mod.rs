@@ -209,7 +209,7 @@ fn fire_error_hook(slot: &SharedErrorHook, event: ErrorEvent) {
     }
 }
 
-const ROSTER_ROUTE_PREFIX: &str = "mob.member.";
+pub(crate) const ROSTER_ROUTE_PREFIX: &str = "mob.member.";
 const ROSTER_ROUTE_CHANNEL: &str = "notification";
 const ROSTER_ROUTE_SINK: &str = "mob_member";
 const ROSTER_ROUTE_TARGET_MODULE: &str = "delivery";
@@ -7954,11 +7954,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::identity_first::GovernedInputBinder for RecordingRefusingBinder {
-        async fn bind(
+        async fn try_bind(
             &self,
             context: &crate::identity_first::GovernedBindContext,
             _input: meerkat_runtime::Input,
-        ) -> Result<crate::identity_first::BoundGovernedInput, String> {
+        ) -> Result<
+            crate::identity_first::BoundGovernedInput,
+            crate::identity_first::GovernedBindError,
+        > {
             self.handed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7966,7 +7969,7 @@ mod tests {
                     context.session_id.clone(),
                     context.controller.selection().clone(),
                 ));
-            Err(BIND_REFUSED.to_string())
+            Err(crate::identity_first::GovernedBindRefusal::denied(BIND_REFUSED).into())
         }
 
         fn retain_unresolved(
@@ -8049,8 +8052,8 @@ mod tests {
         assert!(
             matches!(
                 &sent,
-                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-                    if reason.as_str() == BIND_REFUSED
+                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                    if refusal.detail == BIND_REFUSED
             ),
             "{shape}: the input reaches the host's bind: {sent:?}"
         );
@@ -10257,13 +10260,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::identity_first::bridge::GovernedInputBinder for UnreachedBinder {
-        async fn bind(
+        async fn try_bind(
             &self,
             _context: &crate::identity_first::bridge::GovernedBindContext,
             _input: meerkat_runtime::Input,
-        ) -> Result<crate::identity_first::bridge::BoundGovernedInput, String> {
+        ) -> Result<
+            crate::identity_first::bridge::BoundGovernedInput,
+            crate::identity_first::bridge::GovernedBindError,
+        > {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err("never bound".to_string())
+            Err(crate::identity_first::bridge::GovernedBindRefusal::denied("never bound").into())
         }
         fn retain_unresolved(
             &self,

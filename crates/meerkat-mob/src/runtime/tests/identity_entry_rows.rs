@@ -428,6 +428,227 @@ async fn agent_lane_retire_of_an_entry_is_refused_identity_member() {
     );
 }
 
+/// A turn-driven spec of the externally addressable `lead` profile.
+fn addressable_spec(name: &str) -> SpawnMemberSpec {
+    let mut spec = SpawnMemberSpec::new("lead", id(name));
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec
+}
+
+/// External work (what a mob's external surfaces submit: a member send from
+/// outside the mob) does not reach an identity entry. Core refuses it
+/// `MobError::IdentityMember` before any delivery, whatever the member's
+/// addressability: the entry's host reaches it through its own door, as
+/// internal work. External work still reaches an externally addressable
+/// worker. Core's read of the entry carries its member's addressability,
+/// the rule the entry's host applies to the external work it delivers on
+/// the entry's behalf.
+///
+/// RED: drop the `not_an_identity_entry` guard of MobMachine's
+/// `SubmitWorkRunningExternal` (with its rejection arm): the external send
+/// reaches the entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_work_to_an_identity_entry_is_refused_identity_member() {
+    let mob = EntryMob::new("entry-external-work").await;
+    mob.handle
+        .spawn_spec(addressable_spec("door-entry").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    mob.handle
+        .spawn_spec(entry_spec("closed-entry"))
+        .await
+        .expect("the host declares an entry whose profile admits no external work");
+    mob.handle
+        .spawn_spec(addressable_spec("door-worker"))
+        .await
+        .expect("an externally addressable worker");
+
+    for (name, addressable) in [("door-entry", true), ("closed-entry", false)] {
+        let error = mob
+            .handle
+            .member(&id(name))
+            .await
+            .expect("the entry's member")
+            .send(
+                "hello from outside the mob".to_string(),
+                meerkat_core::types::HandlingMode::Queue,
+            )
+            .await
+            .expect_err("external work does not reach an identity entry");
+        assert!(is_identity_member(&error, name), "{name}: {error:?}");
+        let standing = mob.standing(name);
+        let Some(EntryStanding::Seated(member)) = &standing else {
+            panic!("{name}: the entry's member is seated: {standing:?}");
+        };
+        assert_eq!(member.externally_addressable, addressable, "{name}");
+    }
+
+    mob.handle
+        .member(&id("door-worker"))
+        .await
+        .expect("the worker")
+        .send(
+            "hello from outside the mob".to_string(),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("external work reaches an externally addressable worker");
+
+    let entry = mob
+        .handle
+        .get_member(&id("door-entry"))
+        .await
+        .expect("the roster read")
+        .expect("the entry's member");
+    mob.handle
+        .submit_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(
+                "hello from the entry's host".to_string(),
+                WorkOrigin::Internal,
+            ),
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("the entry's host reaches it as internal work");
+    assert_eq!(mob.entry("door-entry"), Some(IdentityEntryOrigin::Declared));
+}
+
+/// External work to an identity entry that names another session than the
+/// entry's binding (a scope-bound submit whose captured session moved) is
+/// refused as an identity member, not as a stale session: a stale-session
+/// answer would invite a retry Core can only refuse again. MobMachine's
+/// stale session refusal never answers external work to an entry or to a
+/// name reserved unreadable.
+///
+/// The machine admitted both refusals for this work (the arm exclusivity
+/// contract's new pairs, and the doors run over expected sessions), and the
+/// generated mutator answered by declaration order: this row pins the
+/// answer the guard makes the only one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_work_naming_a_moved_session_to_an_entry_is_refused_identity_member() {
+    let mob = EntryMob::new("entry-external-moved-session").await;
+    mob.handle
+        .spawn_spec(addressable_spec("moved-entry").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    let scope = mob
+        .handle
+        .capture_member_delivery_scope(&id("moved-entry"))
+        .await
+        .expect("the entry's delivery scope");
+    // The same incarnation and fence, a session the entry is not bound to.
+    let mut moved = scope.to_json_value();
+    moved["session_id"] = serde_json::to_value(meerkat_core::types::SessionId::new())
+        .expect("a session id serializes");
+    let moved = crate::runtime::MemberDeliveryScope::from_json_value(moved)
+        .expect("the moved scope decodes");
+    assert_ne!(moved.session_id(), scope.session_id());
+    assert_eq!(moved.runtime_id(), scope.runtime_id());
+    assert_eq!(moved.fence_token(), scope.fence_token());
+
+    let key = uuid::Uuid::new_v4().to_string();
+    let error = mob
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &moved,
+            WorkSpec::new(
+                "hello from outside the mob".to_string(),
+                WorkOrigin::External,
+            ),
+            meerkat_core::types::HandlingMode::Queue,
+            crate::store::MobDeliveryIdentity::new(key.clone(), key)
+                .expect("a valid delivery identity"),
+            std::time::Instant::now() + STEP,
+        )
+        .await
+        .expect_err("external work does not reach an identity entry, whatever session it names");
+    assert!(is_identity_member(&error, "moved-entry"), "{error:?}");
+}
+
+/// `scope` at a session its member is not bound to: the same incarnation and
+/// fence, another session.
+fn moved_scope(scope: &crate::runtime::MemberDeliveryScope) -> crate::runtime::MemberDeliveryScope {
+    let mut moved = scope.to_json_value();
+    moved["session_id"] = serde_json::to_value(meerkat_core::types::SessionId::new())
+        .expect("a session id serializes");
+    let moved = crate::runtime::MemberDeliveryScope::from_json_value(moved)
+        .expect("the moved scope decodes");
+    assert_ne!(moved.session_id(), scope.session_id());
+    assert_eq!(moved.runtime_id(), scope.runtime_id());
+    assert_eq!(moved.fence_token(), scope.fence_token());
+    moved
+}
+
+/// Work that names a moved session and that no identity member refusal
+/// answers is refused as a stale scope: external work to a worker, and the
+/// internal work of an entry's host. MobMachine's stale session refusal
+/// spares only external work to an entry or to a name reserved unreadable,
+/// which the identity member refusals answer; any other work naming a session
+/// the member is not bound to stays a typed `StaleDeliveryScope`, never an
+/// unanswered rejection.
+///
+/// RED: narrow the stale session refusal's guard to the origin alone (it then
+/// answers no external work, a worker's included), or to the entry alone (it
+/// then answers no work to an entry, its host's included): the work is
+/// answered by no arm, and the shell refuses it as an internal error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_naming_a_moved_session_that_no_identity_member_refusal_answers_is_refused_stale() {
+    let mob = EntryMob::new("moved-session-stale").await;
+    mob.handle
+        .spawn_spec(addressable_spec("moved-worker"))
+        .await
+        .expect("an externally addressable worker");
+    mob.handle
+        .spawn_spec(addressable_spec("moved-host-entry").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    assert_eq!(mob.entry("moved-worker"), None, "a worker is no entry");
+    assert_eq!(
+        mob.entry("moved-host-entry"),
+        Some(IdentityEntryOrigin::Declared)
+    );
+
+    for (name, origin) in [
+        ("moved-worker", WorkOrigin::External),
+        ("moved-host-entry", WorkOrigin::Internal),
+    ] {
+        let scope = mob
+            .handle
+            .capture_member_delivery_scope(&id(name))
+            .await
+            .expect("the member's delivery scope");
+        let moved = moved_scope(&scope);
+        let key = uuid::Uuid::new_v4().to_string();
+        let error = mob
+            .handle
+            .submit_work_with_mode_and_delivery_identity_bounded(
+                &moved,
+                WorkSpec::new(format!("work for {name}"), origin),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::store::MobDeliveryIdentity::new(key.clone(), key)
+                    .expect("a valid delivery identity"),
+                std::time::Instant::now() + STEP,
+            )
+            .await
+            .expect_err("work naming a moved session is refused");
+        match error {
+            MobError::StaleDeliveryScope {
+                agent_identity,
+                expected_session,
+                actual_session,
+            } => {
+                assert_eq!(agent_identity, id(name), "{name}");
+                assert_eq!(&expected_session, moved.session_id(), "{name}");
+                assert_eq!(actual_session.as_ref(), Some(scope.session_id()), "{name}");
+            }
+            other => panic!("{name}: a stale scope, not {other:?}"),
+        }
+    }
+}
+
 /// An entry's origin rides on its seat's or spawn's `MemberSpawned` row, so
 /// a restart restores the entry from the journal alone, and the restored
 /// entry keeps its name reserved. The entries page in identity order.

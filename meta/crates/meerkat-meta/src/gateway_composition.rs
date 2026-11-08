@@ -1688,7 +1688,10 @@ pub async fn adopt_schedule_mob_targets(
     mob_target_registry: &ScheduleMobTargetRegistry,
 ) -> Option<Arc<MobMcpState>> {
     let mob_state = runtime.mob_runtime().agent_mob_mcp_state();
-    mob_target_registry.set_mob_state(mob_state.clone());
+    // The registry also adopts who the runtime's members are private to:
+    // the agent schedule tools judge private targets and hide private
+    // members' schedules with it.
+    mob_target_registry.adopt_mob_runtime(runtime.mob_runtime());
     if ScheduleFiringRole::of_runtime(runtime) == ScheduleFiringRole::QuiescedCandidate {
         return mob_state;
     }

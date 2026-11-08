@@ -9014,6 +9014,8 @@ SubmitWorkRunningExternal(agent_identity, agent_runtime_id, fence_token, expecte
     /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
     /\ (origin = "External")
     /\ (agent_runtime_id \in externally_addressable_runtime_ids)
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -9033,6 +9035,8 @@ SubmitWorkRunningExternalPeerOnly(agent_identity, agent_runtime_id, fence_token,
     /\ (origin = "External")
     /\ (agent_runtime_id \in externally_addressable_runtime_ids)
     /\ (agent_identity \in DOMAIN member_peer_ids)
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -9133,6 +9137,33 @@ ResolveSubmitWorkRejectionRetiringAsMemberNotFound(agent_identity, agent_runtime
     /\ UnchangedFrame_ab743efccb6e9bcf
 
 
+ResolveSubmitWorkRejectionIdentityMember(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin) ==
+    /\ phase = "Running"
+    /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
+    /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
+    /\ (origin = "External")
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
+ResolveSubmitWorkRejectionIdentityMemberUnreadableName(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin) ==
+    /\ phase = "Running"
+    /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
+    /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
+    /\ (origin = "External")
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ ((agent_identity \in identity_entry_unreadable) = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_ab743efccb6e9bcf
+
+
 ResolveSubmitWorkRejectionNotExternallyAddressable(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin) ==
     /\ phase = "Running"
     /\ ((IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None) = Some(agent_runtime_id))
@@ -9141,6 +9172,8 @@ ResolveSubmitWorkRejectionNotExternallyAddressable(agent_identity, agent_runtime
     /\ ((IF (agent_runtime_id \in DOMAIN member_state_markers) THEN Some((IF agent_runtime_id \in DOMAIN member_state_markers THEN member_state_markers[agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))
     /\ (origin = "External")
     /\ ~((agent_runtime_id \in externally_addressable_runtime_ids))
+    /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -9167,6 +9200,7 @@ ResolveSubmitWorkRejectionStaleSessionBinding(agent_identity, agent_runtime_id, 
     /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
     /\ (expected_session_id # None)
     /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) # expected_session_id)
+    /\ (IF (origin # "External") THEN TRUE ELSE (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_ab743efccb6e9bcf
@@ -26204,32 +26238,9 @@ PrepareMemberInstructionDeliveryNotOwedStopped(agent_identity) ==
     /\ UnchangedFrame_ab743efccb6e9bcf
 
 
-PrepareMemberInstructionDeliveryPlacedRunning(agent_identity) ==
-    /\ phase = "Running"
-    /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = TRUE)
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_instruction_owed' = MapRemove(member_instruction_owed, agent_identity)
-    /\ member_instruction_blocked' = MapSet(member_instruction_blocked, agent_identity, "MemberHostUnsupported")
-    /\ UnchangedFrame_bba34de88771e078
-
-
-PrepareMemberInstructionDeliveryPlacedStopped(agent_identity) ==
-    /\ phase = "Stopped"
-    /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = TRUE)
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ member_instruction_owed' = MapRemove(member_instruction_owed, agent_identity)
-    /\ member_instruction_blocked' = MapSet(member_instruction_blocked, agent_identity, "MemberHostUnsupported")
-    /\ UnchangedFrame_bba34de88771e078
-
-
 PrepareMemberInstructionDeliveryUnbornRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -26239,7 +26250,6 @@ PrepareMemberInstructionDeliveryUnbornRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryUnbornStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = TRUE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
@@ -26249,7 +26259,6 @@ PrepareMemberInstructionDeliveryUnbornStopped(agent_identity) ==
 PrepareMemberInstructionDeliveryUnboundRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26261,7 +26270,6 @@ PrepareMemberInstructionDeliveryUnboundRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryUnboundStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26273,7 +26281,6 @@ PrepareMemberInstructionDeliveryUnboundStopped(agent_identity) ==
 PrepareMemberInstructionDeliveryRetiringRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
     /\ phase' = "Running"
@@ -26284,7 +26291,6 @@ PrepareMemberInstructionDeliveryRetiringRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryRetiringStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))
     /\ phase' = "Stopped"
@@ -26295,7 +26301,6 @@ PrepareMemberInstructionDeliveryRetiringStopped(agent_identity) ==
 PrepareMemberInstructionDeliveryDeliverRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26308,7 +26313,6 @@ PrepareMemberInstructionDeliveryDeliverRunning(agent_identity) ==
 PrepareMemberInstructionDeliveryDeliverStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26321,7 +26325,6 @@ PrepareMemberInstructionDeliveryDeliverStopped(agent_identity) ==
 PrepareMemberInstructionDeliverySpawningRunning(agent_identity) ==
     /\ phase = "Running"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -26334,7 +26337,6 @@ PrepareMemberInstructionDeliverySpawningRunning(agent_identity) ==
 PrepareMemberInstructionDeliverySpawningStopped(agent_identity) ==
     /\ phase = "Stopped"
     /\ ((agent_identity \in DOMAIN member_instruction_owed) = TRUE)
-    /\ ((agent_identity \in DOMAIN member_placement) = FALSE)
     /\ ((agent_identity \in member_seat_session_unborn) = FALSE)
     /\ ((agent_identity \in DOMAIN member_session_bindings) = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) /\ ((IF ((identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers) THEN Some((IF (identity_to_runtime)[agent_identity] \in DOMAIN member_state_markers THEN member_state_markers[(identity_to_runtime)[agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))
@@ -28801,6 +28803,8 @@ Next ==
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionCurrentRuntimeNotLive(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionStaleFenceToken(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionRetiringAsMemberNotFound(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionIdentityMember(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
+    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionIdentityMemberUnreadableName(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionNotExternallyAddressable(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E expected_session_id \in OptionSessionIdValues : \E origin \in WorkOriginValues : ResolveSubmitWorkRejectionStaleSessionBinding(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
@@ -29975,8 +29979,6 @@ Next ==
     \/ (phase = "Running") /\ \E generation \in 0..2 : RecoverOperatorInstructionGenerationHighwaterKept(generation)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryNotOwedRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryNotOwedStopped(agent_identity)
-    \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryPlacedRunning(agent_identity)
-    \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryPlacedStopped(agent_identity)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryUnbornRunning(agent_identity)
     \/ (phase = "Stopped") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryUnbornStopped(agent_identity)
     \/ (phase = "Running") /\ \E agent_identity \in AgentIdentityValues : PrepareMemberInstructionDeliveryUnboundRunning(agent_identity)

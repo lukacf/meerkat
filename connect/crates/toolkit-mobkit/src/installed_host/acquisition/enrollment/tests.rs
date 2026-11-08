@@ -551,3 +551,202 @@ async fn retained_owner_lookup_refuses_poisoned_setup_writer() {
         Err(HostLifetimeError::Unavailable)
     ));
 }
+
+// This exercises the configured owner gate, not native Ready publication. No
+// worker or transfer is entered; the deliberately foreign Weak is never valid.
+#[tokio::test]
+async fn cold_transfer_control_requires_published_exact_host_owner() {
+    use crate::installed_host::acquisition::recovery::AcquisitionRecovery;
+    let (directory, _lifetime, selected) = installed().await;
+    let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
+    let owner = acquisition(&selected, directory.path(), tools);
+    let lifecycle = AcquisitionRecovery::default();
+    assert!(
+        lifecycle.transfer_control().enter_transfer(|| ()).is_some(),
+        "default control is open"
+    );
+    assert!(owner.transfer_recovery.lock().unwrap().is_none());
+    assert!(
+        matches!(
+            lifecycle.published_transfer_control(&owner, &selected.originals, &owner.work_backend),
+            Err(HostLifetimeError::Unavailable)
+        ),
+        "open is not published Ready"
+    );
+
+    let (foreign_directory, _foreign_lifetime, foreign_installed) = installed().await;
+    let foreign_owner = acquisition(
+        &foreign_installed,
+        foreign_directory.path(),
+        InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap(),
+    );
+    assert!(matches!(
+        lifecycle.published_transfer_control(
+            &owner,
+            &foreign_installed.originals,
+            &owner.work_backend
+        ),
+        Err(HostLifetimeError::InvalidSelection)
+    ));
+    assert!(matches!(
+        lifecycle.published_transfer_control(
+            &owner,
+            &selected.originals,
+            &foreign_owner.work_backend
+        ),
+        Err(HostLifetimeError::InvalidSelection)
+    ));
+    let foreign_lifecycle = AcquisitionRecovery::default();
+    *owner.transfer_recovery.lock().unwrap() =
+        Some(Arc::downgrade(&foreign_lifecycle.transfer_control()));
+    assert!(
+        matches!(
+            lifecycle.published_transfer_control(&owner, &selected.originals, &owner.work_backend),
+            Err(HostLifetimeError::InvalidSelection)
+        ),
+        "a live foreign control is not this host's owner"
+    );
+    assert!(
+        selected
+            .originals
+            .workflow_context_transfers()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        foreign_installed
+            .originals
+            .workflow_context_transfers()
+            .unwrap()
+            .is_empty()
+    );
+    lifecycle.stop();
+    foreign_lifecycle.stop();
+    lifecycle.join().await.unwrap();
+    foreign_lifecycle.join().await.unwrap();
+}
+
+#[tokio::test]
+async fn context_selector_is_frozen_with_the_actual_bootstrap_owner_without_ready() {
+    let (directory, lifetime, mut installed) = installed().await;
+    let body = std::panic::AssertUnwindSafe(async {
+        let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
+        let owner = acquisition(&installed, directory.path(), tools);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let selector: InstalledWorkflowContextSelector = Arc::new(move |_, _, _| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        });
+        // The existing installed owner was constructed above from the actual
+        // store/native selection; this tests only the public additive builder.
+        installed.acquisition =
+            super::super::bootstrap::AcquisitionBootstrap::selected(owner.clone());
+        let mut installed = installed
+            .with_workflow_context_recovery(selector.clone())
+            .unwrap();
+        assert!(matches!(
+            installed
+                .acquisition
+                .select_context_recovery(selector.clone()),
+            Err(HostLifetimeError::InvalidSelection)
+        ));
+        let prepared = installed.acquisition.prepare(None, None).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&prepared, &owner));
+        assert!(Arc::ptr_eq(
+            prepared.context_recovery.get().unwrap(),
+            &selector
+        ));
+        assert!(matches!(
+            installed.acquisition.select_context_recovery(selector),
+            Err(HostLifetimeError::InvalidSelection)
+        ));
+        assert!(
+            prepared.transfer_recovery.lock().unwrap().is_none(),
+            "configuration does not publish Ready"
+        );
+        let rejected_before_read = toolkit_store::StoredRecord {
+            key: toolkit_store::StoreKey {
+                realm: "unread".into(),
+                owner: "unread".into(),
+                id: "unread".into(),
+            },
+            revision: 0,
+            data: toolkit_store::RecordData {
+                schema: "test.unread".into(),
+                version: 1,
+                body: serde_json::json!({}),
+            },
+            content_digest: String::new(),
+            updated_at_ms: 0,
+        };
+        assert!(
+            matches!(
+                prepared
+                    .recover_context_source(
+                        &rejected_before_read,
+                        &super::super::recovery::RecoveryControl::default()
+                    )
+                    .await,
+                Err(PrivateOriginalError::Unavailable)
+            ),
+            "default-open control cannot enter before a real published worker"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no workflow or read is invented at bootstrap"
+        );
+    });
+    use futures::FutureExt;
+    let body = body.catch_unwind().await;
+    let close = lifetime
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
+    assert!(lifetime.join_close(&close.handle).await.is_ok());
+    if let Err(panic) = body {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn workflow_backend_is_same_open_bootstrap_owner_not_equal_storage_facts() {
+    let (directory, lifetime, installed) = installed().await;
+    let (_other_directory, other_lifetime, other) = self::installed().await;
+    let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
+    let owner = acquisition(&installed, directory.path(), tools);
+    let selected = Arc::new(std::sync::Mutex::new(
+        super::super::bootstrap::AcquisitionBootstrap::selected(owner.clone()),
+    ));
+    let source = super::super::InstalledServiceTaskSource::new(&selected);
+    assert!(
+        matches!(
+            source.work_backend(&installed.originals),
+            Err(PrivateOriginalError::Unavailable)
+        ),
+        "selection alone is not bootstrap completion"
+    );
+    selected.lock().unwrap().prepare(None, None).unwrap();
+    let backend = source.work_backend(&installed.originals).unwrap();
+    assert_eq!(backend.pin(), owner.work_backend.pin());
+    assert!(Arc::ptr_eq(
+        backend.service().store(),
+        owner.work_backend.service().store()
+    ));
+    assert!(matches!(
+        source.work_backend(&other.originals),
+        Err(PrivateOriginalError::Conflict)
+    ));
+    let close = lifetime
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
+    assert!(matches!(
+        source.work_backend(&installed.originals),
+        Err(PrivateOriginalError::Denied)
+    ));
+    lifetime.join_close(&close.handle).await.unwrap();
+    let close = other_lifetime
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
+    other_lifetime.join_close(&close.handle).await.unwrap();
+}

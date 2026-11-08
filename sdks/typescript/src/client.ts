@@ -299,6 +299,12 @@ import type {
   ToolGrantAuditParams as RpcToolGrantAuditParams,
   ToolGrantAuditResult as RpcToolGrantAuditResult,
   UpdateSystemPromptParams as RpcUpdateSystemPromptParams,
+  SetSessionInstructionParams as RpcSetSessionInstructionParams,
+  RevokeSessionInstructionParams as RpcRevokeSessionInstructionParams,
+  SessionInstructionStatusParams as RpcSessionInstructionStatusParams,
+  MobSetInstructionParams as RpcMobSetInstructionParams,
+  MobRevokeInstructionParams as RpcMobRevokeInstructionParams,
+  MobInstructionStatusParams as RpcMobInstructionStatusParams,
   WireDeviceCompleteResult as RpcWireDeviceCompleteResult,
   WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
   WireRunResult as RpcWireRunResult,
@@ -441,6 +447,19 @@ import {
 import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { isCommsSendErrorCode } from "./comms-errors.js";
 import { parseMobDestroyReport } from "./mob-destroy-report.js";
+import {
+  parseMobInstructionStatus,
+  parseMobInstructionWriteResult,
+  parseSessionInstructionStatus,
+  parseSessionInstructionWriteResult,
+  type InstructionTarget,
+  type InstructionWriteOptions,
+  type MobInstructionStatus,
+  type MobInstructionStatusOptions,
+  type MobInstructionWriteResult,
+  type SessionInstructionStatus,
+  type SessionInstructionWriteResult,
+} from "./instructions.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { parseUsage } from "./events.js";
 import type { RealtimeMessageOrigin } from "./events.js";
@@ -2027,6 +2046,119 @@ export class MeerkatClient {
     if (options?.limit !== undefined) params.limit = options.limit;
     const raw = await this.request("session/instruction_activations", params);
     return MeerkatClient.parseInstructionActivationReadPage(raw);
+  }
+
+  // -- Operator instructions ------------------------------------------------
+
+  /**
+   * Record one session-owned operator instruction: the slot's body at a
+   * revision, applied at the session's next fresh run start. A mob member's
+   * session is refused `owned_by_mob`: write to it with
+   * {@link setMobInstruction} and a member target. A refusal rejects with
+   * `MeerkatError`; {@link instructionSetCode} reads its closed code.
+   */
+  async setSessionInstruction(
+    sessionId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    options?: InstructionWriteOptions,
+  ): Promise<SessionInstructionWriteResult> {
+    const params: RpcSetSessionInstructionParams = {
+      session_id: sessionId,
+      namespace,
+      key,
+      revision,
+      body,
+    };
+    if (options?.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this.request("session/set_instruction", params);
+    return parseSessionInstructionWriteResult(raw, "Invalid session/set_instruction response");
+  }
+
+  /** Revoke one session-owned operator instruction at a higher revision. */
+  async revokeSessionInstruction(
+    sessionId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<SessionInstructionWriteResult> {
+    const params: RpcRevokeSessionInstructionParams = {
+      session_id: sessionId,
+      namespace,
+      key,
+      revision,
+    };
+    const raw = await this.request("session/revoke_instruction", params);
+    return parseSessionInstructionWriteResult(raw, "Invalid session/revoke_instruction response");
+  }
+
+  /** Read a session's committed operator-instruction state without materializing it. */
+  async sessionInstructionStatus(sessionId: string): Promise<SessionInstructionStatus> {
+    const params: RpcSessionInstructionStatusParams = { session_id: sessionId };
+    const raw = await this.request("session/instruction_status", params);
+    return parseSessionInstructionStatus(raw, "Invalid session/instruction_status response");
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects:
+   * `{ kind: "mob" }`, `{ kind: "profile", profile }` or
+   * `{ kind: "member", agent_identity }`. Resolves once the record is in the
+   * mob's journal; delivery to the members is asynchronous (see
+   * {@link mobInstructionStatus}).
+   */
+  async setMobInstruction(
+    mobId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target: InstructionTarget,
+    options?: InstructionWriteOptions,
+  ): Promise<MobInstructionWriteResult> {
+    const params: RpcMobSetInstructionParams = {
+      mob_id: mobId,
+      namespace,
+      key,
+      revision,
+      body,
+      target,
+    };
+    if (options?.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this.request("mob/set_instruction", params);
+    return parseMobInstructionWriteResult(raw, "Invalid mob/set_instruction response");
+  }
+
+  /** Revoke one operator instruction of a mob at a higher revision; the record keeps its target. */
+  async revokeMobInstruction(
+    mobId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<MobInstructionWriteResult> {
+    const params: RpcMobRevokeInstructionParams = { mob_id: mobId, namespace, key, revision };
+    const raw = await this.request("mob/revoke_instruction", params);
+    return parseMobInstructionWriteResult(raw, "Invalid mob/revoke_instruction response");
+  }
+
+  /**
+   * Read a mob's operator-instruction records and one page of members
+   * (`limit` 1 to 200, 100 when absent), without waking a member.
+   */
+  async mobInstructionStatus(
+    mobId: string,
+    options?: MobInstructionStatusOptions,
+  ): Promise<MobInstructionStatus> {
+    const params: RpcMobInstructionStatusParams = { mob_id: mobId };
+    if (options?.namespace !== undefined) params.namespace = options.namespace;
+    if (options?.key !== undefined) params.key = options.key;
+    if (options?.agentIdentity !== undefined) params.agent_identity = options.agentIdentity;
+    if (options?.profile !== undefined) params.profile = options.profile;
+    if (options?.offset !== undefined) params.offset = options.offset;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    const raw = await this.request("mob/instruction_status", params);
+    return parseMobInstructionStatus(raw, "Invalid mob/instruction_status response");
   }
 
   async restoreSessionTranscriptRevision(

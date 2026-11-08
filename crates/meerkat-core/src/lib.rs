@@ -145,6 +145,7 @@ pub mod pending_continuation;
 pub mod placement;
 pub mod prompt;
 pub mod prompt_cache_anchor;
+pub mod protected_section;
 pub mod provider;
 pub mod provider_evidence;
 pub mod provider_matrix;

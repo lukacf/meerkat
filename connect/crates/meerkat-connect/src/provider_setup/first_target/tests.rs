@@ -211,6 +211,54 @@ async fn first_target_refuses_profile_collision_and_present_default() {
 }
 
 #[tokio::test]
+async fn first_target_refuses_next_to_copilot_section() {
+    // A GitHub Copilot account configured once, in the realm's own document
+    // or in the global document it inherits. Core lowers the section into the
+    // account's three routes, so the realm already has model targets.
+    for realm in ["work", "global"] {
+        let root = tempfile::tempdir().unwrap();
+        let storage = storage(root.path());
+        let path = crate::realm::config_source(&storage)
+            .unwrap()
+            .config_doc_path(&storage.locator.realm);
+        let document = if realm == "work" {
+            path.clone()
+        } else {
+            storage.layout.user_rkat_root().unwrap().join("config.toml")
+        };
+        let body = format!(
+            "[realm.{realm}.copilot]\nsource = {{kind = \"env\", env = \"CONNECT_COPILOT_SECTION_TOKEN\"}}\n"
+        );
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(&document, &body).unwrap();
+        let startup = SessionStartup::open(storage.clone()).await.unwrap();
+        let runtime = crate::realm::own_config_runtime(&storage).unwrap();
+        let error = match prepare(
+            &startup,
+            &runtime,
+            request(),
+            name(),
+            "gpt-6-astra",
+            Provider::OpenAI,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("first-target setup must not add a target next to a [copilot] section"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("A native model binding appeared"),
+            "{realm}: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&document).unwrap(), body);
+        assert_eq!(path.exists(), realm == "work");
+        assert!(!path.with_file_name("config_state.json").exists());
+    }
+}
+
+#[tokio::test]
 async fn first_target_original_native_generation_refuses_a_concurrent_writer() {
     let root = tempfile::tempdir().unwrap();
     let storage = storage(root.path());

@@ -1,5 +1,5 @@
 //! Bounded metadata preflight for the v1 ZIP32 profile. This does not decompress
-//! or implement CRC. zip 2.4.2 performs those operations through its streaming
+//! or implement CRC. zip 9.0.4 performs those operations through its streaming
 //! reader, avoiding that version's allocating/deduplicating archive index.
 
 use super::*;

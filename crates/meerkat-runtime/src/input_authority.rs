@@ -30,7 +30,7 @@ pub(crate) use peer_ingress::delivery_input_id;
 pub use peer_ingress::{
     PeerIngressBindDenial, PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest,
     PeerIngressBinder, PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin,
-    PeerIngressOrigin, PeerIngressSupervisorOrigin,
+    PeerIngressOrigin, PeerIngressSupervisorOrigin, PeerIngressWaiter,
 };
 
 /// The native replay lookup's verdict for one admission of a governed input:
@@ -991,7 +991,7 @@ pub(crate) fn qualified_idempotency_key(
 
 /// The submitter's key `raw` qualified under `association`: the key a
 /// governed admission binds in place of `raw`.
-fn qualify_idempotency_key(
+pub(crate) fn qualify_idempotency_key(
     association: &InputAuthorityAssociation,
     raw: &str,
 ) -> Result<IdempotencyKey, RuntimeDriverError> {

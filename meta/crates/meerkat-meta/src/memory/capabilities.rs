@@ -314,6 +314,37 @@ pub trait StewardStore: StagedMemoryStore + TombstoneSource {
         retired_at_ms: u64,
     ) -> Result<(), AgentMemoryError>;
 
+    /// Record that `identity`, retired at `retired_at_ms` from session
+    /// `session_key`, was private to a person (its roster labels named a
+    /// private owner, [`crate::access::PRIVATE_TO_LABEL`]): no exit interview
+    /// harvests it, and every later dream keeps its memory out
+    /// ([`Self::private_retired_identities`]). A pending harvest of the same
+    /// retirement is settled so. Idempotent per (identity, `retired_at_ms`).
+    /// The default settles a pending harvest as harvested and remembers
+    /// nothing more, for a store without the record.
+    async fn record_private_retirement(
+        &self,
+        realm: &str,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        let _ = (session_key, cause);
+        self.mark_harvest_complete(realm, identity, retired_at_ms)
+            .await
+    }
+
+    /// The identities [`Self::record_private_retirement`] recorded. The
+    /// default, for a store without the record, knows none.
+    async fn private_retired_identities(
+        &self,
+        realm: &str,
+    ) -> Result<std::collections::BTreeSet<String>, AgentMemoryError> {
+        let _ = realm;
+        Ok(std::collections::BTreeSet::new())
+    }
+
     /// Record a gated quarantine-promotion: gating `pending_id` → staged
     /// batch token (§10.2). Only a gating approval commits the token.
     async fn record_pending_promotion(

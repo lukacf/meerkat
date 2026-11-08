@@ -163,6 +163,23 @@ pub trait RuntimeDeliveryHost: Send + Sync {
         })
     }
 
+    /// Whether the incarnation behind a continuation delivery address
+    /// refuses, for good, external work a caller committed to it
+    /// ([`crate::ContinuationAddressResolver::external_work_refusal`]). The
+    /// drain asks it for such a row before it reserves or admits anything:
+    /// `Ok(Some(reason))` settles the row refused for `reason`. Hosts with
+    /// bound continuation services delegate to
+    /// [`crate::ContinuationHostBindings::external_work_refusal`]. The
+    /// default refuses nothing. `Err` when it cannot be asked now: the row
+    /// stays blocked.
+    async fn external_work_refusal(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        let _ = address;
+        Ok(None)
+    }
+
     /// The sink that admits continuation deliveries into `session_id`, if
     /// this host admits continuations. Without one, continuation rows stay
     /// visibly blocked as an unsupported kind.

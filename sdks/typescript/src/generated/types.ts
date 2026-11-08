@@ -1032,6 +1032,104 @@ export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolG
 
 export type WireToolGrantApplies = "now" | "not_mounted" | "at_next_build" | "unknown";
 
+export type InstructionSetErrorCode = "invalid_request" | "digest_mismatch" | "stale_revision" | "revision_conflict" | "unknown_slot" | "slot_limit_exceeded" | "body_too_large" | "active_set_budget_exceeded" | "owned_by_mob" | "owned_by_session" | "owned_by_other_mob" | "slot_managed_by_activation" | "durability_unavailable" | "mob_terminal" | "malformed_instruction_history" | "prepared_authorization_required";
+
+export type InstructionEffect = "absent" | "active";
+
+export type InstructionEntryKind = "delta" | "snapshot";
+
+export type WireInstructionPendingReason = "awaiting_run_start" | "leading_prefix_only_lowering" | "lowering_unavailable" | "session_unborn" | "delivery_owed";
+
+export type WireInstructionBlockReason = "member_host_unsupported" | "slot_managed_by_activation" | "durability_unavailable" | "owned_by_session" | "owned_by_other_mob";
+
+export type WireInstructionResidency = "live" | "dormant" | "unborn";
+
+export type WireInstructionLowering = "mid_conversation" | "leading_prefix_only" | "unavailable";
+
+export type WireSessionInstructionDisposition = "recorded" | "duplicate";
+
+export type WireMobInstructionDisposition = "committed" | "duplicate";
+
+export interface WireInstructionTargetMob {
+  kind: "mob";
+}
+
+export interface WireInstructionTargetProfile {
+  kind: "profile";
+  profile: string;
+}
+
+export interface WireInstructionTargetMember {
+  agent_identity: string;
+  kind: "member";
+}
+
+export type WireInstructionTarget = WireInstructionTargetMob | WireInstructionTargetProfile | WireInstructionTargetMember;
+
+export interface WireInstructionSlotStateEffective {
+  state: "effective";
+}
+
+export interface WireInstructionSlotStatePending {
+  reason: WireInstructionPendingReason;
+  state: "pending";
+}
+
+export interface WireInstructionSlotStateBlocked {
+  reason: WireInstructionBlockReason;
+  state: "blocked";
+}
+
+export interface WireInstructionSlotStateNotTargeted {
+  state: "not_targeted";
+}
+
+export type WireInstructionSlotState = WireInstructionSlotStateEffective | WireInstructionSlotStatePending | WireInstructionSlotStateBlocked | WireInstructionSlotStateNotTargeted;
+
+export interface WireInstructionTargetOwnerUnowned {
+  kind: "unowned";
+}
+
+export interface WireInstructionTargetOwnerSession {
+  kind: "session";
+}
+
+export interface WireInstructionTargetOwnerMob {
+  agent_identity: string;
+  kind: "mob";
+  mob_id: string;
+}
+
+export type WireInstructionTargetOwner = WireInstructionTargetOwnerUnowned | WireInstructionTargetOwnerSession | WireInstructionTargetOwnerMob;
+
+export interface WireMemberInstructionDeliveryStateCurrent {
+  state: "current";
+}
+
+export interface WireMemberInstructionDeliveryStateOwed {
+  generation: number;
+  last_failure?: string | null;
+  state: "owed";
+}
+
+export interface WireMemberInstructionDeliveryStateBlocked {
+  reason: WireInstructionBlockReason;
+  state: "blocked";
+}
+
+export type WireMemberInstructionDeliveryState = WireMemberInstructionDeliveryStateCurrent | WireMemberInstructionDeliveryStateOwed | WireMemberInstructionDeliveryStateBlocked;
+
+export interface WireInstructionEffectiveReadOk {
+  status: "ok";
+}
+
+export interface WireInstructionEffectiveReadUnreadable {
+  reason: string;
+  status: "unreadable";
+}
+
+export type WireInstructionEffectiveRead = WireInstructionEffectiveReadOk | WireInstructionEffectiveReadUnreadable;
+
 export interface DecisionAudienceApprover {
   approver_id: string;
   kind: "approver";
@@ -1878,6 +1976,149 @@ export interface ToolGrantAuditResult {
   next_sequence?: number | null;
   rows: WireToolGrantAuditRow[];
   unreadable?: WireUnreadableToolGrantAuditRow[];
+}
+
+export interface InstructionSetErrorData {
+  instruction_set_code: InstructionSetErrorCode;
+}
+
+export interface WireInstructionSlotView {
+  effect: InstructionEffect;
+  revision: number;
+}
+
+export interface WireInstructionEffectiveSlot {
+  effect: InstructionEffect;
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  message_index: number;
+  revision: number;
+  run_id?: RunId | null;
+}
+
+export interface WireSessionInstructionSlot {
+  effective?: WireInstructionEffectiveSlot | null;
+  key: string;
+  namespace: string;
+  recorded?: WireInstructionSlotView | null;
+  state: WireInstructionSlotState;
+}
+
+export interface SetSessionInstructionParams {
+  body: string;
+  content_sha256?: string | null;
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+}
+
+export interface RevokeSessionInstructionParams {
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+}
+
+export interface SessionInstructionStatusParams {
+  session_id: string;
+}
+
+export interface SessionInstructionWriteResult {
+  disposition: WireSessionInstructionDisposition;
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+  target_generation: number;
+}
+
+export interface SessionInstructionStatusResult {
+  entry_sequence: number;
+  lowering?: WireInstructionLowering | null;
+  owner: WireInstructionTargetOwner;
+  session_id: string;
+  slots: WireSessionInstructionSlot[];
+  target_generation: number;
+}
+
+export interface WireInstructionRecord {
+  body_bytes?: number | null;
+  content_sha256?: string | null;
+  effect: InstructionEffect;
+  key: string;
+  namespace: string;
+  revision: number;
+  target: WireInstructionTarget;
+}
+
+export interface WireMemberInstructionSlot {
+  desired: WireInstructionSlotView;
+  effective?: WireInstructionEffectiveSlot | null;
+  key: string;
+  namespace: string;
+  recorded?: WireInstructionSlotView | null;
+  state: WireInstructionSlotState;
+}
+
+export interface WireMemberInstructionDelivery {
+  recorded_generation?: number | null;
+  state: WireMemberInstructionDeliveryState;
+}
+
+export interface WireMemberInstructionStatus {
+  agent_identity: string;
+  delivery: WireMemberInstructionDelivery;
+  effective_read: WireInstructionEffectiveRead;
+  live_channel_open: boolean;
+  profile: string;
+  residency: WireInstructionResidency;
+  slots: WireMemberInstructionSlot[];
+}
+
+export interface MobSetInstructionParams {
+  body: string;
+  content_sha256?: string | null;
+  key: string;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+  target: WireInstructionTarget;
+}
+
+export interface MobRevokeInstructionParams {
+  key: string;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+}
+
+export interface MobInstructionStatusParams {
+  agent_identity?: string | null;
+  key?: string | null;
+  limit?: number | null;
+  mob_id: string;
+  namespace?: string | null;
+  offset?: number | null;
+  profile?: string | null;
+}
+
+export interface MobInstructionWriteResult {
+  disposition: WireMobInstructionDisposition;
+  generation: number;
+  key: string;
+  matched_members: number;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+}
+
+export interface MobInstructionStatusResult {
+  desired: WireInstructionRecord[];
+  generation: number;
+  members: WireMemberInstructionStatus[];
+  mob_id: string;
+  next_offset?: number | null;
 }
 
 export interface WireCanonicalPart {
@@ -5592,6 +5833,7 @@ export interface BridgeCommandMaterializeMember {
   fence_token: number;
   forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
+  instruction_target?: Record<string, unknown> | null;
   launch: { mode: "fresh" } | Record<string, unknown>;
   prompt_context_fork?: Record<string, unknown> | null;
   protocol_version: BridgeProtocolVersion;
@@ -5719,7 +5961,28 @@ export interface BridgeCommandReadMemberVisibleTools {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools;
+export interface BridgeCommandRecordMemberInstructionTarget {
+  binding_generation: number;
+  command: "record_member_instruction_target";
+  epoch: number;
+  member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  target: Record<string, unknown>;
+}
+
+export interface BridgeCommandReleaseMemberInstructionTarget {
+  agent_identity: string;
+  binding_generation: number;
+  command: "release_member_instruction_target";
+  epoch: number;
+  member_session_id: string;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools | BridgeCommandRecordMemberInstructionTarget | BridgeCommandReleaseMemberInstructionTarget;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -5935,7 +6198,15 @@ export interface BridgeRejectionCauseForkInstructionRefused {
   fork_instruction_refused: BridgeRejectionCauseForkInstructionRefusedPayload;
 }
 
-export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused;
+export interface BridgeRejectionCauseInstructionTargetRefusedPayload {
+  code: "invalid_request" | "digest_mismatch" | "stale_revision" | "revision_conflict" | "unknown_slot" | "slot_limit_exceeded" | "body_too_large" | "active_set_budget_exceeded" | "owned_by_mob" | "owned_by_session" | "owned_by_other_mob" | "slot_managed_by_activation" | "durability_unavailable" | "mob_terminal" | "malformed_instruction_history" | "prepared_authorization_required";
+}
+
+export interface BridgeRejectionCauseInstructionTargetRefused {
+  instruction_target_refused: BridgeRejectionCauseInstructionTargetRefusedPayload;
+}
+
+export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused | BridgeRejectionCauseInstructionTargetRefused;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -6138,7 +6409,18 @@ export interface BridgeReplyMemberVisibleTools {
   result: "member_visible_tools";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools;
+export interface BridgeReplyMemberInstructionTargetRecorded {
+  disposition: "recorded" | "already_recorded";
+  result: "member_instruction_target_recorded";
+  target_generation: number;
+}
+
+export interface BridgeReplyMemberInstructionTargetReleased {
+  disposition?: "released" | "already_unowned" | null;
+  result: "member_instruction_target_released";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools | BridgeReplyMemberInstructionTargetRecorded | BridgeReplyMemberInstructionTargetReleased;
 
 export interface ContentBlockText {
   text: string;

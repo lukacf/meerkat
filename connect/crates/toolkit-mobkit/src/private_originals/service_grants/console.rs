@@ -67,7 +67,7 @@ impl PrivateOriginals {
         let lifetime = self.status_lifetime()?;
         let runtime = self.bound_identity_runtime()?;
         let mut members = Vec::new();
-        for route in self.routes()? {
+        for route in &self.current_routes()? {
             if !same_source_human(
                 &principal,
                 &route.requester,
@@ -210,7 +210,8 @@ impl PrivateOriginals {
                 let Some(link) = &record.approved_task else {
                     continue;
                 };
-                let Some(route) = self.routes()?.iter().find(|route| {
+                let routes = self.current_routes()?;
+                let Some(route) = routes.iter().find(|route| {
                     route.id == record.event.route
                         && same_source_human(
                             human,
@@ -392,7 +393,7 @@ impl PrivateOriginals {
         read.publication
             .check_current()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
-        let route = self.route(&row.reference.route)?;
+        let route = &self.route(&row.reference.route)?;
         if !same_source_human(
             &read.human,
             &route.requester,

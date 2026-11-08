@@ -16,9 +16,10 @@ use governed_support::*;
 use meerkat_meta::identity_first::contracts::{ContinuityStore, LeaseProvider};
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentRuntimeId, BoundGovernedInput, DurabilityPolicy, DurableAgentSpec,
-    GovernedAdmission, GovernedBindContext, GovernedDeliveryCustody, GovernedEntryFence,
-    GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityRuntime, IdentityRuntimeConfig,
+    GovernedAdmission, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedBindRefusalKind, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
+    GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
+    GovernedNotNow, GovernedSettlement, GovernedWaitBudget, IdentityRuntime, IdentityRuntimeConfig,
     IdentityRuntimeError, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge,
     NativeInputAdmissionSettlement, SessionBridge, TurnOutcome, TurnOutput, TurnTracking,
 };
@@ -87,8 +88,13 @@ struct FixtureBinder {
     rows: Mutex<Vec<DurableAgentSpec>>,
     /// The registered row the input was authored from.
     authored_from: Option<DurableAgentSpec>,
-    /// Holds the bind (entered, released) after it is handed the row.
+    /// Holds the bind (entered, released): until released, each bind is
+    /// entered and answers "not now", to be bound again once released.
     hold: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    /// Whether the hold was released.
+    released: Arc<AtomicBool>,
+    /// This door's wait budget for its "not now" answers.
+    budget: GovernedWaitBudget,
     /// The host's final-entry fence the bound input carries, if any.
     fence: Option<Arc<dyn GovernedEntryFence>>,
 }
@@ -116,6 +122,24 @@ impl FixtureBinder {
         ))
     }
 
+    /// [`Self::held`] at a door whose wait budget is `budget`.
+    fn held_within(
+        fixture: &Arc<Fixture>,
+        row: DurableAgentSpec,
+        entered: &Arc<tokio::sync::Notify>,
+        release: &Arc<tokio::sync::Notify>,
+        budget: Duration,
+    ) -> Arc<Self> {
+        let mut binder = Self::build(
+            fixture,
+            Binding::Original,
+            Some(row),
+            Some((Arc::clone(entered), Arc::clone(release))),
+        );
+        binder.budget = GovernedWaitBudget::Bounded(budget);
+        Arc::new(binder)
+    }
+
     fn build(
         fixture: &Arc<Fixture>,
         binding: Binding,
@@ -131,6 +155,10 @@ impl FixtureBinder {
             rows: Mutex::new(Vec::new()),
             authored_from,
             hold,
+            released: Arc::new(AtomicBool::new(false)),
+            budget: GovernedWaitBudget::Bounded(
+                meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            ),
             fence: None,
         }
     }
@@ -154,19 +182,31 @@ impl FixtureBinder {
 
 #[async_trait]
 impl GovernedInputBinder for FixtureBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         self.contexts.lock().expect("contexts").push((
             context.session_id.clone(),
             context.controller.selection().clone(),
         ));
         self.rows.lock().expect("rows").push(context.spec.clone());
-        if let Some((entered, release)) = &self.hold {
+        if let Some((entered, release)) = &self.hold
+            && !self.released.load(Ordering::SeqCst)
+        {
+            // Not answerable until the test releases the hold: answer "not
+            // now", waiting holding nothing, and bind again once released.
             entered.notify_one();
-            release.notified().await;
+            let release = Arc::clone(release);
+            let released = Arc::clone(&self.released);
+            return Err(GovernedBindError::NotNow(GovernedNotNow {
+                condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+                until: meerkat_core::authorization::NotNowWait::new(async move {
+                    release.notified().await;
+                    released.store(true, Ordering::SeqCst);
+                }),
+            }));
         }
         if self
             .authored_from
@@ -179,13 +219,21 @@ impl GovernedInputBinder for FixtureBinder {
                 custody: Arc::clone(&self.custody),
                 settled: AtomicBool::new(false),
             });
-            return Err("the input was authored from another registered row".to_string());
+            return Err(GovernedBindRefusal::denied(
+                "the input was authored from another registered row",
+            )
+            .into());
         }
         let bound = match self.binding {
-            Binding::Original => {
-                self.fixture
-                    .bound_with(&context.controller, |_| {}, "original-authentication")
-            }
+            // Bound for the runtime of the session it was handed.
+            Binding::Original => self.fixture.bound_with(
+                &context.controller,
+                |candidate| {
+                    candidate.target.logical_runtime =
+                        id(&LogicalRuntimeId::for_session(&context.session_id).to_string());
+                },
+                "original-authentication",
+            ),
             Binding::WrongDestination => self.fixture.bound_with(
                 &context.controller,
                 |candidate| candidate.target.context_generation += 1,
@@ -207,6 +255,10 @@ impl GovernedInputBinder for FixtureBinder {
             }),
             entry_fence: self.fence.clone(),
         })
+    }
+
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        self.budget
     }
 
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -246,13 +298,22 @@ mod losing {
     use super::LostAnswer;
 
     /// The real mob session bridge, except that after the real governed
-    /// delivery ran its answer is replaced by an unresolved one.
+    /// delivery ran its answer is replaced by an unresolved one (`lose`),
+    /// and that a declared roster may answer without reaching Core
+    /// (`declare_in_core`).
     pub struct LosingBridge {
         pub inner: MobSessionBridge,
-        pub lose: LostAnswer,
+        /// How the governed delivery's answer is lost; `None` keeps it.
+        pub lose: Option<LostAnswer>,
         /// Real native acknowledgements of new work seen before an answer
         /// was replaced.
         pub native_accepted: Arc<AtomicUsize>,
+        /// `false`: a declared roster answers that every identity keeps
+        /// what it has without reaching Core, so the identity registers
+        /// while Core still holds its member as a worker (a member seated
+        /// before identity entries existed, which no declared apply has
+        /// adopted yet).
+        pub declare_in_core: bool,
     }
 
     #[async_trait]
@@ -264,7 +325,13 @@ mod losing {
             input: meerkat_runtime::Input,
             custody: GovernedDeliveryCustody,
         ) -> Result<GovernedDelivery, BridgeAdmissionError> {
-            if matches!(self.lose, LostAnswer::CustodyLost) {
+            let Some(lose) = self.lose else {
+                return self
+                    .inner
+                    .begin_governed_delivery(runtime_id, session_id, input, custody)
+                    .await;
+            };
+            if matches!(lose, LostAnswer::CustodyLost) {
                 // Taken past its guard and lost unsettled: no native
                 // settlement is ever observed.
                 drop((input, custody.submit()));
@@ -288,9 +355,10 @@ mod losing {
             ) {
                 self.native_accepted.fetch_add(1, Ordering::SeqCst);
             }
-            Err(BridgeAdmissionError::GovernedInput(match self.lose {
+            Err(BridgeAdmissionError::GovernedInput(match lose {
                 LostAnswer::Unresolved => GovernedInputError::AdmissionUnresolved {
                     detail: "the admission answer was lost".to_string(),
+                    receipt: None,
                 },
                 LostAnswer::PostAdmissionInternal | LostAnswer::CustodyLost => {
                     GovernedInputError::Mob(Box::new(MobError::Internal(
@@ -546,6 +614,16 @@ mod losing {
             self.inner.member_binding_history().await
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &meerkat_meta::identity_first::AgentIdentity,
+        ) -> Result<
+            meerkat_meta::identity_first::CoreIdentityEntry,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            meerkat_meta::identity_first::SessionBridge::identity_entry(&self.inner, identity).await
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -615,6 +693,9 @@ mod losing {
             meerkat_meta::identity_first::DeclaredRosterAnswer,
             meerkat_meta::identity_first::BridgeError,
         > {
+            if !self.declare_in_core {
+                return Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster));
+            }
             self.inner.apply_declared_roster(roster).await
         }
     }
@@ -643,6 +724,26 @@ async fn governed_runtime_losing(
         admission_budget,
         lose,
         AgentAddressability::Addressable,
+        None,
+    )
+    .await
+}
+
+/// [`governed_runtime`] whose identity runtime reports to `observer`, the
+/// host's operation refusal observer.
+async fn governed_runtime_observed(
+    fixture: &Arc<Fixture>,
+    observer: Arc<dyn meerkat_core::OperationRefusalObserver>,
+) -> (
+    Arc<IdentityRuntime>,
+    meerkat_meta::identity_first::AgentIdentity,
+) {
+    governed_runtime_composed(
+        fixture,
+        None,
+        None,
+        AgentAddressability::Addressable,
+        Some(observer),
     )
     .await
 }
@@ -652,6 +753,7 @@ async fn governed_runtime_composed(
     admission_budget: Option<Duration>,
     lose: Option<(LostAnswer, Arc<AtomicUsize>)>,
     addressability: AgentAddressability,
+    observer: Option<Arc<dyn meerkat_core::OperationRefusalObserver>>,
 ) -> (
     Arc<IdentityRuntime>,
     meerkat_meta::identity_first::AgentIdentity,
@@ -664,15 +766,30 @@ async fn governed_runtime_composed(
     let bridge: Arc<dyn SessionBridge> = match lose {
         Some((lose, native_accepted)) => Arc::new(losing::LosingBridge {
             inner: bridge,
-            lose,
+            lose: Some(lose),
             native_accepted,
+            declare_in_core: true,
         }),
         None => Arc::new(bridge),
     };
+    governed_runtime_over(bridge, addressability, observer).await
+}
+
+/// The identity runtime over `bridge`, with the fixture's member registered
+/// under `addressability`, reporting to the host's operation refusal
+/// `observer` when there is one.
+async fn governed_runtime_over(
+    bridge: Arc<dyn SessionBridge>,
+    addressability: AgentAddressability,
+    observer: Option<Arc<dyn meerkat_core::OperationRefusalObserver>>,
+) -> (
+    Arc<IdentityRuntime>,
+    meerkat_meta::identity_first::AgentIdentity,
+) {
     let store: Arc<dyn ContinuityStore> =
         Arc::new(LocalContinuityStore::in_memory().expect("continuity store"));
     let lease: Arc<dyn LeaseProvider> = Arc::new(LocalLeaseProvider::new());
-    let runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+    let runtime = IdentityRuntime::new(IdentityRuntimeConfig {
         continuity_store: store,
         lease_provider: lease,
         runtime_instance_id: "governed-ingress-mob".to_string(),
@@ -680,7 +797,11 @@ async fn governed_runtime_composed(
         durability_policy: DurabilityPolicy::SyncWriteThrough,
         bridge: Some(bridge),
         default_timeout: None,
-    }));
+    });
+    let runtime = Arc::new(match observer {
+        Some(observer) => runtime.with_operation_refusal_observer(observer),
+        None => runtime,
+    });
     // Only the spec: the fixture's mob already holds the member live on its
     // session, and Core's member history is the identity's binding.
     let identity = meerkat_meta::identity_first::AgentIdentity::parse(MEMBER).unwrap();
@@ -1171,7 +1292,7 @@ async fn an_input_authored_from_a_superseded_row_is_refused_at_bind_and_submits_
     assert!(
         matches!(
             &error,
-            IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(_))
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(_))
         ),
         "{error}"
     );
@@ -1201,11 +1322,10 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
         .spec;
     let row_b = with_instructions(&row_a, "Answer in one sentence.");
 
-    // The bind for an input authored from row A is held after it was handed
-    // the row, inside the delivery's lifecycle custody.
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let binder = FixtureBinder::held(&fixture, row_a.clone(), &entered, &release);
+    // The input authored from row A is bound against row A, and its native
+    // admission is held in flight, inside the delivery's lifecycle custody.
+    fixture.adapter.gate.hold();
+    let binder = FixtureBinder::authored_from(&fixture, row_a.clone());
     let send = tokio::spawn({
         let runtime = Arc::clone(&runtime);
         let identity = identity.clone();
@@ -1216,9 +1336,13 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
                 .await
         }
     });
-    tokio::time::timeout(WAIT, entered.notified())
-        .await
-        .expect("the bind is entered");
+    tokio::time::timeout(WAIT, async {
+        while fixture.adapter.gate.entered() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the admission is in flight");
 
     // The real writer is polled once and parks on the identity's lifecycle
     // lock: it has not committed row B while the admission is in flight.
@@ -1243,7 +1367,7 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
 
     // The queued change does not refuse the input: row A is valid at bind
     // and the input is admitted and settled once.
-    release.notify_one();
+    fixture.adapter.gate.release();
     let sent = tokio::time::timeout(WAIT, send)
         .await
         .expect("the send completes")
@@ -1271,6 +1395,440 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
     };
     let outcome = runtime.wait_for_turn(&identity, ticket, WAIT).await;
     assert!(completed_with_answer(&outcome), "{outcome:?}");
+}
+
+/// How long a lifecycle operation of the same identity may take while a
+/// governed send's bind is not ready: it must not wait for that bind.
+const NOT_READY_PROGRESS: Duration = Duration::from_secs(3);
+
+/// While a governed send's bind cannot answer yet, the identity's other
+/// lifecycle operations run: a row change completes while the send waits,
+/// and the send's next bind is handed the new row, which refuses the input
+/// authored from the old one with nothing admitted.
+///
+/// RED on the base at the row change: the bind waits inside the identity's
+/// lifecycle lock, so the row change parks behind it until the hold ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_lifecycle_operation_completes_while_a_governed_bind_is_not_ready() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row_a = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let row_b = with_instructions(&row_a, "Answer in one sentence.");
+
+    // The bind for an input authored from row A cannot answer until
+    // `release`.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held(&fixture, row_a.clone(), &entered, &release);
+    let send = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the bind is entered");
+
+    let changed =
+        tokio::time::timeout(NOT_READY_PROGRESS, runtime.update_spec(row_b.clone())).await;
+    release.notify_one();
+    assert!(
+        matches!(changed, Ok(Ok(_))),
+        "the row change completes while the bind is not ready, never behind it: {changed:?}"
+    );
+
+    // The send binds again, handed the new row: the input authored from row
+    // A is refused and nothing is admitted.
+    let sent = tokio::time::timeout(WAIT, send)
+        .await
+        .expect("the send completes")
+        .expect("the send task does not panic");
+    assert!(
+        sent.is_err(),
+        "the input authored from row A is refused: {sent:?}"
+    );
+    assert_eq!(binder.rows(), vec![row_a, row_b]);
+    assert!(binder.admitted().is_empty(), "nothing is admitted");
+}
+
+/// A governed send whose bind cannot answer yet while the member's session
+/// is replaced (a reset rotates the member onto a fresh session) is never
+/// admitted onto the old session: its next bind is handed the new session,
+/// which admits it, once. (This fixture's reset destroys the replaced
+/// session, so a read there cannot show whether it holds the input; the
+/// sessions the binds were handed and the one admission onto the new
+/// session carry the row.)
+///
+/// RED on the base: the reset parks behind the bind, which then admits the
+/// input onto the old session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_replaced_while_a_governed_bind_is_not_ready_never_takes_the_input() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held(&fixture, row, &entered, &release);
+    let send = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the bind is entered");
+
+    // The member's session is replaced while the bind is not ready; the new
+    // session is woken and the host serves it as it served the first.
+    let fresh = tokio::time::timeout(NOT_READY_PROGRESS, runtime.reset(&identity))
+        .await
+        .expect("the reset completes while the bind is not ready")
+        .expect("the reset rotates the member");
+    let new_session = fresh.session_id().cloned().expect("the new session");
+    assert_ne!(new_session, fixture.session_id);
+    runtime
+        .materialize(&identity)
+        .await
+        .expect("the member wakes on its new session");
+    fixture.serve_session(&new_session).await;
+    release.notify_one();
+    let sent = tokio::time::timeout(WAIT, send)
+        .await
+        .expect("the send completes")
+        .expect("the send task does not panic");
+
+    let sessions: Vec<SessionId> = binder
+        .contexts
+        .lock()
+        .expect("contexts")
+        .iter()
+        .map(|(session, _)| session.clone())
+        .collect();
+    assert_eq!(
+        sessions,
+        vec![fixture.session_id.clone(), new_session.clone()],
+        "the first bind was handed the member's session, the next its new one"
+    );
+    let outcome = sent.expect("the input is admitted onto the member's new session");
+    assert_eq!(outcome.admission.session_id, new_session);
+    assert_eq!(binder.admitted(), vec![outcome.admission], "admitted once");
+}
+
+/// The fixture binder's wait budget for its "not now" answers.
+const HOLD_BUDGET: Duration = Duration::from_millis(300);
+
+/// A governed send whose every bind is not ready until its door's budget
+/// ends answers a retryable, typed hold: nothing is submitted, no custody
+/// existed to withdraw, the structured data names the hold, and replaying
+/// the same input later binds again and admits it once.
+///
+/// RED on the base: the bind waits inside the identity's lifecycle lock
+/// until it is released, so the send answers nothing within the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_held_past_its_budget_answers_a_retryable_hold_and_its_replay_admits_once() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held_within(&fixture, row.clone(), &entered, &release, HOLD_BUDGET);
+    let input = raw_prompt();
+
+    let sent = tokio::time::timeout(
+        HOLD_BUDGET + NOT_READY_PROGRESS,
+        runtime.send_governed_with_turn_ticket(&identity, None, input.clone(), binder.clone()),
+    )
+    .await;
+    release.notify_one();
+    let error = match sent {
+        Ok(Err(error)) => error,
+        other => panic!("the held send answers a hold within its budget: {other:?}"),
+    };
+    let data = error.structured_data().expect("the hold's structured data");
+    assert_eq!(data["kind"], "governed_input_held", "{data}");
+    assert_eq!(data["retryable"], true, "{data}");
+    assert_eq!(data["submitted"], false, "{data}");
+    assert_eq!(data["input_id"], input.id().to_string(), "{data}");
+    let waited = data["waited_ms"].as_u64().expect("the hold's wait");
+    assert!(
+        u128::from(waited) <= HOLD_BUDGET.as_millis(),
+        "the send waited within its door's budget: {data}"
+    );
+    assert_eq!(data["binds"], 1, "{data}");
+    assert_eq!(
+        binder.contexts.lock().expect("contexts").len(),
+        1,
+        "one bind"
+    );
+    assert!(binder.admitted().is_empty(), "nothing was submitted");
+    assert_eq!(binder.withdrawn(), 0, "no settlement existed to withdraw");
+    assert_eq!(
+        fixture.adapter.gate.entered(),
+        0,
+        "native admission was never entered"
+    );
+
+    let replay = FixtureBinder::authored_from(&fixture, row);
+    let admitted = runtime
+        .send_governed_with_turn_ticket(&identity, None, input, replay.clone())
+        .await
+        .expect("the replay of the held input is admitted");
+    assert_eq!(replay.admitted(), vec![admitted.admission.clone()]);
+    assert!(
+        !admitted.admission.deduplicated,
+        "admitted once, as new work"
+    );
+}
+
+/// A binder whose every bind answers "not now" with a wait that itself
+/// runs past its door's budget before it yields, as a busy host's wait
+/// wakes late.
+#[derive(Default)]
+struct LateWakeBinder {
+    binds: AtomicUsize,
+}
+
+#[async_trait]
+impl GovernedInputBinder for LateWakeBinder {
+    async fn try_bind(
+        &self,
+        _context: &GovernedBindContext,
+        _input: Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.binds.fetch_add(1, Ordering::SeqCst);
+        Err(GovernedBindError::NotNow(GovernedNotNow {
+            condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+            until: meerkat_core::authorization::NotNowWait::new(async {
+                std::thread::sleep(HOLD_BUDGET + Duration::from_millis(200));
+            }),
+        }))
+    }
+
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        GovernedWaitBudget::Bounded(HOLD_BUDGET)
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}
+}
+
+/// A held send reports its wait within its door's budget, never more, also when
+/// the wait woke late (here the host's own wait ran past the budget before it
+/// yielded): `waited_ms` is at most the budget, after one bind.
+///
+/// RED before the fix: the hold reported the wait's whole wall-clock time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_sends_reported_wait_stays_within_its_door_budget() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let binder = Arc::new(LateWakeBinder::default());
+    let error = tokio::time::timeout(
+        WAIT,
+        runtime.send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder.clone()),
+    )
+    .await
+    .expect("the send answers")
+    .expect_err("the send is held");
+    let data = error.structured_data().expect("the hold's structured data");
+    assert_eq!(data["kind"], "governed_input_held", "{data}");
+    let waited = data["waited_ms"].as_u64().expect("the hold's wait");
+    assert!(
+        u128::from(waited) <= HOLD_BUDGET.as_millis(),
+        "the reported wait stays within the door's budget: {data}"
+    );
+    assert_eq!(binder.binds.load(Ordering::SeqCst), 1, "one bind");
+}
+
+/// A binder's refusal ends the send at once, typed: one bind, nothing
+/// submitted, never waited out or bound again, and the structured data names
+/// the refusal's kind.
+///
+/// RED on the base at the typed kind: the base answers an untyped bind error
+/// with no structured data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_bind_ends_the_send_typed_and_is_never_bound_again() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let row_a = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let row_b = with_instructions(&row_a, "Answer in one sentence.");
+    runtime
+        .update_spec(row_b.clone())
+        .await
+        .expect("the row change commits");
+
+    let binder = FixtureBinder::authored_from(&fixture, row_a);
+    let error = runtime
+        .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder.clone())
+        .await
+        .expect_err("the input authored from the old row is refused");
+    assert_eq!(binder.rows(), vec![row_b], "one bind, never bound again");
+    assert!(binder.admitted().is_empty(), "nothing was submitted");
+    let data = error
+        .structured_data()
+        .expect("the refusal's structured data");
+    assert_eq!(data["kind"], "governed_input_refused", "{data}");
+    assert_eq!(data["refusal"], "denied", "{data}");
+    assert_eq!(data["submitted"], false, "{data}");
+    assert_eq!(data["retryable"], false, "{data}");
+}
+
+/// A binder that records a durable effect inside its bind attempt and then
+/// answers "not now": a binder fault.
+#[derive(Default)]
+struct NotNowAfterEffect {
+    binds: AtomicUsize,
+}
+
+#[async_trait]
+impl GovernedInputBinder for NotNowAfterEffect {
+    async fn try_bind(
+        &self,
+        _context: &GovernedBindContext,
+        _input: Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.binds.fetch_add(1, Ordering::SeqCst);
+        meerkat_core::protected_section::note_effect("fixture.durable_write");
+        Err(GovernedBindError::NotNow(GovernedNotNow {
+            condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+            until: meerkat_core::authorization::NotNowWait::pause(),
+        }))
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}
+}
+
+/// A binder that answers "not now" after a durable effect of its bind attempt
+/// is a binder fault, and the send never waits it out or binds again: a debug
+/// build stops at Meta's assertion (the send's runtime-owned operation ends
+/// without a result), a release build refuses the send `unavailable`. One bind,
+/// nothing submitted either way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_not_now_after_a_durable_effect_is_never_waited_out() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let binder = Arc::new(NotNowAfterEffect::default());
+    let error = tokio::time::timeout(
+        WAIT,
+        runtime.send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder.clone()),
+    )
+    .await
+    .expect("the send answers")
+    .expect_err("the send is not admitted");
+    if cfg!(debug_assertions) {
+        assert!(
+            matches!(&error, IdentityRuntimeError::Internal(detail) if detail.contains("without a result")),
+            "the debug assertion ended the send's operation: {error:?}"
+        );
+    } else {
+        assert!(
+            matches!(
+                &error,
+                IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal))
+                    if refusal.kind == GovernedBindRefusalKind::Unavailable
+            ),
+            "the release build refuses the send: {error:?}"
+        );
+    }
+    assert_eq!(
+        binder.binds.load(Ordering::SeqCst),
+        1,
+        "one bind, never bound again"
+    );
+    assert_eq!(fixture.adapter.gate.entered(), 0, "nothing was submitted");
+}
+
+/// Every observation the host's operation refusal observer received.
+#[derive(Default)]
+struct Observed(Mutex<Vec<meerkat_core::OperationRefusalObservation>>);
+
+impl meerkat_core::OperationRefusalObserver for Observed {
+    fn observe(&self, observation: &meerkat_core::OperationRefusalObservation) {
+        self.0
+            .lock()
+            .expect("observations")
+            .push(observation.clone());
+    }
+}
+
+/// A governed send's wait for its binder's "not now" answer is reported to the
+/// operation refusal observer the host installed: one settled wait, on the
+/// governed input surface, for the session the bind was handed. The send then
+/// binds again and is admitted.
+///
+/// RED before the fix: Meta's loop traced the wait and reported nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_governed_sends_not_now_wait_is_reported_to_the_hosts_observer() {
+    let fixture = Arc::new(Fixture::new().await);
+    let observed = Arc::new(Observed::default());
+    let (runtime, identity) = governed_runtime_observed(&fixture, observed.clone()).await;
+    let row = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row")
+        .spec;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let binder = FixtureBinder::held(&fixture, row, &entered, &release);
+    let send = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the bind is entered");
+    release.notify_one();
+    let sent = tokio::time::timeout(WAIT, send)
+        .await
+        .expect("the send completes")
+        .expect("the send task does not panic");
+    assert!(sent.is_ok(), "admitted after the wait: {sent:?}");
+
+    let observations = observed.0.lock().expect("observations").clone();
+    assert_eq!(observations.len(), 1, "one wait reported: {observations:?}");
+    let observation = &observations[0];
+    assert_eq!(observation.session_id(), &fixture.session_id);
+    assert_eq!(
+        observation.surface(),
+        &meerkat_core::OperationRefusalSurface::GovernedInput
+    );
+    assert!(
+        matches!(
+            observation.disposition(),
+            meerkat_core::OperationRefusalDisposition::WaitedForOwnerChange { settled: true, .. }
+        ),
+        "{observation:?}"
+    );
 }
 
 /// A host's retained entry owner (for example one Console login): it admits
@@ -1593,8 +2151,14 @@ async fn a_departed_caller_keeps_the_reserved_use_and_a_replay_is_entered() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trusted_host_dispatch_reaches_an_internal_only_identity_on_a_non_addressable_member() {
     let fixture = Arc::new(Fixture::non_addressable().await);
-    let (runtime, identity) =
-        governed_runtime_composed(&fixture, None, None, AgentAddressability::InternalOnly).await;
+    let (runtime, identity) = governed_runtime_composed(
+        &fixture,
+        None,
+        None,
+        AgentAddressability::InternalOnly,
+        None,
+    )
+    .await;
     let registered = runtime
         .registered_spec(&identity)
         .await
@@ -1713,4 +2277,175 @@ async fn a_trusted_host_dispatch_reaches_an_addressable_identity_on_a_non_addres
     let outcome = runtime.wait_for_turn(&identity, ticket, WAIT).await;
     assert!(completed_with_answer(&outcome), "{outcome:?}");
     assert_eq!(fixture.provider.requests().len(), 1);
+}
+
+/// A governed send to a registered identity whose member Core still holds
+/// as a worker (a member seated before identity entries existed, which no
+/// declared apply has adopted yet) takes the external door: Core's
+/// addressability rule for the worker applies, so on a member whose
+/// profile admits no external work the send is refused
+/// `NotExternallyAddressable`, its custody withdrawn and nothing run.
+///
+/// Pins the door's branch for a name Core holds as no entry: RED under a
+/// door that sends such a name through the trusted host's internal door,
+/// which admits the input whatever the member's addressability.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_send_to_an_identity_whose_member_is_still_a_worker_takes_the_external_door() {
+    let fixture = Arc::new(Fixture::non_addressable().await);
+    let bridge = MobSessionBridge::new(fixture.handle.clone())
+        .with_controller_pin_source(fixture.service.clone());
+    let (runtime, identity) = governed_runtime_over(
+        Arc::new(losing::LosingBridge {
+            inner: bridge,
+            lose: None,
+            native_accepted: Arc::new(AtomicUsize::new(0)),
+            declare_in_core: false,
+        }),
+        AgentAddressability::Addressable,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(
+            fixture.handle.identity_entry(&AgentIdentity::from(MEMBER)),
+            Ok(meerkat_mob::IdentityEntryRead::NotAnEntry { worker: Some(_) })
+        ),
+        "Core holds the member as a worker, no entry"
+    );
+    let registered = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row");
+
+    let send_binder = FixtureBinder::authored_from(&fixture, registered.spec);
+    let error = runtime
+        .send_governed_with_turn_ticket(&identity, None, raw_prompt(), send_binder.clone())
+        .await
+        .expect_err("the external door refuses a worker that admits no external work");
+    assert!(
+        matches!(
+            &error,
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(mob))
+                if matches!(**mob, MobError::NotExternallyAddressable(_))
+        ),
+        "{error}"
+    );
+    assert!(send_binder.admitted().is_empty());
+    assert_eq!(send_binder.withdrawn(), 1, "the custody is withdrawn");
+    assert!(fixture.provider.requests().is_empty(), "nothing ran");
+}
+
+/// A host entry fence whose entry, the governed delivery's last step before
+/// submission, tells the test it was reached and then waits until the test
+/// releases it: a barrier between the delivery's reads and its submission.
+struct BarrierFence {
+    reached: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+struct BarrierPermit;
+
+impl GovernedEntryPermit for BarrierPermit {
+    fn finish(self: Box<Self>, _outcome: GovernedEntryOutcome) {}
+}
+
+impl GovernedEntryFence for BarrierFence {
+    fn enter(&self) -> Result<Box<dyn GovernedEntryPermit>, GovernedEntryRefusal> {
+        if let Some(reached) = self.reached.lock().expect("barrier").take() {
+            let _ = reached.send(());
+        }
+        // Blocks this worker thread: the test's other workers run the
+        // rotation meanwhile.
+        let _ = self.release.lock().expect("barrier").recv_timeout(WAIT);
+        Ok(Box::new(BarrierPermit))
+    }
+}
+
+/// A governed send to an identity entry reads the entry's member (its
+/// incarnation, and whether it admits external work) and then submits. A
+/// rotation of the member between the two, by another host caller of the
+/// same mob (here a respawn of the entry while the send waits at its last
+/// step before submission), leaves the incarnation the send read: the input
+/// submitted at that incarnation is refused stale. Nothing is admitted to
+/// the new incarnation, the custody is withdrawn and nothing runs.
+///
+/// RED before the submission named the incarnation the send read: the input
+/// was submitted by identity, to whichever incarnation was current then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_rotated_between_the_governed_read_and_the_submit_refuses_the_input_stale() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let member = AgentIdentity::from(MEMBER);
+    assert!(
+        matches!(
+            fixture.handle.identity_entry(&member),
+            Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+        ),
+        "the registration's declaration made the member an identity entry"
+    );
+    let read_incarnation = fixture
+        .handle
+        .get_member(&member)
+        .await
+        .expect("roster read")
+        .expect("the entry's member")
+        .agent_runtime_id;
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let fence: Arc<dyn GovernedEntryFence> = Arc::new(BarrierFence {
+        reached: Mutex::new(Some(reached_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let binder = fenced_binder(&fixture, Binding::Original, &fence);
+    let sending = {
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        tokio::spawn(async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        })
+    };
+    tokio::time::timeout(WAIT, reached_rx)
+        .await
+        .expect("the send reaches its last step before submission")
+        .expect("reached");
+    // Another host caller of the same mob rotates the entry's member onto
+    // a fresh session: its next incarnation is seated at the next
+    // generation.
+    let mut successor = SpawnMemberSpec::new("worker", member.clone()).with_entry_custody(true);
+    successor.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+        continuity_key: member.to_string(),
+    };
+    fixture
+        .handle
+        .rotate_member(successor)
+        .await
+        .expect("the entry's member rotates");
+    let current = fixture
+        .handle
+        .get_member(&member)
+        .await
+        .expect("roster read")
+        .expect("the entry's member")
+        .agent_runtime_id;
+    assert_ne!(current, read_incarnation, "a new incarnation");
+    release_tx.send(()).expect("release the barrier");
+
+    let error = sending
+        .await
+        .expect("the send's task")
+        .expect_err("the input submitted at the incarnation the send read is refused");
+    assert!(
+        matches!(
+            &error,
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(mob))
+                if matches!(**mob, MobError::StaleFenceToken { .. })
+        ),
+        "refused stale: {error}"
+    );
+    assert!(binder.admitted().is_empty(), "nothing was admitted");
+    assert_eq!(binder.withdrawn(), 1, "the custody is withdrawn");
+    assert!(fixture.provider.requests().is_empty(), "nothing ran");
 }

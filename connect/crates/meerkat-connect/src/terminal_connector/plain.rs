@@ -32,6 +32,7 @@ pub struct PlainRequest {
 
 /// Immutable protected review with no live setup, auth or runtime handle.
 pub struct ReviewedPlainInstallation {
+    admission: Option<private_service::Admission>,
     storage: ResolvedStorage,
     source: ReviewedPublicSource,
     config: McpServerConfig,
@@ -214,12 +215,92 @@ fn configuration(
 
 pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>(
     owner: &mut TerminalConnectors,
-    mut request: PlainRequest,
+    request: PlainRequest,
     approvals: &LocalApprovals,
     presenter: &mut ApprovalPresenter,
     input: &mut TerminalInput,
     output: &mut W,
     interrupt: F,
+) -> Result<bool, ConnectError> {
+    present_common(
+        owner,
+        request,
+        approvals,
+        Some((presenter, input)),
+        output,
+        interrupt,
+        None,
+        None,
+    )
+    .await
+}
+
+/// The private driver already owns the same ApprovalPresenter. Only transport
+/// differs; the exact request checks and retained native review below are shared.
+pub(super) async fn present_private(
+    owner: &mut TerminalConnectors,
+    request: PlainRequest,
+    approvals: &LocalApprovals,
+    interrupt: impl Future<Output = io::Result<()>> + Send,
+    handoff: &mut Option<PlainHandoff>,
+) -> Result<bool, ConnectError> {
+    present_common(
+        owner,
+        request,
+        approvals,
+        None,
+        &mut io::sink(),
+        interrupt,
+        Some(handoff),
+        None,
+    )
+    .await
+}
+
+pub(super) async fn present_private_admitted(
+    owner: &mut TerminalConnectors,
+    request: PlainRequest,
+    approvals: &LocalApprovals,
+    interrupt: impl Future<Output = io::Result<()>> + Send,
+    handoff: &mut Option<PlainHandoff>,
+    admission: private_service::Admission,
+) -> Result<bool, ConnectError> {
+    present_common(
+        owner,
+        request,
+        approvals,
+        None,
+        &mut io::sink(),
+        interrupt,
+        Some(handoff),
+        Some(admission),
+    )
+    .await
+}
+
+pub(crate) struct PlainHandoff {
+    response: oneshot::Sender<Value>,
+    value: Value,
+}
+impl PlainHandoff {
+    pub(super) fn new(response: oneshot::Sender<Value>, value: Value) -> Self {
+        Self { response, value }
+    }
+    /// The driver fences new input before allowing this reviewed tool to return.
+    pub(crate) fn complete(self) {
+        let _ = self.response.send(self.value);
+    }
+}
+
+async fn present_common<F: Future<Output = io::Result<()>> + Send, W: Write>(
+    owner: &mut TerminalConnectors,
+    mut request: PlainRequest,
+    approvals: &LocalApprovals,
+    terminal: Option<(&mut ApprovalPresenter, &mut TerminalInput)>,
+    output: &mut W,
+    interrupt: F,
+    handoff: Option<&mut Option<PlainHandoff>>,
+    admission: Option<private_service::Admission>,
 ) -> Result<bool, ConnectError> {
     if request.response.is_closed() {
         return Ok(true);
@@ -269,25 +350,38 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
         "grant_scope":"operator_managed_server_policy",
         "notice":notice});
     tokio::pin!(interrupt);
-    let decision = match review(
-        approvals,
-        presenter,
-        input,
-        output,
-        review_request(
-            request.selection.session(),
-            if already_saved {
-                "Review new access to this saved public service?"
-            } else {
-                "Enable this public service?"
+    let review_request = review_request(
+        request.selection.session(),
+        if already_saved {
+            "Review new access to this saved public service?"
+        } else {
+            "Enable this public service?"
+        },
+        body,
+    )?;
+    let reviewed = match terminal {
+        Some((presenter, input)) => {
+            review(
+                approvals,
+                presenter,
+                input,
+                output,
+                review_request,
+                &mut request.response,
+                interrupt.as_mut(),
+            )
+            .await?
+        }
+        None => tokio::select! { biased;
+            _ = request.response.closed() => ReviewOutcome::CallerGone,
+            stopped = interrupt.as_mut() => {
+                stopped.map_err(|error| ConnectError::native("Listen for private access cancellation", error))?;
+                ReviewOutcome::Stopped
             },
-            body,
-        )?,
-        &mut request.response,
-        interrupt.as_mut(),
-    )
-    .await?
-    {
+            decision = approvals.review_access(review_request) => ReviewOutcome::Decided(Box::new(decision?)),
+        },
+    };
+    let decision = match reviewed {
         ReviewOutcome::Decided(decision) => decision,
         ReviewOutcome::CallerGone => return Ok(true),
         ReviewOutcome::Stopped => return Ok(false),
@@ -319,8 +413,12 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
         return Ok(true);
     }
     let source = ReviewedPublicSource::from_selection(&request.selection);
+    if let Some(admission) = &admission {
+        admission.check()?;
+    }
     owner.reviewed = Some(
         ReviewedInstallation::Plain(ReviewedPlainInstallation {
+            admission,
             storage: owner.storage.clone(),
             source,
             config: request.config,
@@ -331,9 +429,17 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
         })
         .into(),
     );
-    let _ = request.response.send(json!({"state":"pending",
+    let value = json!({"state":"pending",
         "reason":"reviewed_finalization_waiting_for_setup_close","access_reviewed":true,"grant_issued":false,
-        "instruction":"Finish this turn. The terminal will close setup and report native persistence and grant results before continuing the conversation. Do not invoke the service, repeat this request or claim readiness before that result."}));
+        "instruction":"Finish this turn. Connect will close setup and report native persistence and grant results. Do not invoke the service, repeat this request or claim readiness before that result."});
+    if let Some(handoff) = handoff {
+        *handoff = Some(PlainHandoff {
+            response: request.response,
+            value,
+        });
+    } else {
+        let _ = request.response.send(value);
+    }
     Ok(true)
 }
 
@@ -401,6 +507,24 @@ async fn preview(
 }
 
 impl ReviewedPlainInstallation {
+    pub(super) fn probe_selection(&self) -> Option<super::ProbeReviewedSelection> {
+        match &self.source {
+            ReviewedPublicSource::Installed {
+                installed,
+                document,
+                inputs,
+            } => Some(super::ProbeReviewedSelection {
+                installed: (**installed).clone(),
+                document: document.clone(),
+                inputs: inputs.clone(),
+                config: self.config.clone(),
+                request: self.request.clone(),
+            }),
+            // Remote export probing needs its own exact current export owner;
+            // never relabel a remote export as an installed receipt.
+            ReviewedPublicSource::Remote(_) => None,
+        }
+    }
     /// Main consumes this after the exact setup session and dispatchers close.
     /// Its existing finalization wrapper joins every effect once entered.
     pub async fn finalize_after_close<W: Write>(self, output: &mut W) -> Result<(), ConnectError> {
@@ -488,15 +612,26 @@ impl ReviewedPlainInstallation {
         }
         let (storage, config, request, principals) =
             (&self.storage, &self.config, &self.request, &principals);
-        Ok(settle_public_effects(
+        Ok(settle_public_effects_admitted(
             interrupt,
             stopped,
             reused.then_some(self.expected_generation),
+            self.admission.as_ref(),
             || async {
-                McpRealmPersistTarget::new(&runtime)
-                    .add(self.config.clone(), Some(self.expected_generation))
-                    .await
-                    .map(|saved| saved.generation)
+                let target = McpRealmPersistTarget::new(&runtime);
+                match &self.admission {
+                    Some(entry) => {
+                        target
+                            .add_entered(self.config.clone(), Some(self.expected_generation), entry)
+                            .await
+                    }
+                    None => {
+                        target
+                            .add(self.config.clone(), Some(self.expected_generation))
+                            .await
+                    }
+                }
+                .map(|saved| saved.generation)
             },
             |generation| async move {
                 // Native rechecks this exact descriptor and generation under
@@ -520,10 +655,42 @@ impl ReviewedPlainInstallation {
 
 /// One sequence for the production config and grant entry points. Cancellation
 /// gates each effect; an entered effect always settles into its original type.
+#[cfg(test)]
 async fn settle_public_effects<I, P, PF, G, GF>(
+    interrupt: Pin<&mut I>,
+    stopped: &mut Option<secrets::Stop>,
+    existing_generation: Option<u64>,
+    persist: P,
+    grant: G,
+) -> FinalizationOutcome
+where
+    I: Future<Output = io::Result<()>>,
+    P: FnOnce() -> PF,
+    PF: Future<Output = Result<u64, meerkat_core::mcp_config::McpRealmPersistError>>,
+    G: FnOnce(u64) -> GF,
+    GF: Future<
+        Output = Result<
+            meerkat::governed_realm::stock::issuance::StockGrantOutcome,
+            StockGrantError,
+        >,
+    >,
+{
+    settle_public_effects_admitted(
+        interrupt,
+        stopped,
+        existing_generation,
+        None,
+        persist,
+        grant,
+    )
+    .await
+}
+
+async fn settle_public_effects_admitted<I, P, PF, G, GF>(
     mut interrupt: Pin<&mut I>,
     stopped: &mut Option<secrets::Stop>,
     existing_generation: Option<u64>,
+    admission: Option<&private_service::Admission>,
     persist: P,
     grant: G,
 ) -> FinalizationOutcome
@@ -548,10 +715,26 @@ where
             Some(Err(error)) => return FinalizationOutcome::PublicPersistenceError(error),
         },
     };
-    let Some(grant) =
-        secrets::joined_effect(interrupt.as_mut(), stopped, || grant(generation)).await
-    else {
-        return FinalizationOutcome::PublicStoppedBeforeGrant { generation, reused };
+    let grant = if let Some(admission) = admission {
+        match private_service::accepted_effect(interrupt.as_mut(), stopped, admission, || {
+            grant(generation)
+        })
+        .await
+        {
+            Some(Ok(value)) => value,
+            Some(Err(_)) => {
+                *stopped = Some(secrets::Stop::Cancelled);
+                return FinalizationOutcome::PublicStoppedBeforeGrant { generation, reused };
+            }
+            None => return FinalizationOutcome::PublicStoppedBeforeGrant { generation, reused },
+        }
+    } else {
+        let Some(value) =
+            secrets::joined_effect(interrupt.as_mut(), stopped, || grant(generation)).await
+        else {
+            return FinalizationOutcome::PublicStoppedBeforeGrant { generation, reused };
+        };
+        value
     };
     if reused {
         FinalizationOutcome::PublicReused { generation, grant }
@@ -698,6 +881,7 @@ mod selected_tests {
             )),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.join("factory"))
@@ -725,6 +909,7 @@ mod selected_tests {
             )),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.join("factory"))
@@ -736,6 +921,131 @@ mod selected_tests {
         Box::pin(TerminalConnectors::open(&mut startup))
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn private_plain_review_keeps_exact_approval_and_defers_waiter_until_driver_custody() {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            Box::pin(async {
+                for mode in ["approve", "deny", "changed"] {
+                    let root = tempfile::tempdir().unwrap();
+                    let fixture = crate::stdio::tests::selected_public_fixture(
+                        root.path(),
+                        Some(declaration(json!({"kind":"none"}))),
+                    )
+                    .await;
+                    let selected = fixture.raw_selection().ok().unwrap();
+                    let storage = crate::RealmOptions {
+                        context_root: root.path().into(),
+                        state_root: Some(root.path().join("state")),
+                        user_config_root: Some(root.path().join("home")),
+                    }
+                    .resolve("selected-owner")
+                    .unwrap();
+                    let mut owner = terminal_owner(root.path(), storage.clone()).await;
+                    let dispatcher = owner.plain_dispatcher_factory()(fixture.owner.clone());
+                    assert_eq!(
+                        dispatcher
+                            .tools()
+                            .iter()
+                            .map(|tool| tool.name.clone())
+                            .collect::<Vec<_>>(),
+                        vec![PLAIN_TOOL]
+                    );
+                    let wrong = serde_json::value::to_raw_value(&json!({})).unwrap();
+                    let context = meerkat_core::ToolDispatchContext::default()
+                        .with_runtime_identity(selected.installed.session.clone(), None);
+                    for name in [TOOL, SECRET_TOOL, ACCESS_MANAGE_TOOL] {
+                        assert!(
+                            dispatcher
+                                .dispatch_with_context(
+                                    ToolCallView {
+                                        id: "unsupported",
+                                        name,
+                                        args: &wrong
+                                    },
+                                    &context
+                                )
+                                .await
+                                .is_err()
+                        );
+                    }
+                    assert!(owner.requests.try_recv().is_err());
+                    let before = crate::realm::read_own_mcp_config(&storage).await.unwrap();
+                    let (approvals, mut presenter) = LocalApprovals::create_browser(
+                        root.path(),
+                        ApprovalPrincipalId::new("private-human").unwrap(),
+                        SystemTime::now() + Duration::from_secs(60),
+                    )
+                    .unwrap();
+                    approvals.bind_session(&selected.installed.session).unwrap();
+                    let names = BTreeSet::from(["actual_read".to_owned()]);
+                    let config = selected.public_configuration(&names).unwrap();
+                    let grant = StockGrantRequest {
+                        agent: "rkat-agent".into(),
+                        expires_in_ms: None,
+                        target: StockGrantTarget::Mcp {
+                            server: config.name.clone(),
+                            operations: McpOperations::Exact(names),
+                        },
+                    };
+                    let (response, mut receive) = oneshot::channel();
+                    let showing = owner.present_private_plain(
+                        ConnectorRequest::Plain(Box::new(PlainRequest {
+                            selection: selected.clone().into(),
+                            config,
+                            grant,
+                            response,
+                        })),
+                        &approvals,
+                        std::future::pending(),
+                    );
+                    let human = async {
+                        let mut prompt = presenter.next().await.unwrap();
+                        assert_eq!(
+                            prompt.record().proposed_action.body.as_ref().unwrap()["phase"],
+                            "public_service_access"
+                        );
+                        if mode == "changed" {
+                            std::fs::write(&selected.installed.receipt_path, b"changed").unwrap();
+                        }
+                        prompt
+                            .decide(if mode == "deny" {
+                                ApprovalDecision::Deny
+                            } else {
+                                ApprovalDecision::Approve
+                            })
+                            .unwrap();
+                    };
+                    let (handoff, ()) = tokio::join!(showing, human);
+                    let handoff = handoff.unwrap();
+                    if mode == "approve" {
+                        assert!(owner.has_reviewed());
+                        assert!(
+                            matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                            "approval alone must not release the native tool waiter"
+                        );
+                        handoff.unwrap().complete();
+                        assert_eq!(
+                            receive.await.unwrap()["reason"],
+                            "reviewed_finalization_waiting_for_setup_close"
+                        );
+                    } else {
+                        assert!(handoff.is_none() && !owner.has_reviewed());
+                        assert_eq!(receive.await.unwrap()["grant_issued"], false);
+                    }
+                    assert_eq!(
+                        crate::realm::read_own_mcp_config(&storage).await.unwrap(),
+                        before
+                    );
+                    owner.retire().unwrap();
+                    approvals.retire();
+                }
+            }),
+        )
+        .await
+        .expect("private review custody must settle");
     }
 
     #[tokio::test]

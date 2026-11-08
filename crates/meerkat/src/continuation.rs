@@ -131,7 +131,13 @@ pub enum ContinuationHandling {
 /// ([`ContinuationOwnerService::submit_host_original`]) carries the marker
 /// instead: its authority is bound for the admitting session at each
 /// admission attempt, never stored here. The marker goes only with a `Host`
-/// producer and never together with retained work.
+/// producer and never together with retained work. External work a caller
+/// committed to a member
+/// ([`ContinuationOwnerService::submit_external_work_for_member_incarnation`])
+/// carries its own mark: its drain asks the member's owner again before
+/// anything is reserved or admitted. A row committed before the mark existed
+/// carries none and is admitted as before; a release that predates the mark
+/// ignores it.
 #[derive(Serialize, Deserialize)]
 struct ContinuationRow {
     #[serde(flatten)]
@@ -140,6 +146,20 @@ struct ContinuationRow {
     retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
     #[serde(default, skip_serializing_if = "is_false")]
     host_original: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    external_work: bool,
+}
+
+/// What a commit records of its row besides the delivery and retained work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommittedRowKind {
+    /// A plain continuation.
+    Plain,
+    /// A host original ([`ContinuationOwnerService::submit_host_original`]).
+    HostOriginal,
+    /// External work a caller committed to a member
+    /// ([`ContinuationOwnerService::submit_external_work_for_member_incarnation`]).
+    ExternalWork,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -437,6 +457,23 @@ pub trait ContinuationAddressResolver: Send + Sync {
     ) -> Result<Option<LogicalRuntimeId>, String> {
         Ok(None)
     }
+
+    /// Whether the incarnation behind `address` refuses, for good, external
+    /// work a caller committed to it
+    /// ([`ContinuationOwnerService::submit_external_work_for_member_incarnation`]).
+    /// A drain asks it for such a row before it reserves or admits anything.
+    /// `Ok(Some(reason))` refuses the row: the drain settles it refused for
+    /// `reason`, never admitted, and the rows after it proceed. `Ok(None)`
+    /// delivers it as any row. `Err` when it cannot be asked now: the row
+    /// waits for the next drain. The default refuses nothing; a resolver of
+    /// mob members asks the member's mob whether it admits external work for
+    /// the member.
+    async fn external_work_refusal(
+        &self,
+        _address: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        Ok(None)
+    }
 }
 
 /// Resolves standalone-session owners only: a session's address is its own
@@ -617,8 +654,15 @@ impl ContinuationOwnerService {
         if self.runtime.has_native_work_authorization_host() {
             return Err(ContinuationSubmitError::NoAdmissibleWorkBinding);
         }
-        self.commit(owner, delivery, None, false, committed_at_ms, None)
-            .await
+        self.commit(
+            owner,
+            delivery,
+            None,
+            CommittedRowKind::Plain,
+            committed_at_ms,
+            None,
+        )
+        .await
     }
 
     /// Commit a host original for `owner`: a continuation of a `Host`
@@ -670,8 +714,15 @@ impl ContinuationOwnerService {
                 "a governed host original joins its owner after the current turn (queue)".into(),
             ));
         }
-        self.commit(owner, delivery, None, true, committed_at_ms, None)
-            .await
+        self.commit(
+            owner,
+            delivery,
+            None,
+            CommittedRowKind::HostOriginal,
+            committed_at_ms,
+            None,
+        )
+        .await
     }
 
     /// [`Self::submit`] for a member owner, bound only to the member's mob
@@ -710,7 +761,41 @@ impl ContinuationOwnerService {
             owner,
             delivery,
             None,
-            false,
+            CommittedRowKind::Plain,
+            committed_at_ms,
+            Self::member_incarnation(owner, incarnation),
+        )
+        .await
+    }
+
+    /// [`Self::submit_for_member_incarnation`] for external work: a
+    /// continuation a caller from outside the mob commits to a member (a
+    /// keyed member send). The row carries the mark of external work, so the
+    /// drain that delivers it asks the member's owner again, before anything
+    /// is reserved or admitted, whether it still admits external work
+    /// ([`ContinuationAddressResolver::external_work_refusal`]): a refusal
+    /// settles the row refused for good, and nothing is admitted. The caller
+    /// asks the same question before it commits.
+    ///
+    /// The mark is not part of the submission: a replay of the same owner,
+    /// key and delivery answers the first receipt, as for [`Self::submit`],
+    /// whether the first commit was marked or not (a key committed before
+    /// the mark existed, or by the member's host).
+    pub async fn submit_external_work_for_member_incarnation(
+        &self,
+        owner: &ContinuationOwner,
+        incarnation: MobIncarnationId,
+        delivery: ContinuationDelivery,
+        committed_at_ms: u64,
+    ) -> Result<ContinuationReceipt, ContinuationSubmitError> {
+        if self.runtime.has_native_work_authorization_host() {
+            return Err(ContinuationSubmitError::NoAdmissibleWorkBinding);
+        }
+        self.commit(
+            owner,
+            delivery,
+            None,
+            CommittedRowKind::ExternalWork,
             committed_at_ms,
             Self::member_incarnation(owner, incarnation),
         )
@@ -785,17 +870,20 @@ impl ContinuationOwnerService {
 
     /// `expected`: the mob incarnation a member owner's commit is bound to
     /// (see [`Self::submit_for_member_incarnation`]); `None` binds whatever
-    /// the owner's current address names.
+    /// the owner's current address names. `kind` is what the row records
+    /// besides its delivery: a host original is a submission of its own, and
+    /// the mark of external work is not part of the submission.
     async fn commit(
         &self,
         owner: &ContinuationOwner,
         delivery: ContinuationDelivery,
         retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
-        host_original: bool,
+        kind: CommittedRowKind,
         committed_at_ms: u64,
         expected: Option<MobIncarnationId>,
     ) -> Result<ContinuationReceipt, ContinuationSubmitError> {
         let ledger_owner = owner.ledger_owner();
+        let host_original = kind == CommittedRowKind::HostOriginal;
         let digest =
             Self::submission_digest(owner, &delivery, retained_work.as_ref(), host_original)?;
         if let Some(binding) = self
@@ -832,6 +920,7 @@ impl ContinuationOwnerService {
             delivery,
             retained_work,
             host_original,
+            external_work: kind == CommittedRowKind::ExternalWork,
         })
         .map_err(unavailable)?;
         let submission = RuntimeDeliverySubmission::new(
@@ -897,7 +986,7 @@ impl ContinuationOwnerService {
             owner,
             delivery,
             job.facts.retained_work.clone(),
-            false,
+            CommittedRowKind::Plain,
             committed_at_ms,
             None,
         )
@@ -922,7 +1011,7 @@ impl ContinuationOwnerService {
             owner,
             delivery,
             job.facts.retained_work.clone(),
-            false,
+            CommittedRowKind::Plain,
             committed_at_ms,
             Self::member_incarnation(owner, incarnation),
         )
@@ -1875,6 +1964,24 @@ impl ContinuationHostBindings {
         }
     }
 
+    /// Ask the bound resolver whether the incarnation behind `address`
+    /// refuses external work a caller committed to it
+    /// ([`ContinuationAddressResolver::external_work_refusal`]). With none
+    /// bound, nothing refuses it. A delivery owner's drain asks it for such a
+    /// row before it reserves or admits anything.
+    ///
+    /// # Errors
+    /// The resolver cannot answer now.
+    pub async fn external_work_refusal(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        match self.resolver() {
+            Some(resolver) => resolver.external_work_refusal(address).await,
+            None => Ok(None),
+        }
+    }
+
     /// The delivery address of the mob member `session_id` serves now,
     /// through the bound resolver
     /// ([`ContinuationAddressResolver::member_address_of_session`]). `None`
@@ -2275,6 +2382,16 @@ pub fn governed_admission_outcome(
 /// A host original row (the marker set by
 /// [`ContinuationOwnerService::submit_host_original`]) is routed first, on
 /// every posture, to [`admit_host_original`].
+///
+/// A row a caller committed as external work to a member (the mark set by
+/// [`ContinuationOwnerService::submit_external_work_for_member_incarnation`])
+/// is admitted only while the member's owner still admits external work:
+/// before anything is reserved, the drain asks the observer
+/// ([`crate::RuntimeDeliveryHost::external_work_refusal`]), and a refusal
+/// settles the row refused for good, never admitted. A row whose admission
+/// is reserved or applied already passed that question at its first
+/// attempt. Without an observer the question cannot be asked, and the row
+/// waits.
 pub(crate) async fn admit_continuation_row(
     inbox: &RuntimeDeliveryInbox,
     address: &LogicalRuntimeId,
@@ -2297,6 +2414,26 @@ pub(crate) async fn admit_continuation_row(
                 observer,
             };
             return admit_host_original(&target, record, job_source, row).await;
+        }
+        if row.external_work
+            && inbox
+                .continuation_admission(address, delivery_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+        {
+            let observer = observer.ok_or_else(|| {
+                ContinuationAdmitError::Failed(
+                    "no delivery host answers whether the owner admits external work".into(),
+                )
+            })?;
+            if let Some(reason) = observer
+                .external_work_refusal(address)
+                .await
+                .map_err(ContinuationAdmitError::Failed)?
+            {
+                return Err(ContinuationAdmitError::Refused(reason));
+            }
         }
         // On a governed runtime, the job owner that confirmed the row, with
         // the job it confirmed: it hears the admission once it commits.

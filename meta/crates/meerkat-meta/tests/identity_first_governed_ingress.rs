@@ -102,6 +102,16 @@ impl SessionBridge for CountingBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -184,13 +194,13 @@ struct CountingBinder {
 
 #[async_trait]
 impl GovernedInputBinder for CountingBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         _context: &GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, meerkat_meta::identity_first::GovernedBindError> {
         self.binds.fetch_add(1, Ordering::SeqCst);
-        Err("unexpected bind".to_string())
+        Err(meerkat_meta::identity_first::GovernedBindRefusal::denied("unexpected bind").into())
     }
 
     fn retain_unresolved(

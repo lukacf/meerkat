@@ -4,7 +4,16 @@ description: "Choose the CLI, application components or SDK for your environment
 icon: "circle-info"
 ---
 
-Connect 0.9.0 works with Meerkat Core and Meta 0.9.0. Download archives, SDKs and checksums from the [release page](https://github.com/lukacf/meerkat-connect/releases/tag/v0.9.0).
+Connect 0.9.10 works with Meerkat Core and Meta 0.9.10. Download archives, SDKs and checksums from the [release page](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10).
+
+<Note>
+The commands on this page and in the quickstart select released 0.9.10 artifacts.
+Connect 0.9.10 does not support in-place updates that change an application's
+tool policy, definition, instructions or runtime; Forge's Stage refuses them,
+so keep the existing installation and state. Shared multi-caller setup is an
+unqualified opt-in, available only when an application starts the gateway with
+`--private-workflow-launch`; ordinary CLI and Console setup stay single-caller.
+</Note>
 
 ## Platforms
 
@@ -12,6 +21,9 @@ Connect 0.9.0 works with Meerkat Core and Meta 0.9.0. Download archives, SDKs an
 | --- | --- |
 | macOS | Apple Silicon, macOS 13.5 or later |
 | Linux | x86_64, glibc 2.39 |
+
+The 0.9.10 release has Linux x86_64 archives only. Its Apple Silicon macOS
+archives are not built yet and follow later.
 
 The CLI archives include Python, Node/npm, the integration library and setup resources. Extract and retain the complete directory, including executable permissions and `libexec` contents.
 

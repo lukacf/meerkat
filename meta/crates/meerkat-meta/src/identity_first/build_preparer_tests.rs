@@ -166,6 +166,13 @@ impl SessionBridge for HoldingCore {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &crate::identity_first::AgentIdentity,
+    ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError> {
+        Ok(self.core.identity_entry(identity, false))
+    }
+
     async fn deliver_admitted(
         &self,
         runtime_id: &AgentRuntimeId,

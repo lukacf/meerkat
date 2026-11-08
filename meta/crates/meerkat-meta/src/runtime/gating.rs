@@ -1480,7 +1480,7 @@ mod gating_identity_tests {
                 .expect("pends");
             std::thread::sleep(Duration::from_millis(GATING_APPROVAL_TIMEOUT_MIN_MS + 100));
 
-            let fence = controller.decision_fence(Some("operator@example.test"));
+            let fence = controller.decision_fence(Some("operator@example.test"), None);
             let (result, notices) = owner.decide_gating_action_authorized(
                 GatingDecideRequest {
                     pending_id,

@@ -2,18 +2,11 @@
 
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    use meerkat_connect::application_driver::finish_then_release;
-    use meerkat_connect::application_gateway::{
-        InheritedOperatorTerminal, serve_local_operator, serve_local_operator_with_setup,
-    };
-    use meerkat_connect::application_remote::serve_remote_operator_with_service_parent;
-    use meerkat_mobkit::{
-        gateway_composition::gateway_tokio_runtime, rpc_gateway::run_persistent_with_host,
-    };
-    use meerkat_toolkit::host_lifetime::control::PrivateHostLifetimeControl;
+    use meerkat_connect::application_gateway::InheritedOperatorTerminal;
+    use meerkat_mobkit::gateway_composition::gateway_tokio_runtime;
     use std::sync::Arc;
     use toolkit_mobkit::private_host::{
-        InheritedHostPipes, PrivateHostConnection, PrivateHostStartup, PrivateHostStartupIntent,
+        InheritedHostPipes, PrivateHostStartup, PrivateHostStartupIntent,
     };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,7 +20,15 @@ fn main() -> std::process::ExitCode {
         );
         return std::process::ExitCode::SUCCESS;
     }
-    let (read_fd, write_fd, control_listen, startup, operator_fd) = match parse_args(&args) {
+    let (
+        read_fd,
+        write_fd,
+        control_listen,
+        startup,
+        operator_fd,
+        private_workflows,
+        hosted_mcp_redirect_base,
+    ) = match parse_args(&args) {
         Ok(args) => args,
         Err(error) => {
             eprintln!("toolkit_gateway: {error}");
@@ -68,196 +69,25 @@ fn main() -> std::process::ExitCode {
             if startup != toolkit_mobkit::installed_host::NativeOwnerStartup::Restore {
                 return Err("application preparation selects initialize or restore in its trusted plan".into());
             }
-            return meerkat_connect::application_driver::run(private_startup, operator_terminal, control_listen).await;
+            return meerkat_connect::application_driver::run_with_options(
+                private_startup, operator_terminal, control_listen,
+                meerkat_connect::application_driver::ApplicationDriverOptions {
+                    operation_review_policy: None,
+                    workflows: private_workflows.then(|| Arc::new(
+                        meerkat_connect::application_acquisition::workflow::PrivateApplicationWorkflowLauncher::default())
+                        as Arc<dyn meerkat_connect::application_acquisition::workflow::ApplicationWorkflowLaunchOwner>),
+                    hosted_mcp_redirect_base,
+                    operation_review: None, abandoned_workflows: None,
+                },
+            ).await;
         }
-        // The existing transaction's trusted launcher selects replacement input.
-        // Validate before restoring an owner; no no-key fallback or fresh setup.
-        let replacement = match private_startup.intent() {
-            PrivateHostStartupIntent::ReplaceApplication(selected) => {
-                if startup != toolkit_mobkit::installed_host::NativeOwnerStartup::Restore {
-                    return Err("replacement application startup requires original-owner Restore".into());
-                }
-                match meerkat_connect::application_update::ValidatedReplacementStartup::validate(selected) {
-                    Ok(selected) => Some(selected),
-                    Err(error) => {
-                        private_startup.reject(error).await.map_err(|error| error.to_string())?;
-                        return Err("replacement application inputs were refused".into());
-                    }
-                }
-            }
-            _ => None,
-        };
-        let private_startup = match &replacement {
-            Some(selected) => private_startup.replace_with_original(selected.predecessor().clone())
-                .map_err(|error| error.to_string())?,
-            None => private_startup,
-        };
-        let mut composition = None;
-        let mut acquisition_composition = None;
-        let mut operator_artifacts = None;
-        let (owner, _, private, operator_reviews, remote_reviews) =
-            PrivateHostConnection::bootstrap_from_startup_with_controller_reviews(private_startup, |selection| {
-                let composition = &mut composition;
-                let acquisition_composition = &mut acquisition_composition;
-                let operator_artifacts = &mut operator_artifacts;
-                async move {
-                    *operator_artifacts = Some(selection.deployment_root.clone());
-                    let (owner, installed, acquisition) = match replacement {
-                        Some(selected) => selected.open().await?,
-                        None => {
-                            meerkat_connect::application_acquisition::open_gateway_acquisition(
-                                selection.clone(), startup).await?
-                        }
-                    };
-                    *acquisition_composition = acquisition;
-                    let originals = installed.originals();
-                    *composition = Some(installed);
-                    Ok((owner, originals))
-                }
-            })
-                .await
-                .map_err(|error| error.to_string())?;
-        let service_parent = match private.service_parent_endpoint() {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                let cleanup = private.finish().await;
-                return Err(match cleanup {
-                    Ok(()) => error.to_string(),
-                    Err(cleanup) => format!("{error}; private host cleanup also failed: {cleanup}"),
-                });
-            }
-        };
-        // The FnOnce factory above either returns both objects or bootstrap
-        // fails. It cannot select the legacy ownerless constructor.
-        let installed = match composition {
-            Some(installed) => installed,
-            None => {
-                let cleanup = private.finish().await;
-                return Err(match cleanup {
-                    Ok(()) => "installed Toolkit composition is unavailable".into(),
-                    Err(error) => format!("installed Toolkit composition is unavailable; private host cleanup also failed: {error}"),
-                });
-            }
-        };
-        // The existing transferred terminal owns this enrollment receiver.
-        // Create it before native init so every offered factory can enroll its
-        // actual selected adapter. No terminal means no local setup presenter.
-        let (setup_approvals, setup_reviews) = match (&operator_terminal, &operator_artifacts) {
-            (Some(terminal), Some(parent)) if acquisition_composition.is_some() => {
-                let (approvals, reviews) = terminal.setup_reviews(parent.clone());
-                (Some(approvals), Some(reviews))
-            }
-            _ => (None, None),
-        };
-        let host = match installed.compose(owner.clone(), private.closed_observer())
-            .with_console_logins(private.console_logins()) {
-            Ok(host) => host,
-            Err(error) => {
-                let cleanup = private.finish().await;
-                return Err(match cleanup {
-                    Ok(()) => error.to_string(),
-                    Err(cleanup) => format!("{error}; private host cleanup also failed: {cleanup}"),
-                });
-            }
-        };
-        let mut console_setup_reviews = None;
-        let host = match acquisition_composition {
-            Some(acquisition) => {
-                let composed = operator_artifacts.clone()
-                    .ok_or(meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection)
-                    .and_then(|artifacts| acquisition.compose_selected_with_service_parent(host, owner.clone(), setup_approvals, artifacts,
-                        Some(service_parent.clone())));
-                match composed {
-                    Ok((host, reviews)) => { console_setup_reviews = reviews; host },
-                    Err(error) => {
-                        let cleanup = private.finish().await;
-                        return Err(match cleanup {
-                            Ok(()) => error.to_string(),
-                            Err(cleanup) => format!("{error}; private host cleanup also failed: {cleanup}"),
-                        });
-                    }
-                }
+        meerkat_connect::application_installed::run_with_options(
+            private_startup, operator_terminal, control_listen,
+            meerkat_connect::application_installed::InstalledGatewayOptions {
+                operation_review_policy: None,
+                startup, private_workflows, hosted_mcp_redirect_base, operation_review: None, console_consent: None, abandoned_workflows: None,
             },
-            None => host,
-        };
-        let host = Arc::new(host);
-        let console_setup_task = console_setup_reviews.map(|reviews| tokio::spawn(
-            meerkat_connect::application_gateway::serve_console_setup(reviews, private.closed_observer())));
-        let remote_task = match operator_artifacts.clone() {
-            Some(parent) => Some(tokio::spawn(serve_remote_operator_with_service_parent(
-                host.clone(), remote_reviews, parent, private.closed_observer(),
-                service_parent))),
-            None => { drop(remote_reviews); None }
-        };
-        let operator_task = match (operator_terminal, operator_artifacts) {
-            (Some(terminal), Some(parent)) => {
-                let operator_host = host.clone();
-                let closed = private.closed_observer();
-                Some(tokio::spawn(async move {
-                    match setup_reviews {
-                        Some(setup) => serve_local_operator_with_setup(
-                            operator_host, operator_reviews, terminal, parent, closed, setup).await,
-                        None => serve_local_operator(
-                            operator_host, operator_reviews, terminal, parent, closed).await,
-                    }
-                }))
-            }
-            _ => {
-                // Without the transferred terminal this process has no local
-                // operator presenter. Requests refuse, never select a fallback.
-                drop(operator_reviews);
-                None
-            }
-        };
-        let gateway_result = run_persistent_with_host(control_listen, host).await;
-        // Even a failed gateway initialization closes and joins the exact
-        // private owner. No ordinary error path exits the process first.
-        // The private JoinSet and these presenter joins preserve issuance
-        // custody even after RPC or parent loss. Neither observer aborts
-        // native work. The close's final release of the native custody
-        // follows them, within the host close's join bound.
-        let joins = async {
-            (
-                private.finish().await.map_err(|error| error.to_string()),
-                join_presenter(operator_task).await,
-                join_presenter(console_setup_task).await,
-                join_presenter(remote_task).await,
-            )
-        };
-        let (joined, custody_result) = finish_then_release(
-            toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND, joins, owner.release_native_custody()).await;
-        let custody_result = custody_result.map_err(|error| error.to_string());
-        let (private_result, operator_result, console_setup_result, remote_result) =
-            joined.unwrap_or_else(|| (
-                Err("private host cleanup and its presenters did not finish within the close bound".into()),
-                Ok(()), Ok(()), Ok(())));
-        let operator_result = match (operator_result, remote_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(local), Err(remote)) => Err(format!("{local}; remote presenter cleanup also failed: {remote}")),
-        };
-        let operator_result = match (operator_result, console_setup_result) {
-            (Ok(()), Ok(())) => Ok(()), (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(error), Err(console)) => Err(format!("{error}; Console setup cleanup also failed: {console}")),
-        };
-        let result = match (gateway_result, private_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(error.to_string()),
-            (Ok(()), Err(error)) => Err(error),
-            (Err(gateway), Err(cleanup)) => Err(format!(
-                "{gateway}; private host cleanup also failed: {cleanup}"
-            )),
-        };
-        let result = match (result, operator_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(error), Err(operator)) => Err(format!("{error}; operator presenter cleanup also failed: {operator}")),
-        };
-        match (result, custody_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(error), Err(custody)) => Err(format!("{error}; native custody release also failed: {custody}")),
-        }
+        ).await
     });
     // All owned cleanup above has returned. Tokio's uncancellable stdin read
     // is an I/O helper, not a native effect whose retirement is inferred here.
@@ -271,22 +101,10 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Join a presenter task, if one runs.
-#[cfg(unix)]
-async fn join_presenter<E: std::fmt::Display>(
-    task: Option<tokio::task::JoinHandle<Result<(), E>>>,
-) -> Result<(), String> {
-    match task {
-        Some(task) => task
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result.map_err(|error| error.to_string())),
-        None => Ok(()),
-    }
-}
-
 /// The gateway's parsed arguments: its two descriptors, the control listen
-/// address, the native owner startup and the optional ready descriptor.
+/// address, the native owner startup, the optional operator terminal
+/// descriptor, the private workflow launch flag and the hosted MCP redirect
+/// base.
 #[cfg(unix)]
 type GatewayArgs = (
     i32,
@@ -294,6 +112,8 @@ type GatewayArgs = (
     Option<meerkat_mobkit::runtime::cross_mob_control::ControlListenAddr>,
     toolkit_mobkit::installed_host::NativeOwnerStartup,
     Option<i32>,
+    bool,
+    Option<meerkat::McpRegisteredRedirectBase>,
 );
 
 #[cfg(unix)]
@@ -305,11 +125,22 @@ fn parse_args(args: &[String]) -> Result<GatewayArgs, &'static str> {
     let mut persistent = false;
     let mut initialize = false;
     let mut operator_fd = None;
+    let mut private_workflows = false;
+    let mut hosted_mcp_redirect_base = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--persistent" if !persistent => persistent = true,
             "--initialize-native-owner" if !initialize => initialize = true,
+            "--private-workflow-launch" if !private_workflows => private_workflows = true,
+            "--hosted-mcp-redirect-base" if hosted_mcp_redirect_base.is_none() => {
+                hosted_mcp_redirect_base = Some(
+                    meerkat::McpRegisteredRedirectBase::parse(
+                        args.next().ok_or("missing hosted MCP redirect base")?,
+                    )
+                    .map_err(|_| "invalid hosted MCP redirect base")?,
+                );
+            }
             "--operator-terminal-fd" if operator_fd.is_none() => {
                 operator_fd = Some(
                     args.next()
@@ -367,6 +198,8 @@ fn parse_args(args: &[String]) -> Result<GatewayArgs, &'static str> {
             toolkit_mobkit::installed_host::NativeOwnerStartup::Restore
         },
         operator_fd,
+        private_workflows,
+        hosted_mcp_redirect_base,
     ))
 }
 
@@ -381,6 +214,73 @@ mod tests {
     use super::parse_args;
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).into()).collect()
+    }
+    #[test]
+    fn hosted_mcp_base_is_explicit_validated_and_never_echoed() {
+        let base = args(&[
+            "--persistent",
+            "--host-control-read-fd",
+            "3",
+            "--host-control-write-fd",
+            "4",
+        ]);
+        assert!(parse_args(&base).unwrap().6.is_none());
+        let mut valid = base.clone();
+        valid.extend(args(&[
+            "--hosted-mcp-redirect-base",
+            "https://console.example/host/toolkit/mcp/callback",
+        ]));
+        let selected = parse_args(&valid).unwrap();
+        assert!(!selected.5, "hosted auth does not select shared workflows");
+        assert_eq!(
+            selected.6.unwrap().as_str(),
+            "https://console.example/host/toolkit/mcp/callback"
+        );
+        valid.extend(args(&[
+            "--hosted-mcp-redirect-base",
+            "https://other.example/callback",
+        ]));
+        assert_eq!(
+            parse_args(&valid).err(),
+            Some("unknown or repeated Toolkit gateway argument")
+        );
+        let mut missing = base.clone();
+        missing.push("--hosted-mcp-redirect-base".into());
+        assert_eq!(
+            parse_args(&missing).err(),
+            Some("missing hosted MCP redirect base")
+        );
+        for value in [
+            "",
+            "http://console.example/callback",
+            "/callback",
+            "https://private:secret@console.example/callback",
+            "https://console.example/callback?private=secret",
+            "https://console.example/callback#private",
+        ] {
+            let mut invalid = base.clone();
+            invalid.extend(args(&["--hosted-mcp-redirect-base", value]));
+            assert_eq!(
+                parse_args(&invalid).err(),
+                Some("invalid hosted MCP redirect base")
+            );
+        }
+    }
+
+    #[test]
+    fn private_workflow_launch_is_explicit_and_not_repeatable() {
+        let mut values = args(&[
+            "--persistent",
+            "--host-control-read-fd",
+            "3",
+            "--host-control-write-fd",
+            "4",
+        ]);
+        assert!(!parse_args(&values).unwrap().5);
+        values.push("--private-workflow-launch".into());
+        assert!(parse_args(&values).unwrap().5);
+        values.push("--private-workflow-launch".into());
+        assert!(parse_args(&values).is_err());
     }
     #[test]
     fn operator_terminal_is_optional_and_cannot_reuse_existing_descriptors() {

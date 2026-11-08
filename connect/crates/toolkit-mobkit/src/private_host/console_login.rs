@@ -3,7 +3,7 @@
 //! native verified carrier must select the exact tuple before retaining a handle.
 
 use super::PrivateHostClosed;
-use meerkat_authorization::publication::LocalAuthorizationPublication;
+use meerkat_authorization::publication::{LocalAuthorizationPublication, LocalPublicationStamp};
 use meerkat_mobkit::identity_first::{
     GovernedEntryFence, GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal,
 };
@@ -97,8 +97,11 @@ pub struct ConsoleLogins {
 }
 
 fn now_ms() -> Result<u64, ConsoleLoginRefusal> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    time_ms(SystemTime::now())
+}
+
+fn time_ms(now: SystemTime) -> Result<u64, ConsoleLoginRefusal> {
+    now.duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|value| u64::try_from(value.as_millis()).ok())
         .ok_or(ConsoleLoginRefusal::Unavailable)
@@ -236,6 +239,37 @@ impl ConsoleLogins {
         Ok(handle)
     }
 
+    /// Observe this exact retained login using this connection's joined native
+    /// publication. Call outside native final-check or approval-owner locks.
+    /// This reserves no entry and supplies no authentication or permission.
+    /// Unbound owners, contention and concurrent publication refuse unavailable.
+    pub fn observe_login(
+        &self,
+        login: &ConsoleLoginHandle,
+    ) -> Result<ObservedConsoleLogin, ConsoleLoginRefusal> {
+        let publication = self
+            .publication
+            .as_ref()
+            .ok_or(ConsoleLoginRefusal::Unavailable)?;
+        let (observed, stamp) = publication
+            .observe(|| {
+                let rows = self
+                    .rows
+                    .try_lock()
+                    .map_err(|_| ConsoleLoginRefusal::Unavailable)?;
+                if !rows.values().any(|retained| retained.same_owner(login)) {
+                    return Err(ConsoleLoginRefusal::Unknown);
+                }
+                login.try_check()
+            })
+            .map_err(|_| ConsoleLoginRefusal::Unavailable)?;
+        observed?;
+        Ok(ObservedConsoleLogin {
+            login: login.clone(),
+            stamp,
+        })
+    }
+
     /// Protected-parent lifetime lookup. The parent separately owns actual
     /// authentication/administration; this never resolves a verified carrier.
     pub(super) fn parent_enrollment(
@@ -257,6 +291,21 @@ impl ConsoleLogins {
             _ => HostLifetimeError::Denied,
         })?;
         Ok(handle)
+    }
+
+    /// Select the exact existing handle for Console proposal observation.
+    /// This performs no liveness check and grants no entry: only an identical
+    /// retained proposal may be observed; new selection and bind check it.
+    pub(super) fn console_proposal_enrollment(
+        &self,
+        id: u64,
+    ) -> Result<ConsoleLoginHandle, HostLifetimeError> {
+        self.rows
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .get(&id)
+            .cloned()
+            .ok_or(HostLifetimeError::WrongOwner)
     }
 
     pub(super) fn retire(&self, id: u64) -> Result<RetirementWait, HostLifetimeError> {
@@ -419,6 +468,64 @@ impl ConsoleLoginHandle {
     }
 }
 
+/// Observed mechanical lifetime of one exact retained Console login.
+///
+/// Only its owning `ConsoleLogins` can construct this proof. Enrollment,
+/// retirement and the private connection's synchronous close publisher share
+/// the captured native publication. Actual last-sender loss is checked using
+/// the same channel's atomic closed state, even if no close callback returned.
+/// Expiry is checked directly at use, without
+/// a timer, watch mirror or renewal. A changed publication is unavailable and
+/// requires fresh owner observation outside the final commit boundary.
+///
+/// This is neither Meta authentication nor complete consent eligibility. The
+/// caller must separately retain the real carrier proof and exact native
+/// approval/candidate binding. Success grants no entry or execution.
+pub struct ObservedConsoleLogin {
+    login: ConsoleLoginHandle,
+    stamp: LocalPublicationStamp,
+}
+
+impl ObservedConsoleLogin {
+    /// Check the same exact login with pointer identity, existing atomic channel
+    /// closure and poison state, bounded local time and native publication stamp.
+    /// No lock, allocation, callback, watch payload borrow or wait,
+    /// fresh owner observation or I/O occurs. No awaited preparation may follow
+    /// a successful final check. Use the existing login reservation for entry.
+    pub fn check_current(&self, login: &ConsoleLoginHandle) -> Result<(), ConsoleLoginRefusal> {
+        self.check_current_at(login, SystemTime::now())
+    }
+
+    fn check_current_at(
+        &self,
+        login: &ConsoleLoginHandle,
+        now: SystemTime,
+    ) -> Result<(), ConsoleLoginRefusal> {
+        if !self.login.same_owner(login) {
+            return Err(ConsoleLoginRefusal::Unknown);
+        }
+        // Receiver::has_changed reads the channel's atomic closed state without
+        // borrowing its payload. Only sender loss matters here, not the change
+        // version: explicit close is covered by the retained publication stamp.
+        // This also covers unwinding before a host's explicit close callback.
+        if self.login.0.closed.0.has_changed().is_err() {
+            return Err(ConsoleLoginRefusal::Unavailable);
+        }
+        // The existing revoke callback can unwind while holding login state
+        // before it reaches native publication. Preserve ordinary refusal
+        // using the mutex's own atomic poison bit, without taking its lock.
+        if self.login.0.state.is_poisoned() {
+            return Err(ConsoleLoginRefusal::Unavailable);
+        }
+        if time_ms(now)? >= self.login.0.selection.expires_at_ms {
+            return Err(ConsoleLoginRefusal::Expired);
+        }
+        self.stamp
+            .check_current()
+            .map_err(|_| ConsoleLoginRefusal::Unavailable)
+    }
+}
+
 /// Local count only. Native input, replay, and unresolved settlement remain
 /// owned by native custody; no input record is reconstructed here.
 pub struct ConsoleLoginReservation {
@@ -525,6 +632,9 @@ impl Drop for RetirementWait {
 mod tests;
 
 #[cfg(test)]
+mod observed_tests;
+
+#[cfg(test)]
 mod parent_lifetime_tests {
     use super::*;
     #[tokio::test]
@@ -547,6 +657,31 @@ mod parent_lifetime_tests {
             )
             .unwrap();
         assert!(held.same_owner(&verified));
+        // A saved numeric label belongs only to this endpoint's live owner.
+        let (_foreign_send, foreign_receive) = watch::channel(false);
+        let foreign = ConsoleLogins::new(PrivateHostClosed(foreign_receive), None);
+        assert!(matches!(
+            foreign.parent_enrollment(7),
+            Err(HostLifetimeError::WrongOwner)
+        ));
+        foreign.enroll(7, selection.clone()).unwrap();
+        let foreign_held = foreign.parent_enrollment(7).unwrap();
+        assert!(
+            !held.same_owner(&foreign_held),
+            "equal labels and login facts cannot substitute another endpoint owner"
+        );
+        assert!(
+            foreign_held.same_owner(
+                &foreign
+                    .resolve(
+                        &selection.issuer,
+                        &selection.subject,
+                        &selection.login_scope_id
+                    )
+                    .unwrap()
+            )
+        );
+        assert_eq!(held.check(), Ok(()));
         assert!(matches!(
             logins.parent_enrollment(8),
             Err(HostLifetimeError::WrongOwner)
@@ -568,6 +703,66 @@ mod parent_lifetime_tests {
         assert!(matches!(
             logins.parent_enrollment(7),
             Err(HostLifetimeError::Unavailable)
+        ));
+        assert_eq!(
+            foreign_held.check(),
+            Ok(()),
+            "closing one endpoint must not retire another endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_id_lookup_refuses_actual_expiry_and_retained_handle_cannot_enter() {
+        let (_send, receive) = watch::channel(false);
+        let logins = ConsoleLogins::new(PrivateHostClosed(receive), None);
+        let expires = now_ms().unwrap() + 250;
+        let selection = ConsoleLoginSelection {
+            issuer: "https://parent.example".into(),
+            subject: "actual-parent-auth-subject".into(),
+            login_scope_id: "expiring-login".into(),
+            expires_at_ms: expires,
+        };
+        logins.enroll(7, selection.clone()).unwrap();
+        let held = logins.parent_enrollment(7).unwrap();
+        assert!(
+            held.same_owner(
+                &logins
+                    .resolve(
+                        &selection.issuer,
+                        &selection.subject,
+                        &selection.login_scope_id
+                    )
+                    .unwrap()
+            )
+        );
+        GovernedEntryFence::enter(&held)
+            .unwrap()
+            .finish(GovernedEntryOutcome::Unentered);
+        // Let the actual immutable deadline pass; do not rewrite owner state.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while now_ms().unwrap() < expires && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            now_ms().unwrap() >= expires,
+            "actual login deadline was reached"
+        );
+        assert!(matches!(
+            logins.parent_enrollment(7),
+            Err(HostLifetimeError::Denied)
+        ));
+        assert_eq!(held.check(), Err(ConsoleLoginRefusal::Expired));
+        assert!(matches!(
+            logins.resolve(
+                &selection.issuer,
+                &selection.subject,
+                &selection.login_scope_id
+            ),
+            Err(ConsoleLoginRefusal::Expired)
+        ));
+        assert!(matches!(
+            GovernedEntryFence::enter(&held),
+            Err(GovernedEntryRefusal::Expired)
         ));
     }
 }

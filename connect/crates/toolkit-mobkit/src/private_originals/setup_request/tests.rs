@@ -237,7 +237,7 @@ async fn tuple_only_generic_and_other_original_reviews_cannot_select_setup_sourc
                 .await
                 .is_err()
         );
-        let route = fixture.source.route(&submission.original.route).unwrap();
+        let route = &fixture.source.route(&submission.original.route).unwrap();
         let bounds = fixture
             .source
             .owner

@@ -574,6 +574,9 @@ pub async fn ensure_steward_dream_schedule(
 #[derive(Clone, Default)]
 pub struct ScheduleMobTargetRegistry {
     state: Arc<RwLock<AdoptedMobState>>,
+    /// The record of who the adopted runtime's members are private to,
+    /// retired members included ([`Self::adopt_mob_runtime`]).
+    private_owners: Arc<RwLock<Option<crate::private_owners::PrivateOwners>>>,
 }
 
 /// The mob state a registry resolves bridge sessions against, held weakly:
@@ -610,10 +613,162 @@ impl ScheduleMobTargetRegistry {
         }
     }
 
+    /// Adopt `runtime`'s mobs: the mob state bridge sessions resolve against
+    /// ([`Self::set_mob_state`]), and the record of who its members are
+    /// private to, which still knows a member its mob has retired.
+    pub(crate) fn adopt_mob_runtime(&self, runtime: &crate::mob_handle_runtime::MobRuntime) {
+        self.set_mob_state(runtime.agent_mob_mcp_state());
+        if let Ok(mut guard) = self.private_owners.write() {
+            *guard = Some(runtime.private_owners().clone());
+        }
+    }
+
     async fn resolve_bridge_session(&self, session_id: &str) -> Option<(String, String)> {
         match self.resolve_mob_session(session_id).await {
             MobSessionResolution::Resolved(found) => found,
             MobSessionResolution::Stopped => None,
+        }
+    }
+
+    /// The person member `member` of mob `mob_id` is private to, as the
+    /// adopted runtime's record knows it.
+    fn recorded_private_owner(&self, mob_id: &str, member: &str) -> Option<String> {
+        self.private_owners
+            .read()
+            .ok()?
+            .as_ref()?
+            .owner_of(mob_id, member)
+    }
+
+    /// The person member `member` is private to: of mob `mob_id`, or of
+    /// whichever mob holds it when no mob is named. Read from its roster
+    /// labels in the adopted mob state, and for a member its mob's roster
+    /// does not hold (or cannot be read for), from the adopted runtime's
+    /// record, which knows the members it built or its mobs' logs name,
+    /// retired ones included. `None` for a member private to no one, one
+    /// neither knows, and when no mob state is adopted.
+    async fn member_private_owner(&self, mob_id: Option<&str>, member: &str) -> Option<String> {
+        let state = match self.state.read().as_deref() {
+            Ok(AdoptedMobState::Adopted(state)) => state.upgrade(),
+            Ok(AdoptedMobState::Unset) | Err(_) => return None,
+        };
+        let handles = match state {
+            Some(state) => state.mob_handles_snapshot().await.ok(),
+            None => None,
+        };
+        let Some(handles) = handles else {
+            return mob_id.and_then(|mob_id| self.recorded_private_owner(mob_id, member));
+        };
+        let identity = meerkat_mob::AgentIdentity::from(member);
+        for (id, handle) in handles {
+            if mob_id.is_some_and(|mob_id| mob_id != id.as_str()) {
+                continue;
+            }
+            if let Ok(Some(entry)) = handle.get_member(&identity).await {
+                return crate::access::private_owner(&entry.labels).map(str::to_string);
+            }
+            if let Some(owner) = self.recorded_private_owner(id.as_str(), member) {
+                return Some(owner);
+            }
+        }
+        mob_id.and_then(|mob_id| self.recorded_private_owner(mob_id, member))
+    }
+
+    /// The person the member holding session `session_id` is private to
+    /// (see [`Self::member_private_owner`]).
+    async fn session_private_owner(&self, session_id: &str) -> Option<String> {
+        let (mob_id, member) = self.resolve_bridge_session(session_id).await?;
+        self.member_private_owner(Some(&mob_id), &member).await
+    }
+
+    /// The member (mob and member id) a schedule tool call's turn belongs
+    /// to: the member holding the dispatch's origin session, if a member
+    /// holds it.
+    async fn calling_member(
+        &self,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Option<(String, String)> {
+        let session_id = context.origin_session_id()?;
+        self.resolve_bridge_session(&session_id.to_string()).await
+    }
+
+    /// The person the member a schedule tool call's turn belongs to is
+    /// private to.
+    async fn caller_private_owner(
+        &self,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Option<String> {
+        let (mob_id, member) = self.calling_member(context).await?;
+        self.member_private_owner(Some(&mob_id), &member).await
+    }
+
+    /// The person the member `target` names is private to: the member a
+    /// member target or an identity target names, the source of a fork
+    /// helper, or the member holding a session target's session. A target
+    /// that names no member names no owner.
+    async fn target_private_owner(&self, target: &TargetBinding) -> Option<String> {
+        match target {
+            TargetBinding::Session(session) => match session_target_session(session) {
+                Some(session_id) => self.session_private_owner(&session_id).await,
+                None => None,
+            },
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(member) => {
+                        self.member_private_owner(Some(&member.mob_id), &member.member)
+                            .await
+                    }
+                    None => self.member_private_owner(None, binding.identity()).await,
+                }
+            }
+            TargetBinding::Mob(binding) => match binding.as_ref() {
+                MobTargetBinding::Member {
+                    mob_id, member_id, ..
+                } => self.member_private_owner(Some(mob_id), member_id).await,
+                MobTargetBinding::ForkHelper {
+                    mob_id,
+                    source_member_id,
+                    ..
+                } => {
+                    self.member_private_owner(Some(mob_id), source_member_id)
+                        .await
+                }
+                MobTargetBinding::SpawnHelper { .. } | MobTargetBinding::Flow { .. } => None,
+            },
+            TargetBinding::HostRunnable(_) => None,
+        }
+    }
+
+    /// Whether `target` names exactly member `member` of mob `mob_id`: a
+    /// member target of it, an identity target naming it, or a session
+    /// target naming its session. A helper, a flow, a host runnable and a
+    /// session no member holds name no member.
+    async fn target_names_member(
+        &self,
+        target: &TargetBinding,
+        mob_id: &str,
+        member: &str,
+    ) -> bool {
+        match target {
+            TargetBinding::Mob(binding) => matches!(
+                binding.as_ref(),
+                MobTargetBinding::Member { mob_id: named_mob, member_id, .. }
+                    if named_mob == mob_id && member_id == member
+            ),
+            TargetBinding::Identity(binding) => {
+                match parse_mob_member_schedule_identity(binding.identity()) {
+                    Some(named) => named.mob_id == mob_id && named.member == member,
+                    None => binding.identity() == member,
+                }
+            }
+            TargetBinding::Session(session) => match session_target_session(session) {
+                Some(session_id) => {
+                    self.resolve_bridge_session(&session_id).await
+                        == Some((mob_id.to_string(), member.to_string()))
+                }
+                None => false,
+            },
+            TargetBinding::HostRunnable(_) => false,
         }
     }
 
@@ -634,6 +789,24 @@ impl ScheduleMobTargetRegistry {
             Some(Some(state)) => state,
         };
         MobSessionResolution::Resolved(bridge_session_member(&state, session_id).await)
+    }
+}
+
+/// A schedule aimed at a member private to a person is hidden from every
+/// agent not private to that person (an agent whose turn no member's
+/// session makes is private to no one): its list leaves the schedule out,
+/// and every verb naming it by id answers as for an id no schedule holds.
+#[async_trait]
+impl crate::console_schedules::AgentScheduleAudience for ScheduleMobTargetRegistry {
+    async fn hides(
+        &self,
+        schedule: &meerkat::Schedule,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> bool {
+        let Some(owner) = self.target_private_owner(&schedule.target).await else {
+            return false;
+        };
+        self.caller_private_owner(context).await.as_deref() != Some(owner.as_str())
     }
 }
 
@@ -842,13 +1015,97 @@ struct MobStateStopped;
 struct MobIdentityScheduleToolDispatcher {
     inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
     resolve_mob_session: MobSessionResolver,
+    /// The registry that tells who a target member and the calling agent are
+    /// private to, and the service whose schedule an update changes; `None`
+    /// judges no target.
+    reach: Option<(ScheduleMobTargetRegistry, ScheduleService)>,
+}
+
+/// The session a session target names: the one an exact or resumable
+/// target names, or the one a materialize-on-demand target is bound to.
+fn session_target_session(session: &SessionTargetBinding) -> Option<String> {
+    match session {
+        SessionTargetBinding::ExactSession { session_id, .. }
+        | SessionTargetBinding::ResumableSession { session_id, .. } => Some(session_id.to_string()),
+        SessionTargetBinding::MaterializeOnDemandSession {
+            bound_session_id, ..
+        } => bound_session_id.as_ref().map(ToString::to_string),
+    }
+}
+
+/// The policy denial code of a schedule a member private to a person writes
+/// for, or changes on, another member than itself.
+const PRIVATE_MEMBER_SCHEDULE_TARGET: &str = "private_member_schedule_target";
+
+/// The schedule target a create or update writes, when it writes one that
+/// parses. An unparseable target is the schedule service's to refuse.
+fn written_target(args: &Value) -> Option<TargetBinding> {
+    args.get("target")
+        .and_then(|target| serde_json::from_value::<TargetBinding>(target.clone()).ok())
+}
+
+/// Why a schedule create or update is refused for its target, if it is.
+///
+/// A member private to a person (`caller` names it, with its owner) writes
+/// only schedules aimed at itself, so nothing of that person's conversation
+/// runs in another member's turns: the target a call writes, and for an
+/// update the target of the schedule it changes, must name the member
+/// itself, or the call is refused as a policy denial
+/// ([`PRIVATE_MEMBER_SCHEDULE_TARGET`]). Any other caller's target that names
+/// a member private to a person the caller is not private to is refused as
+/// an act on a member outside the caller's reach (`access_denied`).
+async fn schedule_target_refusal(
+    registry: &ScheduleMobTargetRegistry,
+    service: &ScheduleService,
+    name: &str,
+    args: &Value,
+    context: &meerkat_core::ToolDispatchContext,
+) -> Option<meerkat_core::ToolError> {
+    let target = written_target(args);
+    let caller = registry.calling_member(context).await;
+    let caller_owner = match &caller {
+        Some((mob_id, member)) => registry.member_private_owner(Some(mob_id), member).await,
+        None => None,
+    };
+    if let (Some((mob_id, member)), Some(_)) = (&caller, &caller_owner) {
+        let mut aimed_elsewhere = match &target {
+            Some(target) => !registry.target_names_member(target, mob_id, member).await,
+            None => false,
+        };
+        if !aimed_elsewhere
+            && name == "meerkat_schedule_update"
+            && let Some(schedule_id) = args
+                .get("schedule_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| meerkat::ScheduleId::parse(raw).ok())
+            && let Ok(schedule) = service.get(&schedule_id).await
+        {
+            aimed_elsewhere = !registry
+                .target_names_member(&schedule.target, mob_id, member)
+                .await;
+        }
+        return aimed_elsewhere.then(|| {
+            meerkat_core::ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+                PRIVATE_MEMBER_SCHEDULE_TARGET,
+                format!(
+                    "{name} refused: a member private to a person schedules only into itself, \
+                     so nothing of that person's conversation runs in another member's turns"
+                ),
+            ))
+        });
+    }
+    let owner = registry.target_private_owner(target.as_ref()?).await?;
+    (caller_owner.as_deref() != Some(owner.as_str()))
+        .then(|| meerkat_core::ToolError::access_denied(name))
 }
 
 impl MobIdentityScheduleToolDispatcher {
     fn new(
         inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
         mob_target_registry: ScheduleMobTargetRegistry,
+        service: ScheduleService,
     ) -> Self {
+        let reach = (mob_target_registry.clone(), service);
         let resolve_mob_session = Arc::new(move |session_id: String| {
             let mob_target_registry = mob_target_registry.clone();
             Box::pin(async move { mob_target_registry.resolve_mob_session(&session_id).await })
@@ -857,6 +1114,7 @@ impl MobIdentityScheduleToolDispatcher {
         Self {
             inner,
             resolve_mob_session,
+            reach: Some(reach),
         }
     }
 
@@ -875,6 +1133,7 @@ impl MobIdentityScheduleToolDispatcher {
         Self {
             inner,
             resolve_mob_session,
+            reach: None,
         }
     }
 
@@ -966,6 +1225,15 @@ impl meerkat_core::AgentToolDispatcher for MobIdentityScheduleToolDispatcher {
                     meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
                 )
             })?;
+        // A private member's schedule aimed at another member than itself,
+        // and any caller's schedule aimed at a member private to a person the
+        // caller is not private to, is refused (`schedule_target_refusal`).
+        if let Some((registry, service)) = self.reach.as_ref()
+            && let Some(refusal) =
+                schedule_target_refusal(registry, service, call.name, &rewritten, context).await
+        {
+            return Err(refusal);
+        }
         let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
             .map_err(|error| {
                 meerkat_core::ToolError::invalid_arguments(
@@ -1254,18 +1522,8 @@ fn attach_schedule_tools_with_store_and_binding(
 ) -> AttachedScheduleTools {
     let service = ScheduleService::new(store);
     let mob_target_registry = ScheduleMobTargetRegistry::default();
-    let dispatcher = MobIdentityScheduleToolDispatcher::new(
-        Arc::new(ScheduleToolDispatcher::new(service.clone())),
-        mob_target_registry.clone(),
-    );
-    // Console schedules are a person's deferred sends: agents' tools leave
-    // them alone (`crate::console_schedules`).
-    let console_gated = crate::console_schedules::ConsoleScheduleToolGate::new(
-        Arc::new(dispatcher),
-        service.clone(),
-    );
     let gated = FiringHostGatedScheduleTools {
-        inner: Arc::new(console_gated),
+        inner: agent_schedule_tool_chain(service.clone(), mob_target_registry.clone()),
         binding: firing_host_binding.clone(),
     };
     meerkat::surface::set_default_schedule_tools(builder, Some(Arc::new(gated)));
@@ -1274,6 +1532,55 @@ fn attach_schedule_tools_with_store_and_binding(
         mob_target_registry,
         firing_host_binding,
     }
+}
+
+/// The agent-facing schedule tools over `service`, below the firing-host
+/// gate: a session target of a mob member is rewritten to that member, a
+/// target outside the calling agent's reach is refused, console schedules
+/// are left to the console, and the schedules aimed at a member private to
+/// a person the calling agent does not act for are on no surface of its
+/// tools.
+fn agent_schedule_tool_chain(
+    service: ScheduleService,
+    mob_target_registry: ScheduleMobTargetRegistry,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    let dispatcher = MobIdentityScheduleToolDispatcher::new(
+        Arc::new(ScheduleToolDispatcher::new(service.clone())),
+        mob_target_registry.clone(),
+        service.clone(),
+    );
+    // Console schedules are a person's deferred sends: agents' tools leave
+    // them alone (`crate::console_schedules`).
+    Arc::new(
+        crate::console_schedules::ConsoleScheduleToolGate::new(Arc::new(dispatcher), service)
+            .with_audience(Arc::new(mob_target_registry)),
+    )
+}
+
+/// The agent-facing schedule tools a composition installs, over `service`,
+/// without the firing-host gate, over a registry that adopts `runtime`'s mobs
+/// as a gateway composition adopts its runtime's
+/// ([`crate::gateway_composition::adopt_schedule_mob_targets`]): rows outside
+/// this module drive an agent's schedule tool call through them.
+#[cfg(test)]
+pub(crate) fn agent_schedule_tools_over_runtime_for_test(
+    service: ScheduleService,
+    runtime: &crate::mob_handle_runtime::MobRuntime,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    let mob_target_registry = ScheduleMobTargetRegistry::default();
+    mob_target_registry.adopt_mob_runtime(runtime);
+    agent_schedule_tool_chain(service, mob_target_registry)
+}
+
+/// The agent-facing schedule tools over `service` and a registry a
+/// composition attached its own tools with (a clone shares what it
+/// adopts), without the firing-host gate.
+#[cfg(test)]
+pub(crate) fn agent_schedule_tools_over_registry_for_test(
+    service: ScheduleService,
+    mob_target_registry: ScheduleMobTargetRegistry,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    agent_schedule_tool_chain(service, mob_target_registry)
 }
 
 /// Spawn the runtime-backed schedule host so authored schedules fire: at due
@@ -1334,6 +1641,9 @@ enum IdentityFireRefusal {
 /// `identity`. Any refusal of a member Core holds broken is final, whatever
 /// its kind: the member does not clear on its own, and a final wake refusal
 /// of it (Core's restore failure) reaches the submit path as plain text.
+/// Whether Core holds it Broken is read from Core's entry of its name for
+/// the fire; a read Core could not serve leaves the fire reclaimable, never
+/// read as "not Broken".
 async fn classify_identity_fire_refusal(
     identity_runtime: &crate::identity_first::IdentityRuntime,
     identity: &crate::identity_first::AgentIdentity,
@@ -1347,20 +1657,20 @@ async fn classify_identity_fire_refusal(
         Refusal::IdentityUnresumable { .. } => {
             IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMaterializationFailed)
         }
-        _ => {
-            let broken = identity_runtime.status(identity).await.is_ok_and(|status| {
-                status.state == crate::identity_first::IdentityLifecycleState::Broken
-            });
-            if broken {
+        _ => match identity_runtime.core_entry_state(identity).await {
+            Ok(crate::identity_first::IdentityLifecycleState::Broken) => {
                 IdentityFireRefusal::Final(
                     meerkat::DeliveryFailureReason::TargetMaterializationFailed,
                 )
-            } else if error.clears_on_its_own() {
-                IdentityFireRefusal::Retry
-            } else {
-                IdentityFireRefusal::Rejected
             }
-        }
+            Ok(_) if error.clears_on_its_own() => IdentityFireRefusal::Retry,
+            Ok(_) => IdentityFireRefusal::Rejected,
+            // Unregistered since the refusal: no target to deliver to.
+            Err(Refusal::UnknownIdentity(_)) => {
+                IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMissing)
+            }
+            Err(_) => IdentityFireRefusal::Retry,
+        },
     }
 }
 
@@ -1391,10 +1701,43 @@ impl InternalDeliveryScheduleMobHost {
         // door). Decode-then-encode canonicalizes both spaces to the roster
         // key; it is the identity on plain member names.
         let member_alias = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
-        if let Some(identity_runtime) = self.identity_runtime.as_ref()
-            && let Some(identity) = identity_runtime
+        // A name the identity runtime refuses (Core holds it for an identity
+        // the runtime has not registered, or its entry could not be read)
+        // ends the fire typed, or leaves it reclaimable when the refusal
+        // clears on its own: never the raw member door.
+        let identity = match self.identity_runtime.as_ref() {
+            Some(identity_runtime) => match identity_runtime
                 .identity_for_member_mutation(&member_alias)
                 .await
+            {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let detail =
+                        format!("identity schedule delivery refused (member {member_id}): {error}");
+                    if error.clears_on_its_own() {
+                        return Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred {
+                            detail,
+                        }));
+                    }
+                    let reason = match error {
+                        crate::identity_first::IdentityRuntimeError::UnknownIdentity(_) => {
+                            meerkat::DeliveryFailureReason::TargetMissing
+                        }
+                        _ => meerkat::DeliveryFailureReason::RuntimeRejected,
+                    };
+                    return Some(Ok(immediate_delivery_failure(
+                        occurrence,
+                        detail,
+                        reason,
+                        Some(delivery_identity.correlation_id.clone()),
+                        None,
+                    )));
+                }
+            },
+            None => None,
+        };
+        if let Some(identity_runtime) = self.identity_runtime.as_ref()
+            && let Some(identity) = identity
         {
             // meerkat 0.8.15: the driver replays this exact identity on every
             // lease-expiry reclaim, and the identity dispatch path now
@@ -4011,6 +4354,186 @@ external_addressable = true
         runtime.shutdown().await;
     }
 
+    /// A schedule fire addressed to a name this runtime has not registered,
+    /// which Core holds for an identity, is answered at the internal door by
+    /// the identity's refusal, never by a member door: an identity created at
+    /// runtime (a created entry, which no roster pass of this runtime
+    /// registers) ends the fire `TargetMissing`, and an entry a host
+    /// declared, before this process's roster pass registered it, leaves the
+    /// fire reclaimable (`DeliveryRepairDeferred`). Nothing reaches either
+    /// member.
+    ///
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
+    /// (the fire is then not the internal door's, and falls back to the
+    /// surface's member door), or keep a final refusal reclaimable (the fire
+    /// of a created entry is then retried for good).
+    #[tokio::test]
+    async fn a_schedule_fire_to_an_unregistered_identity_name_ends_typed_or_stays_reclaimable() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let factory = AgentFactory::new(temp_dir.path()).comms(true);
+        let session_service = Arc::new(meerkat::build_ephemeral_service(
+            factory,
+            Config::default(),
+            4,
+        ));
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "schedule-unregistered"
+
+[profiles.general]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .expect("schedule test mob definition");
+        let mob_spec = crate::mob_handle_runtime::MobBootstrapSpec::new(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            session_service,
+        )
+        .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(meerkat_client::TestClient::for_provider(
+                meerkat_core::Provider::OpenAI,
+            ))),
+        });
+        let runtime = crate::UnifiedRuntime::bootstrap(
+            mob_spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: "schedule-unregistered".to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("bootstrap schedule test runtime");
+
+        let bridge = Arc::new(crate::identity_first::core_test_bridge::CoreReadsBridge::default());
+        let created =
+            crate::identity_first::AgentIdentity::parse("sched-created").expect("identity");
+        let declared =
+            crate::identity_first::AgentIdentity::parse("sched-declared").expect("identity");
+        // Core holds a member of the created entry and of the declared one.
+        for identity in [&created, &declared] {
+            crate::identity_first::core_test_bridge::bind_live(
+                &bridge.core,
+                identity,
+                &meerkat_mob::ProfileName::from("general"),
+                1,
+                Some(SessionId::new()),
+            )
+            .expect("Core's member");
+        }
+        bridge.hold_created(&created);
+        bridge.hold_declared(&declared);
+        // This process has run no roster pass: it registered nothing.
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("identity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-unregistered".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        let schedule = Schedule::new(CreateScheduleRequest {
+            name: Some("identity-unregistered".to_string()),
+            description: None,
+            trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("deliver".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("schedule");
+        let occurrence = Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("occurrence");
+        let host = InternalDeliveryScheduleMobHost {
+            inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
+            handle: runtime.mob_handle(),
+            identity_runtime: Some(identity_runtime),
+        };
+        let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        let content = meerkat_core::ContentInput::Text("deliver".to_string());
+
+        // A created entry: the fire ends typed, its target missing.
+        let dispatch = host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-unregistered",
+                "sched-created",
+                &content,
+            )
+            .await
+            .expect("the identity's refusal answers the fire, never a member door")
+            .expect("a final refusal ends the fire, it is not deferred");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(meerkat::DeliveryFailureReason::TargetMissing),
+            "{:?}",
+            terminal.detail
+        );
+
+        // A declared entry before its roster pass: the fire stays reclaimable.
+        match host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-unregistered",
+                "sched-declared",
+                &content,
+            )
+            .await
+        {
+            Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred { detail, .. })) => {
+                assert!(detail.contains("sched-declared"), "{detail}");
+            }
+            Some(Err(other)) => panic!("the fire stays reclaimable, not {other:?}"),
+            Some(Ok(_)) => panic!("the fire of an entry before its roster pass is deferred"),
+            None => panic!("the identity's refusal answers the fire, never a member door"),
+        }
+        assert!(
+            bridge.delivered().is_empty(),
+            "nothing reaches either member"
+        );
+        runtime.shutdown().await;
+    }
+
     /// A downstream app on 0.7.26 "last link" e2e: an agent-authored one-shot must
     /// DELIVER through the real schedule host — the full rpc_gateway chain
     /// (attach_schedule_tools_with_identity_targets → agent tool dispatch →
@@ -4225,6 +4748,7 @@ schedule = true
         let mob_dispatcher = MobIdentityScheduleToolDispatcher::new(
             Arc::new(ScheduleToolDispatcher::new(attached.service.clone())),
             attached.mob_target_registry.clone(),
+            attached.service.clone(),
         );
         let dispatcher = meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
             Arc::new(mob_dispatcher),
@@ -7858,7 +8382,6 @@ schedule = true
         #[derive(Default)]
         struct FireCore {
             core: crate::identity_first::core_test_members::CoreTestMembers,
-            broken: std::sync::Mutex<BTreeMap<meerkat_mob::AgentIdentity, String>>,
         }
 
         #[async_trait::async_trait]
@@ -7910,17 +8433,12 @@ schedule = true
                 self.core.history()
             }
 
-            async fn broken_members(
+            async fn identity_entry(
                 &self,
-            ) -> Result<
-                BTreeMap<meerkat_mob::AgentIdentity, String>,
-                crate::identity_first::BridgeError,
-            > {
-                Ok(self
-                    .broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone())
+                identity: &crate::identity_first::AgentIdentity,
+            ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+            {
+                Ok(self.core.identity_entry(identity, false))
             }
 
             async fn deliver_admitted(
@@ -8004,13 +8522,10 @@ schedule = true
             )
             .await?;
             if broken {
-                core.broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        crate::member_comms_id::roster_member_id_for_identity(alice.as_str()),
-                        "the session cannot be restored".to_string(),
-                    );
+                core.core.mark_broken(
+                    &alice,
+                    crate::identity_first::CoreBrokenMember::new("the session cannot be restored"),
+                );
             }
             let retryable = [
                 Refusal::IdentityHistoryUnavailable {
@@ -8098,6 +8613,86 @@ schedule = true
                 );
             }
         }
+        Ok(())
+    }
+
+    /// A schedule fire's refusal class comes from Core's entry of the
+    /// identity, read for the fire, never from a read that stood in for it.
+    /// While Core's member history cannot be read and Core holds the member
+    /// Broken, Core's final refusal of the member's wake ends the fire as a
+    /// member that cannot be materialized; and while Core's entry of the
+    /// identity cannot be read either, the fire stays reclaimable (retried),
+    /// never rejected.
+    ///
+    /// RED before the class read Core's entry: it read the identity's whole
+    /// status, took a read that failed for "not Broken", and rejected the
+    /// fire (`RuntimeRejected`) of a member Core holds Broken.
+    #[tokio::test]
+    async fn schedule_fire_refusal_class_comes_from_core_not_a_defaulted_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::identity_first::IdentityRuntimeError as Refusal;
+        use crate::identity_first::core_test_bridge::CoreReadsBridge;
+
+        let bridge = Arc::new(CoreReadsBridge::default());
+        let runtime = crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-fire-refusal-class".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        );
+        let alice = crate::identity_first::AgentIdentity::parse("personal:alice")?;
+        crate::identity_first::core_test_bridge::register_live(
+            &runtime,
+            &bridge.core,
+            crate::identity_first::DurableAgentSpec {
+                identity: alice.clone(),
+                profile: meerkat_mob::ProfileName::from("personal"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            },
+            1,
+            SessionId::new(),
+        )
+        .await?;
+        bridge.core.mark_broken(
+            &alice,
+            crate::identity_first::CoreBrokenMember::new("the member's restore failed"),
+        );
+        // Core's final refusal of the wake of a member it holds Broken, as
+        // the identity runtime answers it.
+        let refusal = Refusal::AdmissionFailed {
+            identity: alice.clone(),
+            detail: "Core holds the member Broken: its restore failed".to_string(),
+        };
+
+        bridge.fail_history_reads(0, u64::MAX);
+        assert_eq!(
+            classify_identity_fire_refusal(&runtime, &alice, &refusal).await,
+            IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMaterializationFailed),
+            "Core's entry says the member is Broken: the fire ends typed"
+        );
+
+        bridge.fail_entry_reads(0, u64::MAX);
+        assert_eq!(
+            classify_identity_fire_refusal(&runtime, &alice, &refusal).await,
+            IdentityFireRefusal::Retry,
+            "an entry read Core could not serve leaves the fire reclaimable"
+        );
         Ok(())
     }
 }

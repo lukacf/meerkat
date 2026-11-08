@@ -2624,6 +2624,7 @@ under `workgraph_realm_migration`.
 | `-32000` | other WorkGraph error | `workgraph_error` |
 | `-32602` | invalid params (including `realm_id`, a non-default namespace where refused, or `limit` above 1000) | none |
 | `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign` names a member of another mob; its bindings live only in that mob's realm (`mob.<mob_id>`), so the write is refused before it happens | `attention_target_realm_mismatch` (`data.owner_key`, `data.mob_id`, `data.required_realm_id`, `data.realm_id`) |
+| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign`, or the supervisor key of `goal/create` or `policy/escalate`, names a member private to a person (a private side chat, or a member one created), in any form; such a member is built without WorkGraph tools, so no binding can serve it and it confirms nothing. Refused for every caller who may see the member, its owner and access admins included; to anyone else it names an unknown member (`-32001`) | `private_member_workgraph_target` (`data.member`) |
 | `-32030` | ABAC denial on the console surface | `access_denied` |
 
 SDK method names are the RPC names with the `meta/workgraph/` prefix

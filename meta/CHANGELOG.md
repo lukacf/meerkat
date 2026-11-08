@@ -42,8 +42,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/console/send` (JSON and multipart RPC) answers invalid params
   (`-32602`). Nothing is recorded for a refused send. `operator` and
   `operator_probe` are accepted as before.
-- Rust: `BridgeDelivery` gains the public field `requester`, so code that
-  builds it literally sets it (`None` keeps the previous behaviour).
+- Rust: `BridgeDelivery` gains the public fields `requester` and
+  `sender_label`, so code that builds it literally sets them (`None` keeps
+  the previous behaviour).
+- The console's `meta/gating/decide` decides as the signed-in person on the
+  connection. A request that names `approver_id` is refused (`-32602`), and
+  a caller that is not a verified, current person (no token on an open
+  console, a service token, a token that names no human, a shared-account
+  token, or a login that ended while the decision waited) is refused with
+  the new refusal code `-32057`, kind `approver_unauthenticated`; nothing is
+  decided. A login that ended before the console took the request up is
+  `-32056` `caller_not_current`. The stdio RPC gateway still takes
+  `approver_id`.
+- Console memory quarantine reviews (`meta/memory/quarantine/decide`) and
+  WorkGraph goal confirmations (`meta/workgraph/goal/confirm`) follow the
+  same rule: a caller that is not a verified, current person is refused
+  with `-32057` `approver_unauthenticated`, and the reviewer recorded on a
+  quarantine decision is always the person.
+- A console WorkGraph claim (`meta/workgraph/claim`) is owned by its
+  caller: the console sets the owner from the connection, an `owner` that
+  names anyone else or carries a `display_name` is refused (`-32602`), and
+  an open console's caller without a token is refused with `-32057`, kind
+  `person_authentication_required`. Only the claim's owner, or an access
+  admin, releases it from the console (`meta/workgraph/release`; anyone
+  else gets `-32030` `access_denied`). The stdio RPC gateway is unchanged.
 
 ### Security
 
@@ -60,6 +82,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An open console refuses requests addressed to a host it does not serve,
   so a page that rebinds its own name to the console's address cannot
   drive it.
+
+- Console approval decisions take the approver only from the signed-in
+  person on the connection, checked again right before the decision is
+  applied. Before, an open console decided as whatever approver a request
+  named.
+- Memory quarantine reviews and WorkGraph goal confirmations on the console
+  take their reviewer from the signed-in person too, and a WorkGraph claim
+  takes its owner from its caller. Before, an open console recorded a
+  review with no reviewer and a claim with whatever owner a request named,
+  and anyone who could manage the WorkGraph released anyone's claim.
+- A console quarantine review, goal confirmation and WorkGraph release read
+  the caller's grants again right before they are applied, as a gating
+  decision does: a grant withdrawn while they waited is refused (`-32030`).
 
 ### Upgrade
 
@@ -90,6 +125,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the requester, compares it when it deduplicates a submission and keeps it
   through compare-and-swap, as Core's notes describe.
 
+- Console clients stop sending `approver_id` to `meta/gating/decide`.
+  People who decide approvals in the console sign in as themselves (an OIDC
+  issuer, or an `auth_config` with `"accounts": "personal"`); a host that
+  decides for someone else uses the stdio RPC gateway (`rpc_gateway`).
+  `meta_gateway` serves no stdio decide route, and the stock console sends
+  no `Authorization` header of its own, so a `meta_gateway` console decides
+  only behind a front that forwards a person's token to an OIDC or
+  `"accounts": "personal"` `auth_config`. A Forge console behind the stock
+  front signs everyone in as one shared account (`provider: "jwt"` without
+  `accounts`), so its approvals stay read-only until its front signs people
+  in with named accounts.
+- Console clients send WorkGraph claims without an `owner`. A claim made
+  through an earlier console carries the owner that request named (the
+  stock console named the signed-in subject, or `console-ops-lead`
+  without sign-in): only a caller with that principal, or an access admin,
+  releases it from the console. Claims the stock console makes carry no
+  lease, so someone else's claim ends when an access admin releases it,
+  when the host releases it on its stdio RPC gateway (`rpc_gateway`;
+  `meta_gateway` serves none), or when its item is closed.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -114,10 +169,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedule's fire for a person, carries the person's qualified principal
   (the verified `sub` in its issuer's trust domain) to the agent's run as
   its original requester, which Meerkat stores with the admitted input and
-  hands to tool dispatch. The stored frame keeps it; no view returns it. A
-  service's, a token principal's and an anonymous caller's sends carry none,
-  no send on an Open console does, and neither does a send to an external
-  member.
+  hands to tool dispatch. The stored frame keeps it, and a send replayed
+  after a restart carries the requester and the label its frame recorded.
+  No view returns it: Meta leaves it out of every transcript identity it
+  shows too, on the frames of the session history and of the run's events,
+  on `/agents/{id}/events`, the mob-wide stream, `meta/events/subscribe` and
+  the event log (`console_agent_event_payload` drops it). A schedule's fire
+  names its sender as that sender's live sends are named at the fire: a
+  person whose issuer's tokens are classified as shared accounts by then
+  (`shared_account_tokens`) is named as a token principal, and the fire
+  names no requester. A service's, a token principal's and an anonymous
+  caller's sends carry none, no ungoverned send on an Open console does (a
+  governed send carries its host-bound association's requester, which may
+  be a person who volunteered a verified token), and neither does a send to
+  an external member.
+- On a console that requires sign-in, the agent's model reads each person's
+  message with a sender label, "Message from" and the person's display name,
+  on an injected-context row of its own right before the message, a steer
+  included. A service's, a token principal's and an anonymous caller's
+  messages, a schedule's fire, every message on an Open console and a send
+  to an external member carry none.
+- An access admin releases anyone's WorkGraph claim from the console. The
+  release is bound to its revision, and the work graph's Released event
+  records the admin and the claim released (`break_glass`).
+
+### Changed
+
+- The stock console names each message's sender from the frame's recorded
+  sender: "You asked" for the caller's own messages in every tab (the
+  sender's `caller_scope` equals the one `meta/console/whoami` reports),
+  and the sender's display name for anyone else's. A frame from an older
+  gateway, which names no sender, keeps the earlier words. Every anonymous
+  caller of an Open console shares one caller scope, so an anonymous
+  message reads "You asked" only in the tab that sent it.
+- The stock console sends no approver with a decision and shows approvals
+  read-only unless `meta/console/whoami` reports a signed-in person.
+- A console approval decision's audit entry records the assurance the
+  console established (`deciding_assurance`) and a digest of the login it
+  was made in (`login_scope_digest`), never the token or the login itself.
+- The stock console offers memory quarantine decisions and WorkGraph goal
+  confirmations only to a signed-in person, claims WorkGraph items as the
+  signed-in caller (an open console's caller without a token gets no
+  Claim) and offers Release on the caller's own claims, and to an access
+  admin on any claim. Read-only approvals tell a caller who is not a
+  signed-in person to sign in as themselves to decide.
+- `meta/capabilities` on the console lists `meta/gating/decide`,
+  `meta/memory/quarantine/decide` and `meta/workgraph/goal/confirm` only
+  to a signed-in person, and `meta/workgraph/claim`,
+  `meta/workgraph/release` and `meta/workgraph/attention/break_glass_reassign`
+  only to a caller with a principal: every other caller is always refused
+  them.
+- A gating decision made on the host's stdio RPC gateway, or by an
+  embedding host through the library, records `deciding_assurance`
+  `device_trusted` in its audit entry.
 
 - The SDK host's tool callbacks carry the original requester of the run
   they serve, typed, so a host can refuse a person-scoped tool (one

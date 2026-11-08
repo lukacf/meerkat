@@ -25731,6 +25731,7 @@ function latestRoutableFrameIsTerminal(frames) {
 // ../packages/console-core/src/contract.ts
 var CONSOLE_RPC_METHODS = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -26816,6 +26817,7 @@ var REFUSAL_WORDS = {
   approver_mismatch: "This request is waiting for another approver.",
   unknown_pending_id: "This request was already decided or has expired.",
   empty_principal: "Sign in to decide approvals.",
+  approver_unauthenticated: "Only a signed-in person can decide approvals. Sign in as yourself; nothing was decided.",
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again."
 };
 function approvalRefusal(error48) {
@@ -26844,7 +26846,8 @@ function createPendingApprovalResource(input) {
     status: "loading",
     requests: [],
     decisions: {},
-    readOnly: input.readOnly === true
+    readOnly: input.readOnly === true,
+    ...input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}
   };
   const listeners2 = /* @__PURE__ */ new Set();
   const lifetime = new AbortController();
@@ -32111,7 +32114,7 @@ function AskedLine({ request, waiting, testId }) {
     waiting ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__waiting", children: "Waiting ".concat(waiting) }) : null
   ] });
 }
-function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }) {
+function ApprovalCard({ request, resourceStatus, decision, readOnly = false, readOnlyReason, decideLinks, onDecide }) {
   const now3 = useApprovalClock([request.deadlineAtMs]);
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
@@ -32175,7 +32178,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, dec
           "Escalated to a new request ",
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(TechnicalId, { value: decision.result.next_pending_id, label: "Request ID" })
         ] }) : null,
-        readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: "Read-only access" }) : null,
+        readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: readOnlyReason === "sign_in" ? "Sign in as yourself to decide" : "Read-only access" }) : null,
         resourceStatus === "forbidden" ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: "Approval access denied" }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("footer", { className: "cc-approval__footer", children: [
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: words2.tone, mark: true, variant: state === "pending" ? "quiet" : void 0, children: words2.text }) }),
@@ -32324,6 +32327,7 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
   if (!approvalSnapshot || !approvalIdentity) return null;
   const requests = approvalSnapshot.requests.filter((request) => Boolean(request.origin?.interactionId) === Boolean(interactionIds) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
   const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  const readOnlyReason = approvalSnapshot.readOnly ? approvalSnapshot.readOnlyReason : void 0;
   return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(import_jsx_runtime49.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(
     ApprovalCard,
     {
@@ -32331,6 +32335,7 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
       resourceStatus: approvalSnapshot.status,
       decision: approvalSnapshot.decisions[request.pendingId],
       readOnly,
+      readOnlyReason,
       decideLinks: readOnly ? hostDecideLinks(decideSources, request.pendingId) : void 0,
       onDecide: onApprovalDecision ?? (() => {
       })
@@ -54598,6 +54603,7 @@ var CONSOLE_RPC_PATHS2 = {
 };
 var CONSOLE_RPC_METHODS2 = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -59336,6 +59342,7 @@ function framesForPanelRuntime(frames, runtimeKey) {
 // src/lib/turn-origin.ts
 var OWN_SEND_LIMIT = 500;
 var ownSendKeys = /* @__PURE__ */ new Set();
+var ownCallerScope;
 function rememberOwnSend(key) {
   const trimmed = typeof key === "string" ? key.trim() : "";
   if (!trimmed) return;
@@ -59348,12 +59355,24 @@ function rememberOwnSend(key) {
 }
 function forgetOwnSends() {
   ownSendKeys.clear();
+  ownCallerScope = void 0;
+}
+function rememberOwnCallerScope(scope) {
+  const trimmed = typeof scope === "string" ? scope.trim() : "";
+  ownCallerScope = trimmed || void 0;
 }
 function isOwnSend(key) {
   return typeof key === "string" && ownSendKeys.has(key.trim());
 }
 function text10(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+function senderOf(data) {
+  const sender = data?.sender;
+  return sender && typeof sender === "object" && !Array.isArray(sender) ? sender : void 0;
+}
+function turnSenderName(data) {
+  return text10(senderOf(data)?.display_name);
 }
 function turnSender(data) {
   const kind = text10(data?.origin_kind);
@@ -59365,14 +59384,30 @@ function turnSender(data) {
   if (kind === "policy") return "policy";
   if (kind === "system") return "system";
   if (kind === "operator" || origin.startsWith("console:")) {
+    const sender = senderOf(data);
+    const senderScope = text10(sender?.caller_scope);
+    if (text10(sender?.kind) === "anonymous") {
+      if (isOwnSend(data?.idempotency_key)) return "you";
+      return text10(sender?.display_name) ? "named" : "operator";
+    }
+    if (senderScope) {
+      if (ownCallerScope) {
+        if (senderScope === ownCallerScope) return "you";
+      } else if (isOwnSend(data?.idempotency_key)) {
+        return "you";
+      }
+      return text10(sender?.display_name) ? "named" : "operator";
+    }
     return isOwnSend(data?.idempotency_key) ? "you" : "operator";
   }
   return "unknown";
 }
-function turnSenderWords(sender) {
+function turnSenderWords(sender, name2) {
   switch (sender) {
     case "you":
       return { before: "You asked ", after: "" };
+    case "named":
+      return name2 ? { before: "".concat(name2, " asked "), after: "" } : { before: "An operator asked ", after: "" };
     case "operator":
       return { before: "An operator asked ", after: "" };
     case "scheduler":
@@ -59392,7 +59427,7 @@ function turnSenderWords(sender) {
   }
 }
 function turnSenderLine(data, agentName) {
-  const words2 = turnSenderWords(turnSender(data));
+  const words2 = turnSenderWords(turnSender(data), turnSenderName(data));
   return "".concat(words2.before).concat(agentName).concat(words2.after);
 }
 
@@ -60650,6 +60685,9 @@ function createHttpConsoleTransport2({
     capabilities: async () => normalizeCapabilities(
       await callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.capabilities, {}, timeout2())
     ),
+    whoami: async () => normalizeWhoami2(
+      await callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.whoami, {}, timeout2())
+    ),
     queryTimeline: (input) => queryTimeline2(baseUrl, input, input.limit, timeout2(), input.signal),
     subscribeTimeline: (input, onFrame, options) => subscribeTimelineEvents2(baseUrl, input, onFrame, {
       signal: input.signal,
@@ -60848,6 +60886,20 @@ function normalizeCapabilities(value) {
     ...record10.topology_control && typeof record10.topology_control === "object" ? { topologyControl: record10.topology_control } : {}
   };
 }
+function normalizeWhoami2(value) {
+  const record10 = value && typeof value === "object" ? value : {};
+  const actor = record10.actor && typeof record10.actor === "object" ? record10.actor : {};
+  const text14 = (field) => typeof field === "string" && field.trim() ? field : void 0;
+  const expiresAt = record10.login_expires_at_ms;
+  return {
+    actorKind: text14(actor.kind) ?? "anonymous",
+    ...text14(actor.principal) ? { principal: text14(actor.principal) } : {},
+    approverIds: Array.isArray(record10.approver_ids) ? record10.approver_ids.filter((id) => typeof id === "string" && id.trim().length > 0) : [],
+    canAdminister: record10.can_administer === true,
+    ...text14(record10.caller_scope) ? { callerScope: text14(record10.caller_scope) } : {},
+    ...typeof expiresAt === "number" && Number.isFinite(expiresAt) ? { loginExpiresAtMs: expiresAt } : {}
+  };
+}
 var ConsoleCapabilityUnavailableError2 = class extends Error {
   constructor(method, capabilities) {
     super("Meta capability missing for ".concat(method));
@@ -60948,9 +61000,13 @@ async function resolveWorkGraphBindingRevision(run, bindingId) {
   }
   return revision;
 }
-function workGraphClaimOwnerId(subject, fallback) {
-  const trimmed = typeof subject === "string" ? subject.trim() : "";
-  return trimmed || fallback;
+function workGraphClaimOwnedBy(item, principal) {
+  const key = item.claim?.owner?.key;
+  return Boolean(principal) && key?.kind === "principal" && key.id === principal;
+}
+function workGraphMayRelease(item, caller) {
+  if (!item.claim) return false;
+  return workGraphClaimOwnedBy(item, caller.principal) || Boolean(caller.principal) && caller.canAdminister === true;
 }
 
 // src/lib/topology.ts
@@ -63356,7 +63412,7 @@ function classifyTurn(frame2, data, who) {
   const event = frame2.event;
   const agent = frameAgent(frame2);
   if (event === "user_input") {
-    const words2 = turnSenderWords(turnSender(data));
+    const words2 = turnSenderWords(turnSender(data), turnSenderName(data));
     return {
       family: "turn",
       tone: "info",
@@ -67267,6 +67323,7 @@ function GatingInboxPanel({
               resourceStatus: resource.status,
               decision: resource.decisions[request.pendingId],
               readOnly: readOnly || resource.readOnly,
+              readOnlyReason: readOnly ? void 0 : resource.readOnlyReason,
               decideLinks: readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : void 0,
               onDecide
             }
@@ -78469,13 +78526,13 @@ function WorkGraphPerson({
     /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { className: "cc-agent__name", children: person.name })
   ] });
 }
-function workGraphItemActions(item, itemId2, canManage, { onClaim, onClose, onRelease }, options = {}) {
+function workGraphItemActions(item, itemId2, canManage, { onClaim, onClose, onRelease, canRelease }, options = {}) {
   const status = item.status || "open";
   const revision = typeof item.revision === "number" ? item.revision : void 0;
   const title = item.title || "this work item";
   const claim = canManage && onClaim && status === "open" && !workGraphItemOwner(item);
   const close = canManage && onClose && !isWorkGraphTerminal(status) && status !== "blocked";
-  const release = options.release && canManage && onRelease && status === "in_progress";
+  const release = options.release && canManage && onRelease && status === "in_progress" && (canRelease?.(item) ?? true);
   if (!claim && !close && !release) return null;
   const variant = options.variant ?? "ghost";
   return /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(import_jsx_runtime112.Fragment, { children: [
@@ -79443,6 +79500,7 @@ function WorkGraphPanel({
   onClaim,
   onClose,
   onRelease,
+  canRelease,
   onGoalConfirm,
   onGoalRequestClose,
   onAttentionPause,
@@ -79536,6 +79594,7 @@ function WorkGraphPanel({
     onClaim,
     onClose,
     onRelease,
+    canRelease,
     onGoalConfirm,
     onGoalRequestClose,
     onAttentionPause,
@@ -91212,7 +91271,6 @@ function agentWorkItems(items, identity, agent) {
     priority: item.priority ?? null
   }));
 }
-var DEFAULT_APPROVER_ID = "console-ops-lead";
 function isWorkGraphSignalFrame(frame2) {
   if (frame2.event.startsWith("workgraph.")) return true;
   if (frame2.event !== "tool_execution_completed" && frame2.event !== "tool_result_received") {
@@ -91522,6 +91580,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules()) : void 0,
         capabilities: () => call(() => source.capabilities()),
+        whoami: source.whoami ? () => call(() => source.whoami()) : void 0,
         queryTimeline: (input) => call(() => source.queryTimeline(input)),
         send: (input) => call(() => source.send(input)),
         executeCommand: source.executeCommand ? (input) => call(() => source.executeCommand(input)) : void 0,
@@ -92919,24 +92978,53 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = import_react102.default.useState(0);
   const approvalResourceRef = import_react102.default.useRef(null);
   const approvalScope = "".concat(sendScope, ":").concat(experience?.runtime_id || "loading");
+  const [approvalDecider, setApprovalDecider] = import_react102.default.useState();
+  import_react102.default.useEffect(() => {
+    let active = true;
+    const scope = sendScope;
+    void Promise.resolve().then(() => consoleTransport.whoami ? consoleTransport.whoami() : null).then((whoami) => {
+      if (!active) return;
+      rememberOwnCallerScope(whoami?.callerScope);
+      const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : void 0;
+      setApprovalDecider({
+        scope,
+        person: whoami?.actorKind === "person",
+        answered: Boolean(whoami),
+        ...claimant ? { claimant } : {},
+        canAdminister: whoami?.canAdminister === true
+      });
+    }).catch(() => {
+      if (active) setApprovalDecider({ scope, person: false });
+    });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, sendScope]);
+  const currentDecider = approvalDecider?.scope === sendScope ? approvalDecider : void 0;
+  const approvalsDecidable = currentDecider?.person;
+  const signInToDecide = currentDecider?.answered === true && !currentDecider.person;
+  const workGraphClaimant = currentDecider?.claimant;
+  const workGraphAdmin = currentDecider?.canAdminister === true;
   import_react102.default.useEffect(() => {
     setApprovalSnapshot(void 0);
     setSelectedApprovalId(void 0);
-    if (!experience || !hasMobControlSurface) return;
+    if (!experience || !hasMobControlSurface || approvalsDecidable === void 0) return;
     const target = controlWorkbenchTarget("gating");
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
-      readOnly: consoleReadOnly,
+      readOnly: consoleReadOnly || !approvalsDecidable,
+      ...!consoleReadOnly && signInToDecide ? { readOnlyReason: "sign_in" } : {},
       load: async (signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.listGatingPending,
         target,
         signal
       })).result,
+      // No approver in the request: the gateway decides as the signed-in person.
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.decideGating,
         target,
         signal,
-        params: { pending_id: pendingId, approver_id: DEFAULT_APPROVER_ID, decision, reason: "console_".concat(decision) }
+        params: { pending_id: pendingId, decision, reason: "console_".concat(decision) }
       })).result
     });
     approvalResourceRef.current = resource;
@@ -92948,7 +93036,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope ? approvalSnapshot.snapshot : void 0;
   const hostAttentionKey = JSON.stringify(experience?.console_config?.attention?.sources || []);
   const hostAttentionSources = import_react102.default.useMemo(
@@ -94678,15 +94766,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
       const revisionOr = (revision, resolve) => revision !== void 0 ? () => Promise.resolve(revision) : resolve;
       return {
-        onClaim: ({ itemId: itemId2, revision }) => dispatch2(
+        // The gateway owns a claim by the connection's caller, so the
+        // request names no owner. A caller who can own nothing is offered
+        // no claim, and only a signed-in person confirms a goal.
+        onClaim: workGraphClaimant === void 0 ? void 0 : ({ itemId: itemId2, revision }) => dispatch2(
           revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2)),
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphClaim, {
             id: itemId2,
-            expected_revision: expectedRevision,
-            owner: {
-              kind: "principal",
-              id: workGraphClaimOwnerId(experience?.access?.subject, DEFAULT_APPROVER_ID)
-            }
+            expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onClose: ({ itemId: itemId2, revision }) => dispatch2(
@@ -94696,7 +94783,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
-        onGoalConfirm: ({ bindingId, revision }) => dispatch2(
+        onGoalConfirm: approvalsDecidable !== true ? void 0 : ({ bindingId, revision }) => dispatch2(
           revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphGoalConfirm, {
             binding_id: bindingId,
@@ -94735,7 +94822,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject]
+    [runWorkGraphCommand, runWorkGraphQuery, workGraphClaimant, approvalsDecidable]
   );
   const workGraphCardActions = import_react102.default.useCallback(
     (cardIdentity) => {
@@ -95566,7 +95653,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             },
             onQueryRecords: queryMemoryRecords,
             onLoadEvidence: loadMemoryEvidence,
-            onDecideQuarantine: memoryData.canDecideQuarantine && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
+            onDecideQuarantine: memoryData.canDecideQuarantine && approvalsDecidable === true && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
             onOpenGating: (
               // Only offered where the nav itself offers gating — on runtimes
               // without a mob control surface (or with gating hidden) the
@@ -95589,6 +95676,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             onRefresh: () => void refreshWorkGraphData(),
             onClaim: workGraphPanelHandlers.onClaim,
             onClose: workGraphPanelHandlers.onClose,
+            canRelease: (item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin }),
             onRelease: ({ itemId: itemId2, revision }) => {
               void (async () => {
                 let expectedRevision = revision;

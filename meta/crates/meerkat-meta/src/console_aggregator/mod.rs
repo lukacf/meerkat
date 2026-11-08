@@ -82,6 +82,7 @@ pub use store::{
     ConsoleLogError, ConsoleLogResult, ConsoleLogStore, ConsoleSendDedupeDurability,
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
 };
+pub(crate) use types::ConsoleHumanAttribution;
 pub use types::{
     AppendDisposition, AppendOutcome, ConsoleActorKind, ConsoleCursor, ConsoleDeltaCompaction,
     ConsoleDeltaKind, ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance,
@@ -1132,15 +1133,21 @@ impl MetaConsoleAggregator {
             frame.payload["frame"] = projected;
         }
         frame.source.member_provenance = None;
-        // The requester a send carried to the agent stays with the stored
-        // frame (a redispatch reads it there); no view reads it.
+        // The requester and the sender label a send carried to the agent stay
+        // with the stored frame (a redispatch reads them there); no view
+        // reads them.
         if let Some(sender) = frame
             .payload
             .get_mut("sender")
             .and_then(Value::as_object_mut)
         {
             sender.remove("requester");
+            sender.remove("model_label");
         }
+        // Nor the same requester on the run's transcript identities: a
+        // committed message's (the session history's frames), a run event's
+        // own and the lineage a console event inherits.
+        crate::mob_handle_runtime::strip_transcript_requesters(&mut frame.payload);
         frame
     }
 
@@ -4841,15 +4848,16 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
 
 /// Deliver a Console send to `resolved` and answer the session it landed
 /// on: best effort for an identity, empty when that read fails after the
-/// delivery (the send is delivered all the same). `requester` is the
-/// sender's person principal, carried to the agent's run.
+/// delivery (the send is delivered all the same). `attribution` is what the
+/// send carries for its person: the requester of the agent's run and the
+/// sender label its model reads.
 async fn dispatch_message_to_resolved_member(
     resolved: &ResolvedConsoleMember,
     content: ContentInput,
     skill_references: &[meerkat_core::skills::SkillKey],
     handling_mode: meerkat_core::types::HandlingMode,
     accepted: &ConsoleInteractionAccepted,
-    requester: Option<&meerkat_core::PrincipalRef>,
+    attribution: &ConsoleHumanAttribution,
 ) -> Result<String, ConsoleSendError> {
     if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
         && let Some(identity) = identity_runtime
@@ -4864,7 +4872,7 @@ async fn dispatch_message_to_resolved_member(
                 handling_mode,
                 skill_references,
                 accepted,
-                requester,
+                attribution,
                 None,
             )
             .await
@@ -4888,7 +4896,7 @@ async fn dispatch_message_to_resolved_member(
         skill_references,
         handling_mode,
         accepted,
-        requester,
+        attribution,
     )
     .await
     .map_err(|err| match err {
@@ -4924,17 +4932,17 @@ fn spawn_console_send_dispatch(
         // The claim names this task the frame's dispatch owner until it
         // settles the frame (dropped at the end of the task).
         let _claim = claim;
-        // The sender's requester, as the send's own frame recorded it, so a
-        // redispatch after a restart carries the same requester.
-        let requester = ConsoleSender::of_frame_payload(&user_frame.payload)
-            .and_then(|sender| sender.requester);
+        // The sender's requester and label, as the send's own frame recorded
+        // them, so a redispatch after a restart carries the same ones.
+        let sender = ConsoleSender::of_frame_payload(&user_frame.payload);
+        let attribution = ConsoleHumanAttribution::of_sender(sender.as_ref());
         match dispatch_message_to_resolved_member(
             &resolved,
             content,
             &skill_references,
             handling_mode,
             &accepted_from_frame(&user_frame),
-            requester.as_ref(),
+            &attribution,
         )
         .await
         {
@@ -15049,7 +15057,7 @@ comms = true
             &[],
             meerkat_core::types::HandlingMode::Steer,
             &accepted,
-            None,
+            &ConsoleHumanAttribution::default(),
         )
         .await;
 

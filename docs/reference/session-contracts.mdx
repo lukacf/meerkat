@@ -111,7 +111,10 @@ worker. Do not rely on the model to notice and act once for every item in a
 batched prompt. Inputs of different original requesters never share a turn:
 the runtime coalesces only inputs that carry the same requester, or none, and
 a steer from another requester waits for a turn of its own instead of joining
-a running one.
+a running one. Steers keep the order they were admitted in across
+requesters: a steer waiting for a turn of its own keeps its place, so a later
+steer of the running turn's own requester waits behind it too rather than
+join the running turn.
 </Warning>
 
 ### Ordered System messages

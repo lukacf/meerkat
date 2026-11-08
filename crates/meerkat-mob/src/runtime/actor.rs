@@ -61330,6 +61330,7 @@ impl MobActor {
             mut ack_mode,
             content_attribution,
             requester,
+            sender_label,
             governed_input,
         } = *payload;
         let dsl_expected_session_id = expected_session_id
@@ -61474,6 +61475,7 @@ impl MobActor {
                             ack_mode,
                             content_attribution,
                             requester,
+                            sender_label,
                             governed_input,
                         }),
                     });
@@ -61642,6 +61644,18 @@ impl MobActor {
                 });
             }
         }
+        // The sender label names the person who sent a message, so only host
+        // human input carries one; any other work (an agent's, a schedule's,
+        // a flow's) that carries one is refused here, before MobMachine
+        // emits an ingress effect.
+        if sender_label.is_some()
+            && content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a sender label rides only host human input".to_string(),
+            });
+        }
         validate_member_turn_carriers(
             &entry,
             remotely_hosted,
@@ -61717,6 +61731,17 @@ impl MobActor {
                 });
             }
         }
+        // The sender label leads the turn's injected context: the message's
+        // own injected-context row, right before it. Core places that row on
+        // both of a steer's paths (joined into the running turn or run as its
+        // own), so the label rides a steer too, which ordinary injected
+        // context cannot.
+        let injected_context = match sender_label {
+            Some(label) => std::iter::once(ContentInput::Text(label.as_str().to_string()))
+                .chain(injected_context)
+                .collect(),
+            None => injected_context,
+        };
         if system_prompt.is_some()
             && !remotely_hosted
             && entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
@@ -68411,6 +68436,7 @@ mod routed_effect_containment_tests {
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                 requester: None,
+                sender_label: None,
                 governed_input: None,
                 expected_session_id: None,
             })

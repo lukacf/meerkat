@@ -165,13 +165,15 @@ them.
   all appended last, so an exhaustive match needs their arms.
 
 - Behaviour-only (not measured by the gate): `meerkat-runtime`: a steer from
-  another requester no longer joins a running turn; it waits for a turn of
-  its own (see Changed). An input is refused when its host-supplied
-  requester is not a qualified principal or differs from its governed
-  association's requester, a keyed retry for another requester than the
-  input it would replay is an `InputIdempotencyConflict`, and an input whose
-  supersession key names a queued input of another requester is refused, as
-  one of another governed binding already is.
+  another requester no longer joins a running turn; it keeps its place in
+  the Steer lane and waits for a turn of its own, and a later steer of the
+  running turn's requester waits behind it (see Changed). An input is
+  refused when its host-supplied requester is not a qualified principal or
+  differs from its governed association's requester, a keyed retry for
+  another requester than the input it would replay is an
+  `InputIdempotencyConflict`, and an input whose supersession key names a
+  queued input of another requester is refused, as one of another governed
+  binding already is.
 
 - Behaviour-only (not measured by the gate): `meerkat-mob`: work that
   carries a requester (`WorkSpec::with_requester`) is refused with
@@ -364,7 +366,26 @@ them.
   `ToolDispatchContext::direct_requester` for a requester that asked
   directly, never one carried across a peer hop). `Input::requester` is the
   one accessor: a governed input's requester is its work association's, any
-  other input's is the one its host supplied.
+  other input's is the one its host supplied. The run's lifecycle events
+  (`run_started`, `run_completed` and `run_failed`) carry it in their
+  transcript identity too, so a host that shows an agent's events or
+  transcript to other viewers leaves it out there.
+
+- `meerkat-mob`: a host labels the person who sent host human input for the
+  member's model with `SenderLabel` (`WorkSpec::with_sender_label`), such as
+  "Message from" and the person's name. The member's turn receives it as an
+  injected-context row of its own right before the message, on a steer too,
+  whether the steer joins the running turn or runs as its own; ordinary
+  injected context on a steer is still refused. Work that is not host human
+  input refuses a label (`MobError::UnsupportedForMode`). The label is
+  attribution the model reads, never control data.
+
+- `meerkat-workgraph`: `WorkGraphService::break_glass_release` with
+  `BreakGlassReleaseWorkItemRequest` (both re-exported by `meerkat`): a
+  host-plane operator releases a work item's claim it does not own, bound
+  to the request's revision. The Released event records the operator and
+  the released claim under `break_glass`, as
+  `break_glass_reassign_attention` records its move.
 
 - `meerkat-rpc`, `meerkat-jobs`, `meerkat-contracts`: host tool callbacks
   carry the original requester of the run they serve, typed, so a host can
@@ -415,9 +436,19 @@ them.
   its binding's key, which already names its requester), so coalescing and
   staging keep one requester per run, and a live-boundary join takes an
   input only of the key its run staged. A steer from another requester, or
-  without a requester while the run has one (or the reverse), takes the
-  queued fallback and runs in a turn of its own. A recovered row keeps its
-  requester's key. The TLC lane runs a new audit of the rule
+  without a requester while the run has one (or the reverse), keeps its
+  place in the Steer lane and runs in a turn of its own. The Steer lane
+  stays first in, first out across requesters: a later steer of the running
+  turn's requester waits behind it too, rather than join the turn, so an
+  earlier steer of another requester is never overtaken. The MeerkatMachine
+  owns that order: `StageForRun`, `JoinLiveBoundaryDurableAppend` and the
+  request-only receipt `ResolveLiveBoundaryContextReceipt` refuse a
+  Steer-lane input while a Steer-lane input admitted before it waits with
+  another key, and the receipt, as the durable join does, takes only an
+  input of the key its run staged, so an input with a requester never
+  enters a run that staged nothing (a direct service turn). A recovered row
+  keeps its requester's key, and a run resumed after a restart stages its
+  batch under it. The TLC lane runs a new audit of the rule and the order
   (`specs/machines/meerkat_machine/requester_batch_audit.sh`).
   So content from another party never enters a person's run: a
   requester-less input (a peer message, request or response, a flow step,
@@ -538,7 +569,11 @@ them.
 - Stored input rows and transcript rows write the requester as one more
   optional field. An older Core that reads them drops it, which leaves the
   input and its turn without a requester, so nothing then acts for that
-  person.
+  person. A keyed retry, under an older Core, of an input this release
+  admitted with a requester is refused as an idempotency conflict
+  (`InputIdempotencyConflict`), not deduplicated: the input's replay
+  identity includes the requester, and an older Core computes it without
+  one.
 
 - A stored detached job writes its requester as one more optional field. An
   older Core that reads the job drops it, so the job's later attempts start

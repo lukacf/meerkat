@@ -406,9 +406,24 @@ confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/concepts/gating) for
 current tier, timeout, and decision behavior.
 
-The stock console submits decisions with `approver_id: "console-ops-lead"`. There
-is no approver selector in this inbox. A request pinned to a different approver
-needs a host-provided approval surface that authenticates and maps the approver.
+The stock console decides as the signed-in person: its decisions name no
+approver, and the console takes the approver from the connection (see
+[Gating](/concepts/gating)). When `meta/console/whoami` reports a caller that is
+not a person (no token on an open console, a service token, a token that names
+no human, or a shared-account token), the inbox shows requests read-only and
+says to sign in as yourself to decide: such a caller can read them but not
+decide them. A request pinned to an approver id is decided by a person who
+holds that id through the access configuration's `approvers` bindings.
+
+The same holds for memory quarantine reviews and WorkGraph goal confirmations:
+the console offers them only to a signed-in person. A WorkGraph claim is owned
+by the caller who makes it, so the WorkGraph panel offers Claim only to a
+caller with a token, and Release on the caller's own claims and, to an access
+admin, on anyone's: the work graph records an admin's release with the admin
+and the claim released. Claims the stock console makes carry no lease, so
+someone else's claim ends when an access admin releases it, when the host
+releases it on its stdio RPC gateway (`rpc_gateway`; `meta_gateway` serves
+none), or when its item is closed.
 
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
@@ -1001,8 +1016,20 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     console that requires sign-in, a person's send carries the person's
     qualified principal to the agent's run as the run's original requester
     (Meerkat's `ToolDispatchContext::requester`); the stored frame keeps it
-    and no view returns it. Other callers' sends, and every send on an Open
-    console, carry none.
+    and no view returns it, neither on the send's frame nor on the run's
+    transcript identities that the session history's frames, the run's
+    event frames and the agent and mob event streams show. Other callers'
+    sends carry none, and so does
+    every ungoverned send on an Open console (see
+    [Access control](/concepts/access-control#requesters-on-an-open-console)).
+
+    On a console that requires sign-in, the agent's model also reads each
+    person's message with a sender label: an injected-context row "Message
+    from" and the person's display name, right before the message, a steer
+    included. The agent tells people apart from it without parsing the
+    message. A service's, a token principal's and an anonymous caller's
+    messages, a schedule's fire and every message on an Open console carry
+    no label.
 
     `idempotency_key` must be unique per send; the stock console mints one
     UUID per send. An idempotent retry reuses the same key in the same

@@ -40597,6 +40597,308 @@ async fn a_resumed_run_takes_a_durable_join_while_its_contributors_stay_below_th
     joined.expect("a resumed run that holds 255 contributors takes the join");
 }
 
+/// A person the host authenticated: an opaque, qualified requester.
+fn requester_person(subject: &str) -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject,
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+            .expect("trust domain"),
+    )
+    .expect("qualified requester")
+}
+
+/// A typed text prompt in the Steer lane from `requester`.
+fn steer_prompt_from(text: &str, requester: Option<meerkat_core::PrincipalRef>) -> Input {
+    let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+    metadata.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+    let mut input = Input::Prompt(crate::input::PromptInput::new(text, Some(metadata)));
+    input.header_mut().requester = requester;
+    input
+}
+
+/// What a crash, or a graceful stop that kept the run, leaves of a person's
+/// durable run in `store`: the run's continuable tail (round zero's first
+/// commit, its staged call only in the run cursor, which binds the run's
+/// input) and the run's input, from `requester`, bound to the run and applied
+/// pending consumption. Returns the session and the run.
+async fn a_person_s_kept_run(
+    store: &crate::store::InMemoryRuntimeStore,
+    requester: meerkat_core::PrincipalRef,
+) -> (SessionId, RunId) {
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("the person's prompt")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let base = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone()))
+                    .expect("seal the committed base"),
+            ),
+        )
+        .await
+        .expect("the committed base commits")
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("the committed base has a WholeBlob authority");
+
+    let mut input = make_prompt("the person's prompt");
+    input.header_mut().requester = Some(requester.clone());
+    let staged_call = BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "kept-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string())
+                .expect("raw tool arguments"),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(uuid::Uuid::now_v7().to_string()))
+                .expect("an assistant message id"),
+        ),
+    };
+    let mut round = committed;
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            vec![input.id().clone()],
+            0,
+            meerkat_core::RunResumePoint::ToolsPending {
+                assistant_message: staged_call,
+            },
+        ))
+        .expect("the run cursor is recorded");
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            crate::store::PreparedWholeBlobProvisionalTail::prepare(
+                base,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(round)).expect("seal the run's tail"),
+            )
+            .expect("the run's tail prepares"),
+        )
+        .await
+        .expect("the run's tail is written");
+
+    let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+    state.durability = Some(crate::input::InputDurability::Durable);
+    state.requester = Some(requester);
+    let policy = crate::DefaultPolicyTable::resolve(&input, true);
+    state.policy = Some(crate::input_state::PolicySnapshot {
+        version: policy.policy_version,
+        decision: policy,
+    });
+    state.runtime_semantics = Some(
+        crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+            .expect("generated admission semantics"),
+    );
+    state.persisted_input = Some(input);
+    let row = crate::input_state::StoredInputState {
+        state,
+        seed: crate::input_state::InputStateSeed {
+            phase: crate::input_state::InputLifecycleState::AppliedPendingConsumption,
+            last_run_id: Some(run_id.clone()),
+            last_boundary_sequence: Some(1),
+            admission_sequence: None,
+            terminal_outcome: None,
+            attempt_count: 1,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
+        },
+    };
+    let record = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("kept-run-record"))
+        .recover_input_state_persistence_record(row)
+        .expect("the kept row passes the generated recovery authority");
+    store
+        .persist_input_state(&runtime_id, &record)
+        .await
+        .expect("the kept row persists");
+    (session_id, run_id)
+}
+
+/// A person's run in flight at a restart resumes as that person's run: the
+/// restart's recovery binds its kept input's requester key again
+/// (`BindInputRequesterBatchKey`), and `ResumeRun` stages the run's batch
+/// under that key. So a requester-less steer may not join the resumed run;
+/// it waits for a run of its own.
+#[tokio::test]
+async fn a_person_s_run_resumed_after_a_restart_keeps_the_person_s_key() {
+    let person = requester_person("a");
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let (session_id, run_id) = a_person_s_kept_run(&store, person.clone()).await;
+    let machine = MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    )
+    .expect("persistent machine");
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("the restart recovers the run's durable state");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        Some(run_id.clone()),
+        "the restart keeps the person's run resumable"
+    );
+    let driver = {
+        let sessions = machine.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let mut entry = driver.lock().await;
+    assert!(
+        matches!(
+            crate::meerkat_machine::driver::machine_begin_resumed_run(&mut entry, &run_id)
+                .expect("the run resumes"),
+            crate::meerkat_machine::driver::ResumedRunStart::Started { .. }
+        ),
+        "the person's run resumes under its own id"
+    );
+    assert_eq!(
+        entry
+            .shared_dsl_authority()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .authority_staged_batch,
+        Some(crate::input_authority::requester_batch_key(&person).expect("the person's key")),
+        "the resumed run stages its batch under the person's key"
+    );
+    let steer = steer_prompt_from("a requester-less steer", None);
+    let steer_id = steer.id().clone();
+    assert!(
+        entry
+            .as_driver_mut()
+            .accept_input(steer)
+            .await
+            .expect("the requester-less steer is accepted")
+            .is_accepted()
+    );
+    assert!(
+        !entry
+            .driver_ingress()
+            .live_boundary_joins_run_batch(&steer_id, &run_id),
+        "a requester-less steer may not join the person's resumed run"
+    );
+}
+
+/// Two people's steers waiting in the Steer lane at once (both admitted
+/// while the runtime is idle) are two runs: the generated plan's steer batch
+/// takes the earlier person's steer alone. Staging is never asked to mix
+/// requesters, which it refuses, and a refused batch would be planned again
+/// until the attempt cap ended both steers.
+#[tokio::test]
+async fn a_steer_batch_serves_one_requester() {
+    let mut driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+        "steer-batch-serves-one-requester",
+    )));
+    let from_a = steer_prompt_from("from a", Some(requester_person("a")));
+    let from_b = steer_prompt_from("from b", Some(requester_person("b")));
+    let a = from_a.id().clone();
+    for steer in [from_a, from_b] {
+        assert!(
+            driver
+                .as_driver_mut()
+                .accept_input(steer)
+                .await
+                .expect("the steer is accepted")
+                .is_accepted()
+        );
+    }
+    assert_eq!(
+        driver.driver_ingress().steer_queue().len(),
+        2,
+        "both steers wait in the Steer lane"
+    );
+    let plan = crate::meerkat_machine::machine_authorize_runtime_loop_batch(&driver)
+        .expect("the runtime loop has a batch");
+    assert_eq!(
+        plan.input_ids(),
+        std::slice::from_ref(&a),
+        "the steer batch serves the earlier person alone"
+    );
+    assert_eq!(
+        plan.source(),
+        crate::meerkat_machine::driver::RuntimeLoopBatchSource::Steer
+    );
+}
+
+/// Request-only context of a person's input never enters a run that staged
+/// no batch (a direct service turn, which the runtime loop did not stage).
+/// The machine refuses it at the input-owned receipt
+/// (`ResolveLiveBoundaryContextReceipt`), as it refuses the durable join, so
+/// the refusal does not rest on the runtime asking its own predicate first.
+/// The same context without a requester is taken.
+#[tokio::test]
+async fn a_person_s_request_only_context_never_enters_a_run_that_staged_nothing() {
+    async fn receipt_in_unstaged_run(
+        requester: Option<meerkat_core::PrincipalRef>,
+    ) -> (Result<(), String>, bool) {
+        let mut ephemeral =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("request-only-context-unstaged-run"));
+        let run_id = RunId::new();
+        ephemeral
+            .contract_begin_run_authority(run_id.clone())
+            .expect("a run begins that stages no batch");
+        let mut driver = DriverEntry::Ephemeral(ephemeral);
+        let mut completion = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        completion.header_mut().requester = requester;
+        let completion_id = completion.id().clone();
+        assert!(
+            driver
+                .as_driver_mut()
+                .accept_input(completion)
+                .await
+                .expect("the background completion is accepted")
+                .is_accepted()
+        );
+        let receipt = MeerkatMachine::preview_dsl_input_on_shared_authority(
+            &driver.shared_dsl_authority(),
+            mm_dsl::MeerkatMachineInput::ResolveLiveBoundaryContextReceipt {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                input_id: completion_id.to_string(),
+            },
+            "ResolveLiveBoundaryContextReceipt",
+        )
+        .map(|_| ());
+        let shell_predicate = driver
+            .driver_ingress()
+            .live_boundary_joins_run_batch(&completion_id, &run_id);
+        (receipt, shell_predicate)
+    }
+
+    let (receipt, shell_predicate) = receipt_in_unstaged_run(Some(requester_person("a"))).await;
+    let refusal = receipt.expect_err("the machine refuses a person's context in an unstaged run");
+    assert!(
+        refusal.contains("guard rejected"),
+        "a generated guard refuses the receipt: {refusal}"
+    );
+    assert!(!shell_predicate, "the runtime's predicate agrees");
+
+    let (receipt, shell_predicate) = receipt_in_unstaged_run(None).await;
+    receipt.expect("context without a requester enters the run");
+    assert!(shell_predicate, "the runtime's predicate agrees");
+}
+
 #[tokio::test]
 async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_state() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());

@@ -4481,12 +4481,15 @@ enum DoorLane {
 /// first attempt Core refuses for the build preparation the member's host
 /// asked to retry (`BuildPreparationRetry`) retries that preparation once
 /// (`resolve_member_build_preparation`), which ends Core's cause, and
-/// attempts once more. The lanes: the materialization, the governed input's
-/// wake before its bind, the three send lanes (ingress, ticketed, awaiting
-/// commit) and the two dispatch lanes (ticketed, plain).
+/// attempts once more, so Core sees the lane's attempt twice. The lanes:
+/// the materialization, the governed input's wake before its bind, the
+/// three send lanes (ingress, ticketed, awaiting commit) and the two
+/// dispatch lanes (ticketed, plain).
 ///
 /// Pin: a lane that took no door step surfaces Core's refusal with no retry
-/// asked. Every lane is driven, and every lane that does not retry is named.
+/// asked, and one that took the step and attempted no more answers the
+/// refusal the step ended, after one attempt. Every lane is driven, and
+/// every lane that does not retry is named.
 #[tokio::test]
 async fn every_door_lane_retries_a_build_preparation_once() {
     let mut not_retried = Vec::new();
@@ -4510,21 +4513,24 @@ async fn every_door_lane_retries_a_build_preparation_once() {
             .await
             .expect("registered live");
         lock(&core.build_preparation_retry).insert(alice.clone());
+        let attempted = lane_attempts(&core, lane);
 
         let answered = drive_door_lane(&runtime, &alice, lane).await;
 
+        let attempts = lane_attempts(&core, lane) - attempted;
         let resolves = lock(&core.resolves).clone();
         let cause_ended = lock(&core.build_preparation_retry).is_empty();
-        if resolves != vec![member_id(&alice).to_string()] || !cause_ended {
+        if resolves != vec![member_id(&alice).to_string()] || !cause_ended || attempts != 2 {
             not_retried.push(format!(
-                "{lane:?}: retries asked {resolves:?}, cause ended {cause_ended} ({answered:?})"
+                "{lane:?}: retries asked {resolves:?}, cause ended {cause_ended}, attempts \
+                 {attempts} ({answered:?})"
             ));
         }
     }
     assert!(
         not_retried.is_empty(),
-        "every lane's door retries the build preparation once and ends Core's cause: \
-         {not_retried:#?}"
+        "every lane's door retries the build preparation once, ends Core's cause and \
+         attempts once more: {not_retried:#?}"
     );
 }
 
@@ -4573,17 +4579,34 @@ async fn drive_door_lane(
     }
 }
 
+/// The attempts of `lane` Core has seen: the materialization's wakes, the
+/// governed input's wakes before its bind, and every other lane's
+/// deliveries, a refused one included.
+fn lane_attempts(core: &SeatCore, lane: DoorLane) -> usize {
+    match lane {
+        DoorLane::Materialize => core.wakes.load(Ordering::SeqCst),
+        DoorLane::GovernedInput => core.governed_wakes.load(Ordering::SeqCst),
+        DoorLane::SendIngress
+        | DoorLane::SendTicketed
+        | DoorLane::SendAwaitingCommit
+        | DoorLane::DispatchTicketed
+        | DoorLane::DispatchPlain => core.delivery_attempts.load(Ordering::SeqCst),
+    }
+}
+
 /// The door's one step for a host preparation Core keeps that Meta's own
 /// records do not name (`HostPreparationPending`), on every delivery lane:
 /// the governed input's wake before its bind, the three send lanes
 /// (ingress, ticketed, awaiting commit) and the two dispatch lanes
 /// (ticketed, plain). Core refuses each lane's first attempt; the door
 /// declares the identity once, which ends Core's mark, and attempts once
-/// more. (The materialization declares the identity before it wakes it.)
+/// more, so Core sees the lane's attempt twice. (The materialization
+/// declares the identity before it wakes it.)
 ///
 /// Pin: a lane that took no door step surfaces Core's refusal, declares
-/// nothing and leaves the mark. Every lane is driven, and every lane that
-/// does not declare is named.
+/// nothing and leaves the mark, and one that declared and attempted no more
+/// answers the refusal the declaration ended, after one attempt. Every lane
+/// is driven, and every lane that does not declare is named.
 #[tokio::test]
 async fn every_delivery_lane_declares_and_retries_a_host_preparation_once() {
     let mut not_declared = Vec::new();
@@ -4608,21 +4631,24 @@ async fn every_delivery_lane_declares_and_retries_a_host_preparation_once() {
             .expect("registered live");
         lock(&core.host_pending).insert(alice.clone());
         let applied = core.apply_calls.load(Ordering::SeqCst);
+        let attempted = lane_attempts(&core, lane);
 
         let answered = drive_door_lane(&runtime, &alice, lane).await;
 
         let declared = core.apply_calls.load(Ordering::SeqCst) - applied;
+        let attempts = lane_attempts(&core, lane) - attempted;
         let mark_ended = !lock(&core.host_pending).contains(&alice);
-        if declared != 1 || !mark_ended {
+        if declared != 1 || !mark_ended || attempts != 2 {
             not_declared.push(format!(
-                "{lane:?}: declared {declared} times, mark ended {mark_ended} ({answered:?})"
+                "{lane:?}: declared {declared} times, mark ended {mark_ended}, attempts \
+                 {attempts} ({answered:?})"
             ));
         }
     }
     assert!(
         not_declared.is_empty(),
-        "every delivery lane's door declares the identity once and ends Core's mark: \
-         {not_declared:#?}"
+        "every delivery lane's door declares the identity once, ends Core's mark and \
+         attempts once more: {not_declared:#?}"
     );
 }
 
@@ -4898,6 +4924,55 @@ async fn a_status_sweep_reads_core_s_held_members_once() {
     assert!(status.customizer_tools_pending.is_none());
 }
 
+/// One identity's status reports Core's hold of its member: a member Core
+/// holds for unpublished customizer tools reads its tools pending (published
+/// once the runtime is composed), from one read of that member's hold and
+/// no read of Core's whole list; an identity whose member Core does not
+/// hold reads nothing pending.
+///
+/// Pin: a status that read the hold and dropped it would answer nothing
+/// pending for the held identity, which the sweep reads pending.
+#[tokio::test]
+async fn one_identity_s_status_reports_core_s_hold_of_its_member() {
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let identities = register_held_live(&runtime, &core, 2, 1).await;
+    let lists = || core.tools_held_list_reads.load(Ordering::SeqCst);
+    let points = || core.tools_held_point_reads.load(Ordering::SeqCst);
+
+    let (lists_before, points_before) = (lists(), points());
+    let held = runtime
+        .status(&identities[0])
+        .await
+        .expect("the held identity's status reads");
+    assert_eq!(
+        held.customizer_tools_pending
+            .as_ref()
+            .map(|pending| pending.reason.as_str()),
+        Some(crate::identity_first::build_preparer::PUBLISHED_ONCE_COMPOSED),
+        "the status reports Core's hold of the member"
+    );
+    assert_eq!(
+        points() - points_before,
+        1,
+        "one read of the member's own hold"
+    );
+    assert_eq!(
+        lists() - lists_before,
+        0,
+        "no read of Core's whole list of held members"
+    );
+
+    let unheld = runtime
+        .status(&identities[1])
+        .await
+        .expect("the other identity's status reads");
+    assert!(
+        unheld.customizer_tools_pending.is_none(),
+        "a member Core does not hold has nothing pending: {unheld:?}"
+    );
+}
+
 /// The status sweep at scale: 800 identities, 400 of them members Core
 /// holds for unpublished customizer tools, are answered from one read of
 /// Core's held members, by `statuses()` and by `roster_inspect()` alike.
@@ -5050,6 +5125,39 @@ async fn a_delivery_whose_held_member_read_fails_is_refused_retryable() {
 /// RED before the projection removed it: the record stayed for good.
 #[tokio::test]
 async fn a_rotation_core_finishes_itself_leaves_no_rotation_record() {
+    rotation_core_finishes_itself(CoreFinishes::Successor).await;
+}
+
+/// The same when the reset's retirement ended before Core seated the fresh
+/// life: Core journals that seat as a fresh life after the retired
+/// incarnation (`SeatRotation::FreshLifeAfter`), one shape of a reset or a
+/// delete a stop interrupted, which Core finishes at the next start, and
+/// the lifecycle projection removes the record on it as on a successor's
+/// seat.
+///
+/// Pin: a projection that removed the record on a successor's seat only
+/// would keep it here, and a rollback after a later retirement would rotate
+/// the identity again.
+#[tokio::test]
+async fn a_fresh_life_core_seats_after_the_retirement_leaves_no_rotation_record() {
+    rotation_core_finishes_itself(CoreFinishes::FreshLifeAfter).await;
+}
+
+/// How Core finishes on its own the rotation a reset may have started: by
+/// the rotation's terminal step, which retires the live incarnation and
+/// seats its successor (`SeatRotation::Successor`), or, once the reset's
+/// retirement ended, by a fresh life after the retired incarnation
+/// (`SeatRotation::FreshLifeAfter`).
+#[derive(Clone, Copy, Debug)]
+enum CoreFinishes {
+    Successor,
+    FreshLifeAfter,
+}
+
+/// A reset of alice whose rotation may have started, and Core finishing
+/// that rotation on its own as `finishes` says: the record stays after the
+/// reset and is gone once the lifecycle projection read Core's seat.
+async fn rotation_core_finishes_itself(finishes: CoreFinishes) {
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
     *lock(&core.rotation_failure) = Some(BridgeError::Mob(
@@ -5076,6 +5184,16 @@ async fn a_rotation_core_finishes_itself_leaves_no_rotation_record() {
         "the record of a rotation that may have started stays"
     );
 
+    if let CoreFinishes::FreshLifeAfter = finishes {
+        // The reset's retirement ends first: no member holds alice when
+        // Core seats her fresh life.
+        let retiring = core
+            .core
+            .live_member(&alice)
+            .expect("Core's members read")
+            .expect("alice's member is retiring");
+        core.core.retire(&retiring.agent_runtime_id);
+    }
     // Core carries out the rotation it started, on its own.
     let next = AgentRuntimeId::parse(&format!("rt:{alice}:1")).expect("a runtime id");
     core.core.rotate(
@@ -5086,12 +5204,44 @@ async fn a_rotation_core_finishes_itself_leaves_no_rotation_record() {
         },
         &meerkat_mob::ProfileName::from("personal"),
     );
+    let seat = last_seat_rotation(&core.core, &alice);
+    let journaled = match finishes {
+        CoreFinishes::Successor => {
+            matches!(seat, Some(meerkat_mob::SeatRotation::Successor { .. }))
+        }
+        CoreFinishes::FreshLifeAfter => {
+            matches!(seat, Some(meerkat_mob::SeatRotation::FreshLifeAfter { .. }))
+        }
+    };
+    assert!(journaled, "Core journals a {finishes:?} seat: {seat:?}");
     runtime.settle_lifecycle_projection().await;
 
     assert!(
         rotation_records(&runtime).await.is_empty(),
-        "the rotation's terminal seat removed the record"
+        "the rotation's terminal seat removed the record ({finishes:?})"
     );
+}
+
+/// The rotation Core's journal names on `identity`'s last seat, if any.
+fn last_seat_rotation(
+    core: &CoreTestMembers,
+    identity: &AgentIdentity,
+) -> Option<meerkat_mob::SeatRotation> {
+    let member = member_id(identity);
+    core.journal_page(0, usize::MAX)
+        .expect("Core's journal reads")
+        .records
+        .into_iter()
+        .rev()
+        .find_map(|record| match record.fact {
+            crate::identity_first::bridge::MemberLifecycleFact::Seated {
+                member: seated,
+                rotation,
+                ..
+            } if seated == member => Some(rotation),
+            _ => None,
+        })
+        .flatten()
 }
 
 /// A held pass whose rollback mark cannot be written is refused, and the

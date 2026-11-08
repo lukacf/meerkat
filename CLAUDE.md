@@ -624,7 +624,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   `--partition count:K/N` per canary, so the canaries run on separate
   runners; the coverage check credits it only when every partition is
   planned. A test no hosted runner can run, in a binary whose other tests
-  do run (it needs an environment only its product's own lane provides), is
+  do run (it needs an environment no CI lane provides: Connect's PTY
+  tests of `cli_paired_host` need an assembled synthetic resource prefix
+  that no workflow builds, so no lane runs them), is
   listed by exact name with its reason in `HOSTED_RUNNER_EXCLUDED_TESTS` and
   named in `hosted_runner_excluded_tests`: the row that holds its binary
   leaves it out with the row's `filter`, and

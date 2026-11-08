@@ -374,8 +374,9 @@ export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
   },
 ];
 // Tests no hosted runner can run, in a binary whose other tests run: each
-// needs an environment only its product's own lane provides. Keyed by the
-// binary (package::test-target) and listed by exact name, with the reason.
+// needs an environment no CI lane provides, and its reason says what that is
+// and that no lane runs it. Keyed by the binary (package::test-target) and
+// listed by exact name, with the reason.
 // The closure-tests row that holds the binary runs it without them (the
 // row's `filter`, ci-hook-coverage's excludedTestsFilter), the plan names them with the reason
 // in `hosted_runner_excluded_tests`, and scripts/ci-verify-row-binaries.mjs
@@ -385,8 +386,9 @@ export const HOSTED_RUNNER_EXCLUDED_TESTS = [
   {
     binary: "meerkat-connect::cli_paired_host",
     reason:
-      "needs the assembled pin-built synthetic resource prefix (CONNECT_LAZY_SERVICES_FIXTURE_PREFIX), " +
-      "which only Connect's native lane provides",
+      "needs CONNECT_LAZY_SERVICES_FIXTURE_PREFIX, an assembled synthetic Connect resource prefix with a " +
+      "meerkat-connect built against its resource pin; no workflow of this repository assembles one, so no " +
+      "CI lane runs these tests and their acceptance stays owed",
     tests: [
       "actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval",
       "actual_cli_configured_browser_login_precedes_pairing_and_uses_same_native_session",

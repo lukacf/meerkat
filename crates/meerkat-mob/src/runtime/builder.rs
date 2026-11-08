@@ -9433,46 +9433,19 @@ impl MobBuilder {
                 .iter()
                 .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
                 .map_or(0, |pos| pos + 1);
-            if matches!(
+            // The identities the replayed respawn abandonments ended: their
+            // grants end once the preview handle below exists.
+            let recovered_ends = if matches!(
                 resumed_state,
                 MobState::Running | MobState::Stopped | MobState::Completed
             ) {
-                let recovered_ends = recover_pending_member_retirements(
+                recover_pending_member_retirements(
                     initial_dsl_authority.as_mut(),
                     &mob_events[repaired_epoch_start..],
-                )?;
-                // An identity a replayed respawn abandonment ended loses its
-                // scoped tool grants, and those of the sessions MobMachine
-                // held for it, before the mob serves. A busy answer is
-                // retried within the abandonment's bound; another failure
-                // fails the resume, and the next resume replays the
-                // abandonment and ends them again (a grant already ended is
-                // left as it stands).
-                #[cfg(feature = "runtime-adapter")]
-                if let Some(runtime) = runtime_adapter.as_deref() {
-                    let live_incarnation =
-                        meerkat_core::service::LiveMobIncarnation::witnessed(incarnation);
-                    for end in &recovered_ends {
-                        let reason = format!(
-                            "the identity '{}' ended: a resume abandoned its respawn",
-                            end.identity
-                        );
-                        super::actor::end_within_abandonment_bound(|| {
-                            super::actor::end_member_identity_tool_grants(
-                                runtime,
-                                definition.id.as_str(),
-                                &live_incarnation,
-                                &end.identity,
-                                &end.sessions,
-                                &reason,
-                            )
-                        })
-                        .await?;
-                    }
-                }
-                #[cfg(not(feature = "runtime-adapter"))]
-                let _ = recovered_ends;
-            }
+                )?
+            } else {
+                Vec::new()
+            };
             let repaired_epoch_events = &mob_events[repaired_epoch_start..];
             // The identity store's created entry rows, after the replay and
             // before the member plan (`RecoverCreatedIdentityEntry`): a store
@@ -9636,6 +9609,38 @@ impl MobBuilder {
                     .unwrap_or_default(),
                 member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
             };
+            // An identity a replayed respawn abandonment ended loses its
+            // scoped tool grants, and those of the sessions MobMachine held
+            // for it, before the mob serves: before the pre-activation read,
+            // any member registration and the actor. The grants name the
+            // mob's incarnation through the handle's witness
+            // (`MobHandle::live_incarnation`). A busy answer is retried
+            // within the abandonment's bound; another failure fails the
+            // resume, and the next resume replays the abandonment and ends
+            // them again (a grant already ended is left as it stands).
+            #[cfg(feature = "runtime-adapter")]
+            if let Some(runtime) = runtime_adapter.as_deref() {
+                let live_incarnation = preview_handle.live_incarnation();
+                for end in &recovered_ends {
+                    let reason = format!(
+                        "the identity '{}' ended: a resume abandoned its respawn",
+                        end.identity
+                    );
+                    super::actor::end_within_abandonment_bound(|| {
+                        super::actor::end_member_identity_tool_grants(
+                            runtime,
+                            definition.id.as_str(),
+                            &live_incarnation,
+                            &end.identity,
+                            &end.sessions,
+                            &reason,
+                        )
+                    })
+                    .await?;
+                }
+            }
+            #[cfg(not(feature = "runtime-adapter"))]
+            let _ = recovered_ends;
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
                 hook(preview_handle.read_handle()).await?;

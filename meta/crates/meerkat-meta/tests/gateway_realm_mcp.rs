@@ -331,6 +331,17 @@ fn a_secret_binds_to_the_reviewed_definition_and_is_never_echoed_or_logged() {
         json!({"server": search, "env": SLOT, "value": SECRET, "note": SECRET}),
     );
     assert_eq!(malformed["error"]["code"], json!(-32602), "{malformed:#}");
+    // The value in a wrongly typed field: the refusal quotes nothing of the
+    // request.
+    let mistyped = gateway.rpc(
+        "meta/realm_mcp/set_secret",
+        json!({"server": SECRET, "env": SLOT, "value": SECRET}),
+    );
+    assert_eq!(mistyped["error"]["code"], json!(-32602), "{mistyped:#}");
+    assert!(
+        !mistyped.to_string().contains(SECRET),
+        "a malformed set_secret is refused without quoting its request: {mistyped:#}"
+    );
 
     let still = gateway.rpc(
         "meta/realm_mcp/remove_secret",
@@ -443,4 +454,109 @@ fn the_stdio_capabilities_list_the_realm_mcp_methods_served() {
         json!({"name": "search", "expected_generation": 1}),
     );
     assert_eq!(remove["error"]["code"], json!(-32601), "{remove:#}");
+}
+
+/// A launch that names no credential store keeps the secret values in its
+/// member factory's default store, the one its members' launches read:
+/// `set_secret` answers `{}`, and the value lands in the default store under
+/// the gateway's configuration directory.
+#[test]
+fn without_a_named_store_a_secret_lands_in_the_default_store() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::start(scratch.path(), "info");
+    gateway.init(&scratch.path().join("state"), json!({"demo_llm": true}));
+    let listed = gateway.rpc("meta/realm_mcp/servers", json!({}));
+    assert!(listed["error"].is_null(), "{listed:#}");
+    let search = server("search", &["-c", "sleep 30"]);
+    let installed = gateway.rpc(
+        "meta/realm_mcp/install",
+        json!({"server": search, "expected_generation": generation(&listed)}),
+    );
+    assert!(installed["error"].is_null(), "{installed:#}");
+
+    let set = gateway.rpc(
+        "meta/realm_mcp/set_secret",
+        json!({"server": search, "env": SLOT, "value": SECRET}),
+    );
+    assert!(
+        set["error"].is_null(),
+        "the default store takes the value: {set:#}"
+    );
+    let store = scratch
+        .path()
+        .join("xdg-config")
+        .join("meerkat")
+        .join("credentials");
+    assert!(
+        holds(&store, SECRET),
+        "the value is in the default store under the gateway's configuration directory"
+    );
+}
+
+/// The gateway's own Console (`POST /console/rpc` on its listener) serves no
+/// realm MCP method, though the runtime behind it serves them on the stdio:
+/// each is method not found there, and nothing is written.
+#[test]
+fn the_gateways_own_console_serves_no_realm_mcp_method() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::start(scratch.path(), "info");
+    let init = gateway.init(
+        &scratch.path().join("state"),
+        with_credentials(scratch.path()),
+    );
+    let base = init["result"]["http_base_url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the gateway's listener: {init:#}"))
+        .to_string();
+    let listed = gateway.rpc("meta/realm_mcp/servers", json!({}));
+    assert!(listed["error"].is_null(), "the stdio serves it: {listed:#}");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("HTTP client");
+    for (method, params) in [
+        ("meta/realm_mcp/servers", json!({})),
+        (
+            "meta/realm_mcp/install",
+            json!({
+                "server": server("search", &["-c", "sleep 30"]),
+                "expected_generation": generation(&listed),
+            }),
+        ),
+    ] {
+        let answer: Value = client
+            .post(format!("{base}/console/rpc"))
+            .json(&json!({"jsonrpc": "2.0", "id": "console", "method": method, "params": params}))
+            .send()
+            .expect("console RPC")
+            .json()
+            .expect("console RPC JSON");
+        assert_eq!(
+            answer["error"]["code"],
+            json!(-32601),
+            "{method} is not served on the Console: {answer:#}"
+        );
+    }
+    let after = gateway.rpc("meta/realm_mcp/servers", json!({}));
+    assert_eq!(
+        after["result"]["servers"],
+        json!([]),
+        "the Console wrote nothing: {after:#}"
+    );
+}
+
+/// Whether a file under `dir` holds `needle`.
+fn holds(dir: &Path, needle: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            holds(&path, needle)
+        } else {
+            std::fs::read_to_string(&path).is_ok_and(|text| text.contains(needle))
+        }
+    })
 }

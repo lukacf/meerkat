@@ -65,6 +65,7 @@ impl Gateway {
             .arg("--persistent")
             .env("OPENAI_API_KEY", "sk-regression-test")
             .env("XDG_STATE_HOME", scratch.join("xdg-state"))
+            .env("XDG_CONFIG_HOME", scratch.join("xdg-config"))
             .current_dir(scratch)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

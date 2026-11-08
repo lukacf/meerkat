@@ -36,11 +36,19 @@ const VIEWER: &str = "viewer@example.test";
 const MANAGER: &str = "manager@example.test";
 const STAR: &str = "star@example.test";
 const STRANGER: &str = "stranger@example.test";
+/// Views both identities, manages the grants of `agent-a` only.
+const SCOPED: &str = "scoped@example.test";
+/// Views and manages `agent-a` only: `agent-b` is hidden from it.
+const NARROW: &str = "narrow@example.test";
 
 const IDENTITY: &str = "agent-a";
+/// The roster's second identity.
+const OTHER: &str = "agent-b";
 const GATED_TOOL: &str = "datetime";
 const TEN_MINUTES_MS: u64 = 600_000;
 const MANAGE: &str = "agent.tool_grants.manage";
+/// A grant id no grant holds.
+const UNKNOWN_GRANT: &str = "00000000-0000-4000-8000-000000000000";
 
 const ACCESS: &str = r#"
 enabled = true
@@ -60,6 +68,24 @@ actions = ["agent.tool_grants.manage"]
 id = "every-agent-verb"
 subjects = ["star@example.test"]
 actions = ["agent.*"]
+
+[[rules]]
+id = "scoped-viewer"
+subjects = ["scoped@example.test"]
+actions = ["agent.view"]
+agents = ["agent-a", "agent-b"]
+
+[[rules]]
+id = "narrow-viewer"
+subjects = ["narrow@example.test"]
+actions = ["agent.view"]
+agents = ["agent-a"]
+
+[[rules]]
+id = "one-identity-grant-managers"
+subjects = ["scoped@example.test", "narrow@example.test"]
+actions = ["agent.tool_grants.manage"]
+agents = ["agent-a"]
 "#;
 
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
@@ -87,8 +113,12 @@ grant_gated = {{ tools = ["{GATED_TOOL}"] }}
 }
 
 fn spec() -> DurableAgentSpec {
+    spec_of(IDENTITY)
+}
+
+fn spec_of(identity: &str) -> DurableAgentSpec {
     DurableAgentSpec {
-        identity: AgentIdentity::parse(IDENTITY).unwrap(),
+        identity: AgentIdentity::parse(identity).unwrap(),
         profile: ProfileName::from("worker"),
         addressability: AgentAddressability::Addressable,
         display_name: None,
@@ -103,12 +133,12 @@ fn spec() -> DurableAgentSpec {
     }
 }
 
-struct OneIdentityRoster;
+struct TwoIdentityRoster;
 
 #[async_trait]
-impl RosterProvider for OneIdentityRoster {
+impl RosterProvider for TwoIdentityRoster {
     async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
-        Ok(vec![spec()])
+        Ok(vec![spec(), spec_of(OTHER)])
     }
 }
 
@@ -128,7 +158,7 @@ restart_policy = "always"
         .to_string(),
         auth: AuthPolicy {
             default_provider: meerkat_meta::AuthProvider::GoogleOAuth,
-            email_allowlist: [ADMIN, VIEWER, MANAGER, STAR, STRANGER]
+            email_allowlist: [ADMIN, VIEWER, MANAGER, STAR, STRANGER, SCOPED, NARROW]
                 .iter()
                 .map(|email| (*email).to_string())
                 .collect(),
@@ -164,7 +194,7 @@ async fn console(state: &Path, access: Option<&str>) -> (UnifiedRuntime, axum::R
         .continuity_from_state_dir(state)
         .await
         .expect("open the state-dir identity substrate")
-        .roster_provider(Arc::new(OneIdentityRoster))
+        .roster_provider(Arc::new(TwoIdentityRoster))
         .identity_runtime_instance_id("meta-tool-grants-console")
         .default_llm_client(Arc::new(TestClient::default()));
     if let Some(access) = access {
@@ -215,11 +245,51 @@ async fn rpc(app: &axum::Router, subject: &str, method: &str, params: Value) -> 
 }
 
 fn grant_params() -> Value {
+    grant_params_for(IDENTITY)
+}
+
+fn grant_params_for(identity: &str) -> Value {
     json!({
-        "identity": IDENTITY,
+        "identity": identity,
         "target": {"kind": "tool", "name": GATED_TOOL},
         "duration_ms": TEN_MINUTES_MS,
     })
+}
+
+/// The id of a grant `subject` issued to `identity`, which must be issued.
+async fn issued(app: &axum::Router, subject: &str, identity: &str) -> String {
+    let granted = rpc(
+        app,
+        subject,
+        "meta/tool_grants/grant",
+        grant_params_for(identity),
+    )
+    .await;
+    assert!(granted["error"].is_null(), "{granted:#?}");
+    granted["result"]["grant"]["grant_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a grant id: {granted:#?}"))
+        .to_string()
+}
+
+/// The status of `identity`'s grant `grant_id`, as an admin lists it.
+async fn status_of(app: &axum::Router, identity: &str, grant_id: &str) -> Value {
+    let listed = rpc(
+        app,
+        ADMIN,
+        "meta/tool_grants/list",
+        json!({"identity": identity, "include_ended": true}),
+    )
+    .await;
+    listed["result"]["grants"]
+        .as_array()
+        .and_then(|grants| {
+            grants
+                .iter()
+                .find(|grant| grant["grant_id"] == json!(grant_id))
+        })
+        .map(|grant| grant["status"].clone())
+        .unwrap_or_else(|| panic!("{identity} lists {grant_id}: {listed:#?}"))
 }
 
 fn assert_access_denied(response: &Value, action: &str) {
@@ -302,6 +372,112 @@ async fn grant_and_revoke_need_the_manage_action_and_reads_need_agent_view() {
     .await;
     assert!(revoked["error"].is_null(), "{revoked:#?}");
     assert_eq!(revoked["result"]["changed"], json!(true), "{revoked:#?}");
+
+    // The audit records who revoked it.
+    let audit = rpc(
+        &app,
+        MANAGER,
+        "meta/tool_grants/audit",
+        json!({"identity": IDENTITY}),
+    )
+    .await;
+    let revoked_row = audit["result"]["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row["event"]["kind"] == json!("revoked") && row["event"]["grant_id"] == grant_id
+            })
+        })
+        .unwrap_or_else(|| panic!("the audit has the revoked row: {audit:#?}"));
+    assert_eq!(
+        revoked_row["event"]["actor"],
+        json!(MANAGER),
+        "the revoked row names the signed-in principal: {audit:#?}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A revoke is judged on its grant's identity under resource-scoped rules:
+/// a principal that may manage one identity's grants revokes them, and its
+/// revoke of another identity's grant, which it may view but not manage, is
+/// `access_denied` naming that identity, with the grant left active.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_console_revoke_is_judged_on_the_grants_identity_under_resource_scoped_rules() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console(temp.path(), Some(ACCESS)).await;
+    let own = issued(&app, ADMIN, IDENTITY).await;
+    let other = issued(&app, ADMIN, OTHER).await;
+
+    let denied = rpc(
+        &app,
+        SCOPED,
+        "meta/tool_grants/revoke",
+        json!({"grant_id": other}),
+    )
+    .await;
+    assert_access_denied(&denied, MANAGE);
+    assert_eq!(
+        denied["error"]["data"]["resource"],
+        json!(OTHER),
+        "the refusal names the identity the caller may view: {denied:#?}"
+    );
+    assert_eq!(
+        status_of(&app, OTHER, &other).await,
+        json!("active"),
+        "the refused revoke leaves the grant active"
+    );
+
+    let revoked = rpc(
+        &app,
+        SCOPED,
+        "meta/tool_grants/revoke",
+        json!({"grant_id": own}),
+    )
+    .await;
+    assert!(
+        revoked["error"].is_null(),
+        "a principal revokes the grants of the identity it manages: {revoked:#?}"
+    );
+    assert_eq!(revoked["result"]["changed"], json!(true), "{revoked:#?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// A revoke tells a caller that may not view the grant's identity nothing:
+/// it is answered exactly as a grant id no grant holds is (`not_found`, the
+/// same message), and the grant stays active.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_console_revoke_answers_a_caller_that_cannot_view_the_identity_as_for_an_unknown_grant() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console(temp.path(), Some(ACCESS)).await;
+    let other = issued(&app, ADMIN, OTHER).await;
+
+    for caller in [NARROW, STRANGER] {
+        let hidden = rpc(
+            &app,
+            caller,
+            "meta/tool_grants/revoke",
+            json!({"grant_id": other}),
+        )
+        .await;
+        let unknown = rpc(
+            &app,
+            caller,
+            "meta/tool_grants/revoke",
+            json!({"grant_id": UNKNOWN_GRANT}),
+        )
+        .await;
+        assert_eq!(refusal_kind(&hidden), "not_found", "{caller}");
+        assert_eq!(
+            hidden["error"].to_string().replace(&other, "GRANT"),
+            unknown["error"].to_string().replace(UNKNOWN_GRANT, "GRANT"),
+            "{caller}: the answer does not tell a hidden grant from an unknown one"
+        );
+    }
+    assert_eq!(
+        status_of(&app, OTHER, &other).await,
+        json!("active"),
+        "the hidden grant stays active"
+    );
     let _ = runtime.shutdown().await;
 }
 

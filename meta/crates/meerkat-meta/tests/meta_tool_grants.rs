@@ -567,6 +567,29 @@ async fn an_identity_grant_opens_a_gated_tool_of_a_meta_member_and_its_revoke_cl
         json!("revoked"),
         "{ended:#?}"
     );
+    let active = rig
+        .rpc("meta/tool_grants/list", json!({"identity": IDENTITY}))
+        .await;
+    assert_eq!(
+        active["result"]["grants"],
+        json!([]),
+        "without include_ended an ended grant is not listed: {active:#?}"
+    );
+    let audit = rig
+        .rpc("meta/tool_grants/audit", json!({"identity": IDENTITY}))
+        .await;
+    let revoked_row = audit["result"]["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["event"]["kind"] == json!("revoked"))
+        })
+        .unwrap_or_else(|| panic!("the audit has the revoked row: {audit:#?}"));
+    assert_eq!(
+        revoked_row["event"]["actor"],
+        Value::Null,
+        "the stdio host revokes as the operator, with no caller: {audit:#?}"
+    );
     rig.shutdown().await;
 }
 
@@ -845,6 +868,27 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
         ),
         other => panic!("the created identity is an entry: {other:?}"),
     }
+    // The host's roster lists the created identity too, so the identity
+    // runtime serves it and the registration check passes: the store-owned
+    // origin is what refuses the grant.
+    let identities = rig.runtime.identity_runtime().expect("identity runtime");
+    let keeper_spec = DurableAgentSpec {
+        identity: AgentIdentity::parse("keeper").unwrap(),
+        ..spec()
+    };
+    let registered = identities.runtime().register(keeper_spec).await;
+    assert!(
+        registered.is_ok(),
+        "Core answers the registration: {registered:?}"
+    );
+    assert!(
+        identities
+            .runtime()
+            .registered_spec(&AgentIdentity::parse("keeper").unwrap())
+            .await
+            .is_ok(),
+        "the identity runtime serves keeper"
+    );
 
     let refused = rig
         .rpc(
@@ -853,6 +897,129 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
         )
         .await;
     assert_eq!(refusal_kind(&refused), "subject_unknown");
+    rig.shutdown().await;
+}
+
+/// Only an identity grant of this gateway's mob is revoked here: a grant the
+/// runtime holds for another mob's identity, spelled like this mob's, is
+/// `not_found`, and stays active.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoke_answers_not_found_for_a_grant_of_another_mob() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let machine = rig
+        .runtime
+        .mob_runtime()
+        .session_service()
+        .expect("a session service")
+        .acquire_runtime_adapter(None)
+        .expect("the runtime adapter")
+        .expect("the runtime that owns the grants");
+    let member = meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY);
+    let target = meerkat::resolve_grant_target(
+        meerkat_contracts::ToolGrantTargetRequest::Tool {
+            name: GATED_TOOL.to_string(),
+        },
+        &meerkat_core::tool_grant::GrantGatedTools::default().with_tool(GATED_TOOL),
+    )
+    .expect("a gated target");
+    let grant = machine
+        .grant_tool(
+            meerkat_runtime::tool_grant::ToolGrantRequest {
+                subject: meerkat_core::tool_grant::ToolGrantSubject::member(
+                    "another-mob",
+                    &rig.runtime.mob_handle().live_incarnation(),
+                    member.as_str(),
+                ),
+                target,
+                issuer: meerkat_core::tool_grant::ToolGrantIssuer::Operator {
+                    caller: None,
+                    decision_ref: None,
+                },
+                reason: None,
+                window: meerkat_runtime::tool_grant::ToolGrantWindow::For(Duration::from_mins(10)),
+            },
+            None,
+        )
+        .await
+        .expect("the runtime issues another mob's grant");
+
+    let refused = rig
+        .rpc(
+            "meta/tool_grants/revoke",
+            json!({"grant_id": grant.record.grant_id.to_string()}),
+        )
+        .await;
+    assert_eq!(refusal_kind(&refused), "not_found");
+    let stored = machine
+        .tool_grant(&grant.record.grant_id)
+        .await
+        .expect("the grant reads");
+    assert!(
+        matches!(
+            stored.status,
+            meerkat_runtime::tool_grant::ToolGrantStatus::Active
+        ),
+        "the other mob's grant stays active: {:?}",
+        stored.status
+    );
+    rig.shutdown().await;
+}
+
+/// A seat Core refuses answers on the wire exactly as a delivery to the
+/// identity does (the identity runtime's typed error), never as a grant
+/// refusal kind. Here the host removed the identity, so Core tombstoned its
+/// name and refuses the door's declaration of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_whose_seat_core_refuses_answers_as_a_delivery_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let removed = rig
+        .runtime
+        .mob_handle()
+        .remove_identity(
+            meerkat_mob::IdentityRemoval::new(
+                meerkat_mob::IdentityOperation::new(
+                    "remove-agent-a",
+                    meerkat_core::approval::decision::Sha256Digest::of(b"remove-agent-a").as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY),
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            removed,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{removed:?}"
+    );
+
+    let granted = rig
+        .rpc(
+            "meta/tool_grants/grant",
+            json!({"identity": IDENTITY, "target": tool_target(), "duration_ms": TEN_MINUTES_MS}),
+        )
+        .await;
+    let sent = rig
+        .rpc(
+            "meta/send",
+            json!({"identity": IDENTITY, "content": "after the removal"}),
+        )
+        .await;
+    assert!(
+        sent["error"].is_object(),
+        "the delivery is refused: {sent:#?}"
+    );
+    assert_eq!(
+        (&granted["error"]["code"], &granted["error"]["data"]),
+        (&sent["error"]["code"], &sent["error"]["data"]),
+        "the grant answers the delivery's typed refusal: {granted:#?}\n{sent:#?}"
+    );
     rig.shutdown().await;
 }
 

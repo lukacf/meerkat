@@ -1638,6 +1638,7 @@ impl ComposedGateway {
             .env("ANTHROPIC_API_KEY", "sk-ant-regression-test")
             .env("OPENAI_API_KEY", "sk-regression-test")
             .env("XDG_STATE_HOME", workspace.join("xdg-state"))
+            .env("XDG_CONFIG_HOME", workspace.join("xdg-config"))
             .env("RUST_LOG", "error")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1772,7 +1773,8 @@ fn meta_gateway_takes_the_maximum_grant_lifetime_at_init() {
 }
 
 /// A maximum grant lifetime that is not a positive whole number of
-/// milliseconds within 2^53 - 1 refuses meta_gateway's init.
+/// milliseconds within 2^53 - 1 refuses meta_gateway's init, on the init's
+/// id and with the typed kind rpc_gateway answers.
 #[cfg(unix)]
 #[test]
 fn meta_gateway_refuses_an_invalid_maximum_grant_lifetime() {
@@ -1787,6 +1789,17 @@ fn meta_gateway_refuses_an_invalid_maximum_grant_lifetime() {
     .expect("the init is refused");
     let message = refused["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("tool_grants.max_lifetime_ms"), "{refused}");
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("tool_grant_lifetime_invalid"),
+        "{refused}"
+    );
+    assert_eq!(
+        refused["id"],
+        json!(1),
+        "answered on the init's id: {refused}"
+    );
 }
 
 /// A read-only console refuses the announcement methods that change state

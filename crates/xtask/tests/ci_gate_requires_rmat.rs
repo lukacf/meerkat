@@ -396,28 +396,16 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
             "{job} runs exactly when the plan selects it"
         );
     }
-    // The workspace rustdoc runs two parallel legs, default features and
-    // --all-features, for each of the plan's rows (Core's members and each
-    // product's packages the change reaches).
-    let rustdoc_legs = jobs
-        .get("rustdoc")
-        .and_then(|job| job.pointer("/strategy/matrix/features"))
-        .and_then(serde_json::Value::as_array)
-        .expect("the rustdoc job's features matrix");
-    assert_eq!(
-        rustdoc_legs,
-        &vec![
-            serde_json::Value::from("default"),
-            serde_json::Value::from("all")
-        ],
-        "the rustdoc lane runs a default-features leg and an all-features leg"
-    );
+    // The rustdoc job runs one entry per row and leg of the plan's
+    // rustdoc_matrix: Core's members with default features and with
+    // --all-features, each product's packages the change reaches with
+    // --all-features (the planner self-test pins each row's legs).
     assert_eq!(
         jobs.get("rustdoc")
-            .and_then(|job| job.pointer("/strategy/matrix/row"))
+            .and_then(|job| job.pointer("/strategy/matrix"))
             .and_then(serde_json::Value::as_str),
-        Some("${{ fromJSON(needs.changes.outputs.rustdoc_rows) }}"),
-        "each leg runs every rustdoc row the plan names"
+        Some("${{ fromJSON(needs.changes.outputs.rustdoc_matrix) }}"),
+        "the rustdoc job runs every row and leg the plan names"
     );
     // Each of these lanes runs in two waves (long rows first): the job holds
     // the first wave, its -rest copy the rest.
@@ -470,7 +458,7 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
         // Every crate of the row (Core's members, or a product's packages)
         // documented with rustdoc's lints denied, once per leg.
         "RUSTDOCFLAGS: -Dwarnings",
-        "RUSTDOC_FLAGS: ${{ matrix.row.flags }}",
+        "RUSTDOC_FLAGS: ${{ matrix.flags }}",
         "default) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going ;;",
         "all) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going --all-features ;;",
         "forbid_failure \"Governed JSONL\" \"${GOVERNED_JSONL_RESULT}\"",

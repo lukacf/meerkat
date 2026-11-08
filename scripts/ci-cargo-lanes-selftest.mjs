@@ -3580,15 +3580,18 @@ for (const path of [
     // part of the closure; no row holds a bin name twice (Cargo refuses to
     // document two bins of one name at once), and a product's later row
     // starts with a package whose bin an earlier row holds, so it splits
-    // only for that; every row's key is its own.
+    // only for that; every row's key is its own. Core's row runs both
+    // legs, a product's row the all-features leg only.
     const binNames = (name) =>
       WORKSPACE_BY_NAME.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
     const productRows = new Map();
     for (const row of plan.rustdoc_rows) {
       if (row.product === CORE) {
         assert.equal(row.flags, SELECTIONS.selections.get(CORE).flags, `${label}: Core's rustdoc row selects Core's members`);
+        assert.deepEqual(row.features, ["default", "all"], `${label}: Core's rustdoc row runs both legs`);
         continue;
       }
+      assert.deepEqual(row.features, ["all"], `${label}: rustdoc row ${row.name} runs the all-features leg only`);
       const names = row.flags.split(" ").filter((token) => token !== "-p");
       assert.equal(row.flags, names.map((name) => `-p ${name}`).join(" "), `${label}: rustdoc row ${row.name} is \`-p\` each`);
       const bins = names.flatMap(binNames);
@@ -3799,22 +3802,34 @@ for (const path of [
     assert.equal(out.floor_check_count, String(lock.products.floor_checks.length));
     assert.deepEqual(JSON.parse(out.floor_check_matrix).include.map((row) => row.product), lock.products.floor_checks);
     assert.equal(out.core_changed, "true");
-    // A pull request leaves the rustdoc lane to the push: its rows output is
-    // the placeholder the job's fromJSON needs.
+    // A pull request leaves the rustdoc lane to the push: its matrix output
+    // is the placeholder the job's fromJSON needs.
     assert.equal(out.rustdoc, "false");
-    assert.deepEqual(JSON.parse(out.rustdoc_rows).map((row) => row.name), ["none"]);
+    assert.deepEqual(JSON.parse(out.rustdoc_matrix).include.map((leg) => leg.name), ["none"]);
     const pushOut = Object.fromEntries(
       run(["--format", "github", "--event", "push", "--", "Cargo.toml"]).stdout.trim().split("\n")
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     );
-    const rows = JSON.parse(pushOut.rustdoc_rows);
-    assert.equal(rows[0].product, CORE);
-    assert.match(rows[0].flags, /^--workspace( --exclude \S+)+$/, "the rustdoc lane documents Core's members");
+    // One matrix entry per row and leg: Core's members with default features
+    // and with --all-features, every product's rows with --all-features.
+    const legs = JSON.parse(pushOut.rustdoc_matrix).include;
+    const coreLegs = legs.filter((leg) => leg.product === CORE);
+    assert.deepEqual(coreLegs.map((leg) => leg.features), ["default", "all"], "Core's members are documented in both legs");
+    for (const leg of coreLegs) {
+      assert.match(leg.flags, /^--workspace( --exclude \S+)+$/, "the rustdoc lane documents Core's members");
+    }
+    const productLegs = legs.filter((leg) => leg.product !== CORE);
     assert.deepEqual(
-      [...new Set(rows.slice(1).map((row) => row.product))],
+      [...new Set(productLegs.map((leg) => leg.product))],
       productNames.filter((product) => members(lock, product).length > 0),
       "and every product, in rows of its own, on a whole-workspace push",
     );
+    assert.deepEqual(
+      [...new Set(productLegs.map((leg) => leg.features))],
+      ["all"],
+      "a product's rows run the all-features leg only",
+    );
+    assert.equal(new Set(legs.map((leg) => `${leg.key} ${leg.features}`)).size, legs.length, "every leg names its own artifacts");
   }
 }
 

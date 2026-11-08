@@ -3112,7 +3112,11 @@ function plan(args) {
   // and the all-features leg builds every bin (Connect's two
   // toolkit_gateway bins, in meerkat-connect and toolkit-mobkit), so a
   // product's packages fill as few rows as hold no bin name twice, in
-  // order. `key` names a row's artifacts.
+  // order. `key` names a row's artifacts and `features` its legs: Core's
+  // members are documented with default features and with --all-features,
+  // a product's rows with --all-features only, which compiles every
+  // feature-gated doc of the product and so every link it makes into Core
+  // (a doc that only a build without some feature compiles is outside it).
   const binNames = (name) =>
     byName.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
   const docGroups = (names) => {
@@ -3133,7 +3137,7 @@ function plan(args) {
     ? []
     : [
       ...(result.core_changed
-        ? [{ name: CORE, key: CORE, product: CORE, flags: selections.selections.get(CORE).flags }]
+        ? [{ name: CORE, key: CORE, product: CORE, flags: selections.selections.get(CORE).flags, features: ["default", "all"] }]
         : []),
       ...byProduct(result.closure)
         .filter(([product]) => product !== CORE)
@@ -3146,6 +3150,7 @@ function plan(args) {
               key: groups.length > 1 ? `${product}-${index + 1}` : product,
               product,
               flags: group.map((name) => `-p ${name}`).join(" "),
+              features: ["all"],
             };
           });
         }),
@@ -3578,13 +3583,18 @@ function githubOutput(result) {
     }),
   );
   scalar("rustdoc", String(result.rustdoc));
-  // The rustdoc job's rows (each runs in both feature legs); a placeholder
-  // keeps fromJSON well-formed for a plan without rustdoc, whose job `if:`
-  // skips it.
-  const rustdocRows = result.rustdoc_rows ?? [];
+  // The rustdoc job's matrix: one entry per row and leg. A placeholder keeps
+  // fromJSON well-formed for a plan without rustdoc, whose job `if:` skips
+  // it.
+  const rustdocLegs = (result.rustdoc_rows ?? []).flatMap(({ features, ...row }) =>
+    features.map((leg) => ({ ...row, features: leg })));
   scalar(
-    "rustdoc_rows",
-    JSON.stringify(rustdocRows.length > 0 ? rustdocRows : [{ name: "none", key: "none", product: "none", flags: "" }]),
+    "rustdoc_matrix",
+    JSON.stringify({
+      include: rustdocLegs.length > 0
+        ? rustdocLegs
+        : [{ name: "none", key: "none", product: "none", flags: "", features: "default" }],
+    }),
   );
   scalar("core_changed", String(result.core_changed));
   scalar("core_paths_changed", String(result.core_paths_changed));

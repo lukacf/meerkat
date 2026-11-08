@@ -1593,19 +1593,22 @@ mod operator_connections {
         );
     }
 
-    /// Probe: an operator connection whose subscription fell behind still
-    /// presents every decision its operator acts for that opened while it
-    /// was open. More decisions open than the subscription holds before
-    /// the connection reads any of them; nothing tells the client to list.
+    /// An operator connection whose subscription fell behind still presents
+    /// every decision its operator acts for that opened while it was open.
+    /// More decisions open than the subscription holds, and more than one
+    /// page of the owner's list, before the connection reads any of them, so
+    /// the connection catches up over two pages; nothing tells the client to
+    /// list.
     #[tokio::test]
-    async fn probe_a_connection_that_falls_behind_presents_every_opening() {
+    async fn a_connection_that_falls_behind_presents_every_opening() {
         let root = tempfile::tempdir().expect("tempdir");
         let (_router, runtime) = persistent_router(root.path()).await;
         let decisions = runtime.decision_service();
         let Connection { operator, written } = Connection::open("stdio:operator:behind");
         let operator = Arc::new(operator);
         let openings = decisions.subscribe_openings();
-        let total = 300;
+        // More than one page of the owner's list: 700 at a page of 500.
+        let total = meerkat_core::approval::decision::DECISION_PAGE_MAX + 200;
         for index in 0..total {
             decisions
                 .hold(

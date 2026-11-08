@@ -472,6 +472,8 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireUnreadableToolGrant",
     "WireToolGrantAuditRow",
     "WireUnreadableToolGrantAuditRow",
+    "WireToolGrantGateView",
+    "WireMemberToolGrantGate",
     "GrantToolParams",
     "GrantToolResult",
     "RevokeToolGrantParams",
@@ -537,6 +539,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
     "WireToolGrantAuditEvent",
+    "WireToolGrantApplies",
     # Durable decision vocabulary. The request audience is closed; the result
     # vocabularies are tolerant; the refusal and the error data are closed.
     "DecisionAudienceRequest",

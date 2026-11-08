@@ -26339,7 +26339,7 @@
         ]
       },
       "ToolGrantTargetRequest": {
-        "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+        "description": "The target a grant request names: one tool name, a built-in tool family,\nwhose names the server takes at grant time, or an MCP server. Closed: a\nkind or a field this version does not know is refused, never ignored, so\na request is never read as wider than it asked.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -26374,6 +26374,33 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An MCP server: every tool it provides when a call or a boundary\nadjudicates the grant, or, with `tools`, only those of its tools\nnamed there (a non-empty list, which only narrows).",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           }
@@ -32229,10 +32256,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -32244,6 +32278,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -35289,10 +35327,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -35304,6 +35349,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -36560,10 +36609,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -36575,6 +36631,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -39002,10 +39062,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -39017,6 +39084,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -46326,7 +46397,7 @@
   },
   "ToolGrantTargetRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+    "description": "The target a grant request names: one tool name, a built-in tool family,\nwhose names the server takes at grant time, or an MCP server. Closed: a\nkind or a field this version does not know is refused, never ignored, so\na request is never read as wider than it asked.",
     "oneOf": [
       {
         "additionalProperties": false,
@@ -46361,6 +46432,33 @@
         "required": [
           "kind",
           "family"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "An MCP server: every tool it provides when a call or a boundary\nadjudicates the grant, or, with `tools`, only those of its tools\nnamed there (a non-empty list, which only narrows).",
+        "properties": {
+          "kind": {
+            "const": "mcp_server",
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "server"
         ],
         "type": "object"
       }

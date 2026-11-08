@@ -300,16 +300,19 @@ pub trait ToolVisibilityOwner: Send + Sync {
         })
     }
 
-    /// Replace this build's grant gate: the names it marked grant-gated.
+    /// Replace this build's grant gate: the names it marked grant-gated, the
+    /// MCP servers it gated, the unconfigured-servers mode, the servers it
+    /// configures ungated and the role entries it ignored as not mounted.
     /// Every open name closes, so a new build starts closed.
     ///
-    /// The default has no gate authority: it accepts an empty gate and
-    /// refuses any other, so a gated build fails closed on such an owner.
+    /// The default has no gate authority: it accepts a gate that records
+    /// nothing and refuses any other, so a gated build fails closed on such
+    /// an owner.
     fn replace_tool_grant_gate(
         &self,
-        gated: BTreeSet<ToolName>,
+        gate: crate::tool_grant::InstalledToolGrantGate,
     ) -> Result<(), ToolScopeApplyError> {
-        if gated.is_empty() {
+        if gate.is_empty() {
             Ok(())
         } else {
             Err(ToolScopeApplyError::Owner {
@@ -317,6 +320,23 @@ pub trait ToolVisibilityOwner: Send + Sync {
                     .to_string(),
             })
         }
+    }
+
+    /// Gate the names the MCP server `server` provides now: a model-request
+    /// boundary extends the gate this way for a server the gate gates. The
+    /// gated names only grow, and no name opens; an extension for a server
+    /// the gate does not gate is refused.
+    ///
+    /// The default has no gate authority and refuses.
+    fn extend_tool_grant_gate(
+        &self,
+        server: &str,
+        gated: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        let _ = (server, gated);
+        Err(ToolScopeApplyError::Owner {
+            message: "generated MeerkatMachine tool grant gate authority is required".to_string(),
+        })
     }
 
     /// Apply the gated names a live grant opens at this boundary. A set that
@@ -428,9 +448,17 @@ impl GeneratedToolVisibilityOwner {
 
     pub fn replace_tool_grant_gate(
         &self,
+        gate: crate::tool_grant::InstalledToolGrantGate,
+    ) -> Result<(), ToolScopeApplyError> {
+        self.owner.replace_tool_grant_gate(gate)
+    }
+
+    pub fn extend_tool_grant_gate(
+        &self,
+        server: &str,
         gated: BTreeSet<ToolName>,
     ) -> Result<(), ToolScopeApplyError> {
-        self.owner.replace_tool_grant_gate(gated)
+        self.owner.extend_tool_grant_gate(server, gated)
     }
 
     pub fn apply_tool_grant_open_set(
@@ -488,6 +516,15 @@ impl LocalToolVisibilityOwner {
     pub fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(SessionToolVisibilityState::default())),
+        }
+    }
+
+    /// A local owner whose fixed projection is `state`: for tests that need
+    /// a gate the owner reports without a generated machine.
+    #[cfg(test)]
+    pub(crate) fn with_state(state: SessionToolVisibilityState) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(state)),
         }
     }
 }
@@ -1164,7 +1201,39 @@ mod generated_visibility_test_owner {
             filter_witnesses: state_witness_map(state, "filter_visibility_witnesses")?,
             tool_grant_gated_names: state_string_set(state, "tool_grant_gated_names")?,
             tool_grant_open_names: state_string_set(state, "tool_grant_open_names")?,
+            tool_grant_gated_servers: server_names(state_string_set(
+                state,
+                "tool_grant_gated_servers",
+            )?),
+            tool_grant_gates_unconfigured_servers: state_bool(
+                state,
+                "tool_grant_gates_unconfigured_servers",
+            )?,
+            tool_grant_ungated_servers: server_names(state_string_set(
+                state,
+                "tool_grant_ungated_servers",
+            )?),
+            tool_grant_not_mounted_names: state_string_set(state, "tool_grant_not_mounted_names")?,
         })
+    }
+
+    /// Server names read through the string-set reader.
+    #[cfg(feature = "workspace-tests")]
+    fn server_names(names: BTreeSet<ToolName>) -> BTreeSet<String> {
+        names
+            .into_iter()
+            .map(|name| name.as_str().to_owned())
+            .collect()
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    fn kernel_server_set(servers: &BTreeSet<String>) -> KernelValue {
+        KernelValue::Set(
+            servers
+                .iter()
+                .map(|server| KernelValue::String(server.clone()))
+                .collect(),
+        )
     }
 
     #[cfg(feature = "workspace-tests")]
@@ -1389,14 +1458,44 @@ mod generated_visibility_test_owner {
 
         fn replace_tool_grant_gate(
             &self,
-            gated: BTreeSet<ToolName>,
+            gate: crate::tool_grant::InstalledToolGrantGate,
         ) -> Result<(), ToolScopeApplyError> {
             self.apply_for_apply(
                 input(
                     "ReplaceToolGrantGate",
-                    [("gated", kernel_string_set(&gated))],
+                    [
+                        ("gated", kernel_string_set(&gate.gated)),
+                        ("gated_servers", kernel_server_set(&gate.gated_servers)),
+                        (
+                            "gates_unconfigured_servers",
+                            KernelValue::Bool(gate.gates_unconfigured_servers),
+                        ),
+                        ("ungated_servers", kernel_server_set(&gate.ungated_servers)),
+                        (
+                            "not_mounted_names",
+                            kernel_string_set(&gate.not_mounted_names),
+                        ),
+                    ],
                 ),
                 "ReplaceToolGrantGate",
+            )?;
+            Ok(())
+        }
+
+        fn extend_tool_grant_gate(
+            &self,
+            server: &str,
+            gated: BTreeSet<ToolName>,
+        ) -> Result<(), ToolScopeApplyError> {
+            self.apply_for_apply(
+                input(
+                    "ExtendToolGrantGate",
+                    [
+                        ("server", KernelValue::String(server.to_owned())),
+                        ("gated", kernel_string_set(&gated)),
+                    ],
+                ),
+                "ExtendToolGrantGate",
             )?;
             Ok(())
         }
@@ -2094,7 +2193,7 @@ impl ToolScope {
                 require_filter_witnesses,
             ),
         ];
-        if let Some(closed) = Self::closed_grant_gate_filter(visibility_state) {
+        if let Some(closed) = Self::closed_grant_gate_filter(state, visibility_state) {
             filters.push(closed);
         }
         if let Some(allow) = &state.active_turn_allow {
@@ -2106,13 +2205,26 @@ impl ToolScope {
         Self::compose(&filters)
     }
 
-    /// The grant gate's layer: deny every gated name no live grant opened.
-    /// Like the policy layer it needs no witnesses, since a gated name may
-    /// not be mounted yet.
+    /// The grant gate's layer: deny every gated name no live grant opened,
+    /// and every base tool of an MCP server the gate gates whose name no live
+    /// grant opened, by its provenance, so a gated server's tool is hidden
+    /// from the moment it appears. Like the policy layer it needs no
+    /// witnesses, since a gated name may not be mounted yet.
     fn closed_grant_gate_filter(
+        state: &ToolScopeState,
         visibility_state: &SessionToolVisibilityState,
     ) -> Option<ToolFilter> {
-        let closed = visibility_state.closed_tool_grant_gated_names();
+        let mut closed = visibility_state.closed_tool_grant_gated_names();
+        closed.extend(
+            state
+                .base_tools
+                .iter()
+                .filter(|tool| {
+                    visibility_state
+                        .tool_is_closed_by_grant_gate(tool.name.as_str(), tool.provenance.as_ref())
+                })
+                .map(|tool| tool.name.clone()),
+        );
         (!closed.is_empty()).then(|| ToolFilter::Deny(closed.into_iter().collect()))
     }
 
@@ -2402,22 +2514,34 @@ impl ToolScope {
         ];
         // A closed gated name stays closed to the deferred catalog too: only
         // a live grant opens it, at a boundary.
-        if let Some(closed) = Self::closed_grant_gate_filter(&visibility_state) {
+        if let Some(closed) = Self::closed_grant_gate_filter(&state, &visibility_state) {
             filters.push(closed);
         }
         Ok(Self::compose(&filters).allows(name))
     }
 
     /// Replace this build's grant gate on the generated visibility owner:
-    /// the names the build marked grant-gated. Every open name closes.
+    /// the names, servers, mode, ungated servers and ignored names the build
+    /// resolved. Every open name closes.
     pub fn replace_tool_grant_gate(
         &self,
-        gated: BTreeSet<ToolName>,
+        gate: crate::tool_grant::InstalledToolGrantGate,
     ) -> Result<(), ToolScopeApplyError> {
-        if !gated.is_empty() {
+        if !gate.is_empty() {
             self.ensure_generated_authority_for_apply("installing a tool grant gate")?;
         }
-        self.visibility_owner.replace_tool_grant_gate(gated)
+        self.visibility_owner.replace_tool_grant_gate(gate)
+    }
+
+    /// Gate the names a gated MCP server provides now. The generated owner
+    /// refuses a server the gate does not gate, and opens nothing.
+    pub fn extend_tool_grant_gate(
+        &self,
+        server: &str,
+        gated: BTreeSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        self.ensure_generated_authority_for_apply("extending a tool grant gate")?;
+        self.visibility_owner.extend_tool_grant_gate(server, gated)
     }
 
     /// Apply the gated names a live grant opens at this boundary. The
@@ -2440,9 +2564,12 @@ impl ToolScope {
     }
 
     /// Whether the closed grant gate is the only layer hiding `name` at the
-    /// committed boundary: the name is gated, no live grant opened it, and
-    /// it would be visible had one opened it. Such a call goes on to the
-    /// dispatch gate, which adjudicates the grants and refuses it there.
+    /// committed boundary: the name is gated (by name, or by the MCP server
+    /// that provides it), no live grant opened it, and had one opened it the
+    /// tool would be visible, or loadable from the deferred catalog. Such a
+    /// call goes on to the dispatch gate, which adjudicates the grants and
+    /// refuses it there, so a closed gated tool behind the deferred catalog
+    /// is refused as one the model sees would be.
     pub fn hidden_only_by_closed_grant_gate(
         &self,
         name: &str,
@@ -2452,9 +2579,12 @@ impl ToolScope {
             .read()
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
         let mut visibility_state = self.visibility_owner.visibility_state()?;
-        if !visibility_state.tool_grant_gated_names.contains(name)
-            || visibility_state.tool_grant_open_names.contains(name)
-        {
+        let provenance = state
+            .base_tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.provenance.clone());
+        if !visibility_state.tool_is_closed_by_grant_gate(name, provenance.as_ref()) {
             return Ok(false);
         }
         visibility_state
@@ -2468,7 +2598,7 @@ impl ToolScope {
         Ok(state.base_tools.iter().any(|tool| {
             tool.name == name
                 && Self::tool_visibility(&state, &visibility_state, &composed, tool)
-                    == crate::tool_catalog::ToolCatalogVisibility::Visible
+                    != crate::tool_catalog::ToolCatalogVisibility::Hidden
         }))
     }
 
@@ -3825,7 +3955,11 @@ mod tests {
     fn closed_gated_names_are_hidden_and_opened_names_reappear() {
         let scope = scope_with_generated_visibility(tools(&["read_file", "shell", "shell_jobs"]));
         let gated = BTreeSet::from([ToolName::from("shell"), ToolName::from("shell_jobs")]);
-        scope.replace_tool_grant_gate(gated.clone()).unwrap();
+        scope
+            .replace_tool_grant_gate(crate::tool_grant::InstalledToolGrantGate::names(
+                gated.clone(),
+            ))
+            .unwrap();
         assert_eq!(
             scope.visible_tool_names().unwrap(),
             BTreeSet::from(["read_file".into()]),
@@ -3860,7 +3994,9 @@ mod tests {
         // A new build's gate closes every open name, the regated ones too.
         scope.apply_tool_grant_open_set(gated.clone()).unwrap();
         assert_eq!(scope.visible_tool_names().unwrap().len(), 3);
-        scope.replace_tool_grant_gate(gated).unwrap();
+        scope
+            .replace_tool_grant_gate(crate::tool_grant::InstalledToolGrantGate::names(gated))
+            .unwrap();
         assert_eq!(
             scope.visible_tool_names().unwrap(),
             BTreeSet::from(["read_file".into()]),
@@ -3894,7 +4030,9 @@ mod tests {
         let base: Arc<[Arc<ToolDef>]> = vec![Arc::clone(&visible), Arc::clone(&deferred)].into();
         let scope = scope_with_generated_projection_names(Arc::clone(&base), raw_set(&["deploy"]));
         scope
-            .replace_tool_grant_gate(BTreeSet::from(["deploy".into()]))
+            .replace_tool_grant_gate(crate::tool_grant::InstalledToolGrantGate::names(
+                BTreeSet::from(["deploy".into()]),
+            ))
             .unwrap();
 
         assert!(
@@ -3929,6 +4067,148 @@ mod tests {
             scope.visible_tool_names().unwrap(),
             BTreeSet::from(["deploy".into(), "visible".into()]),
             "the loaded tool appears once a grant opens it"
+        );
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    fn mcp_tool(name: &str, server: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            audience: Default::default(),
+            name: name.into(),
+            description: format!("{name} tool"),
+            input_schema: serde_json::json!({ "type": "object" }),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Mcp,
+                source_id: server.into(),
+                artifact: None,
+            }),
+        })
+    }
+
+    /// A gated MCP server's tools are hidden by their provenance from the
+    /// moment they appear, before any boundary gates their names; the
+    /// unconfigured-servers mode hides every server's tools but the ungated
+    /// servers', and never a callback tool's. A boundary gates a server's
+    /// names, and a name a live grant opens reappears; the gate refuses to
+    /// extend for a server it does not gate. A closed gated tool behind the
+    /// deferred catalog is hidden only by its gate, so its call goes on to
+    /// the dispatch gate.
+    #[cfg(feature = "workspace-tests")]
+    #[test]
+    fn a_gated_servers_tools_are_hidden_by_their_provenance() {
+        use crate::tool_grant::InstalledToolGrantGate;
+        let base: Arc<[Arc<ToolDef>]> = vec![
+            tools(&["read_file"])[0].clone(),
+            mcp_tool("open_ticket", "tickets"),
+            mcp_tool("today", "calendar"),
+            mcp_tool("send_mail", "mail"),
+        ]
+        .into();
+        let scope = scope_with_generated_visibility(Arc::clone(&base));
+        scope
+            .replace_tool_grant_gate(InstalledToolGrantGate {
+                gated_servers: BTreeSet::from(["tickets".to_string()]),
+                ..InstalledToolGrantGate::default()
+            })
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into(), "send_mail".into(), "today".into()]),
+            "a gated server's tool is hidden before its name is gated"
+        );
+        assert!(
+            scope
+                .hidden_only_by_closed_grant_gate("open_ticket")
+                .unwrap()
+        );
+        assert!(!scope.hidden_only_by_closed_grant_gate("today").unwrap());
+
+        scope
+            .replace_tool_grant_gate(InstalledToolGrantGate {
+                gates_unconfigured_servers: true,
+                ungated_servers: BTreeSet::from(["calendar".to_string()]),
+                ..InstalledToolGrantGate::default()
+            })
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into(), "today".into()]),
+            "the mode gates every server but the ungated ones"
+        );
+
+        scope
+            .extend_tool_grant_gate("mail", BTreeSet::from(["send_mail".into()]))
+            .unwrap();
+        assert!(
+            scope
+                .visibility_state()
+                .unwrap()
+                .tool_grant_gated_names
+                .contains("send_mail")
+        );
+        scope
+            .apply_tool_grant_open_set(BTreeSet::from(["send_mail".into()]))
+            .unwrap();
+        assert_eq!(
+            scope.visible_tool_names().unwrap(),
+            BTreeSet::from(["read_file".into(), "send_mail".into(), "today".into()])
+        );
+        let refused = scope
+            .extend_tool_grant_gate("calendar", BTreeSet::from(["today".into()]))
+            .expect_err("an ungated server never joins the gate");
+        assert!(
+            refused.to_string().contains("ExtendToolGrantGate"),
+            "the refusal comes from generated authority: {refused}"
+        );
+
+        let deferred =
+            scope_with_generated_projection_names(Arc::clone(&base), raw_set(&["open_ticket"]));
+        deferred
+            .replace_tool_grant_gate(InstalledToolGrantGate {
+                gated_servers: BTreeSet::from(["tickets".to_string()]),
+                ..InstalledToolGrantGate::default()
+            })
+            .unwrap();
+        assert!(
+            deferred
+                .hidden_only_by_closed_grant_gate("open_ticket")
+                .unwrap(),
+            "a closed gated tool behind the deferred catalog meets the dispatch gate"
+        );
+    }
+
+    /// An owner without gate authority refuses a gate that gates only an
+    /// MCP server, or only by the unconfigured-servers mode, as it refuses
+    /// gated names, so such a build fails closed; it accepts a gate that
+    /// records nothing, and refuses every extension.
+    #[test]
+    fn an_owner_without_gate_authority_refuses_a_server_gate() {
+        use crate::tool_grant::InstalledToolGrantGate;
+        let owner = LocalToolVisibilityOwner::new();
+        for gate in [
+            InstalledToolGrantGate {
+                gated_servers: BTreeSet::from(["tickets".to_string()]),
+                ..InstalledToolGrantGate::default()
+            },
+            InstalledToolGrantGate {
+                gates_unconfigured_servers: true,
+                ..InstalledToolGrantGate::default()
+            },
+            InstalledToolGrantGate {
+                not_mounted_names: BTreeSet::from(["shell".into()]),
+                ..InstalledToolGrantGate::default()
+            },
+        ] {
+            assert!(
+                ToolVisibilityOwner::replace_tool_grant_gate(&owner, gate.clone()).is_err(),
+                "{gate:?}"
+            );
+        }
+        ToolVisibilityOwner::replace_tool_grant_gate(&owner, InstalledToolGrantGate::default())
+            .expect("the empty gate needs no authority");
+        assert!(
+            ToolVisibilityOwner::extend_tool_grant_gate(&owner, "tickets", BTreeSet::new())
+                .is_err()
         );
     }
 

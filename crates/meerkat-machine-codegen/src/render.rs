@@ -556,6 +556,23 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     // or a stop (0.9.10).
     "CompleteUntilChangedSwitchTurnReconfigureRetired",
     "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    // The scoped tool grant gate's server gate (0.9.11): a model-request
+    // boundary's extension of the gate by a gated server's names, and the
+    // grant path's stage of a gated server. Both inputs are declared after
+    // every published one.
+    "ExtendToolGrantGateChangedIdle",
+    "ExtendToolGrantGateChangedAttached",
+    "ExtendToolGrantGateChangedRunning",
+    "ExtendToolGrantGateChangedRetired",
+    "ExtendToolGrantGateChangedStopped",
+    "ExtendToolGrantGateUnchangedIdle",
+    "ExtendToolGrantGateUnchangedAttached",
+    "ExtendToolGrantGateUnchangedRunning",
+    "ExtendToolGrantGateUnchangedRetired",
+    "ExtendToolGrantGateUnchangedStopped",
+    "SurfaceStageGatedAddIdle",
+    "SurfaceStageGatedAddAttached",
+    "SurfaceStageGatedAddRunning",
 ];
 
 // Append-only emission tails for the other machines, whose public

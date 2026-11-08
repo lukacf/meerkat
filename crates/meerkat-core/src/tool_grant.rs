@@ -71,12 +71,15 @@ pub enum GrantGateRefusal {
     NoGrantService,
 }
 
-/// The built-in tool families and tool names a build marks grant-gated.
+/// The built-in tool families, tool names and MCP servers a build marks
+/// grant-gated.
 ///
 /// A gated family is mounted as if enabled; its names, like the gated tool
-/// names, stay closed until a live grant opens them. Set per build (session
-/// options or a mob profile) and persisted with the session's tooling, so a
-/// resume restores it.
+/// names and every tool a gated MCP server provides, stay closed until a live
+/// grant opens them. With `unconfigured_mcp_servers` the build also gates
+/// every MCP server it does not configure ungated, at the build or attached
+/// later. Set per build (session options or a mob profile) and persisted with
+/// the session's tooling, so a resume restores it.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantGatedTools {
@@ -86,18 +89,36 @@ pub struct GrantGatedTools {
     /// Individual tool names, of any source.
     #[serde(default, skip_serializing_if = "ToolNameSet::is_empty")]
     pub tools: ToolNameSet,
+    /// MCP server names: every tool such a server provides is gated, from the
+    /// moment it appears. A gated server need not be configured: it may be
+    /// attached later.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub mcp_servers: BTreeSet<String>,
+    /// Gate every MCP server the build does not configure ungated: one an
+    /// installation provides, at the build or later, and one attached later
+    /// by any path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfigured_mcp_servers: bool,
 }
 
 impl GrantGatedTools {
     /// Every key a gate declares, exactly as the serde derive reads them. A
     /// definition parser compares an authored gate's keys against it, so a
     /// typo is reported instead of silently leaving the gate narrower.
-    pub const FIELD_NAMES: &'static [&'static str] = &["families", "tools"];
+    pub const FIELD_NAMES: &'static [&'static str] = &[
+        "families",
+        "tools",
+        "mcp_servers",
+        "unconfigured_mcp_servers",
+    ];
 
     /// Whether nothing is gated.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.families.is_empty() && self.tools.is_empty()
+        self.families.is_empty()
+            && self.tools.is_empty()
+            && self.mcp_servers.is_empty()
+            && !self.unconfigured_mcp_servers
     }
 
     /// Gate a built-in tool family.
@@ -114,12 +135,28 @@ impl GrantGatedTools {
         self
     }
 
+    /// Gate an MCP server.
+    #[must_use]
+    pub fn with_mcp_server(mut self, server: impl Into<String>) -> Self {
+        self.mcp_servers.insert(server.into());
+        self
+    }
+
+    /// Gate every MCP server the build does not configure ungated.
+    #[must_use]
+    pub fn with_unconfigured_mcp_servers(mut self) -> Self {
+        self.unconfigured_mcp_servers = true;
+        self
+    }
+
     /// Gate everything `other` gates too.
     pub fn extend(&mut self, other: &Self) {
         self.families.extend(other.families.iter().cloned());
         for name in other.tools.iter() {
             self.tools.insert(name.clone());
         }
+        self.mcp_servers.extend(other.mcp_servers.iter().cloned());
+        self.unconfigured_mcp_servers |= other.unconfigured_mcp_servers;
     }
 
     /// The entries of this gate that `other` does not gate.
@@ -137,7 +174,25 @@ impl GrantGatedTools {
                 rest.tools.insert(name.clone());
             }
         }
+        rest.mcp_servers.extend(
+            self.mcp_servers
+                .iter()
+                .filter(|server| !other.mcp_servers.contains(*server))
+                .cloned(),
+        );
+        rest.unconfigured_mcp_servers =
+            self.unconfigured_mcp_servers && !other.unconfigured_mcp_servers;
         rest
+    }
+
+    /// Whether this gate gates the MCP server `server` of a build that
+    /// configures the servers `configured`: the gate names it, or the gate
+    /// gates every server the build does not configure and `server` is not
+    /// one of them.
+    #[must_use]
+    pub fn gates_mcp_server(&self, server: &str, configured: &BTreeSet<String>) -> bool {
+        self.mcp_servers.contains(server)
+            || (self.unconfigured_mcp_servers && !configured.contains(server))
     }
 }
 
@@ -192,6 +247,99 @@ impl GatedToolTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty() && self.families.values().all(BTreeSet::is_empty)
+    }
+}
+
+/// A build's scoped tool grant gate as the generated visibility owner
+/// installs it (`ReplaceToolGrantGate`): what the session's machine records
+/// for the build until its next build.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledToolGrantGate {
+    /// The tool names the build gated, by name or through a gated family.
+    pub gated: BTreeSet<ToolName>,
+    /// The MCP servers the build gated: every tool such a server provides is
+    /// gated from the moment it appears.
+    pub gated_servers: BTreeSet<String>,
+    /// Whether the build gates every MCP server it does not configure
+    /// ungated, at the build or attached later.
+    pub gates_unconfigured_servers: bool,
+    /// The servers the build configures ungated: while the mode above is on,
+    /// the only servers it does not gate. Empty while the mode is off.
+    pub ungated_servers: BTreeSet<String>,
+    /// The role gate entries the build ignored as not mounted: never gated,
+    /// never open.
+    pub not_mounted_names: BTreeSet<ToolName>,
+}
+
+impl InstalledToolGrantGate {
+    /// The gate of `gated` names alone.
+    #[must_use]
+    pub fn names(gated: BTreeSet<ToolName>) -> Self {
+        Self {
+            gated,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the gate gates nothing: no name, no server and no mode. The
+    /// ignored names alone gate nothing.
+    #[must_use]
+    pub fn gates_nothing(&self) -> bool {
+        self.gated.is_empty() && self.gated_servers.is_empty() && !self.gates_unconfigured_servers
+    }
+
+    /// Whether the gate records nothing at all, its ignored names included.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.gates_nothing() && self.ungated_servers.is_empty() && self.not_mounted_names.is_empty()
+    }
+}
+
+/// The scoped tool grant gate a live build runs, as its session's machine
+/// records it: the gate the build installed, with the names a model-request
+/// boundary since gated for a gated server, and the gated names a live grant
+/// opened at the last boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunningToolGrantGate {
+    /// What the build gates now.
+    pub gate: InstalledToolGrantGate,
+    /// The gated names a live grant opened at the last boundary.
+    pub open: BTreeSet<ToolName>,
+}
+
+impl InstalledToolGrantGate {
+    /// Whether the gate gates the MCP server `server`: a server it names, or,
+    /// while it gates every server its build does not configure ungated, any
+    /// server outside its ungated servers.
+    #[must_use]
+    pub fn gates_server(&self, server: &str) -> bool {
+        self.gated_servers.contains(server)
+            || (self.gates_unconfigured_servers && !self.ungated_servers.contains(server))
+    }
+
+    /// Whether the gate gates what `target` names: its tool name, any name
+    /// of its family, or its MCP server.
+    #[must_use]
+    pub fn gates_target(&self, target: &ToolGrantTarget) -> bool {
+        match target {
+            ToolGrantTarget::McpServer { server, .. } => self.gates_server(server),
+            ToolGrantTarget::Tool { .. } | ToolGrantTarget::Family { .. } => {
+                target.names().any(|name| self.gated.contains(name))
+            }
+        }
+    }
+
+    /// Whether the build ignored what `target` names as not mounted: a name
+    /// target all of whose names it ignored. A server is never ignored.
+    #[must_use]
+    pub fn ignores_target(&self, target: &ToolGrantTarget) -> bool {
+        match target {
+            ToolGrantTarget::McpServer { .. } => false,
+            ToolGrantTarget::Tool { .. } | ToolGrantTarget::Family { .. } => {
+                let mut names = target.names().peekable();
+                names.peek().is_some() && names.all(|name| self.not_mounted_names.contains(name))
+            }
+        }
     }
 }
 
@@ -357,25 +505,68 @@ pub enum ToolGrantTarget {
         family: String,
         names: BTreeSet<ToolName>,
     },
+    /// An MCP server: every tool whose provenance is the server at
+    /// adjudication time, or, with `tools`, only those of its tools named
+    /// there. No snapshot, unlike a family: the installed server is the
+    /// surface. The names in `tools` only narrow: they open at most the named
+    /// tools the server itself provides.
+    McpServer {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<BTreeSet<ToolName>>,
+    },
 }
 
 impl ToolGrantTarget {
-    /// Whether the grant's target covers `name`.
+    /// Whether the grant's target covers the tool `name`, provided by the MCP
+    /// server `server` (`None` for a tool no MCP server provides).
     #[must_use]
-    pub fn covers(&self, name: &str) -> bool {
+    pub fn covers(&self, name: &str, server: Option<&str>) -> bool {
         match self {
             Self::Tool { name: target } => target.as_str() == name,
             Self::Family { names, .. } => names.contains(name),
+            Self::McpServer {
+                server: target,
+                tools,
+            } => {
+                server == Some(target.as_str())
+                    && tools.as_ref().is_none_or(|tools| tools.contains(name))
+            }
         }
     }
 
-    /// The names the target covers.
+    /// The names the target names: a tool's name, a family's names, a server
+    /// target's `tools` subset (none for a whole server, which covers its
+    /// tools by provenance).
     pub fn names(&self) -> impl Iterator<Item = &ToolName> {
         let (one, many) = match self {
             Self::Tool { name } => (Some(name), None),
             Self::Family { names, .. } => (None, Some(names)),
+            Self::McpServer { tools, .. } => (None, tools.as_ref()),
         };
         one.into_iter().chain(many.into_iter().flatten())
+    }
+
+    /// The MCP server a server target covers.
+    #[must_use]
+    pub fn mcp_server(&self) -> Option<&str> {
+        match self {
+            Self::McpServer { server, .. } => Some(server.as_str()),
+            Self::Tool { .. } | Self::Family { .. } => None,
+        }
+    }
+
+    /// Whether the target names no tool: an empty tool name, or a server
+    /// target whose `tools` subset is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Tool { name } => name.as_str().is_empty(),
+            Self::Family { names, .. } => names.is_empty(),
+            Self::McpServer { server, tools } => {
+                server.is_empty() || tools.as_ref().is_some_and(BTreeSet::is_empty)
+            }
+        }
     }
 }
 
@@ -565,14 +756,77 @@ fn format_unix_ms(unix_ms: u64) -> String {
 pub struct ToolGrantCall<'a> {
     /// The called tool's name.
     pub name: &'a str,
+    /// The MCP server that provides the called tool, from its provenance;
+    /// `None` for a tool no MCP server provides.
+    pub server: Option<&'a str>,
     /// The provider's call id, for the refusal audit row.
     pub call_id: &'a str,
     /// The run the call belongs to, when it belongs to one.
     pub run_id: Option<&'a crate::RunId>,
 }
 
-/// A session's scoped tool grants, as the agent's boundary and dispatch gate
-/// read them.
+/// What a model-request boundary adjudicates of a build's gate: the gated
+/// names (the session's machine's, after the boundary's extension) and the
+/// names each gated MCP server provides now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatedToolView {
+    gated: BTreeSet<ToolName>,
+    server_names: BTreeMap<String, BTreeSet<ToolName>>,
+}
+
+impl GatedToolView {
+    /// The view of the `gated` names, with each gated server's names now.
+    #[must_use]
+    pub fn new(
+        gated: BTreeSet<ToolName>,
+        server_names: BTreeMap<String, BTreeSet<ToolName>>,
+    ) -> Self {
+        Self {
+            gated,
+            server_names,
+        }
+    }
+
+    /// The gated names.
+    #[must_use]
+    pub fn gated(&self) -> &BTreeSet<ToolName> {
+        &self.gated
+    }
+
+    /// Whether `name` is gated.
+    #[must_use]
+    pub fn is_gated(&self, name: &str) -> bool {
+        self.gated.contains(name)
+    }
+
+    /// The gated names `target` covers now: the gated names it names, and
+    /// for a server target the gated names its server provides now, within
+    /// its `tools` subset.
+    #[must_use]
+    pub fn covered_by(&self, target: &ToolGrantTarget) -> BTreeSet<ToolName> {
+        match target {
+            ToolGrantTarget::McpServer { server, tools } => self
+                .server_names
+                .get(server)
+                .into_iter()
+                .flatten()
+                .filter(|name| {
+                    self.gated.contains(*name)
+                        && tools.as_ref().is_none_or(|tools| tools.contains(*name))
+                })
+                .cloned()
+                .collect(),
+            ToolGrantTarget::Tool { .. } | ToolGrantTarget::Family { .. } => target
+                .names()
+                .filter(|name| self.gated.contains(*name))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// A session's scoped tool grants, as the agent's boundary, dispatch gate and
+/// build read them.
 ///
 /// The runtime implements this over its grant store for the session's
 /// subjects. Every answer comes from the stored rows and the host clock read
@@ -580,16 +834,26 @@ pub struct ToolGrantCall<'a> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SessionToolGrants: Send + Sync {
-    /// The names of `gated` that a live grant opens at this moment.
-    async fn open_names(&self, gated: &GatedToolTable) -> Result<ToolNameSet, ToolGrantRefusal>;
+    /// The gated names of `view` that a live grant opens at this moment.
+    async fn open_names(&self, view: &GatedToolView) -> Result<ToolNameSet, ToolGrantRefusal>;
 
-    /// One call's admission. The clock is read after every await inside, so
-    /// the caller hands the call on with no await in between.
-    async fn admit_call(
+    /// One gated call's admission: a live grant that covers it admits it.
+    /// The caller has already decided the call is gated. The clock is read
+    /// after every await inside, so the caller hands the call on with no
+    /// await in between.
+    async fn admit_call(&self, call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal>;
+
+    /// Which of the MCP servers `servers` a live server grant covers at this
+    /// moment, with or without a `tools` subset: a build attaches a gated
+    /// server only while one does. A grant found past its deadline is
+    /// settled as expired by the build. The default covers none.
+    async fn granted_servers(
         &self,
-        gated: &GatedToolTable,
-        call: ToolGrantCall<'_>,
-    ) -> Result<(), ToolGrantRefusal>;
+        servers: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, ToolGrantRefusal> {
+        let _ = servers;
+        Ok(BTreeSet::new())
+    }
 
     /// The seam of a mob member's build over the same grants: it reads the
     /// member's identity subject first (`member` in the mob incarnation that
@@ -607,61 +871,121 @@ pub trait SessionToolGrants: Send + Sync {
     }
 }
 
-/// A build's grant gate: the session's grants and what the build gated.
+/// A build's grant gate: the session's grants, the gate the build installs,
+/// and the build's visibility owner, whose machine records the gate the build
+/// runs (the install, grown by each boundary's extension).
 ///
-/// The factory installs one on the agent (the boundary's open set) and on the
-/// outermost dispatch gate (each call's admission).
+/// The factory installs one on the agent (the boundary's extension and open
+/// set) and on the outermost dispatch gate (each call's admission).
 #[derive(Clone)]
 pub struct ToolGrantGate {
     grants: Arc<dyn SessionToolGrants>,
-    table: Arc<GatedToolTable>,
+    install: Arc<InstalledToolGrantGate>,
+    owner: crate::tool_scope::GeneratedToolVisibilityOwner,
 }
 
 impl ToolGrantGate {
-    /// The gate of `table` over `grants`.
+    /// The gate `install` over `grants`, read through `owner`, the build's
+    /// generated visibility owner.
     #[must_use]
-    pub fn new(grants: Arc<dyn SessionToolGrants>, table: GatedToolTable) -> Self {
+    pub fn new(
+        grants: Arc<dyn SessionToolGrants>,
+        install: InstalledToolGrantGate,
+        owner: crate::tool_scope::GeneratedToolVisibilityOwner,
+    ) -> Self {
         Self {
             grants,
-            table: Arc::new(table),
+            install: Arc::new(install),
+            owner,
         }
     }
 
-    /// What the build gated.
+    /// What the build installs.
     #[must_use]
-    pub fn table(&self) -> &GatedToolTable {
-        &self.table
+    pub fn install(&self) -> &InstalledToolGrantGate {
+        &self.install
     }
 
-    /// Whether `name` is gated.
+    /// Whether the tool `name`, provided by `provenance`, is gated by the
+    /// gate the build runs now: its name is gated, or an MCP server the gate
+    /// gates provides it. A gate that cannot be read gates every call, so a
+    /// gated tool never runs ungated.
     #[must_use]
-    pub fn is_gated(&self, name: &str) -> bool {
-        self.table.is_gated(name)
+    pub fn is_gated(&self, name: &str, provenance: Option<&crate::types::ToolProvenance>) -> bool {
+        match self.owner.visibility_state() {
+            Ok(state) => state.tool_is_grant_gated(name, provenance),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    tool = name,
+                    "the tool grant gate could not be read; the call is gated"
+                );
+                true
+            }
+        }
     }
 
-    /// The gated names a live grant opens at this moment.
+    /// The gated names of `view` a live grant opens at this moment.
     ///
     /// # Errors
     /// The seam's refusal when the grants cannot be read.
-    pub async fn open_names(&self) -> Result<ToolNameSet, ToolGrantRefusal> {
-        self.grants.open_names(&self.table).await
+    pub async fn open_names(&self, view: &GatedToolView) -> Result<ToolNameSet, ToolGrantRefusal> {
+        self.grants.open_names(view).await
     }
 
-    /// One call's admission.
+    /// One gated call's admission.
     ///
     /// # Errors
     /// The refusal that closes the call.
     pub async fn admit_call(&self, call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal> {
-        self.grants.admit_call(&self.table, call).await
+        self.grants.admit_call(call).await
+    }
+
+    /// The build's seam over the session's grants.
+    #[must_use]
+    pub fn grants(&self) -> &Arc<dyn SessionToolGrants> {
+        &self.grants
     }
 }
 
 impl std::fmt::Debug for ToolGrantGate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolGrantGate")
-            .field("table", &self.table)
+            .field("install", &self.install)
             .finish_non_exhaustive()
     }
+}
+
+/// A gate over `grants` that gates `names`, read through a fixed local
+/// owner: the gate of a build whose machine recorded exactly those names.
+#[cfg(test)]
+pub(crate) fn gate_over_names(grants: Arc<dyn SessionToolGrants>, names: &[&str]) -> ToolGrantGate {
+    let gated: BTreeSet<ToolName> = names.iter().map(|name| ToolName::from(*name)).collect();
+    gate_over_install(grants, InstalledToolGrantGate::names(gated))
+}
+
+/// A gate over `grants` that runs `install`, read through a fixed local owner
+/// whose machine recorded exactly that gate, with nothing open.
+#[cfg(test)]
+pub(crate) fn gate_over_install(
+    grants: Arc<dyn SessionToolGrants>,
+    install: InstalledToolGrantGate,
+) -> ToolGrantGate {
+    let state = crate::session::SessionToolVisibilityState {
+        tool_grant_gated_names: install.gated.clone(),
+        tool_grant_gated_servers: install.gated_servers.clone(),
+        tool_grant_gates_unconfigured_servers: install.gates_unconfigured_servers,
+        tool_grant_ungated_servers: install.ungated_servers.clone(),
+        tool_grant_not_mounted_names: install.not_mounted_names.clone(),
+        ..Default::default()
+    };
+    ToolGrantGate::new(
+        grants,
+        install,
+        crate::tool_scope::GeneratedToolVisibilityOwner::from_generated_authority(Arc::new(
+            crate::tool_scope::LocalToolVisibilityOwner::with_state(state),
+        )),
+    )
 }
 
 #[cfg(test)]
@@ -740,9 +1064,256 @@ mod tests {
                 .map(ToolName::from)
                 .collect(),
         };
-        assert!(target.covers("shell"));
-        assert!(!target.covers("shell_job_cancel"));
+        assert!(target.covers("shell", None));
+        assert!(!target.covers("shell_job_cancel", None));
         assert_eq!(target.names().count(), 2);
+        assert_eq!(target.mcp_server(), None);
+    }
+
+    /// A server target covers the tools whose provenance is its server, or
+    /// with `tools` only those of them it names; it names no tool of its own
+    /// otherwise, and an empty server name or `tools` subset is an empty
+    /// target. Its stored form is additive.
+    #[test]
+    fn a_server_target_covers_its_servers_tools_by_provenance() {
+        let whole = ToolGrantTarget::McpServer {
+            server: "tickets".into(),
+            tools: None,
+        };
+        assert!(whole.covers("open_ticket", Some("tickets")));
+        assert!(!whole.covers("open_ticket", Some("calendar")));
+        assert!(
+            !whole.covers("open_ticket", None),
+            "a tool no server provides is never a server's"
+        );
+        assert_eq!(whole.names().count(), 0);
+        assert_eq!(whole.mcp_server(), Some("tickets"));
+        assert!(!whole.is_empty());
+
+        let narrowed = ToolGrantTarget::McpServer {
+            server: "tickets".into(),
+            tools: Some(BTreeSet::from([ToolName::from("open_ticket")])),
+        };
+        assert!(narrowed.covers("open_ticket", Some("tickets")));
+        assert!(!narrowed.covers("close_ticket", Some("tickets")));
+        assert!(!narrowed.covers("open_ticket", Some("calendar")));
+        assert_eq!(narrowed.names().count(), 1);
+        assert_eq!(
+            serde_json::to_value(&narrowed).unwrap(),
+            serde_json::json!({"kind": "mcp_server", "server": "tickets", "tools": ["open_ticket"]})
+        );
+        assert_eq!(
+            serde_json::to_value(&whole).unwrap(),
+            serde_json::json!({"kind": "mcp_server", "server": "tickets"})
+        );
+
+        for empty in [
+            ToolGrantTarget::McpServer {
+                server: String::new(),
+                tools: None,
+            },
+            ToolGrantTarget::McpServer {
+                server: "tickets".into(),
+                tools: Some(BTreeSet::new()),
+            },
+        ] {
+            assert!(empty.is_empty(), "{empty:?}");
+        }
+    }
+
+    /// A gate's servers and its unconfigured-servers mode count as gating
+    /// something, join and subtract as its names do, and read in its key list.
+    #[test]
+    fn a_gate_counts_its_servers_and_its_mode() {
+        assert!(GrantGatedTools::default().is_empty());
+        let server = GrantGatedTools::default().with_mcp_server("tickets");
+        let mode = GrantGatedTools::default().with_unconfigured_mcp_servers();
+        assert!(!server.is_empty() && !mode.is_empty());
+
+        let mut joined = server.clone();
+        joined.extend(&mode);
+        assert_eq!(
+            joined,
+            GrantGatedTools::default()
+                .with_mcp_server("tickets")
+                .with_unconfigured_mcp_servers()
+        );
+        assert_eq!(joined.without(&server), mode);
+        assert_eq!(joined.without(&mode), server);
+        assert!(joined.without(&joined).is_empty());
+
+        let configured = BTreeSet::from(["calendar".to_string()]);
+        assert!(server.gates_mcp_server("tickets", &configured));
+        assert!(!server.gates_mcp_server("calendar", &configured));
+        assert!(mode.gates_mcp_server("tickets", &configured));
+        assert!(
+            !mode.gates_mcp_server("calendar", &configured),
+            "the mode leaves a server its build configures ungated"
+        );
+
+        let parsed: GrantGatedTools = serde_json::from_value(serde_json::json!({
+            "mcp_servers": ["tickets"],
+            "unconfigured_mcp_servers": true,
+        }))
+        .unwrap();
+        assert_eq!(parsed, joined);
+        assert_eq!(
+            serde_json::to_value(GrantGatedTools::default().with_family("shell")).unwrap(),
+            serde_json::json!({"families": ["shell"]}),
+            "an ungated server list and an unset mode are omitted"
+        );
+        for key in ["mcp_servers", "unconfigured_mcp_servers"] {
+            assert!(GrantGatedTools::FIELD_NAMES.contains(&key), "{key}");
+        }
+    }
+
+    /// The installed gate's one server predicate: a server it names, or
+    /// with the mode on any server outside its ungated servers. A target is
+    /// gated when a name it names is gated or its server is gated, and
+    /// ignored when every name it names was ignored as not mounted.
+    #[test]
+    fn the_installed_gate_judges_servers_and_targets() {
+        let gate = InstalledToolGrantGate {
+            gated: BTreeSet::from([ToolName::from("deploy")]),
+            gated_servers: BTreeSet::from(["tickets".to_string()]),
+            gates_unconfigured_servers: false,
+            ungated_servers: BTreeSet::new(),
+            not_mounted_names: BTreeSet::from([ToolName::from("shell")]),
+        };
+        assert!(gate.gates_server("tickets"));
+        assert!(!gate.gates_server("calendar"));
+        let moded = InstalledToolGrantGate {
+            gates_unconfigured_servers: true,
+            ungated_servers: BTreeSet::from(["calendar".to_string()]),
+            ..gate.clone()
+        };
+        assert!(moded.gates_server("mail"));
+        assert!(!moded.gates_server("calendar"));
+        assert!(!moded.gates_nothing());
+
+        let tool = |name: &str| ToolGrantTarget::Tool {
+            name: ToolName::from(name),
+        };
+        let server = |server: &str| ToolGrantTarget::McpServer {
+            server: server.into(),
+            tools: None,
+        };
+        assert!(gate.gates_target(&tool("deploy")));
+        assert!(!gate.gates_target(&tool("shell")));
+        assert!(gate.ignores_target(&tool("shell")));
+        assert!(!gate.ignores_target(&tool("deploy")));
+        assert!(gate.gates_target(&server("tickets")));
+        assert!(!gate.gates_target(&server("calendar")));
+        assert!(
+            !gate.ignores_target(&server("calendar")),
+            "a server is never ignored"
+        );
+
+        let ignored = InstalledToolGrantGate {
+            not_mounted_names: BTreeSet::from([ToolName::from("shell")]),
+            ..InstalledToolGrantGate::default()
+        };
+        assert!(ignored.gates_nothing() && !ignored.is_empty());
+        assert!(InstalledToolGrantGate::default().is_empty());
+    }
+
+    /// The view a boundary adjudicates: a name or family target opens the
+    /// gated names it names; a server target opens the gated names its
+    /// server provides now, within its `tools`, and nothing of another
+    /// server or of a name that is not gated.
+    #[test]
+    fn a_boundary_view_covers_a_servers_gated_names_now() {
+        let view = GatedToolView::new(
+            ["deploy", "open_ticket", "close_ticket"]
+                .into_iter()
+                .map(ToolName::from)
+                .collect(),
+            BTreeMap::from([(
+                "tickets".to_string(),
+                ["open_ticket", "close_ticket", "not_yet_gated"]
+                    .into_iter()
+                    .map(ToolName::from)
+                    .collect(),
+            )]),
+        );
+        let names = |names: &[&str]| -> BTreeSet<ToolName> {
+            names.iter().map(|name| ToolName::from(*name)).collect()
+        };
+        assert_eq!(
+            view.covered_by(&ToolGrantTarget::McpServer {
+                server: "tickets".into(),
+                tools: None,
+            }),
+            names(&["close_ticket", "open_ticket"])
+        );
+        assert_eq!(
+            view.covered_by(&ToolGrantTarget::McpServer {
+                server: "tickets".into(),
+                tools: Some(names(&["open_ticket", "elsewhere"])),
+            }),
+            names(&["open_ticket"])
+        );
+        assert!(
+            view.covered_by(&ToolGrantTarget::McpServer {
+                server: "calendar".into(),
+                tools: None,
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            view.covered_by(&ToolGrantTarget::Tool {
+                name: ToolName::from("deploy"),
+            }),
+            names(&["deploy"])
+        );
+        assert!(
+            view.covered_by(&ToolGrantTarget::Tool {
+                name: ToolName::from("read_file"),
+            })
+            .is_empty()
+        );
+        assert!(view.is_gated("open_ticket") && !view.is_gated("not_yet_gated"));
+    }
+
+    /// The one predicate every reader uses: a name the gate gates, or a tool
+    /// whose MCP provenance names a server the gate gates (with the mode on,
+    /// any MCP server outside the ungated ones); never a host's callback tool
+    /// or a bundle, which are no MCP provenance.
+    #[test]
+    fn a_tool_is_gated_by_name_or_by_its_mcp_server() {
+        use crate::types::{ToolProvenance, ToolSourceKind};
+        let source = |kind, source: &str| ToolProvenance {
+            kind,
+            source_id: source.into(),
+            artifact: None,
+        };
+        let state = crate::session::SessionToolVisibilityState {
+            tool_grant_gated_names: BTreeSet::from([ToolName::from("deploy")]),
+            tool_grant_gated_servers: BTreeSet::from(["tickets".to_string()]),
+            tool_grant_gates_unconfigured_servers: true,
+            tool_grant_ungated_servers: BTreeSet::from(["calendar".to_string()]),
+            tool_grant_open_names: BTreeSet::from([ToolName::from("open_ticket")]),
+            ..Default::default()
+        };
+        let tickets = source(ToolSourceKind::Mcp, "tickets");
+        assert!(state.tool_is_grant_gated("deploy", None));
+        assert!(state.tool_is_grant_gated("close_ticket", Some(&tickets)));
+        assert!(
+            state.tool_is_grant_gated("send_mail", Some(&source(ToolSourceKind::Mcp, "mail"))),
+            "the mode gates a server the build does not configure"
+        );
+        assert!(
+            !state.tool_is_grant_gated("today", Some(&source(ToolSourceKind::Mcp, "calendar")))
+        );
+        for kind in [ToolSourceKind::Callback, ToolSourceKind::RustBundle] {
+            let named = format!("{kind:?}");
+            assert!(
+                !state.tool_is_grant_gated("host_tool", Some(&source(kind, "mail"))),
+                "{named} provenance is never a server's"
+            );
+        }
+        assert!(!state.tool_is_closed_by_grant_gate("open_ticket", Some(&tickets)));
+        assert!(state.tool_is_closed_by_grant_gate("close_ticket", Some(&tickets)));
     }
 
     #[test]

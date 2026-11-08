@@ -341,8 +341,9 @@ pub use supervisor_bridge::{
 pub use tool_grant::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    ToolGrantSubjectRequest, ToolGrantTargetRequest, WireGrantGatedTools, WireToolGrant,
-    WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantExpiryDriver, WireToolGrantIssuer,
+    ToolGrantSubjectRequest, ToolGrantTargetRequest, WireGrantGatedTools, WireMemberToolGrantGate,
+    WireToolGrant, WireToolGrantApplies, WireToolGrantAuditEvent, WireToolGrantAuditRow,
+    WireToolGrantExpiryDriver, WireToolGrantGateView, WireToolGrantIssuer,
     WireToolGrantRefusalKind, WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
     WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
 };

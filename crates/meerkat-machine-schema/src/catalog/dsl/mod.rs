@@ -3526,6 +3526,12 @@ runtime_internal_inputs!(
         // request it staged: the switch-turn chain applies it beside
         // CompleteUntilChangedSwitchTurnReconfigure. No caller can ask for it.
         AbortUntilChangedSwitchTurnReconfigure,
+        // The scoped tool grant gate's server gate: a model-request boundary
+        // extends the gate with a gated server's names, and the grant path
+        // stages a gated server through the surface owner. No caller can ask
+        // for either.
+        ExtendToolGrantGate,
+        SurfaceStageGatedAdd,
     ]
 );
 

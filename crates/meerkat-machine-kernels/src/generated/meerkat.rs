@@ -14260,6 +14260,10 @@ pub struct State {
     pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
     pub tool_grant_gated_names: std::collections::BTreeSet<ToolName>,
     pub tool_grant_open_names: std::collections::BTreeSet<ToolName>,
+    pub tool_grant_gated_servers: std::collections::BTreeSet<String>,
+    pub tool_grant_gates_unconfigured_servers: bool,
+    pub tool_grant_ungated_servers: std::collections::BTreeSet<String>,
+    pub tool_grant_not_mounted_names: std::collections::BTreeSet<ToolName>,
     pub input_authority_bindings: std::collections::BTreeMap<String, String>,
     pub input_authority_batch_keys: std::collections::BTreeMap<String, String>,
     pub scoped_context_binding: Option<String>,
@@ -15053,6 +15057,19 @@ impl std::fmt::Debug for State {
             )
             .field("tool_grant_gated_names", &self.tool_grant_gated_names)
             .field("tool_grant_open_names", &self.tool_grant_open_names)
+            .field("tool_grant_gated_servers", &self.tool_grant_gated_servers)
+            .field(
+                "tool_grant_gates_unconfigured_servers",
+                &self.tool_grant_gates_unconfigured_servers,
+            )
+            .field(
+                "tool_grant_ungated_servers",
+                &self.tool_grant_ungated_servers,
+            )
+            .field(
+                "tool_grant_not_mounted_names",
+                &self.tool_grant_not_mounted_names,
+            )
             .field(
                 "input_authority_bindings",
                 &format_args!(
@@ -19086,6 +19103,10 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceToolGrantGate {
         pub gated: std::collections::BTreeSet<ToolName>,
+        pub gated_servers: std::collections::BTreeSet<String>,
+        pub gates_unconfigured_servers: bool,
+        pub ungated_servers: std::collections::BTreeSet<String>,
+        pub not_mounted_names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyToolGrantOpenSet {
@@ -19094,6 +19115,16 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbortUntilChangedSwitchTurnReconfigure {
         pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExtendToolGrantGate {
+        pub server: String,
+        pub gated: std::collections::BTreeSet<ToolName>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceStageGatedAdd {
+        pub surface_id: String,
+        pub now_ms: u64,
     }
 }
 
@@ -19529,6 +19560,8 @@ pub enum Input {
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
+    ExtendToolGrantGate(inputs::ExtendToolGrantGate),
+    SurfaceStageGatedAdd(inputs::SurfaceStageGatedAdd),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20129,6 +20162,8 @@ impl Input {
             Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
+            Self::ExtendToolGrantGate(_) => InputKind::ExtendToolGrantGate,
+            Self::SurfaceStageGatedAdd(_) => InputKind::SurfaceStageGatedAdd,
         }
     }
 }
@@ -20552,6 +20587,8 @@ pub enum InputKind {
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
+    ExtendToolGrantGate,
+    SurfaceStageGatedAdd,
 }
 
 pub mod signals {
@@ -26095,6 +26132,19 @@ pub enum TransitionId {
     RequestUntilChangedSwitchTurnPendingConflictRunning,
     CompleteUntilChangedSwitchTurnReconfigureRetired,
     CompleteUntilChangedSwitchTurnReconfigureStopped,
+    ExtendToolGrantGateChangedIdle,
+    ExtendToolGrantGateChangedAttached,
+    ExtendToolGrantGateChangedRunning,
+    ExtendToolGrantGateChangedRetired,
+    ExtendToolGrantGateChangedStopped,
+    ExtendToolGrantGateUnchangedIdle,
+    ExtendToolGrantGateUnchangedAttached,
+    ExtendToolGrantGateUnchangedRunning,
+    ExtendToolGrantGateUnchangedRetired,
+    ExtendToolGrantGateUnchangedStopped,
+    SurfaceStageGatedAddIdle,
+    SurfaceStageGatedAddAttached,
+    SurfaceStageGatedAddRunning,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26298,6 +26348,10 @@ pub fn initial_state() -> State {
         turn_tool_overlay_deny_names: Default::default(),
         tool_grant_gated_names: Default::default(),
         tool_grant_open_names: Default::default(),
+        tool_grant_gated_servers: Default::default(),
+        tool_grant_gates_unconfigured_servers: false,
+        tool_grant_ungated_servers: Default::default(),
+        tool_grant_not_mounted_names: Default::default(),
         input_authority_bindings: Default::default(),
         input_authority_batch_keys: Default::default(),
         scoped_context_binding: None,

@@ -466,9 +466,18 @@ where
     /// The dispatch gate then adjudicates the grants, so every refusal of a
     /// gated name has one site.
     pub(crate) fn call_reaches_tool_grant_gate(&self, name: &str) -> bool {
-        self.tool_grant_gate
-            .as_ref()
-            .is_some_and(|gate| gate.is_gated(name))
+        let Some(gate) = self.tool_grant_gate.as_ref() else {
+            return false;
+        };
+        // The call's provenance, from the dispatcher that serves it: a tool of
+        // a gated MCP server is gated by it from the moment it appears.
+        let provenance = self
+            .tools
+            .tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.provenance.clone());
+        gate.is_gated(name, provenance.as_ref())
             && self
                 .tool_scope
                 .hidden_only_by_closed_grant_gate(name)

@@ -7,6 +7,7 @@
 //! published machine state.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use meerkat_core::tool_grant::GrantGatedTools;
@@ -22,13 +23,19 @@ use crate::profile::{Profile, ToolConfig};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberGrantGate {
     /// What the build gates: the member's own gate and every role entry it
-    /// installs. A role tool name is gated from the moment it appears, so it
-    /// is always here; a role family is here when the member mounts it.
+    /// installs. A role tool name and a role MCP server are gated from the
+    /// moment they appear, so they are always here; a role family is here
+    /// when the member mounts it. The unconfigured-servers mode is here when
+    /// the member's own gate or its role's has it.
     pub gated: GrantGatedTools,
     /// The role families the member's switches and own gate leave off: no
     /// tool of theirs can appear within the build, so the build ignores
     /// them, never refusing for them.
     pub not_mounted: GrantGatedTools,
+    /// The MCP servers the member's own profile configures that the gate
+    /// does not name: while the unconfigured-servers mode is on, the only
+    /// servers the gate does not gate.
+    pub ungated_servers: BTreeSet<String>,
 }
 
 impl MemberGrantGate {
@@ -48,21 +55,31 @@ impl MemberGrantGate {
         let mut gate = Self {
             gated: own.grant_gated.clone(),
             not_mounted: GrantGatedTools::default(),
+            ungated_servers: BTreeSet::new(),
         };
-        let Some(role) = role else {
-            return gate;
-        };
-        let entries = role.grant_gated.without(&own.grant_gated);
-        for family in &entries.families {
-            if family_switch(own, family) == Some(false) {
-                gate.not_mounted.families.insert(family.clone());
-            } else {
-                gate.gated.families.insert(family.clone());
+        if let Some(role) = role {
+            let entries = role.grant_gated.without(&own.grant_gated);
+            for family in &entries.families {
+                if family_switch(own, family) == Some(false) {
+                    gate.not_mounted.families.insert(family.clone());
+                } else {
+                    gate.gated.families.insert(family.clone());
+                }
             }
+            for name in entries.tools.iter() {
+                gate.gated.tools.insert(name.clone());
+            }
+            gate.gated
+                .mcp_servers
+                .extend(entries.mcp_servers.iter().cloned());
+            gate.gated.unconfigured_mcp_servers |= entries.unconfigured_mcp_servers;
         }
-        for name in entries.tools.iter() {
-            gate.gated.tools.insert(name.clone());
-        }
+        gate.ungated_servers = own
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.clone())
+            .filter(|server| !gate.gated.mcp_servers.contains(server))
+            .collect();
         gate
     }
 }
@@ -222,5 +239,74 @@ impl super::MobHandle {
             &own.tools,
             role_profile.as_ref().map(|profile| &profile.tools),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stdio(name: &str) -> meerkat_core::McpServerConfig {
+        meerkat_core::McpServerConfig::stdio(
+            name,
+            format!("{name}-server"),
+            Vec::new(),
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// A member's gate joins its own gate with its role's current gate: a
+    /// role server and the role's unconfigured-servers mode are gated from
+    /// the moment they appear; the servers the member's own profile
+    /// configures and its gate does not name are its ungated servers, which
+    /// the mode leaves open; a role family its switches leave off is not
+    /// mounted.
+    #[test]
+    fn a_member_gate_joins_role_servers_and_the_mode_and_lists_its_ungated_servers() {
+        let own = ToolConfig {
+            shell: false,
+            mcp_servers: vec![stdio("calendar"), stdio("tickets")],
+            grant_gated: GrantGatedTools::default().with_mcp_server("tickets"),
+            ..ToolConfig::default()
+        };
+        let role = ToolConfig {
+            grant_gated: GrantGatedTools::default()
+                .with_family("shell")
+                .with_mcp_server("mail")
+                .with_unconfigured_mcp_servers(),
+            ..ToolConfig::default()
+        };
+        let gate = MemberGrantGate::resolve(&own, Some(&role));
+        assert_eq!(
+            gate.gated,
+            GrantGatedTools::default()
+                .with_mcp_server("mail")
+                .with_mcp_server("tickets")
+                .with_unconfigured_mcp_servers()
+        );
+        assert_eq!(
+            gate.not_mounted,
+            GrantGatedTools::default().with_family("shell")
+        );
+        assert_eq!(
+            gate.ungated_servers,
+            BTreeSet::from(["calendar".to_string()])
+        );
+        let named = gate.named();
+        assert!(named.gates_mcp_server("drive", &gate.ungated_servers));
+        assert!(named.gates_mcp_server("tickets", &gate.ungated_servers));
+        assert!(!named.gates_mcp_server("calendar", &gate.ungated_servers));
+
+        let alone = MemberGrantGate::resolve(&own, None);
+        assert_eq!(
+            alone.gated,
+            GrantGatedTools::default().with_mcp_server("tickets")
+        );
+        assert!(
+            !alone
+                .named()
+                .gates_mcp_server("drive", &alone.ungated_servers),
+            "without the mode an unnamed server is not gated"
+        );
     }
 }

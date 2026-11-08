@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use meerkat_core::tool_grant::{SessionToolGrants, ToolGrantId, ToolGrantSubject};
+use meerkat_core::tool_grant::{
+    InstalledToolGrantGate, RunningToolGrantGate, SessionToolGrants, ToolGrantId, ToolGrantSubject,
+};
 use meerkat_core::types::SessionId;
 
 use super::MeerkatMachine;
@@ -20,6 +22,31 @@ use crate::tool_grant::{
 };
 
 impl MeerkatMachine {
+    /// The scoped tool grant gate the session `session_id` runs now, as its
+    /// machine records it: the gate its build installed, the names a
+    /// boundary since gated for a gated server, and the names a live grant
+    /// opened at its last boundary. `None` when the session is not registered
+    /// here: this loads, registers and wakes nothing.
+    pub async fn tool_grant_gate(&self, session_id: &SessionId) -> Option<RunningToolGrantGate> {
+        let authority = {
+            let sessions = self.sessions.read().await;
+            Arc::clone(&sessions.get(session_id)?.dsl_authority)
+        };
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        Some(RunningToolGrantGate {
+            gate: InstalledToolGrantGate {
+                gated: state.tool_grant_gated_names.clone(),
+                gated_servers: state.tool_grant_gated_servers.clone(),
+                gates_unconfigured_servers: state.tool_grant_gates_unconfigured_servers,
+                ungated_servers: state.tool_grant_ungated_servers.clone(),
+                not_mounted_names: state.tool_grant_not_mounted_names.clone(),
+            },
+            open: state.tool_grant_open_names.clone(),
+        })
+    }
     /// This runtime's scoped tool grant service, over its store.
     #[must_use]
     pub fn tool_grant_service(&self) -> Arc<ToolGrantService> {

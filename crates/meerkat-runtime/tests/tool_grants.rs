@@ -15,15 +15,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use meerkat_core::ToolScope;
 use meerkat_core::session_owner_wake::{
     SessionOwnerWakeFuture, SessionOwnerWakeOutcome, SessionOwnerWakeRegistry, SessionOwnerWaker,
 };
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantCall, ToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRefusal,
-    ToolGrantSubject, ToolGrantTarget,
+    GatedToolTable, GatedToolView, InstalledToolGrantGate, ToolGrantCall, ToolGrantGate,
+    ToolGrantId, ToolGrantIssuer, ToolGrantRefusal, ToolGrantSubject, ToolGrantTarget,
 };
 use meerkat_core::types::{SessionId, ToolDef, ToolName, ToolProvenance, ToolSourceKind};
+use meerkat_core::{GeneratedToolVisibilityOwner, ToolScope};
 use meerkat_runtime::MeerkatMachine;
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SqliteRuntimeStore};
 use meerkat_runtime::tool_grant::{
@@ -149,10 +149,16 @@ fn shell_grant(session_id: &SessionId, lifetime: Duration) -> ToolGrantRequest {
 }
 
 /// A served session: its tool scope over the runtime's visibility owner,
-/// and its grant gate over the runtime's grants.
+/// and its grant gate over the runtime's grants, read through that owner.
 struct Served {
     scope: ToolScope,
     gate: ToolGrantGate,
+    owner: GeneratedToolVisibilityOwner,
+}
+
+/// The build's gate as the visibility owner installs it.
+fn gate_install() -> InstalledToolGrantGate {
+    InstalledToolGrantGate::names(gate_table().gated_names())
 }
 
 async fn serve(machine: &MeerkatMachine, session_id: &SessionId) -> Served {
@@ -169,27 +175,31 @@ async fn serve(machine: &MeerkatMachine, session_id: &SessionId) -> Served {
         .into_iter()
         .map(tool)
         .collect();
-    let scope = ToolScope::new_with_visibility_owner(
-        tools,
-        HashSet::new(),
-        HashSet::new(),
-        bindings.tool_visibility_owner().clone(),
-    )
-    .expect("tool scope");
-    let table = gate_table();
+    let owner = bindings.tool_visibility_owner().clone();
+    let scope =
+        ToolScope::new_with_visibility_owner(tools, HashSet::new(), HashSet::new(), owner.clone())
+            .expect("tool scope");
     scope
-        .replace_tool_grant_gate(table.gated_names())
+        .replace_tool_grant_gate(gate_install())
         .expect("the build installs its gate");
     Served {
         scope,
-        gate: ToolGrantGate::new(grants, table),
+        gate: ToolGrantGate::new(grants, gate_install(), owner.clone()),
+        owner,
     }
 }
 
 impl Served {
-    /// One model-request boundary, as the agent runs it.
+    /// One model-request boundary, as the agent runs it: no MCP server
+    /// serves these tools, so the view is the machine's gated names.
     async fn boundary(&self) -> Result<(), ToolGrantRefusal> {
-        match self.gate.open_names().await {
+        let gated = self
+            .scope
+            .visibility_state()
+            .expect("the gate reads")
+            .tool_grant_gated_names;
+        let view = GatedToolView::new(gated, BTreeMap::new());
+        match self.gate.open_names(&view).await {
             Ok(open) => {
                 self.scope
                     .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -219,6 +229,7 @@ impl Served {
         self.gate
             .admit_call(ToolGrantCall {
                 name,
+                server: None,
                 call_id,
                 run_id: None,
             })
@@ -1063,7 +1074,8 @@ async fn serve_member(
     ));
     Served {
         scope: session.scope,
-        gate: ToolGrantGate::new(grants, gate_table()),
+        gate: ToolGrantGate::new(grants, gate_install(), session.owner.clone()),
+        owner: session.owner,
     }
 }
 
@@ -1405,6 +1417,121 @@ async fn a_grant_ended_with_its_subject_explains_no_refusal() {
                 grant_id: revoked.record.grant_id.clone(),
             },
             "{backend:?}: an operator's revoke is cited"
+        );
+    }
+}
+
+/// A build asks which gated MCP servers a live server grant covers: a whole
+/// server grant and one narrowed to some of its tools both cover their
+/// server, a name grant covers none, and a server grant the build finds past
+/// its deadline covers nothing and is settled expired by the build. A
+/// boundary opens a server grant's gated names its server provides now,
+/// within its tools.
+#[tokio::test]
+async fn a_build_reads_which_gated_servers_a_live_server_grant_covers() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(
+            bindings
+                .tool_grants()
+                .expect("the runtime carries the session's grants"),
+        );
+        let server = |server: &str, tools: Option<&[&str]>| ToolGrantTarget::McpServer {
+            server: server.to_string(),
+            tools: tools.map(|tools| tools.iter().map(|tool| ToolName::from(*tool)).collect()),
+        };
+        for (target, lifetime) in [
+            (server("tickets", None), Duration::from_mins(10)),
+            (
+                server("calendar", Some(&["today"])),
+                Duration::from_mins(10),
+            ),
+            (server("mail", None), Duration::from_mins(1)),
+            (
+                ToolGrantTarget::Tool {
+                    name: ToolName::from("deploy"),
+                },
+                Duration::from_mins(10),
+            ),
+        ] {
+            machine
+                .grant_tool(
+                    ToolGrantRequest {
+                        subject: ToolGrantSubject::session(session_id.clone()),
+                        target,
+                        issuer: ToolGrantIssuer::operator(),
+                        reason: None,
+                        window: ToolGrantWindow::For(lifetime),
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        clock.set(T0 + 120_000);
+
+        let asked: BTreeSet<String> = ["tickets", "calendar", "mail", "deploy", "unknown"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            grants
+                .granted_servers(&asked)
+                .await
+                .expect("the grants read"),
+            BTreeSet::from(["calendar".to_string(), "tickets".to_string()]),
+            "{backend:?}"
+        );
+        assert!(
+            grants
+                .granted_servers(&BTreeSet::new())
+                .await
+                .expect("nothing asked reads nothing")
+                .is_empty()
+        );
+        let events = audit_events(durable.open().as_ref(), &session_id).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ToolGrantAuditEvent::Expired {
+                    driver: ToolGrantExpiryDriver::Build,
+                    ..
+                }
+            )),
+            "{backend:?}: the build settles the lapsed grant: {events:?}"
+        );
+
+        let names = |names: &[&str]| -> BTreeSet<ToolName> {
+            names.iter().map(|name| ToolName::from(*name)).collect()
+        };
+        let view = GatedToolView::new(
+            names(&["close_ticket", "deploy", "open_ticket", "today", "tomorrow"]),
+            BTreeMap::from([
+                (
+                    "tickets".to_string(),
+                    names(&["close_ticket", "open_ticket"]),
+                ),
+                ("calendar".to_string(), names(&["today", "tomorrow"])),
+            ]),
+        );
+        let open: BTreeSet<ToolName> = grants
+            .open_names(&view)
+            .await
+            .expect("the grants read")
+            .into_inner()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            open,
+            names(&["close_ticket", "deploy", "open_ticket", "today"]),
+            "{backend:?}"
         );
     }
 }

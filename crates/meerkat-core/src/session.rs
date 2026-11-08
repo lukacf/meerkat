@@ -4326,6 +4326,23 @@ pub struct SessionToolVisibilityState {
     /// first boundary adjudicates its grants.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub tool_grant_open_names: BTreeSet<ToolName>,
+    /// The MCP servers this build marked grant-gated: every tool a gated
+    /// server provides is gated, by its provenance, from the moment it
+    /// appears. Recomputed on every build, like `tool_grant_gated_names`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_gated_servers: BTreeSet<String>,
+    /// Whether this build gates every MCP server it does not configure
+    /// ungated (`tool_grant_ungated_servers`). Recomputed on every build.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tool_grant_gates_unconfigured_servers: bool,
+    /// The servers this build configures ungated: while the mode above is
+    /// on, the only MCP servers it does not gate. Recomputed on every build.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_ungated_servers: BTreeSet<String>,
+    /// The role gate entries this build ignored as not mounted: never gated
+    /// and never open. Recomputed on every build.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tool_grant_not_mounted_names: BTreeSet<ToolName>,
 }
 
 impl SessionToolVisibilityState {
@@ -4336,6 +4353,46 @@ impl SessionToolVisibilityState {
             .difference(&self.tool_grant_open_names)
             .cloned()
             .collect()
+    }
+
+    /// Whether this build's scoped tool grant gate gates the MCP server
+    /// `server`: a server the gate names, or, while the build gates every
+    /// server it does not configure ungated, any server outside its ungated
+    /// servers. The one server predicate every reader of the gate uses, as
+    /// the machine's guards do.
+    #[must_use]
+    pub fn tool_grant_gates_server(&self, server: &str) -> bool {
+        self.tool_grant_gated_servers.contains(server)
+            || (self.tool_grant_gates_unconfigured_servers
+                && !self.tool_grant_ungated_servers.contains(server))
+    }
+
+    /// Whether the tool `name`, provided by `provenance`, is grant-gated: its
+    /// name is gated, or it comes from an MCP server the gate gates. A host's
+    /// callback tool or bundle is never MCP provenance, so the
+    /// unconfigured-servers mode never gates it.
+    #[must_use]
+    pub fn tool_is_grant_gated(
+        &self,
+        name: &str,
+        provenance: Option<&crate::types::ToolProvenance>,
+    ) -> bool {
+        self.tool_grant_gated_names.contains(name)
+            || provenance.is_some_and(|provenance| {
+                provenance.kind == crate::types::ToolSourceKind::Mcp
+                    && self.tool_grant_gates_server(provenance.source_id.as_str())
+            })
+    }
+
+    /// Whether the gate closes the tool `name`, provided by `provenance`: it
+    /// is grant-gated and no live grant opened its name.
+    #[must_use]
+    pub fn tool_is_closed_by_grant_gate(
+        &self,
+        name: &str,
+        provenance: Option<&crate::types::ToolProvenance>,
+    ) -> bool {
+        self.tool_is_grant_gated(name, provenance) && !self.tool_grant_open_names.contains(name)
     }
 
     /// Deterministic projection of the generated CallingLlm visibility

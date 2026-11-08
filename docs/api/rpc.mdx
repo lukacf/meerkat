@@ -155,7 +155,7 @@ of this full catalog.
 | `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval audit records |
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
-| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's or a mob member identity's grant-gated tool name or built-in tool family for a bounded window |
+| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window |
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
 | `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first |
 | `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's or a mob member identity's scoped tool grants |
@@ -828,9 +828,12 @@ During execution, `session/event` notifications are emitted (see
 </ParamField>
 
 <ParamField body="grant_gated_tools" type="object | null" default="null">
-  Scoped tool grant gate, `{"families": [...], "tools": [...]}`: built-in tool
-  families and tool names the session mounts hidden and refuses at dispatch
-  until a live grant opens them (see [Scoped tool grants](#scoped-tool-grants)).
+  Scoped tool grant gate, `{"families": [...], "tools": [...], "mcp_servers": [...], "unconfigured_mcp_servers": true}`:
+  built-in tool families, tool names and MCP servers whose tools the session
+  mounts hidden and refuses at dispatch until a live grant opens them (see
+  [Scoped tool grants](#scoped-tool-grants)). `unconfigured_mcp_servers` gates
+  every MCP server the session does not configure, so a server a later
+  `mcp/add` attaches is gated too.
   The session records its gate. A field the gate does not know is an invalid
   parameter, and a gate no grant could honour (an unknown or disabled family,
   a name nothing mounts) fails the session's build with invalid params whose
@@ -2064,10 +2067,14 @@ a decision on an approval the pipe never presented is refused.
 ## Scoped tool grants
 
 A session created with `grant_gated_tools` mounts its gated tool families and
-names hidden: the model is not shown them and every call is refused until a
+names hidden, and the tools of its gated MCP servers too, from the moment they
+appear: the model is not shown them and every call is refused until a
 live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
 A mob member's build gates what its profile's `tools.grant_gated` and its
-role's current gate name. `tool_grants/grant`, `tool_grants/revoke`,
+role's current gate name; a gated MCP server a member's profile configures
+starts no process until a live grant of that server covers it at the member's
+build, so after such a grant the member connects it at its next build (a
+`mob/respawn`, for one). `tool_grants/grant`, `tool_grants/revoke`,
 `tool_grants/list` and `tool_grants/audit` manage the grants of a session or
 of a mob member identity. They read and write grant rows only: no method
 loads, registers or wakes the session or the member.
@@ -2107,9 +2114,17 @@ loads, registers or wakes the session or the member.
 
 - **`tool_grants/grant`** opens a `target` for the `subject`: a tool name
   (`{"kind": "tool", "name": ...}`) the subject's gate names or a gated family
-  provides, or a family the gate names (`{"kind": "family", "family": ...}`;
+  provides, a family the gate names (`{"kind": "family", "family": ...}`;
   the server fills in `names` with the names the family can provide, so omit
-  them). The subject is a session (`{"kind": "session", "session_id": ...}`),
+  them), or an MCP server the gate gates (`{"kind": "mcp_server", "server":
+  ..., "tools": [...]}`): every tool that server provides when a boundary or
+  a call adjudicates the grant, or, with `tools` (a non-empty list), only those
+  of its tools named there. A server is gated when the gate names it, or when
+  the gate's `unconfigured_mcp_servers` is on and the subject's build does not
+  configure it; a grant of a server a session configured itself opens
+  nothing, since that server is not gated. A tool name only a gated server
+  provides is no `tool` target (`target_not_gated`, whose message names the
+  server form). The subject is a session (`{"kind": "session", "session_id": ...}`),
   whose recorded gate the target must be in, or a mob member identity
   (`{"kind": "identity", "mob_id": ..., "identity": ...}`), which must be in
   the mob's roster and whose gate is the one its next build resolves: its
@@ -2120,7 +2135,12 @@ loads, registers or wakes the session or the member.
   host's maximum lifetime (24 hours by default). `decision_ref`, when given,
   is the host's reference to the decision it made before issuing (non-empty,
   at most 1024 bytes, no control character): the grant's `issuer` records it,
-  as attribution only. A session before or during its first turn is granted
+  as attribution only. An identity grant answers `applies`, whether it
+  applies to the member's running build: `now` (that build gates the
+  target), `not_mounted` (that build, or with no live build the next one,
+  ignores the target as not mounted) or `at_next_build` (the member is not
+  live here, or its live build predates the gate that names the target). It
+  is advisory: the grant is issued either way. A session before or during its first turn is granted
   from its staged build. A gate no grant could honour fails the session's
   build, which a deferred create reports at its first `turn/start`.
 - **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
@@ -2130,10 +2150,16 @@ loads, registers or wakes the session or the member.
 - **`tool_grants/list`** answers the subject's grants, each due one settled as
   `expired` first. Ended grants (`expired`, `revoked`) are listed only with
   `include_ended`; `unreadable` names any stored grant this server cannot read
-  (written by a newer version, or damaged), which opens nothing.
+  (written by a newer version, or damaged), which opens nothing. For a member
+  identity in the roster it also answers the member's `gate`: `running`, what
+  its live build gates (its gated names under `tools`, with its gated servers
+  and `unconfigured_mcp_servers`) and the names it ignored as not mounted, or
+  `null` when no build of the member is live here; and `next_build`, the gate
+  its next build resolves, split the same way. Advisory, like `applies`.
 - **`tool_grants/audit`** answers a page of the subject's audit log, `granted`,
   `expired` (with the `driver` that observed it: `timer`, `boundary`,
-  `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`
+  `dispatch`, `read`, `revoke` or `build`, a build reading which gated servers
+  a grant covers), `revoked` and `refused` rows, in `sequence`
   order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
   a full page carries `next_sequence`, the next page's `after_sequence`. A row
   this server cannot read is named in `unreadable` with its `sequence`, and the

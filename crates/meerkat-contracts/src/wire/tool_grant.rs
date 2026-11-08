@@ -12,11 +12,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A scoped tool grant gate: the built-in tool families and the tool names a
-/// build mounts hidden and refuses at dispatch until a live grant opens them.
-/// A session's build takes it on `session/create` (`grant_gated_tools`); a
-/// mob profile declares its members' (`tools.grant_gated`). A field this
-/// version does not know is refused, never ignored.
+/// A scoped tool grant gate: the built-in tool families, the tool names and
+/// the MCP servers a build mounts hidden and refuses at dispatch until a live
+/// grant opens them. A session's build takes it on `session/create`
+/// (`grant_gated_tools`); a mob profile declares its members'
+/// (`tools.grant_gated`). A field this version does not know is refused,
+/// never ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -27,13 +28,26 @@ pub struct WireGrantGatedTools {
     /// Tool names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// MCP server names: every tool such a server provides is gated, from
+    /// the moment it appears. A gated server need not be configured: it may
+    /// be attached later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    /// Gate every MCP server the build does not configure itself: one an
+    /// installation provides, at the build or later, and one attached later
+    /// by any path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfigured_mcp_servers: bool,
 }
 
 impl WireGrantGatedTools {
     /// Whether nothing is gated: an empty gate is omitted where it rides.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.families.is_empty() && self.tools.is_empty()
+        self.families.is_empty()
+            && self.tools.is_empty()
+            && self.mcp_servers.is_empty()
+            && !self.unconfigured_mcp_servers
     }
 }
 
@@ -44,6 +58,8 @@ impl From<WireGrantGatedTools> for meerkat_core::tool_grant::GrantGatedTools {
         for tool in wire.tools {
             gate.tools.insert(tool);
         }
+        gate.mcp_servers.extend(wire.mcp_servers);
+        gate.unconfigured_mcp_servers = wire.unconfigured_mcp_servers;
         gate
     }
 }
@@ -55,6 +71,8 @@ impl From<&meerkat_core::tool_grant::GrantGatedTools> for WireGrantGatedTools {
         Self {
             families: gate.families.iter().cloned().collect(),
             tools,
+            mcp_servers: gate.mcp_servers.iter().cloned().collect(),
+            unconfigured_mcp_servers: gate.unconfigured_mcp_servers,
         }
     }
 }
@@ -72,10 +90,10 @@ pub enum ToolGrantSubjectRequest {
     Identity { mob_id: String, identity: String },
 }
 
-/// The target a grant request names: one tool name, or a built-in tool
-/// family, whose names the server takes at grant time. Closed: a kind or a
-/// field this version does not know is refused, never ignored, so a request
-/// is never read as wider than it asked.
+/// The target a grant request names: one tool name, a built-in tool family,
+/// whose names the server takes at grant time, or an MCP server. Closed: a
+/// kind or a field this version does not know is refused, never ignored, so
+/// a request is never read as wider than it asked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -84,6 +102,14 @@ pub enum ToolGrantTargetRequest {
     Tool { name: String },
     /// A built-in tool family.
     Family { family: String },
+    /// An MCP server: every tool it provides when a call or a boundary
+    /// adjudicates the grant, or, with `tools`, only those of its tools
+    /// named there (a non-empty list, which only narrows).
+    McpServer {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+    },
 }
 
 /// Whose grant a record names: a session, or (in a later version) a mob
@@ -102,8 +128,8 @@ pub enum WireToolGrantSubject {
     Unknown,
 }
 
-/// What a grant record opens: one tool name, or a built-in tool family with
-/// the names the server took for it at grant time.
+/// What a grant record opens: one tool name, a built-in tool family with
+/// the names the server took for it at grant time, or an MCP server's tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -115,6 +141,13 @@ pub enum WireToolGrantTarget {
         family: String,
         #[serde(default)]
         names: Vec<String>,
+    },
+    /// An MCP server: every tool it provides, or only those of its tools
+    /// named in `tools`.
+    McpServer {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
     },
     /// Forward compatibility: a target kind this version does not know.
     /// The server never sends it.
@@ -223,6 +256,55 @@ pub struct GrantToolParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GrantToolResult {
     pub grant: WireToolGrant,
+    /// For an identity grant: whether it applies to the member's running
+    /// build now. Advisory: the grant is issued either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies: Option<WireToolGrantApplies>,
+}
+
+/// Whether an identity grant applies to the member's running build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireToolGrantApplies {
+    /// The identity's live member build runs a gate that covers the target.
+    Now,
+    /// The target is not mounted: the live build ignored it, or, with no
+    /// live build, the next build cannot mount it.
+    NotMounted,
+    /// The member's next build applies it: the member is not live here, or
+    /// its live build predates the gate that covers the target.
+    AtNextBuild,
+    /// Forward compatibility: a value this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A build's tool grant gate: what it gates, and the role entries it
+/// ignores as not mounted (never gated, never open).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolGrantGateView {
+    #[serde(default)]
+    pub gated: WireGrantGatedTools,
+    #[serde(default)]
+    pub not_mounted: WireGrantGatedTools,
+}
+
+/// A mob member identity's tool grant gate, as `tool_grants/list` answers
+/// it: what its live build runs, and what its next build resolves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMemberToolGrantGate {
+    /// What the identity's live member build gates now (its gated names
+    /// under `tools`, with its gated servers and the unconfigured-servers
+    /// mode) and the names it ignored as not mounted; `null` when no build
+    /// of the member is live on this server.
+    pub running: Option<WireToolGrantGateView>,
+    /// The gate the member's next build resolves: its own gate joined with
+    /// its role's current gate.
+    pub next_build: WireToolGrantGateView,
 }
 
 /// `tool_grants/revoke` parameters.
@@ -263,6 +345,10 @@ pub struct ListToolGrantsResult {
     /// Rows of the subject the server cannot read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<WireUnreadableToolGrant>,
+    /// For an identity subject: the member's gate, running and next build.
+    /// Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<WireMemberToolGrantGate>,
 }
 
 /// `tool_grants/audit` parameters: a page of the subject's audit log.
@@ -289,6 +375,8 @@ pub enum WireToolGrantExpiryDriver {
     Dispatch,
     Read,
     Revoke,
+    /// A build reading which gated MCP servers a live grant covers.
+    Build,
     /// Forward compatibility: a driver this version does not know. The
     /// server never sends it.
     #[serde(other)]

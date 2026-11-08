@@ -115,6 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A rule that grants `operator.memory.read` now reads only the caller's own
   operator memory; grant `operator.memory.read_any` too where a role reads
   every person's.
+- A steward prompt bundle a host supplies needs the new `operator_proposals`
+  phase, as the embedded bundle has it: `StewardProfile::load` refuses a
+  bundle without it, and a dream fails on one while a person's operator
+  proposal is pending.
 
 ### Added
 
@@ -162,21 +166,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   too). `operator.memory.read` reads the caller's own operator memory.
 - With the operator scope on, the `memory` tool files an `operator_said`
   fact only as a proposal to the operator memory of the person whose own
-  message started the run, never in the agent's own memory, so other
-  people's turns do not recall it. A run without such a person (no
-  requester, a carried request, a service, a governed run) files nothing
-  and gets a typed tool error that names the alternative (`data.kind`
-  `operator_fact_without_a_person`); an `operator_said` update is refused
-  (`operator_fact_update_refused`), and so is such a fact on a memory store
-  that keeps no proposals (`operator_memory_unavailable`). With the
-  operator scope off (the default), an `operator_said` fact stays the
-  agent's own memory, as before.
-- The steward never changes a person's operator memory: it accepts a
-  person's proposal into that person's operator memory only, refuses
-  (typed) every dream op that would supersede, tombstone, retier or copy an
-  operator record, or name an operator key, refuses to promote a person's
-  proposal or record to a mob scope, and no longer sees a person's
-  operator records in a dream, so no promotion gate shows them.
+  message started the run, never in the agent's own memory or a mob
+  proposal, so other people's turns do not recall it. A run without such a
+  person (no requester, a carried request, a service, a governed run) files
+  nothing and gets a typed tool error that names the alternative
+  (`data.kind` `operator_fact_without_a_person`); an `operator_said` update
+  is refused (`operator_fact_update_refused`), and so are such a fact on a
+  memory store that keeps no proposals (`operator_memory_unavailable`) and
+  a `propose_to_mob` of one (`operator_fact_mob_proposal_refused`, whose
+  message names both alternatives). Such a fact becomes operator memory
+  only when the memory steward accepts its proposal; the configuration does
+  not require a steward. With the operator scope off (the default), an
+  `operator_said` fact stays the agent's own memory, as before.
+- The steward never changes a person's operator memory: it judges a
+  person's proposals in a call of their own, which sees only those
+  proposals and can only accept, reject or hold them, and accepts a
+  proposal into that person's operator memory only. It refuses (typed)
+  every dream op that would supersede, tombstone, retier or copy an
+  operator record, or name an operator key, and refuses to promote a
+  person's proposal or record to a mob scope. A dream's gather and
+  consolidate phases no longer read a person's operator records or pending
+  proposals, so no promotion gate shows them.
 - The Distiller is unchanged: it distills the agent's own transcript,
   which everyone who views the agent reads, and cannot tell which person
   said a fact, so a fact it tags `operator_said` stays the agent's own

@@ -3400,10 +3400,11 @@ async fn a_private_member_schedules_only_into_itself() -> TestResult {
 /// A WorkGraph binding cannot serve a private member, which is built without
 /// WorkGraph tools while each turn of a bound member takes the binding's
 /// tools: a goal or a reassignment aimed at a private side chat, in any form
-/// of the target, and a goal whose supervisor is one, are refused for every
-/// caller who may see it, its owner included, as naming a member no binding
-/// can serve (`-32602`, `private_member_workgraph_target`). Nothing is bound
-/// to it, and the side chat keeps taking turns.
+/// of the target, a break-glass reassignment onto one, and a goal or an
+/// escalation whose supervisor is one, are refused for every caller who may
+/// see it, its owner included, as naming a member no binding can serve
+/// (`-32602`, `private_member_workgraph_target`). Nothing is bound to it, and
+/// the side chat keeps taking turns.
 #[tokio::test]
 async fn a_workgraph_binding_on_a_private_member_is_refused_to_its_owner_too() -> TestResult {
     const MOB: &str = "private-workgraph-owner";
@@ -3480,12 +3481,12 @@ async fn a_workgraph_binding_on_a_private_member_is_refused_to_its_owner_too() -
             &app,
             Some(&alice),
             "meta/workgraph/goal/create",
-            json!({ "title": "Alice's goal for her side chat", "target": target }),
+            json!({ "title": "Alice's goal for their side chat", "target": target }),
         )
         .await;
         assert!(
             refused(&created),
-            "the owner's goal aimed at her private side chat as {target} is refused: \
+            "the owner's goal aimed at their private side chat as {target} is refused: \
              {created:#}"
         );
         let reassigned = console_rpc_as(
@@ -3497,7 +3498,7 @@ async fn a_workgraph_binding_on_a_private_member_is_refused_to_its_owner_too() -
         .await;
         assert!(
             refused(&reassigned),
-            "the owner's reassignment onto her private side chat as {target} is refused: \
+            "the owner's reassignment onto their private side chat as {target} is refused: \
              {reassigned:#}"
         );
     }
@@ -3517,7 +3518,44 @@ async fn a_workgraph_binding_on_a_private_member_is_refused_to_its_owner_too() -
     .await;
     assert!(
         refused(&supervised),
-        "the owner's goal supervised by her private side chat is refused: {supervised:#}"
+        "the owner's goal supervised by their private side chat is refused: {supervised:#}"
+    );
+    let broken = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/attention/break_glass_reassign",
+        json!({
+            "binding_id": binding_id,
+            "expected_revision": revision,
+            "reason": "the shared agent is wedged",
+            "target": { "kind": "identity", "identity": "alpha-side" },
+        }),
+    )
+    .await;
+    assert!(
+        refused(&broken),
+        "the owner's break-glass reassignment onto their private side chat is refused: \
+         {broken:#}"
+    );
+    let escalated = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/policy/escalate",
+        json!({
+            "binding_id": binding_id,
+            "id": shared["result"]["item"]["id"],
+            "expected_revision": revision,
+            "completion_policy": {
+                "kind": "supervisor",
+                "owner_key": agent_owner_key(MOB, "alpha-side"),
+            },
+        }),
+    )
+    .await;
+    assert!(
+        refused(&escalated),
+        "the owner's escalation to their private side chat as supervisor is refused: \
+         {escalated:#}"
     );
     assert_eq!(
         turn("A second turn.").await,
@@ -3705,6 +3743,62 @@ async fn an_injected_schedule_stores_tools_hide_a_private_members_schedule() -> 
     assert!(
         matches!(&refused, Err(meerkat_core::ToolError::AccessDenied { .. })),
         "the shared agent's schedule into the private member is refused: {refused:?}"
+    );
+    Ok(())
+}
+
+/// A gateway composition's agent schedule tools judge a private member with
+/// the runtime's record of who its members are private to, as the
+/// composition adopts it (`adopt_schedule_mob_targets`): after the owner
+/// closes their side chat, the roster no longer holds it, and its schedule
+/// still stays off another agent's list.
+#[tokio::test]
+async fn a_composed_gateways_schedule_tools_keep_a_closed_side_chats_schedule_hidden() -> TestResult
+{
+    const MOB: &str = "private-schedule-composed";
+    let (_state, runtime, app) = signed_in_unified_runtime(MOB).await?;
+    let alice = bearer(alice_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let service = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+    let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
+    crate::gateway_composition::adopt_schedule_mob_targets(&runtime, &service, &registry).await;
+    let tools =
+        crate::schedule_wiring::agent_schedule_tools_over_registry_for_test(service, registry);
+    let private = member_session(runtime.mob_runtime(), "alpha-side").await?;
+    let shared = member_session(runtime.mob_runtime(), "alpha").await?;
+    let hidden_id = created_schedule_id(
+        &schedule_tool_call(
+            &tools,
+            &private,
+            "meerkat_schedule_create",
+            daily_schedule(
+                "PRIVATE-NAME salary review",
+                member_schedule_target(
+                    MOB,
+                    "alpha-side",
+                    "PRIVATE-NOTE: Alice asks for 15% at the salary review.",
+                ),
+            ),
+        )
+        .await?,
+    )?;
+    let closed = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/retire_member",
+        json!({ "member_id": "alpha-side" }),
+    )
+    .await;
+    assert!(closed["error"].is_null(), "{closed:#}");
+    assert!(
+        leaves_the_roster(runtime.mob_runtime(), "alpha-side").await?,
+        "the owner closes the side chat"
+    );
+    let listed = schedule_tool_call(&tools, &shared, "meerkat_schedule_list", json!({})).await?;
+    assert!(
+        !listed.contains(&hidden_id) && !listed.contains("PRIVATE-"),
+        "the closed side chat's schedule stays off the shared agent's list: {listed}"
     );
     Ok(())
 }

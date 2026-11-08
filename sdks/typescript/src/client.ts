@@ -624,6 +624,11 @@ const PEER_INGRESS_TERMINAL_OUTCOMES = {
   rejected: true,
 } as const satisfies Record<PeerIngressTerminalOutcomeKind, true>;
 
+/**
+ * The notification a stdio connection shows its operator a durable decision
+ * with (`decision/notice`). This client has no listener for it and drops it.
+ */
+const DECISION_NOTICE_NOTIFICATION = "decision/notice";
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(
@@ -5528,6 +5533,11 @@ export class MeerkatClient {
         // Consent notices carry no session_id either: they go to
         // onConsentNotice listeners only.
         this.dispatchConsentNotice(params);
+        return;
+      }
+      if (method === DECISION_NOTICE_NOTIFICATION) {
+        // A decision notice names no session and this client has no
+        // listener for it: it is dropped, never buffered as a session event.
         return;
       }
       if (method === "session/stream_event" || method === "mob/stream_event") {

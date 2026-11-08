@@ -96145,7 +96145,7 @@
             "type": "object"
           },
           {
-            "description": "The member's durable resume gate was unavailable at the wake.",
+            "description": "The member's durable resume gate was unavailable at the wake, or its\nsession could not be built now for a cause that clears with no change\nto the member (for example a provider credential whose source or\nstore cannot answer now or whose lookup is in flight).",
             "properties": {
               "kind": {
                 "const": "resume_gate_unavailable",

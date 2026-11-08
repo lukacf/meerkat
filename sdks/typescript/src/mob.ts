@@ -27,6 +27,7 @@ import type {
   LiveOpenResult,
   LiveStatusResult,
   MobBindHostResult,
+  MobForkMemberResult,
   MobHostStatus,
   MobMemberHistoryResult,
   MobRevokeHostResult,
@@ -303,6 +304,20 @@ export interface MobForkHelperOptions extends MobHelperOptions {
   forkContext?: Record<string, unknown>;
 }
 
+/** Options for a member fork at a message boundary (`mob/fork_member`). */
+export interface MobForkMemberOptions {
+  /**
+   * Where the copied prefix ends, as on `session/fork_at`: the new member's
+   * transcript is the source's messages before this index. Absent takes the
+   * source's committed end.
+   */
+  messageIndex?: number;
+  /** The new member's profile. Absent takes the source member's. */
+  profile?: string;
+  /** The new member's runtime mode. Absent takes the source member's. */
+  runtimeMode?: WireMobRuntimeMode;
+}
+
 export class Member {
   private readonly client: MeerkatClient;
   readonly mobId: string;
@@ -539,6 +554,15 @@ export class Mob {
     options: MobForkHelperOptions,
   ): Promise<MobHelperResult> {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
+  }
+
+  /** Fork a member's session at a message boundary into a new member. */
+  async forkMember(
+    sourceMemberId: string,
+    agentIdentity: string,
+    options?: MobForkMemberOptions,
+  ): Promise<MobForkMemberResult> {
+    return this.client.forkMobMember(this.mobId, sourceMemberId, agentIdentity, options);
   }
 
   async wire(member: string, peer: MobPeerTarget): Promise<void> {

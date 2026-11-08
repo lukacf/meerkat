@@ -126,7 +126,7 @@ async fn missing_or_revoked_configured_parent_binds_controller_only() {
             if revoked {
                 let parent = parent(&fixture);
                 let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();
-                fixture.source.owner.grants().revoke(&parent.root_authority, &parent, &mut custody).unwrap();
+                fixture.source.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &parent.root_authority, &parent, &mut custody).unwrap();
             }
             let first = fixture.submit().await;
             fixture.finish(&first).await.unwrap();
@@ -198,7 +198,12 @@ async fn revoking_bound_configured_parent_refuses_without_substitution() {
             .source
             .owner
             .grants()
-            .revoke(&parent.root_authority, &parent, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &parent.root_authority,
+                &parent,
+                &mut custody,
+            )
             .unwrap();
         drop(custody);
         assert!(matches!(

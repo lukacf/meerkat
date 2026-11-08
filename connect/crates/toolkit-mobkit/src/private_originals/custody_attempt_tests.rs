@@ -93,6 +93,7 @@ impl Fixture {
         let base = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("base"),
                 principal("admin"),
@@ -785,6 +786,7 @@ async fn legacy_bound_row_does_not_recreate_first_write_provenance_on_owner_rest
         ToolkitOriginalOwner::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 directory.path().join("grants"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
             domain,
@@ -1068,6 +1070,7 @@ async fn withdrawn_custody_reopens_as_terminal_absence_without_reenrollment() {
             ToolkitOriginalOwner::restore(
                 Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                     directory.path().join("grants"),
+                    meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
                 )),
                 Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
                 association.candidate().ingress_namespace.ingress.clone(),

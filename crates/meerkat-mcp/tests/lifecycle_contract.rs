@@ -414,6 +414,7 @@ async fn observation_reports_the_current_route_and_accepted_state() {
     let Observation::Callable {
         connection_generation: first,
         connector: None,
+        service_secret_launch: None,
     } = adapter.observe_operation("observed", "echo").await
     else {
         panic!("the connected server's route is callable");
@@ -436,6 +437,7 @@ async fn observation_reports_the_current_route_and_accepted_state() {
         Observation::Callable {
             connection_generation: first,
             connector: None,
+            service_secret_launch: None,
         },
         "the current route stays callable while its replacement is staged"
     );

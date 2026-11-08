@@ -705,6 +705,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ImportIdentityRecord { .. }
             | mob_dsl::MobMachineInput::AdmitOwnedEdgeRealization { .. }
             | mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -2021,6 +2023,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ImportIdentityRecord { .. }
             | mob_dsl::MobMachineInput::AdmitOwnedEdgeRealization { .. }
             | mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -7214,6 +7218,7 @@ mod tests {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -7236,6 +7241,7 @@ mod tests {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

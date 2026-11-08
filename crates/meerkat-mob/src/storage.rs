@@ -128,8 +128,21 @@ pub struct MobStorage {
 impl MobStorage {
     /// Create a storage bundle with in-memory stores (for tests and ephemeral mobs).
     pub fn in_memory() -> Self {
-        let (runs, specs) = Self::in_memory_flow_stores();
+        Self::in_memory_over(InMemoryMobEventStore::new())
+    }
+
+    /// [`Self::in_memory`], and a handle on its event log, for rows that need
+    /// a stored row as an older build wrote it.
+    #[cfg(test)]
+    pub(crate) fn in_memory_with_event_log_for_test()
+    -> (Self, crate::store::InMemoryEventLogForTest) {
         let events = InMemoryMobEventStore::new();
+        let log = events.event_log_for_test();
+        (Self::in_memory_over(events), log)
+    }
+
+    fn in_memory_over(events: InMemoryMobEventStore) -> Self {
+        let (runs, specs) = Self::in_memory_flow_stores();
         let identity = InMemoryMobIdentityStore::paired_with_event_store(
             &events,
             Arc::new(crate::store::SystemMobIdentityStoreClock),

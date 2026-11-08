@@ -302,7 +302,7 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
-        mutation_fn().await
+        mutation_fn(meerkat_core::AdmissionGuard::none()).await
     }
 
     async fn with_refresh(
@@ -325,7 +325,7 @@ impl RefreshCoordinator for FailingRefreshCoordinator {
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
-        mutation_fn().await
+        mutation_fn(meerkat_core::AdmissionGuard::none()).await
     }
 
     async fn with_refresh(
@@ -362,6 +362,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         mark_tokens_and_auth_lease_handle_for_test(&persisted, 1, Some(1_000));
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &persisted,
         )
@@ -403,6 +404,7 @@ async fn claude_ai_oauth_rejects_token_without_auth_lifecycle() {
     };
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &persisted,
         )
@@ -451,6 +453,7 @@ async fn claude_ai_oauth_reauth_required_is_typed() {
     };
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &mark_tokens_lifecycle_published_for_test(&persisted, 1, None),
         )
@@ -485,6 +488,7 @@ async fn claude_ai_oauth_rejects_wrong_persisted_mode() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &PersistedTokens {
                 auth_mode: PersistedAuthMode::OauthToApiKey,
@@ -531,6 +535,7 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &PersistedTokens {
                 auth_mode: PersistedAuthMode::ClaudeAiOauth,
@@ -600,7 +605,10 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
     };
     let (marked_expired, auth_lease) =
         mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
-    store.save(&key, &marked_expired).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_expired)
+        .await
+        .unwrap();
     let refreshed = PersistedTokens {
         auth_mode: PersistedAuthMode::ClaudeAiOauth,
         primary_secret: Some("refreshed-access-NEW".into()),
@@ -659,7 +667,10 @@ async fn claude_ai_oauth_refresh_failure_is_typed() {
     };
     let (marked_expired, auth_lease) =
         mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
-    store.save(&key, &marked_expired).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_expired)
+        .await
+        .unwrap();
 
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
@@ -709,7 +720,10 @@ async fn resolve_after_refresh_failure(
     };
     let (marked_expired, auth_lease) =
         mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
-    store.save(&key, &marked_expired).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_expired)
+        .await
+        .unwrap();
     let realm = realm_with_oauth_binding("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
         .with_provider_auth_persistence(ProviderAuthPersistence::new(
@@ -787,7 +801,10 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
     };
     let (marked_fresh, auth_lease) =
         mark_tokens_and_auth_lease_handle_for_test(&fresh, 1, Some(1_000));
-    store.save(&key, &marked_fresh).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_fresh)
+        .await
+        .unwrap();
     let refreshed = PersistedTokens {
         auth_mode: PersistedAuthMode::ClaudeAiOauth,
         primary_secret: Some("forced-claude-access".into()),
@@ -849,7 +866,10 @@ async fn claude_ai_oauth_force_refresh_with_refresh_disallowed_errors_refresh_re
     };
     let (marked_fresh, auth_lease) =
         mark_tokens_and_auth_lease_handle_for_test(&fresh, 1, Some(1_000));
-    store.save(&key, &marked_fresh).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_fresh)
+        .await
+        .unwrap();
 
     let realm = realm_with_oauth_binding_no_refresh("claude_ai_oauth");
     let env = ResolverEnvironment::testing()
@@ -890,6 +910,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     let (persisted, auth_lease) = mark_tokens_and_auth_lease_handle_for_test(&persisted, 1, None);
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &persisted,
         )
@@ -919,6 +940,7 @@ async fn oauth_to_api_key_rejects_claude_ai_oauth_mode() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
             &PersistedTokens {
                 auth_mode: PersistedAuthMode::ClaudeAiOauth,

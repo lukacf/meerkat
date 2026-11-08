@@ -30,6 +30,7 @@ async fn setup_child_observation_preserves_bounded_native_parent_lifetime() {
             .owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new("bounded-warm-test-parent").unwrap(),
                 facts.application.clone(),
@@ -56,6 +57,7 @@ async fn setup_child_observation_preserves_bounded_native_parent_lifetime() {
             .owner
             .grants()
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &facts.application,
                 &parent,
                 selected.id.clone(),
@@ -76,7 +78,12 @@ async fn setup_child_observation_preserves_bounded_native_parent_lifetime() {
         source
             .owner
             .grants()
-            .revoke(&facts.application, &leaf, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &facts.application,
+                &leaf,
+                &mut custody,
+            )
             .unwrap();
         drop(custody);
         let before = std::fs::read(fixture.source_path.with_file_name("grants.jsonl")).unwrap();

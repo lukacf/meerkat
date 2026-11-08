@@ -20,6 +20,7 @@ const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "agent.respawn": "Restart agents",
   "agent.retire": "Retire agents",
   "agent.reset": "Reset agents",
+  "agent.tool_grants.manage": "Grant tools to agents",
   "gating.view": "View approvals",
   "gating.decide": "Decide approvals",
   "workgraph.view": "View work items",
@@ -44,6 +45,7 @@ const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
 const FAMILY_WORDS: Readonly<Record<string, string>> = {
   agent: "agent",
   "agent.memory": "agent memory",
+  "agent.tool_grants": "agent tool grant",
   operator: "operator",
   "operator.memory": "operator memory",
   mob: "team",

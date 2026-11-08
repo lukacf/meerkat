@@ -127,6 +127,7 @@ impl UserMobConfig {
                     model: resolve_model(model_overrides, name, &agent.model),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),

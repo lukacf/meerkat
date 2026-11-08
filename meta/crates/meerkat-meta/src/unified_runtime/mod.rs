@@ -482,6 +482,11 @@ pub struct UnifiedRuntimeCore {
     /// Rebuildable detached-job health/status projection supplied by the
     /// host that owns the canonical Meerkat job service.
     job_health_projection: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
+    /// The stdio gateway's realm MCP administration (`meta/realm_mcp/*`):
+    /// set once by the stdio gateway that composed it, so a runtime without
+    /// it neither serves nor advertises the methods.
+    realm_mcp_administration:
+        std::sync::OnceLock<crate::rpc::realm_mcp_methods::RealmMcpAdministration>,
     // Realm-scoped WorkGraph service backing the `meta/workgraph/*` RPC
     // group and the console experience section. Seeded from the bootstrap
     // spec and deliberately FIXED from then on: the admission guards
@@ -924,6 +929,7 @@ impl UnifiedRuntime {
                 topology_controller: crate::topology_control::TopologyController::default(),
                 memory_panel_store: std::sync::RwLock::new(None),
                 job_health_projection: Arc::new(std::sync::RwLock::new(None)),
+                realm_mcp_administration: std::sync::OnceLock::new(),
                 workgraph_service,
                 workgraph_fact_hub,
                 workgraph_fact_tail_task: tokio::sync::Mutex::new(WorkGraphFactTailTask(
@@ -1354,6 +1360,24 @@ impl UnifiedRuntime {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Serve the stdio gateway's realm MCP administration on this runtime's
+    /// stdio dispatcher. Set once, by the stdio gateway that composed it;
+    /// `false` when it was already set (the first stands).
+    pub(crate) fn serve_realm_mcp(
+        &self,
+        administration: crate::rpc::realm_mcp_methods::RealmMcpAdministration,
+    ) -> bool {
+        self.realm_mcp_administration.set(administration).is_ok()
+    }
+
+    /// The realm MCP administration this runtime serves, when the stdio
+    /// gateway composed one.
+    pub(crate) fn realm_mcp_administration(
+        &self,
+    ) -> Option<&crate::rpc::realm_mcp_methods::RealmMcpAdministration> {
+        self.realm_mcp_administration.get()
     }
 
     pub(crate) fn module_runtime_handle(&self) -> Arc<tokio::sync::Mutex<MetaRuntimeHandle>> {

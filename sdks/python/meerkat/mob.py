@@ -16,6 +16,7 @@ from .generated.types import (
     LiveOpenResult,
     LiveStatusResult,
     MobBindHostResult,
+    MobForkMemberResult,
     MobHostStatus,
     MobMemberHistoryResult,
     MobStopMemberRunResult,
@@ -753,6 +754,28 @@ class Mob:
             role_name=role_name,
             model_override=model_override,
             fork_context=fork_context,
+        )
+
+    async def fork_member(
+        self,
+        source_member_id: str,
+        agent_identity: str,
+        *,
+        message_index: int | None = None,
+        profile: str | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+    ) -> MobForkMemberResult:
+        """Fork a member's session at a message boundary into a new member.
+
+        See :meth:`MeerkatClient.fork_mob_member`.
+        """
+        return await self._client.fork_mob_member(
+            self.id,
+            source_member_id,
+            agent_identity,
+            message_index=message_index,
+            profile=profile,
+            runtime_mode=runtime_mode,
         )
 
     async def wire(self, member: str, peer: str | dict[str, Any]) -> None:

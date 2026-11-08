@@ -14,6 +14,12 @@
 //! ([`LocalGrantAuthority::consume_use`]): with durable custody the spend is
 //! acknowledged by the store first, and advances the owner's revision, so a
 //! decision prepared before the spend is stale after it.
+//!
+//! Every issuance and every spend here appends to the owner as
+//! [`LocalGrantAuthority::issue_root`] does: each takes the operation's
+//! admission guard, and a durable owner whose store has an admission fence
+//! appends only while that guard holds it
+//! ([`LocalGrantAuthority::admission_fences`]).
 
 use std::sync::Arc;
 
@@ -25,6 +31,7 @@ use meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_authorization_contracts::grant::GrantLineageRef;
 use meerkat_authorization_contracts::work_association::OriginalWorkRef;
+use meerkat_core::AdmissionGuard;
 use meerkat_core::approval::decision::{ApproverId, Sha256Digest};
 use meerkat_core::auth::PrincipalRef;
 use serde::Serialize;
@@ -233,7 +240,8 @@ pub enum ApprovalChildRefusal {
     /// The id names a grant this owner already issued.
     #[error("grant id already issued")]
     AlreadyIssued,
-    /// The owner cannot say now; nothing was issued.
+    /// The owner cannot say now, or the operation's admission guard does not
+    /// hold the fence of this owner's store; nothing was issued.
     #[error("grant authority unavailable")]
     Unavailable,
 }
@@ -294,8 +302,9 @@ pub enum ConsumeUseRefusal {
     /// was spent.
     #[error("the grant's approver is no longer current")]
     ApproverNotCurrent,
-    /// The owner cannot say now (contention, clock, custody). Nothing was
-    /// spent.
+    /// The owner cannot say now (contention, clock, custody), or the
+    /// operation's admission guard does not hold the fence of this owner's
+    /// store. Nothing was spent.
     #[error("grant authority unavailable")]
     Unavailable,
     /// The store's acknowledgement of the spend is unknown: the use counts
@@ -307,9 +316,12 @@ pub enum ConsumeUseRefusal {
 
 impl LocalGrantAuthority {
     /// [`issue_root`](Self::issue_root) of a root whose children must each
-    /// carry a person's decision for `rule`'s approver id.
+    /// carry a person's decision for `rule`'s approver id. `guard` is the
+    /// operation's admission guard, as for [`issue_root`](Self::issue_root).
+    #[allow(clippy::too_many_arguments)]
     pub fn issue_root_with_child_rule(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         id: EvidenceId,
         grantee: PrincipalRef,
@@ -318,6 +330,7 @@ impl LocalGrantAuthority {
         rule: ChildApprovalRule,
     ) -> Result<GrantLineageRef, GrantRefusal> {
         self.issue_root_carrying(
+            guard,
             caller,
             id,
             grantee,
@@ -329,9 +342,12 @@ impl LocalGrantAuthority {
 
     /// [`issue_child`](Self::issue_child) of a child whose own children must
     /// each carry a person's decision for `rule`'s approver id. Its parent's
-    /// rule, if any, still applies to it.
+    /// rule, if any, still applies to it. `guard` is the operation's
+    /// admission guard, as for [`issue_child`](Self::issue_child).
+    #[allow(clippy::too_many_arguments)]
     pub fn issue_child_with_child_rule(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         parent: &GrantLineageRef,
         id: EvidenceId,
@@ -339,7 +355,16 @@ impl LocalGrantAuthority {
         requested: ExecutionRestrictions,
         rule: ChildApprovalRule,
     ) -> Result<GrantLineageRef, GrantRefusal> {
-        self.issue_child_carrying(caller, parent, id, grantee, requested, Some(rule), None)
+        self.issue_child_carrying(
+            guard,
+            caller,
+            parent,
+            id,
+            grantee,
+            requested,
+            Some(rule),
+            None,
+        )
     }
 
     /// Issue the approval-carried child of `parent` that executing an
@@ -347,12 +372,19 @@ impl LocalGrantAuthority {
     /// execution permit. The generated owner refuses a parent without a
     /// child rule, a decision below the rule, terms other than the approved
     /// request's, a child that could be delegated or has no window or no
-    /// use, and a decision another grant carries.
+    /// use, and a decision another grant carries. `guard` is the operation's
+    /// admission guard, as for [`issue_child`](Self::issue_child): a caller
+    /// that may not wait takes it with [`AdmissionGuard::try_acquire`] of
+    /// [`Self::admission_fences`].
     ///
     /// # Errors
     /// The typed [`ApprovalChildRefusal`]; nothing is issued.
+    /// [`ApprovalChildRefusal::Unavailable`] also when `guard` does not hold
+    /// the fence of this owner's store.
+    #[allow(clippy::too_many_arguments)]
     pub fn issue_approval_child(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         parent: &GrantLineageRef,
         id: EvidenceId,
@@ -361,14 +393,25 @@ impl LocalGrantAuthority {
         approval: GrantApproval,
     ) -> Result<GrantLineageRef, ApprovalChildRefusal> {
         self.classify_approval_child(caller, parent, &id, &grantee, &requested, &approval)?;
-        self.issue_child_carrying(caller, parent, id, grantee, requested, None, Some(approval))
-            .map_err(|refusal| match refusal {
-                GrantRefusal::Duplicate => ApprovalChildRefusal::AlreadyIssued,
-                GrantRefusal::Unavailable => ApprovalChildRefusal::Unavailable,
-                GrantRefusal::Denied | GrantRefusal::ControllerInUse => {
-                    ApprovalChildRefusal::ParentRefused
-                }
-            })
+        self.issue_child_carrying(
+            guard,
+            caller,
+            parent,
+            id,
+            grantee,
+            requested,
+            None,
+            Some(approval),
+        )
+        .map_err(|refusal| match refusal {
+            GrantRefusal::Duplicate => ApprovalChildRefusal::AlreadyIssued,
+            GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => {
+                ApprovalChildRefusal::Unavailable
+            }
+            GrantRefusal::Denied | GrantRefusal::ControllerInUse => {
+                ApprovalChildRefusal::ParentRefused
+            }
+        })
     }
 
     /// The typed reason the generated owner would refuse this approval
@@ -502,13 +545,17 @@ impl LocalGrantAuthority {
     /// With durable custody the spend is acknowledged by the store before
     /// this returns `Ok`; it advances the owner's revision and publishes, so
     /// every decision prepared before it is stale. Never waits: contention
-    /// refuses as unavailable.
+    /// refuses as unavailable. `guard` is the operation's admission guard, as
+    /// for [`issue_root`](Self::issue_root): the spend is appended only while
+    /// it holds the fence of this owner's store, if it has one.
     ///
     /// # Errors
     /// The typed [`ConsumeUseRefusal`]. Only `Uncertain` may have spent the
-    /// use; the operation must not enter on any refusal.
+    /// use; the operation must not enter on any refusal. `Unavailable` also
+    /// when `guard` does not hold the fence of this owner's store.
     pub fn consume_use(
         &self,
+        guard: &AdmissionGuard,
         references: &[GrantLineageRef],
         executor: &PrincipalRef,
         represented_subject: Option<&PrincipalRef>,
@@ -556,6 +603,7 @@ impl LocalGrantAuthority {
         let applied = self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::ConsumeUse {
                 namespace: reference.authority_namespace.clone(),
                 generation: reference.authority_generation,
@@ -578,7 +626,10 @@ impl LocalGrantAuthority {
                 .is_some_and(|durable| durable.check_available().is_err());
             return Err(if uncertain {
                 ConsumeUseRefusal::Uncertain
-            } else if refusal == GrantRefusal::Unavailable {
+            } else if matches!(
+                refusal,
+                GrantRefusal::Unavailable | GrantRefusal::AdmissionFence
+            ) {
                 ConsumeUseRefusal::Unavailable
             } else {
                 ConsumeUseRefusal::Denied
@@ -610,15 +661,18 @@ impl LocalGrantAuthority {
     /// Spend one use of the approval-carried leaf of `references` at the
     /// operation's entry: the host's currentness owner answers for the
     /// person who decided the leaf's decision, outside every grant lock, and
-    /// [`Self::consume_use`] spends with that answer. An owner composed
-    /// without a currentness owner, or an unsettled answer, spends nothing
-    /// and is unavailable.
+    /// [`Self::consume_use`] spends with that answer, under `guard`, the
+    /// entry's admission guard. An owner composed without a currentness
+    /// owner, or an unsettled answer, spends nothing and is unavailable.
+    /// The entry may not wait: it takes `guard` with
+    /// [`AdmissionGuard::try_acquire`] of [`Self::admission_fences`].
     ///
     /// # Errors
     /// As [`Self::consume_use`]; `Denied` for a leaf that carries no
     /// approval.
     pub fn spend_use_at_entry(
         &self,
+        guard: &AdmissionGuard,
         references: &[GrantLineageRef],
         executor: &PrincipalRef,
         represented_subject: Option<&PrincipalRef>,
@@ -643,6 +697,7 @@ impl LocalGrantAuthority {
             ApprovalUseAnswer::Unsettled => return Err(ConsumeUseRefusal::Unavailable),
         };
         self.consume_use(
+            guard,
             references,
             executor,
             represented_subject,

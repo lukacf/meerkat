@@ -604,7 +604,10 @@ mod chatgpt_backend {
             &transition,
         )
         .expect("the tokens carry the lifecycle marker");
-        store.save(&key, &tokens).await.expect("store the tokens");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+            .await
+            .expect("store the tokens");
         drop(guard);
     }
 

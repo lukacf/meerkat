@@ -398,6 +398,54 @@ async fn a_staged_realm_refuses_competing_openers_and_composes_its_own_grant() {
     reopens(root).await;
 }
 
+/// An admission's hold of the realm's admission fence refuses the stage's
+/// grant at once: the grant runs under the stage's custody, so it takes the
+/// fence without waiting and answers `AdmissionInProgress` well inside the
+/// interactive wait, with nothing appended to the grant log or selected.
+/// Once the hold ends, the stage's grant goes through.
+#[tokio::test]
+async fn a_held_fence_refuses_the_staged_grant_at_once_with_nothing_issued() {
+    let tmp = governed_realm().await;
+    let root = tmp.path();
+    let mut staged = stage(root).await.expect("staged");
+    let fence = meerkat_core::AdmissionFence::realm(root, &realm()).expect("the realm's fence");
+    fence.ensure_exists().expect("the fence a holder needs");
+    let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence])
+        .expect("an admission holds the realm's fence");
+    let log = meerkat_store::realm_paths_in(root, REALM)
+        .root
+        .join(meerkat_store::GRANT_OWNER_STORE_RELATIVE_PATH);
+    let before = std::fs::read(&log).ok();
+
+    let started = std::time::Instant::now();
+    let refused = staged.grant_stock_agent(catalog()).await;
+    let waited = started.elapsed();
+    assert!(
+        matches!(
+            refused,
+            Err(StagedRealmError::Grant(
+                StockGrantError::AdmissionInProgress
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        waited < meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT / 2,
+        "under the stage's custody the realm's fence is taken without waiting: {waited:?}"
+    );
+    assert_eq!(std::fs::read(&log).ok(), before, "nothing was appended");
+    assert_eq!(selected_catalog(root).await, None, "nothing was selected");
+
+    hold.release();
+    let granted = staged
+        .grant_stock_agent(catalog())
+        .await
+        .expect("the stage's grant goes through once the hold ended");
+    let open = staged.finish().await.expect("finished");
+    assert_eq!(open.issuance, StagedIssuanceEffect::Committed);
+    assert_eq!(selected_catalog(root).await, Some(granted.issued));
+}
+
 /// Under the stage's own custody the stage observes the persisted selection
 /// its grant wrote, through the realm's grant owner restored for that read
 /// only (finishing restores it again for the composition); the finished

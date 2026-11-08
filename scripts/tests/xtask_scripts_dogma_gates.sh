@@ -364,7 +364,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # actions (of module entered_step_audit) generated a state, its three
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # property violated.
-# source_credential_publication_audit.sh (auth) requires each of its seven
+# source_credential_publication_audit.sh (auth) requires each of its nine
 # reachability witnesses violated.
 # tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its eight
 # witnesses violated, and with --mutants each seeded defect's invariant or
@@ -428,6 +428,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # writer_fence_audit.sh (host_store_writer_fence) requires its eleven
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # action property violated.
+# member_dispatch_admission_audit.sh (mob_machine) requires a coverage block
+# in which each of its four covered Running arms generated a state, its
+# Running witness violated, and with --mutants each seeded defect's target
+# invariant violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -790,6 +794,10 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
   'echo "Error: Invariant NotAuditWitnessLateRefusalLeavesNewer is violated."' \
   'echo "Error: Invariant NotAuditWitnessCurrentRefusalWithdraws is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdoptedBelowLease is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedBound is violated."' \
+  'echo "Error: Action property AuditGenerationNeverDecreases is violated."' \
+  'echo "Error: Invariant released_publication_only_without_credential is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredByTimer is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredAtDispatch is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredWhileDownSettledOnRead is violated."' \
@@ -1267,6 +1275,16 @@ printf '%s\n' \
   'echo "Error: Action property AuditClassificationsMonotone is violated."' \
   'echo "Error: Invariant no_scope_is_quarantined_and_poisoned is violated."' \
   'echo "Error: Invariant AuditNoReacquireAfterFailedOpen is violated."' \
+  'for action in ResolveMemberDispatchAdmissionAskHostRunning ResolveMemberDispatchAdmissionInheritRunning ResolveMemberDispatchAdmissionRefusedRunning ResolveMemberDispatchAdmissionNoneRequiredRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessRunning is violated by the initial state:"' \
+  'echo "Error: Invariant AuditHostAskedOnlyForGatedOrUnknownLineage is violated by the initial state:"' \
+  'echo "Error: Invariant AuditInheritNeedsDerived is violated by the initial state:"' \
+  'echo "Error: Invariant AuditVerdictTable is violated by the initial state:"' \
+  'echo "Error: Invariant AuditGatedLineageNeverBuiltUngated is violated by the initial state:"' \
+  'echo "Error: Invariant AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRefusedOnlyForGatedNoneDerived is violated by the initial state:"' \
+  'echo "Error: Invariant AuditStaleRecordNeverMatches is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRecordOnlyTheCurrentLocalIncarnation is violated by the initial state:"' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

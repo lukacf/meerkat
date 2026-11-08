@@ -493,7 +493,10 @@ impl MobActor {
             shell_env: None,
             inherited_tool_filter: None,
             tool_access_policy: None,
-            tool_dispatch_admission: None,
+            // The admission the rebuild request carries: the host's, decided
+            // by MobMachine from the member's lineage when the rebuild was
+            // prepared (`rebuild_explicit_resume_member_sessions`).
+            tool_dispatch_admission: work.rebuild.restore_spec.tool_dispatch_admission.clone(),
             web_search_override: Default::default(),
             // The restore spec's policy choice (the host customizer's, for an
             // ordinary member) wins over the durable binding; no choice keeps

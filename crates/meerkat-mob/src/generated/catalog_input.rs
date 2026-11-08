@@ -260,6 +260,8 @@ pub enum MobMachineCatalogInput {
     ImportIdentityRecord,
     AdmitOwnedEdgeRealization,
     RestoreOwnedIdentityEdge,
+    ResolveMemberDispatchAdmission,
+    RecordMemberDispatchAdmissionLineage,
 }
 
 impl MobMachineCatalogInput {
@@ -520,6 +522,8 @@ impl MobMachineCatalogInput {
         Self::ImportIdentityRecord,
         Self::AdmitOwnedEdgeRealization,
         Self::RestoreOwnedIdentityEdge,
+        Self::ResolveMemberDispatchAdmission,
+        Self::RecordMemberDispatchAdmissionLineage,
     ];
 
     #[must_use]
@@ -783,6 +787,8 @@ impl MobMachineCatalogInput {
             Self::ImportIdentityRecord => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ImportIdentityRecord,
             Self::AdmitOwnedEdgeRealization => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitOwnedEdgeRealization,
             Self::RestoreOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RestoreOwnedIdentityEdge,
+            Self::ResolveMemberDispatchAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberDispatchAdmission,
+            Self::RecordMemberDispatchAdmissionLineage => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordMemberDispatchAdmissionLineage,
         }
     }
 
@@ -1071,6 +1077,8 @@ impl MobMachineCatalogInput {
             Self::ImportIdentityRecord => "ImportIdentityRecord",
             Self::AdmitOwnedEdgeRealization => "AdmitOwnedEdgeRealization",
             Self::RestoreOwnedIdentityEdge => "RestoreOwnedIdentityEdge",
+            Self::ResolveMemberDispatchAdmission => "ResolveMemberDispatchAdmission",
+            Self::RecordMemberDispatchAdmissionLineage => "RecordMemberDispatchAdmissionLineage",
         }
     }
 }

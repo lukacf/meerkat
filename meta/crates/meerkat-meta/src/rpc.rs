@@ -29,11 +29,13 @@ pub(crate) mod memory_methods;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
 pub(crate) mod params;
+pub(crate) mod realm_mcp_methods;
 mod routing_delivery_methods;
 pub(crate) mod schedule_methods;
 mod session_store_methods;
 pub(crate) mod storage_methods;
 mod subscribe_methods;
+pub(crate) mod tool_grant_methods;
 pub(crate) mod topology_methods;
 pub(crate) mod workgraph_methods;
 
@@ -2114,13 +2116,18 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// member declaration mutation (an identity adoption or a tool declaration
 /// apply, [`mob_methods::is_member_declaration_mutating_method`]), which
 /// writes durable member intent and schedules the identity convergence that
-/// can replace a stored member; a WorkGraph write
+/// can replace a stored member; a scoped tool grant write
+/// ([`tool_grant_methods::is_tool_grant_mutating_method`]), which writes the
+/// runtime's grant rows and can seat a member; a realm MCP write
+/// ([`realm_mcp_methods::is_realm_mcp_mutating_method`]), which writes the
+/// realm's own config document or its credential store; a WorkGraph write
 /// ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
 /// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
-/// still answer: the declaration read, the WorkGraph reads, the draft reads,
-/// a deploy plan, a structural validation and a BigQuery read among them.
+/// still answer: the declaration read, the grant reads, the WorkGraph reads,
+/// the draft reads, a deploy plan, a structural validation and a BigQuery
+/// read among them.
 pub(crate) fn candidate_launch_refuses(
     method: &str,
     params: &Value,
@@ -2128,6 +2135,8 @@ pub(crate) fn candidate_launch_refuses(
 ) -> bool {
     CANDIDATE_LAUNCH_REFUSED_METHODS.contains(&method)
         || mob_methods::is_member_declaration_mutating_method(method)
+        || tool_grant_methods::is_tool_grant_mutating_method(method)
+        || realm_mcp_methods::is_realm_mcp_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
         || candidate_launch_refuses_mobpack_change(method, params, state_dir)
@@ -2725,6 +2734,18 @@ async fn handle_unified_rpc_json_inner(
             // it cannot SERVE these. Advertising what a surface cannot serve is the
             // same defect as serving what it does not advertise.
             methods.extend_from_slice(mob_methods::MEMBER_DECLARATION_METHODS);
+            // The scoped tool grant family, derived from its registry: a grant
+            // names an identity the identity runtime serves, so the family is
+            // served and advertised with it.
+            if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
+                methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
+            }
+            // The stdio gateway's realm MCP administration, derived from its
+            // registry: advertised by the runtime the stdio gateway composed
+            // it on, and by no other.
+            if runtime.realm_mcp_administration().is_some() {
+                methods.extend_from_slice(realm_mcp_methods::REALM_MCP_METHODS);
+            }
             // Workgraph methods are advertised only when the service is
             // configured (`runtime_options.workgraph = false` or a failed
             // store open leave them off).
@@ -4042,6 +4063,77 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        // ONE arm for the scoped tool grant family, from its registry, served
+        // with the identity runtime as the capabilities advertise it. The
+        // stdio host is the operator: no caller and no access view.
+        method
+            if tool_grant_methods::is_tool_grant_method(method)
+                && (identity_ctx.is_some() || runtime.identity_runtime_ref().is_some()) =>
+        {
+            let surface = tool_grant_methods::ToolGrantSurface {
+                mob: runtime.mob_runtime(),
+                identity_runtime: identity_ctx
+                    .map(|ctx| ctx.runtime.runtime())
+                    .or_else(|| runtime.identity_runtime_ref()),
+                caller: None,
+                access: None,
+            };
+            match tool_grant_methods::handle_tool_grant_rpc(
+                &surface,
+                method,
+                response_id.clone(),
+                &request.params,
+            )
+            .await
+            {
+                Some(response) => response,
+                None => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: format!(
+                            "{method} is registered in the tool grant family but has no dispatcher arm"
+                        ),
+                        data: None,
+                    }),
+                },
+            }
+        }
+        // ONE arm for the realm MCP administration family, from its registry,
+        // served by the runtime the stdio gateway composed it on (its SDK host
+        // administers the installation realm), as the capabilities advertise
+        // it; every other runtime answers method not found.
+        method
+            if realm_mcp_methods::is_realm_mcp_method(method)
+                && runtime.realm_mcp_administration().is_some() =>
+        {
+            let response = match runtime.realm_mcp_administration() {
+                Some(administration) => {
+                    realm_mcp_methods::handle_realm_mcp_rpc(
+                        administration,
+                        method,
+                        response_id.clone(),
+                        &request.params,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            response.unwrap_or_else(|| JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32601,
+                    message: format!(
+                        "{method} is registered in the realm MCP family but has no dispatcher arm"
+                    ),
+                    data: None,
+                }),
+            })
         }
         "meta/send_message" => {
             // Pass the identity runtime so bare durable identities resolve
@@ -8418,6 +8510,64 @@ mod tests {
                 "an authoritative launch serves {method}"
             );
         }
+    }
+
+    /// A candidate launch refuses the grant writes typed (they change the
+    /// grant rows the authoritative launch reads) and still answers the
+    /// grant reads.
+    #[test]
+    fn a_candidate_launch_refuses_grant_writes_and_serves_grant_reads() {
+        for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+        }
+        for method in ["meta/tool_grants/list", "meta/tool_grants/audit"] {
+            assert!(
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .is_none(),
+                "a candidate serves {method}"
+            );
+        }
+    }
+
+    /// A candidate launch refuses the realm MCP writes (the realm's own
+    /// config document and its credential store are the authoritative
+    /// launch's) and serves the listing.
+    #[test]
+    fn a_candidate_launch_refuses_realm_mcp_writes_and_serves_the_listing() {
+        for method in [
+            "meta/realm_mcp/install",
+            "meta/realm_mcp/set_secret",
+            "meta/realm_mcp/remove_secret",
+        ] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+        }
+        assert!(
+            super::candidate_launch_refusal(
+                false,
+                None,
+                "meta/realm_mcp/servers",
+                &json!({}),
+                json!(7)
+            )
+            .is_none(),
+            "a candidate serves the listing"
+        );
     }
 
     /// A candidate's refusal of a session revocation sends the operator to

@@ -39,6 +39,10 @@ pub enum McpOperationObservation {
         connection_generation: u64,
         /// The connector binding of that same connection, if it has one.
         connector: Option<McpConnectorIdentity>,
+        /// The service-secret writes that same connection's stdio server was
+        /// launched with, if its launch injected any: every call over the
+        /// connection is served by these writes' values.
+        service_secret_launch: Option<crate::auth::McpServiceSecretLaunch>,
     },
     /// The router has been shut down.
     Retired,

@@ -414,9 +414,13 @@ impl PrivateOriginals {
         leaf: &GrantLineageRef,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
     ) -> Result<(), ExpectedRevokeRefusal> {
-        self.owner
-            .grants()
-            .revoke_expecting(&row.record.caller, leaf, &read.publication, custody)
+        self.owner.grants().revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
+            &row.record.caller,
+            leaf,
+            &read.publication,
+            custody,
+        )
     }
 
     /// Component control only. The wrapper delegates to actual machine

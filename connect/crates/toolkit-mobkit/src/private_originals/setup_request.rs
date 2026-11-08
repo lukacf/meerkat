@@ -229,6 +229,7 @@ impl PrivateOriginals {
                         let child = match grants.issued_reference(&child_id)? {
                             Some(child) => child,
                             None => grants.issue_child(
+                                &meerkat_core::AdmissionGuard::none(),
                                 &caller,
                                 parent.last().ok_or(GrantRefusal::Denied)?,
                                 child_id.clone(),

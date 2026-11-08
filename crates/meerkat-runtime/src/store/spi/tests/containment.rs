@@ -979,6 +979,7 @@ fn grant_of(
 fn call_of(tool: &str) -> meerkat_core::tool_grant::ToolGrantCall<'_> {
     meerkat_core::tool_grant::ToolGrantCall {
         name: tool,
+        server: None,
         call_id: "call-1",
         run_id: None,
     }

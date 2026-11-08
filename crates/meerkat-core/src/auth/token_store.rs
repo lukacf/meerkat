@@ -18,6 +18,7 @@ use crate::connection::{
     AuthBindingRef, AuthCredentialIdentity, BindingId, CredentialAccountId, IdentityError,
     ProfileId, RealmId,
 };
+use crate::realm_admission::AdmissionGuard;
 
 /// Key for a persisted token bundle.
 ///
@@ -707,6 +708,12 @@ pub enum TokenStoreError {
         backend: &'static str,
         detail: String,
     },
+    /// A write whose admission guard does not cover the credential fence of
+    /// the written credential's realm (C(r) under this store's root): the
+    /// store wrote nothing. A persisted store answers it before any byte is
+    /// written; it is never an I/O error and never a partial write.
+    #[error("credential store write refused, its admission guard does not cover it: {0}")]
+    AdmissionFence(String),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -912,12 +919,28 @@ impl TokenStoreObservation {
 /// (`resolve_credential_use_admission` in the resolver). A persisted token
 /// without a valid marker is dead data: no acquisition was recorded for it,
 /// and it must be rejected, never silently adopted.
+///
+/// # Writes take the operation's admission guard
+///
+/// Every write ([`Self::save`], [`Self::clear`], [`Self::save_for`],
+/// [`Self::clear_for`]) takes the [`AdmissionGuard`] of the operation it
+/// belongs to, which the credential coordinator acquires at the operation's
+/// entry and hands its closure. A persisted store refuses a guard that does
+/// not cover the credential fence C(r) of the written credential's realm
+/// under its own root ([`TokenStoreError::AdmissionFence`]), before any byte
+/// is written. A store with no fence (in memory, ephemeral) accepts any
+/// guard, [`AdmissionGuard::none`] included. Reads take none.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait TokenStore: Send + Sync {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError>;
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError>;
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError>;
+    async fn save(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError>;
+    async fn clear(&self, guard: &AdmissionGuard, key: &TokenKey) -> Result<(), TokenStoreError>;
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError>;
     fn backend_name(&self) -> &'static str;
 
@@ -951,6 +974,7 @@ pub trait TokenStore: Send + Sync {
     /// Save for a stated access. Status never writes.
     async fn save_for(
         &self,
+        guard: &AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
         access: TokenStoreAccess,
@@ -963,7 +987,7 @@ pub trait TokenStore: Send + Sync {
                 "a status access never writes",
             )),
             TokenStoreAccess::Unattended | TokenStoreAccess::Interactive => {
-                self.save(key, tokens).await
+                self.save(guard, key, tokens).await
             }
         }
     }
@@ -971,6 +995,7 @@ pub trait TokenStore: Send + Sync {
     /// Clear for a stated access. Status never deletes.
     async fn clear_for(
         &self,
+        guard: &AdmissionGuard,
         key: &TokenKey,
         access: TokenStoreAccess,
     ) -> Result<(), TokenStoreError> {
@@ -981,7 +1006,9 @@ pub trait TokenStore: Send + Sync {
                 TokenStoreRefusal::Unsupported,
                 "a status access never deletes",
             )),
-            TokenStoreAccess::Unattended | TokenStoreAccess::Interactive => self.clear(key).await,
+            TokenStoreAccess::Unattended | TokenStoreAccess::Interactive => {
+                self.clear(guard, key).await
+            }
         }
     }
 
@@ -1054,6 +1081,21 @@ pub enum RefreshError {
         observation: RefreshFailureObservation,
         disposition: Option<RefreshFailureDisposition>,
     },
+    /// An admission, or another fenced operation, holds the credential fence
+    /// of the credential's realm beyond the coordinator's wait. The refresh
+    /// did not start: it sent no token request and wrote nothing. A refusal,
+    /// never evidence about the credential; it may be retried once the hold
+    /// ends, which for an admission may be only when its process restarts.
+    #[error(
+        "an admission or another fenced operation holds the credential fence; the refresh did \
+         not start, sent no token request and wrote nothing"
+    )]
+    AdmissionInProgress,
+    /// The credential fence could not be opened, created, locked or
+    /// identity-checked. The refresh did not start and wrote nothing; it
+    /// fails closed.
+    #[error("the credential admission fence is unavailable; the refresh did not start: {0}")]
+    AdmissionFenceUnavailable(String),
 }
 
 /// Machine-issued classification of a typed refresh-failure observation.
@@ -1131,6 +1173,8 @@ impl RefreshError {
             | Self::Cancelled
             | Self::LockFailed(_)
             | Self::CredentialAccess { .. }
+            | Self::AdmissionInProgress
+            | Self::AdmissionFenceUnavailable(_)
             | Self::StalePreparation => RefreshFailureObservation::transient(),
         }
     }
@@ -1151,25 +1195,37 @@ impl RefreshError {
             | Self::Cancelled
             | Self::LockFailed(_)
             | Self::CredentialAccess { .. }
+            | Self::AdmissionInProgress
+            | Self::AdmissionFenceUnavailable(_)
             | Self::StalePreparation => None,
         }
     }
 
     /// Carry a token-store error into a refresh: a refused or failed credential
-    /// access stays typed, any other store error keeps its text.
+    /// access stays typed, a write its guard did not cover is the fence's
+    /// refusal, and any other store error keeps its text.
     pub fn from_token_store(error: TokenStoreError) -> Self {
+        if let TokenStoreError::AdmissionFence(detail) = error {
+            return Self::AdmissionFenceUnavailable(detail);
+        }
         match credential_access_parts(&error) {
             Some((refusal, detail)) => Self::CredentialAccess { refusal, detail },
             None => Self::Refresh(error.to_string()),
         }
     }
 
-    /// The typed auth error for a refused credential access in a refresh.
+    /// The typed auth error for a refused credential access in a refresh: a
+    /// held credential fence is pending work (retryable), an unavailable one
+    /// an unavailable store.
     pub fn credential_access_error(&self) -> Option<super::error::AuthError> {
         match self {
             Self::CredentialAccess { refusal, detail } => {
                 Some(refusal_auth_error(*refusal, detail.clone()))
             }
+            Self::AdmissionInProgress => Some(super::error::AuthError::CredentialAccessPending),
+            Self::AdmissionFenceUnavailable(detail) => Some(
+                super::error::AuthError::CredentialStoreUnavailable(detail.clone()),
+            ),
             _ => None,
         }
     }
@@ -1189,9 +1245,15 @@ fn credential_access_parts(error: &TokenStoreError) -> Option<(TokenStoreRefusal
     }
 }
 
-/// Boxed refresh closure.
-pub type RefreshFn =
-    Box<dyn FnOnce() -> BoxFuture<'static, Result<PersistedTokens, RefreshError>> + Send + 'static>;
+/// Boxed refresh closure. The coordinator runs it under the credential fence
+/// of the key's realm and hands it that operation's [`AdmissionGuard`],
+/// which it passes to every write it makes (the token request, the commit,
+/// the lifecycle publication and any rollback all run under it).
+pub type RefreshFn = Box<
+    dyn FnOnce(Arc<AdmissionGuard>) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
+        + Send
+        + 'static,
+>;
 
 /// Errors raised while serializing one durable credential mutation.
 ///
@@ -1230,12 +1292,31 @@ pub enum CredentialMutationError {
     /// read of the stored credential reports what is durable.
     #[error("credential publication and its rollback failed: {0}")]
     RollbackFailed(String),
+    /// An admission, or another fenced operation, holds the credential fence
+    /// of the key's realm beyond the coordinator's wait. The mutation did not
+    /// start and wrote nothing. A refusal, never an unknown outcome; it may
+    /// be retried once the hold ends, which for an admission may be only
+    /// when its process restarts.
+    #[error(
+        "an admission or another fenced operation holds the credential fence; the credential \
+         mutation did not start and wrote nothing"
+    )]
+    AdmissionInProgress,
+    /// The credential fence could not be opened, created, locked or
+    /// identity-checked, or the operation's guard does not cover it. The
+    /// mutation did not start and wrote nothing; it fails closed.
+    #[error("the credential admission fence is unavailable; the mutation did not start: {0}")]
+    AdmissionFenceUnavailable(String),
 }
 
 impl CredentialMutationError {
     /// Carry a token-store error into a mutation: a refused or failed
-    /// credential access stays typed, any other store error keeps its text.
+    /// credential access stays typed, a write its guard did not cover is the
+    /// fence's refusal, and any other store error keeps its text.
     pub fn from_token_store(error: TokenStoreError) -> Self {
+        if let TokenStoreError::AdmissionFence(detail) = error {
+            return Self::AdmissionFenceUnavailable(detail);
+        }
         match credential_access_parts(&error) {
             Some((refusal, detail)) => Self::CredentialAccess { refusal, detail },
             None => Self::TokenStore(error.to_string()),
@@ -1277,15 +1358,37 @@ pub enum CredentialMutationOutcome {
     Cleared,
 }
 
-/// Boxed non-coalescing credential mutation closure.
+/// Boxed non-coalescing credential mutation closure. The coordinator runs
+/// it under the credential fence of the key's realm and hands it that
+/// operation's [`AdmissionGuard`], which it passes to every write it makes.
 pub type CredentialMutationFn = Box<
-    dyn FnOnce() -> BoxFuture<'static, Result<CredentialMutationOutcome, CredentialMutationError>>
+    dyn FnOnce(
+            Arc<AdmissionGuard>,
+        )
+            -> BoxFuture<'static, Result<CredentialMutationOutcome, CredentialMutationError>>
         + Send
         + 'static,
 >;
 
 /// Coordinator for token-refresh calls. Implementations coalesce
 /// concurrent calls for the same `TokenKey`.
+///
+/// # The credential fence
+///
+/// Every credential write of a persisted store happens under the credential
+/// fence C(r) of the written credential's realm, held EXCLUSIVE for the
+/// whole operation. The coordinator of a persisted store takes it once per
+/// operation: after in-process coalescing (refreshes that join one in flight
+/// take nothing) and before its per-key lock and the closure, waiting no
+/// longer than it waits for that lock. It runs the closure on a task it owns
+/// and hands the closure the guard, so a caller that stops waiting releases
+/// nothing before the closure's last write returned. A held fence refuses
+/// typed (`AdmissionInProgress`, an unavailable one
+/// `AdmissionFenceUnavailable`) before the closure runs: nothing was
+/// requested or written. The coordinator of a store with no fence (in
+/// memory, ephemeral) hands its closures [`AdmissionGuard::none`]. A
+/// coordinator that wraps another delegates every entry, `_under` included,
+/// and never acquires a fence itself.
 #[async_trait]
 pub trait RefreshCoordinator: Send + Sync {
     /// Run one per-key credential mutation under the coordinator's in-process
@@ -1313,6 +1416,53 @@ pub trait RefreshCoordinator: Send + Sync {
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         let _ = access;
         self.with_exclusive_mutation(key, mutation_fn).await
+    }
+
+    /// [`Self::with_exclusive_mutation_for`] for an operation that already
+    /// holds the credential fence of `key`'s realm in `guard` (it acquired
+    /// its whole fence set at its own outermost entry): it takes no fence and
+    /// hands the closure `guard`. A second acquisition of a fence the process
+    /// already holds would conflict with it and refuse. A persisted
+    /// coordinator refuses a guard that does not cover C of `key`'s realm
+    /// (`AdmissionFenceUnavailable`) before the closure runs. A coordinator
+    /// that wraps another delegates it. The default refuses
+    /// (`AdmissionFenceUnavailable`) without running the closure: a
+    /// coordinator that does not implement it never runs a fenced operation
+    /// unfenced.
+    async fn with_exclusive_mutation_under(
+        &self,
+        guard: Arc<AdmissionGuard>,
+        key: TokenKey,
+        access: TokenStoreAccess,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
+        let _ = (guard, key, access, mutation_fn);
+        Err(CredentialMutationError::AdmissionFenceUnavailable(
+            "this credential coordinator does not run operations that already hold the \
+             credential fence; nothing was started or written"
+                .into(),
+        ))
+    }
+
+    /// The credential fence C of `realm` this coordinator takes for a key of
+    /// that realm: for an operation that takes it in one set with other
+    /// fences ([`AdmissionGuard::acquire`], in the global order) and then
+    /// enters through [`Self::with_exclusive_mutation_under`]. `Ok(None)`
+    /// when the coordinator's store has no fence (in memory, ephemeral). A
+    /// coordinator that wraps another delegates it. The default refuses
+    /// (`AdmissionFenceUnavailable`): a coordinator that does not name its
+    /// fence serves no such operation.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn credential_fence(
+        &self,
+        realm: &crate::connection::RealmId,
+    ) -> Result<Option<crate::realm_admission::AdmissionFence>, CredentialMutationError> {
+        let _ = realm;
+        Err(CredentialMutationError::AdmissionFenceUnavailable(
+            "this credential coordinator does not name its credential fence; nothing was \
+             started or written"
+                .into(),
+        ))
     }
 
     async fn with_refresh(

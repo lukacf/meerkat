@@ -702,20 +702,25 @@ fi
 # needs two values to tell a new value from the recorded one, which the auth
 # ci sweep (one string, three steps) never has. A hand-written audit over the
 # same generated model explores every AuthMachine action over two values,
-# OAuth flow membership left out, under every generated invariant plus an
-# action property (a refused or logged-out value is never published again
-# while the lease records it) and two invariants (the classifier's verdict is
-# Publish exactly when an Acquire arm naming the value is enabled; a
-# MarkPublicationRefused arm withdraws the lease exactly when the refusal
-# names the publication the lease carries in a live phase). It requires its
-# seven witnesses reached (a refusal and a logout healed by another value, a
-# run-out window renewing the same value, a refused and a logged-out value
-# whose Acquire is disabled while another's is enabled, a newer publication a
-# late refusal of the earlier one leaves valid, a refusal of the current
-# publication withdrawing it). Its --mutants mode (by hand) refuses the
-# Acquire guard removed, the renewal arms AcquireFromExpiring and
-# AcquireFromExpired disabled, and the refusal's correlation guard removed.
-# 3 steps reach every witness.
+# OAuth flow membership left out, under every generated invariant plus two
+# action properties (a refused or logged-out value is never published again
+# while the lease records it; the lease generation never goes back, also when
+# a restore adopts a record another process published at a lower generation)
+# and two invariants (the classifier's verdict is Publish exactly when an
+# Acquire arm naming the value is enabled; a MarkPublicationRefused arm
+# withdraws the lease exactly when the refusal names the publication the
+# lease carries in a live phase). It requires its nine witnesses reached (a
+# refusal and a logout healed by another value, a run-out window renewing
+# the same value, a refused and a logged-out value whose Acquire is disabled
+# while another's is enabled, a newer publication a late refusal of the
+# earlier one leaves valid, a refusal of the current publication withdrawing
+# it, a lease that records a marker generation below its own, a lease that
+# withdrew its credential and keeps its publication time). Its --mutants
+# mode (by hand) refuses the Acquire guard removed, the renewal arms
+# AcquireFromExpiring and AcquireFromExpired disabled, the refusal's
+# correlation guard removed, a restore that takes the record's generation,
+# and a publication that keeps the withdrawn publication time. 4 steps reach
+# every witness.
 source_credential_publication_audit="${workspace_root}/specs/machines/auth/source_credential_publication_audit.sh"
 if [[ ! -x "${source_credential_publication_audit}" ]]; then
   echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2
@@ -1322,6 +1327,35 @@ fi
 if run_part audits-e; then
   echo "running bounded durable-tail classification TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_tail_classification_audit}" --mutants
+fi
+
+# The MobMachine member dispatch admission verdict
+# (ResolveMemberDispatchAdmission*: AskHost, Inherit, Refused, NoneRequired,
+# by the build's observed lineage and the host's answer) has four arms in
+# each phase whose guards must partition the observations, a lineage that
+# runs under a host's tool dispatch admission must never be built without
+# one, and an Unknown lineage (a fork-derived member whose spawn row records
+# none) only once the host derived none: the DSL declares state invariants
+# only and the generated Next
+# is a disjunction, so the ci sweep never checks it. A hand-written audit
+# over the same generated model checks, with ENABLED at the initial state
+# over all 21 observation pairs, that exactly one arm answers each pair with
+# the verdict the shell mirrors. It first checks on the generated model that
+# the arms read no state but phase, and that each arm's copies in the
+# Stopped, Completed and Destroyed phases have its Running guards, so the
+# initial state stands for every state; then requires every Running arm to
+# fire in a one-step run (TLC coverage) and its witness reached. --mutants
+# refuses one seeded defect per verdict arm and two for the Unknown lineage,
+# each by the invariant it targets. It needs no step bound, and runs in under
+# a minute.
+member_dispatch_admission_audit="${workspace_root}/specs/machines/mob_machine/member_dispatch_admission_audit.sh"
+if [[ ! -x "${member_dispatch_admission_audit}" ]]; then
+  echo "error: member dispatch admission audit runner is missing from workspace runfiles: ${member_dispatch_admission_audit}" >&2
+  exit 1
+fi
+if run_part audits-e; then
+  echo "running member dispatch admission TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${member_dispatch_admission_audit}" --mutants
 fi
 
 # The MeerkatMachine durable-tail recovery authorization

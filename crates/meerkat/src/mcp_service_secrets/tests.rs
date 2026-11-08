@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use meerkat_core::auth::{
-    McpServiceSecretPresence, McpServiceSecretRef, McpServiceSecretRefusal, TokenStore,
-    clear_mcp_service_secret, save_mcp_service_secret,
+    McpServiceSecretPresence, McpServiceSecretRecheck, McpServiceSecretRef,
+    McpServiceSecretRefusal, McpServiceSecretWitness, TokenStore, clear_mcp_service_secret,
+    save_mcp_service_secret,
 };
 use meerkat_core::connection::{RealmConfigSection, RealmId};
 use meerkat_core::mcp_config::McpTransportConfig;
@@ -79,6 +80,23 @@ fn store() -> Arc<dyn TokenStore> {
     Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new())
 }
 
+/// Store `value` for `reference` as a write does, and return its witness.
+async fn written(
+    store: &Arc<dyn TokenStore>,
+    reference: &McpServiceSecretRef,
+    value: &str,
+) -> McpServiceSecretWitness {
+    let row = save_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        store.as_ref(),
+        reference,
+        value,
+    )
+    .await
+    .unwrap();
+    reference.witness_of(&row).expect("a named write")
+}
+
 #[tokio::test]
 async fn a_launch_reads_only_the_defining_realms_exact_row() {
     let defined = search(&["--stdio"]);
@@ -92,15 +110,21 @@ async fn a_launch_reads_only_the_defining_realms_exact_row() {
     ]);
     let store = store();
     save_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
         store.as_ref(),
         &reference("global", &defined),
         "global-value",
     )
     .await
     .unwrap();
-    save_mcp_service_secret(store.as_ref(), &reference("other", &defined), "other-value")
-        .await
-        .unwrap();
+    save_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        store.as_ref(),
+        &reference("other", &defined),
+        "other-value",
+    )
+    .await
+    .unwrap();
     let custody = RealmMcpServiceSecrets::from_realm_source(
         Arc::clone(&docs) as Arc<dyn meerkat_core::RealmConfigSource>,
         realm("child"),
@@ -134,16 +158,26 @@ async fn a_launch_reads_only_the_defining_realms_exact_row() {
             env: SLOT.to_owned()
         })
     );
-    save_mcp_service_secret(store.as_ref(), &reference("child", &defined), "child-value")
-        .await
-        .unwrap();
+    save_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        store.as_ref(),
+        &reference("child", &defined),
+        "child-value",
+    )
+    .await
+    .unwrap();
     let launched = custody.resolve(&defined).await.expect("child value");
 
     // Rotation and removal apply to the next read; a launch that already
     // read keeps its snapshot.
-    save_mcp_service_secret(store.as_ref(), &reference("child", &defined), "rotated")
-        .await
-        .unwrap();
+    save_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        store.as_ref(),
+        &reference("child", &defined),
+        "rotated",
+    )
+    .await
+    .unwrap();
     assert_eq!(
         launched.into_env().collect::<Vec<_>>(),
         vec![(SLOT.to_owned(), "child-value".to_owned())]
@@ -157,9 +191,13 @@ async fn a_launch_reads_only_the_defining_realms_exact_row() {
             .collect::<Vec<_>>(),
         vec![(SLOT.to_owned(), "rotated".to_owned())]
     );
-    clear_mcp_service_secret(store.as_ref(), &reference("child", &defined))
-        .await
-        .unwrap();
+    clear_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        store.as_ref(),
+        &reference("child", &defined),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         custody.resolve(&defined).await,
         Err(McpServiceSecretRefusal::NotStored {
@@ -196,12 +234,113 @@ async fn an_observation_names_the_owner_and_presence_without_the_value() {
     let before = custody.observe(&defined).await.expect("observed");
     assert_eq!(before.owner, realm("team"));
     assert_eq!(before.slots[SLOT], McpServiceSecretPresence::NotStored);
-    save_mcp_service_secret(store.as_ref(), &reference("team", &defined), "sk-hidden")
-        .await
-        .unwrap();
+    assert!(before.witnesses.is_empty());
+    let witness = written(&store, &reference("team", &defined), "sk-hidden").await;
     let after = custody.observe(&defined).await.expect("observed");
     assert_eq!(after.slots[SLOT], McpServiceSecretPresence::Stored);
+    // The slot's current write is reported, never the value.
+    assert_eq!(after.witnesses.get(SLOT), Some(&witness));
     assert!(!format!("{after:?}").contains("sk-hidden"));
+}
+
+/// A launch records the write of each value it read; a recheck answers from
+/// the realm documents and the store, read now, whether that write is still
+/// what a launch of its server would inject.
+#[tokio::test]
+async fn a_recheck_answers_whether_a_write_is_still_what_a_launch_injects() {
+    use McpServiceSecretRecheck::{Current, DefinitionChanged, Removed, Rotated};
+    let defined = search(&["--stdio"]);
+    let docs = Documents::new([
+        ("global", document("global", None, vec![defined.clone()])),
+        (
+            "child",
+            document("child", Some(RealmId::global()), Vec::new()),
+        ),
+    ]);
+    let store = store();
+    let custody = RealmMcpServiceSecrets::from_realm_source(
+        Arc::clone(&docs) as Arc<dyn meerkat_core::RealmConfigSource>,
+        realm("child"),
+        Arc::clone(&store),
+    );
+    let global = reference("global", &defined);
+
+    // The write a launch reads is the one the observation reports.
+    let first = written(&store, &global, "v1").await;
+    let launched = custody.resolve(&defined).await.expect("launch values");
+    assert_eq!(launched.launch().witness(SLOT), Some(&first));
+    assert_eq!(
+        custody
+            .observe(&defined)
+            .await
+            .expect("observed")
+            .witnesses
+            .get(SLOT),
+        Some(&first)
+    );
+    assert_eq!(custody.recheck(&first).await, Ok(Current));
+
+    // A rewrite, even of the same value, is another write: the earlier one
+    // is rotated, while the launch that read it keeps its record.
+    let second = written(&store, &global, "v1").await;
+    assert_ne!(first, second);
+    assert_eq!(custody.recheck(&first).await, Ok(Rotated));
+    assert_eq!(custody.recheck(&second).await, Ok(Current));
+    assert_eq!(launched.launch().witness(SLOT), Some(&first));
+    assert_eq!(
+        custody
+            .resolve(&defined)
+            .await
+            .expect("launch values")
+            .launch()
+            .witness(SLOT),
+        Some(&second)
+    );
+
+    // A removal.
+    clear_mcp_service_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        store.as_ref(),
+        &global,
+    )
+    .await
+    .unwrap();
+    assert_eq!(custody.recheck(&second).await, Ok(Removed));
+    assert_eq!(custody.recheck(&first).await, Ok(Removed));
+
+    // Another realm's definition now serves the launches: a child repeating
+    // the definition defines it itself, so the parent's write is no longer
+    // what a launch injects, and is again once the child's is gone.
+    let third = written(&store, &global, "v3").await;
+    docs.replace(
+        "child",
+        document("child", Some(RealmId::global()), vec![defined.clone()]),
+    );
+    assert_eq!(custody.recheck(&third).await, Ok(DefinitionChanged));
+    docs.replace(
+        "child",
+        document("child", Some(RealmId::global()), Vec::new()),
+    );
+    assert_eq!(custody.recheck(&third).await, Ok(Current));
+
+    // A changed definition, then none at all.
+    docs.replace(
+        "global",
+        document("global", None, vec![search(&["--other"])]),
+    );
+    assert_eq!(custody.recheck(&third).await, Ok(DefinitionChanged));
+    docs.replace("global", document("global", None, Vec::new()));
+    assert_eq!(custody.recheck(&third).await, Ok(DefinitionChanged));
+
+    // An identical reinstallation is the same reference (the same identity
+    // an obsolete cleanup keeps), so its stored write answers again.
+    docs.replace("global", document("global", None, vec![defined.clone()]));
+    assert_eq!(custody.recheck(&third).await, Ok(Current));
+
+    // A value that names no write (a host's own) is recorded without one.
+    let mut host = meerkat_core::auth::McpServiceSecretValues::new();
+    host.insert(SLOT, "host-value");
+    assert_eq!(host.launch().witness(SLOT), None);
 }
 
 /// An explicit credential source with answers of its own for every method.
@@ -249,6 +388,35 @@ impl meerkat_mcp::McpAuthResolver for Explicit {
             }
         }
     }
+
+    fn credential_publication(
+        &self,
+        _target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        Some(explicit_publication())
+    }
+}
+
+/// The lease publication the explicit credential source states.
+#[cfg(feature = "mcp")]
+fn explicit_publication() -> meerkat_core::handles::CredentialLeasePublication {
+    meerkat_core::handles::CredentialLeasePublication::of(
+        meerkat_core::handles::LeaseKey::new(
+            realm("explicit"),
+            meerkat_core::BindingId::parse("explicit-source").unwrap(),
+            None,
+        ),
+        &meerkat_core::handles::AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: true,
+            generation: 7,
+            credential_published_at_millis: None,
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
+        },
+    )
+    .expect("a lease that holds a credential has a publication")
 }
 
 #[cfg(feature = "mcp")]
@@ -257,9 +425,7 @@ async fn the_custody_resolver_forwards_every_credential_method_and_keeps_explici
     let defined = search(&[]);
     let docs = Documents::new([("team", document("team", None, vec![defined.clone()]))]);
     let store = store();
-    save_mcp_service_secret(store.as_ref(), &reference("team", &defined), "realm-value")
-        .await
-        .unwrap();
+    let witness = written(&store, &reference("team", &defined), "realm-value").await;
     let custody = RealmMcpServiceSecrets::from_realm_source(
         docs as Arc<dyn meerkat_core::RealmConfigSource>,
         realm("team"),
@@ -295,6 +461,11 @@ async fn the_custody_resolver_forwards_every_credential_method_and_keeps_explici
         "the explicit source's egress profile is forwarded unchanged"
     );
     assert_eq!(
+        wrapped.credential_publication(&identity),
+        Some(explicit_publication()),
+        "the explicit source's lease publication is forwarded unchanged"
+    );
+    assert_eq!(
         wrapped
             .stdio_service_secrets(&defined)
             .await
@@ -302,6 +473,17 @@ async fn the_custody_resolver_forwards_every_credential_method_and_keeps_explici
             .into_env()
             .collect::<Vec<_>>(),
         vec![(SLOT.to_owned(), "realm-value".to_owned())]
+    );
+    // The realm custody's values carry the write each was read from, which
+    // is what the launch records.
+    assert_eq!(
+        wrapped
+            .stdio_service_secrets(&defined)
+            .await
+            .expect("realm custody")
+            .launch()
+            .witness(SLOT),
+        Some(&witness)
     );
 
     // An explicit source's own custody answer stands, refusal included.
@@ -491,6 +673,7 @@ mod owner_updates {
         }
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &meerkat_core::auth::TokenKey,
             _tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -500,6 +683,7 @@ mod owner_updates {
         }
         async fn clear(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             Err(meerkat_core::auth::TokenStoreError::Io(
@@ -555,10 +739,11 @@ mod owner_updates {
             .add(reviewed.clone(), None)
             .await
             .unwrap();
-        let reference = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+        let witness = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
             .await
             .expect("stored for the current installation");
-        assert_eq!(reference.realm(), &realm("team"));
+        assert_eq!(witness.reference().realm(), &realm("team"));
+        assert_eq!(witness.reference(), &reference("team", &reviewed));
         assert_eq!(stored(&persistence, &reviewed).await.as_deref(), Some("v1"));
 
         // The launch custody reads exactly what the owner stored.
@@ -872,6 +1057,182 @@ mod owner_updates {
             .expect("stored once the write settled");
     }
 
+    /// The realm document's shared custody, the one a currentness read holds
+    /// (`ConfigReadLock`), excludes every service-secret update as a held
+    /// writer custody does: an update needs the exclusive custody and takes
+    /// it without waiting. While it is held, a rotation and a removal are
+    /// both refused as `ConfigurationUnavailable` with nothing written; once
+    /// it is released, both land.
+    #[tokio::test]
+    async fn a_held_read_custody_refuses_a_secret_update_with_nothing_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let persistence = persistence();
+        let reviewed = search(&[]);
+        McpRealmPersistTarget::new(&runtime(&document))
+            .add(reviewed.clone(), None)
+            .await
+            .unwrap();
+        set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+            .await
+            .expect("stored before any custody is held");
+        let held = meerkat_core::config_runtime::ConfigReadLock::try_hold(
+            &document.with_file_name("config_state.lock"),
+        )
+        .unwrap()
+        .expect("config read custody");
+
+        assert!(matches!(
+            set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v2").await,
+            Err(McpServiceSecretUpdateError::ConfigurationUnavailable(_))
+        ));
+        assert!(matches!(
+            remove_mcp_service_secret(
+                &storage,
+                &persistence,
+                &reviewed,
+                SLOT,
+                McpServiceSecretRemoval::Current
+            )
+            .await,
+            Err(McpServiceSecretUpdateError::ConfigurationUnavailable(_))
+        ));
+        assert_eq!(
+            stored(&persistence, &reviewed).await.as_deref(),
+            Some("v1"),
+            "nothing was written while the read custody was held"
+        );
+
+        drop(held);
+        set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v2")
+            .await
+            .expect("the rotation lands once the read custody is released");
+        assert_eq!(stored(&persistence, &reviewed).await.as_deref(), Some("v2"));
+        remove_mcp_service_secret(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            McpServiceSecretRemoval::Current,
+        )
+        .await
+        .expect("the removal lands once the read custody is released");
+        assert_eq!(stored(&persistence, &reviewed).await, None);
+    }
+
+    /// A durable credential store under `root` and its fenced coordinator,
+    /// retaining custody: an interactive update waits at most 5 s for a held
+    /// credential fence, then refuses.
+    fn fenced_persistence(root: &Path) -> meerkat_providers::auth_store::ProviderAuthPersistence {
+        meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::FileTokenStore::new(root)),
+            Arc::new(
+                meerkat_providers::auth_store::FileLockCoordinator::retaining_custody(
+                    root.join("refresh-locks"),
+                ),
+            ),
+        )
+    }
+
+    /// An admission holder's hold of C(`team`) under the credential root
+    /// `root`: SHARED, so every fenced credential write of the realm is
+    /// excluded until it is released.
+    fn hold_team_credentials(root: &Path) -> meerkat_core::AdmissionHold {
+        let fence = meerkat_core::AdmissionFence::credentials(root, &realm("team")).unwrap();
+        fence.ensure_exists().unwrap();
+        meerkat_core::AdmissionHold::try_acquire(vec![fence]).unwrap()
+    }
+
+    /// The update takes the credential fence once, at its coordinator entry;
+    /// the custodies nested inside it (the config document's writer
+    /// exclusion, the write) take none, so with no holder a set and a
+    /// removal both land.
+    #[tokio::test]
+    async fn with_no_holder_a_secret_write_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let persistence = fenced_persistence(&temp.path().join("credentials"));
+        let reviewed = search(&[]);
+        McpRealmPersistTarget::new(&runtime(&document))
+            .add(reviewed.clone(), None)
+            .await
+            .unwrap();
+
+        set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+            .await
+            .expect("stored with no holder");
+        assert_eq!(stored(&persistence, &reviewed).await.as_deref(), Some("v1"));
+        remove_mcp_service_secret(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            McpServiceSecretRemoval::Current,
+        )
+        .await
+        .expect("removed with no holder");
+        assert_eq!(stored(&persistence, &reviewed).await, None);
+    }
+
+    /// While an admission holds the realm's credential fence, a rotation and
+    /// a removal are refused as `AdmissionInProgress` with nothing written,
+    /// and land once it is released.
+    #[tokio::test]
+    async fn under_a_held_fence_a_secret_write_refuses_admission_in_progress_with_nothing_written()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let credentials = temp.path().join("credentials");
+        let persistence = fenced_persistence(&credentials);
+        let reviewed = search(&[]);
+        McpRealmPersistTarget::new(&runtime(&document))
+            .add(reviewed.clone(), None)
+            .await
+            .unwrap();
+        set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+            .await
+            .expect("stored before the hold");
+
+        let held = hold_team_credentials(&credentials);
+        let rotated = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v2").await;
+        assert!(
+            matches!(
+                rotated,
+                Err(McpServiceSecretUpdateError::AdmissionInProgress)
+            ),
+            "{rotated:?}"
+        );
+        let removed = remove_mcp_service_secret(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            McpServiceSecretRemoval::Current,
+        )
+        .await;
+        assert!(
+            matches!(
+                removed,
+                Err(McpServiceSecretUpdateError::AdmissionInProgress)
+            ),
+            "{removed:?}"
+        );
+        assert_eq!(
+            stored(&persistence, &reviewed).await.as_deref(),
+            Some("v1"),
+            "nothing was written while the fence was held"
+        );
+
+        drop(held);
+        set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v2")
+            .await
+            .expect("the rotation lands once the holder released");
+        assert_eq!(stored(&persistence, &reviewed).await.as_deref(), Some("v2"));
+    }
+
     #[tokio::test]
     async fn invalid_updates_touch_nothing() {
         let temp = tempfile::tempdir().unwrap();
@@ -976,18 +1337,20 @@ mod owner_updates {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
             tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             self.record();
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             self.record();
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
         async fn list(
             &self,
@@ -1139,7 +1502,7 @@ mod owner_updates {
                 .with_exclusive_mutation_for(
                     key,
                     meerkat_core::auth::TokenStoreAccess::Interactive,
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         Box::pin(async move {
                             let _ = holding.send(());
                             let _ = released.await;
@@ -1403,6 +1766,7 @@ mod owner_updates {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
             tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -1414,13 +1778,14 @@ mod owner_updates {
             if let Some(release) = release {
                 let _ = release.await;
             }
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
         async fn list(
             &self,
@@ -1507,5 +1872,172 @@ mod owner_updates {
             Some(meerkat_core::AdministeredChange::McpServiceSecretSet { .. })
         ));
         assert_eq!(stored(&persistence, &reviewed).await.as_deref(), Some("v1"));
+    }
+
+    fn realm_custody(
+        storage: &ResolvedStorage,
+        persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
+    ) -> RealmMcpServiceSecrets {
+        RealmMcpServiceSecrets::from_realm_source(
+            Arc::new(
+                crate::governed_realm::stock::issuance::realm_config_source(storage)
+                    .expect("projection"),
+            ),
+            realm("team"),
+            persistence.token_store(),
+        )
+    }
+
+    /// The owner's writes name themselves: a set returns the witness that
+    /// the observation reports as current and a launch records, and every
+    /// later rewrite, removal, uninstallation or replacement is what a
+    /// recheck answers.
+    #[tokio::test]
+    async fn a_set_returns_the_witness_observed_launched_and_rechecked() {
+        use McpServiceSecretRecheck::{Current, DefinitionChanged, Removed, Rotated};
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let persistence = persistence();
+        let reviewed = search(&["--stdio"]);
+        let config = runtime(&document);
+        let target = McpRealmPersistTarget::new(&config);
+        target.add(reviewed.clone(), None).await.unwrap();
+        let custody = realm_custody(&storage, &persistence);
+
+        let first = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+            .await
+            .expect("stored");
+        let observed = custody.observe(&reviewed).await.expect("observed");
+        assert_eq!(observed.slots[SLOT], McpServiceSecretPresence::Stored);
+        assert_eq!(observed.witnesses.get(SLOT), Some(&first));
+        let launched = custody.resolve(&reviewed).await.expect("launch values");
+        assert_eq!(launched.launch().witness(SLOT), Some(&first));
+        assert_eq!(custody.recheck(&first).await, Ok(Current));
+
+        // Setting the same value again is another write.
+        let second = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+            .await
+            .expect("stored");
+        assert_ne!(first, second);
+        assert_eq!(custody.recheck(&first).await, Ok(Rotated));
+        assert_eq!(custody.recheck(&second).await, Ok(Current));
+        assert_eq!(launched.launch().witness(SLOT), Some(&first));
+
+        // A removal.
+        remove_mcp_service_secret(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            McpServiceSecretRemoval::Current,
+        )
+        .await
+        .expect("removed");
+        assert_eq!(custody.recheck(&second).await, Ok(Removed));
+        assert!(
+            custody
+                .observe(&reviewed)
+                .await
+                .expect("observed")
+                .witnesses
+                .is_empty()
+        );
+
+        // Uninstalled, then replaced by another definition of the name: the
+        // write is no longer what a launch of the server injects, and the
+        // replacement's own write is another reference.
+        let third = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v3")
+            .await
+            .expect("stored");
+        target.remove("search", None).await.unwrap();
+        assert_eq!(custody.recheck(&third).await, Ok(DefinitionChanged));
+        let replacement = search(&["--replacement"]);
+        target.add(replacement.clone(), None).await.unwrap();
+        assert_eq!(custody.recheck(&third).await, Ok(DefinitionChanged));
+        let replaced = set_mcp_service_secret(&storage, &persistence, &replacement, SLOT, "v4")
+            .await
+            .expect("stored");
+        assert_ne!(replaced.reference(), third.reference());
+        assert_eq!(custody.recheck(&replaced).await, Ok(Current));
+
+        // Reinstalling exactly the reviewed definition is its reference
+        // again: the write still stored for it answers from the store, and
+        // the replacement's is the changed one now.
+        target.remove("search", None).await.unwrap();
+        target.add(reviewed.clone(), None).await.unwrap();
+        assert_eq!(custody.recheck(&third).await, Ok(Current));
+        assert_eq!(custody.recheck(&replaced).await, Ok(DefinitionChanged));
+    }
+
+    /// Rechecks read durable state: after a restart (a new store over the
+    /// same credential files and a new custody over the same realm
+    /// documents), witnesses a host kept as data get the same answers.
+    #[tokio::test]
+    async fn a_recheck_after_a_restart_gives_the_same_answers() {
+        use McpServiceSecretRecheck::{Current, Removed, Rotated};
+        let temp = tempfile::tempdir().unwrap();
+        let storage = storage(temp.path());
+        let document = document_path(&storage);
+        let credentials = temp.path().join("credentials");
+        // A fresh store and coordinator over the same credential files, as a
+        // restarted process opens them.
+        let durable = || fenced_persistence(&credentials);
+        let reviewed = search(&["--stdio"]);
+        McpRealmPersistTarget::new(&runtime(&document))
+            .add(reviewed.clone(), None)
+            .await
+            .unwrap();
+
+        let (kept_rotated, kept_current, observed) = {
+            let persistence = durable();
+            let rotated = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v1")
+                .await
+                .expect("stored");
+            let current = set_mcp_service_secret(&storage, &persistence, &reviewed, SLOT, "v2")
+                .await
+                .expect("stored");
+            let custody = realm_custody(&storage, &persistence);
+            assert_eq!(custody.recheck(&rotated).await, Ok(Rotated));
+            assert_eq!(custody.recheck(&current).await, Ok(Current));
+            (
+                serde_json::to_string(&rotated).unwrap(),
+                serde_json::to_string(&current).unwrap(),
+                custody.observe(&reviewed).await.expect("observed"),
+            )
+        };
+        let persistence = durable();
+        let restarted = realm_custody(&storage, &persistence);
+        let rotated: McpServiceSecretWitness = serde_json::from_str(&kept_rotated).unwrap();
+        let current: McpServiceSecretWitness = serde_json::from_str(&kept_current).unwrap();
+        assert_eq!(restarted.recheck(&rotated).await, Ok(Rotated));
+        assert_eq!(restarted.recheck(&current).await, Ok(Current));
+        assert_eq!(
+            restarted.observe(&reviewed).await.expect("observed"),
+            observed
+        );
+        assert_eq!(
+            restarted
+                .resolve(&reviewed)
+                .await
+                .expect("launch values")
+                .launch()
+                .witness(SLOT),
+            Some(&current)
+        );
+
+        // A removal is durable state too.
+        remove_mcp_service_secret(
+            &storage,
+            &persistence,
+            &reviewed,
+            SLOT,
+            McpServiceSecretRemoval::Current,
+        )
+        .await
+        .expect("removed");
+        let restarted = realm_custody(&storage, &durable());
+        assert_eq!(restarted.recheck(&current).await, Ok(Removed));
+        assert_eq!(restarted.recheck(&rotated).await, Ok(Removed));
     }
 }

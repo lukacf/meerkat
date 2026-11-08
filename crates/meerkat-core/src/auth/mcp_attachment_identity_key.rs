@@ -7,8 +7,10 @@
 //! own key kind and mode ([`TokenKey::mcp_attachment_identity_key`],
 //! [`PersistedAuthMode::McpAttachmentIdentityKey`]), outside session state,
 //! with no lease or lifecycle. It is created and persisted, under the
-//! store's exclusive mutation, before any intent depends on it; restore only
-//! ever loads it, so a lost key proves nothing and is never replaced there.
+//! store's exclusive mutation (and so under the realm's credential fence),
+//! before any intent depends on it; an existing key is read without the
+//! fence; restore only ever loads it, so a lost key proves nothing and is
+//! never replaced there.
 
 use std::fmt::Write as _;
 
@@ -146,27 +148,37 @@ pub async fn load_mcp_attachment_identity_key(
     }
 }
 
-/// `realm`'s identity key, created and persisted first if it has none. The
-/// load-or-create runs under the store's exclusive mutation for the key, so
-/// concurrent callers (in any process sharing the store) agree on one key,
-/// and the key is durable before it is returned. An unreadable stored key is
-/// an error, never silently replaced. (Not on wasm32: its token-store
-/// futures are not Send, which the exclusive mutation requires.)
+/// `realm`'s identity key, created and persisted first if it has none.
+///
+/// An existing key is read first, as any read is, without the realm's
+/// credential fence: resolving a realm's key never waits for, or is refused
+/// by, an admission that holds the fence. Only a missing key is created, and
+/// only under the store's exclusive mutation for the key, which takes the
+/// credential fence of the realm: concurrent callers (in any process sharing
+/// the store) agree on one key, and the key is durable before it is
+/// returned. While the fence is held the creation is refused (`Mutation`)
+/// and nothing is written. An unreadable stored key is an error, never
+/// silently replaced. (Not on wasm32: its token-store futures are not Send,
+/// which the exclusive mutation requires.)
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn resolve_or_create_mcp_attachment_identity_key(
     persistence: &ProviderAuthPersistence,
     realm: &RealmId,
 ) -> Result<McpAttachmentIdentityKey, McpAttachmentIdentityKeyError> {
-    let key = TokenKey::mcp_attachment_identity_key(realm.clone());
     let store = persistence.token_store();
+    if let Some(existing) = load_mcp_attachment_identity_key(store.as_ref(), realm).await? {
+        return Ok(existing);
+    }
+    let key = TokenKey::mcp_attachment_identity_key(realm.clone());
     let mutation_key = key.clone();
     let outcome = persistence
         .refresh_coordinator()
         .with_exclusive_mutation_for(
             key,
             super::token_store::TokenStoreAccess::Unattended,
-            Box::new(move || {
+            Box::new(move |guard| {
                 Box::pin(async move {
+                    // Created by another caller since the first read: keep it.
                     let stored = store
                         .load_for(
                             &mutation_key,
@@ -180,6 +192,7 @@ pub async fn resolve_or_create_mcp_attachment_identity_key(
                     let tokens = McpAttachmentIdentityKey::generate().to_tokens();
                     store
                         .save_for(
+                            &guard,
                             &mutation_key,
                             &tokens,
                             super::token_store::TokenStoreAccess::Unattended,

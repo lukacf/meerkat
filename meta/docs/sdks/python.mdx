@@ -399,6 +399,66 @@ with `state` `ABSENT`, `IN_FLIGHT` (`durable_witness`), `COMPLETED`
 `UNRESOLVED` (`cause`); a state this SDK does not know reads as `UNRESOLVED`,
 never `ABSENT`. See [Scope-bound dispatch](/api/rpc#scope-bound-dispatch).
 
+### Scoped tool grants
+
+A profile's `tools.grant_gated` mounts tools closed on every build of its
+members; a grant to an identity opens one for a fixed window, across the
+member's respawns and the gateway's restarts. The grant wakes nothing and
+applies at the member's next model request.
+
+```python
+from meerkat_meta import ToolGrantRequestRefusedError
+
+granted = await runtime.grant_tool(
+    "agent-a", tool="datetime", duration_ms=600_000,
+    decision_ref="approval-7",           # your own record of the decision
+)
+grant_id = granted["grant"]["grant_id"]
+await runtime.list_tool_grants("agent-a", include_ended=True)
+await runtime.tool_grant_audit("agent-a", limit=50)
+await runtime.revoke_tool_grant(grant_id, reason="done")
+
+try:
+    await runtime.grant_tool("agent-a", family="shell", duration_ms=600_000)
+except ToolGrantRequestRefusedError as error:
+    error.refusal_kind                   # "target_not_gated", ...
+```
+
+Name exactly one of `tool` and `family`, and exactly one of `duration_ms`
+and `expires_at_ms`. Every refusal raises `ToolGrantRequestRefusedError`; its
+kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+[Scoped tool grants](/api/rpc#scoped-tool-grants).
+
+### Realm MCP administration
+
+The stdio gateway lets its host administer the installation realm's own MCP
+servers and the secret values of their stdio servers' `secret_env` slots,
+kept in the launch's provider credential store:
+
+```python
+from meerkat_meta import RealmMcpRefusedError
+
+listed = await runtime.realm_mcp_servers()          # {"servers": [...], "generation": 3}
+server = {
+    "name": "search",
+    "command": "search-mcp",
+    "secret_env": ["SEARCH_API_KEY"],
+}
+await runtime.realm_mcp_install(server, expected_generation=listed["generation"])
+await runtime.realm_mcp_set_secret(server, "SEARCH_API_KEY", api_key)
+try:
+    await runtime.realm_mcp_install(server, expected_generation=listed["generation"])
+except RealmMcpRefusedError as error:
+    error.refusal_kind                               # "generation_conflict"
+await runtime.realm_mcp_remove_secret(server, "SEARCH_API_KEY")
+```
+
+The value is sent once, in the `set_secret` request, and never appears in an
+answer, an exception or a log record. A launch whose credential store did not
+open answers the secret methods `RealmMcpUnavailableError`; a write whose
+result is unknown raises `RealmMcpOutcomeUnknownError`. See
+[Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).
+
 ## Mob-Level API
 
 For direct mob-member operations (discovery-based), the mob handle API is still available.
@@ -1344,6 +1404,10 @@ from meerkat_meta.errors import (
     IdentityHistoryUnavailableError,   # Core's history of the identity cannot be read now (-32052, retryable)
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
+    ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
+    RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
+    RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
+    RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
     MobAnnouncementsUnavailableError,  # Mob announcements are not enabled (-32044)
     AnnouncementConflictError,         # Conflict or stale request (-32045): .kind
     SourceStaleRevisionError,          # A source's revision moved (-32045): .current_revision, .current_version, .generation, .cursor

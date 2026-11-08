@@ -2839,6 +2839,22 @@ mod tests {
                 "store unavailable".to_string(),
             ))
         }
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), meerkat_core::config::ConfigError> {
+            Ok(())
+        }
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _delta: meerkat_core::config::ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

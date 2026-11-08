@@ -495,6 +495,7 @@ async fn exercise_a2(server: &Server, order: Order) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -506,6 +507,7 @@ async fn exercise_a2(server: &Server, order: Order) {
     operation_ceiling.actions = ExactRestriction::exact([action("read"), action("delete")]);
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("record-actions"),
             principal("executor"),

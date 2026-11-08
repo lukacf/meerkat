@@ -663,7 +663,10 @@ pub trait WorkAuthorization: Send + Sync {
     /// The typed outcome is returned boxed. Wrappers check their own custody
     /// and forward; the default is unavailable and issues nothing. A held
     /// exclusion refuses as for `run_if_current_within`, before anything is
-    /// decided or appended.
+    /// decided or appended. An admission fence of the grant owner's store
+    /// that another holder holds (`realm_admission`) is answered, also
+    /// before anything is decided or appended, with a boxed
+    /// [`ChildIssuanceAdmissionInProgress`] in place of the outcome.
     fn issue_child_if_current_within(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -1150,6 +1153,17 @@ impl fmt::Debug for OperationRefused {
 }
 
 impl std::error::Error for OperationRefused {}
+
+/// A work owner's answer to a child issuance it did not attempt
+/// ([`WorkAuthorization::issue_child_if_current_within`], boxed in place of
+/// the grant owner's outcome): an admission, or another fenced write, holds
+/// the admission fence of the grant owner's store (`realm_admission`).
+/// Nothing was decided or appended. A waiting issuance (the
+/// `_after_owner_change` forms) waits it out like a refusal to rebuild,
+/// within the same bounds; still held after them, it is the issuance's
+/// answer, and the hold may last until the holding process restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildIssuanceAdmissionInProgress;
 
 /// An operation refusal, unavailable authority, or failed observation.
 /// None of these variants authorizes retry or bypassing the actual owner.

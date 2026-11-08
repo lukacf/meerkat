@@ -101,6 +101,8 @@ async fn invoke(surface: Surface, reply: Reply, text_only: bool) -> Result<Outpu
                 oauth_target: None,
                 attempt: None,
                 account: std::sync::Arc::new(meerkat_core::OperationAccount::Unavailable),
+                service_secret_launch: None,
+                credential_source: None,
             };
             let result = tokio::time::timeout(Duration::from_secs(3), async {
                 if text_only {

@@ -54,6 +54,7 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -63,6 +64,7 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),

@@ -331,11 +331,15 @@ pub trait RequesterReplyRoute: Send + Sync {
 /// implements it over its controller grant mutation custody.
 pub trait ApprovalControllerCustody: Send + Sync {
     /// Revoke `grant`, issued by `issuer`, unless unfinished work of this
-    /// runtime still runs under it.
+    /// runtime still runs under it. The revocation is appended under the
+    /// grant log's admission fence ([`LocalGrantAuthority::admission_fences`]),
+    /// which the custody takes without waiting, before its own.
     ///
     /// # Errors
     /// The grant owner's refusal: `ControllerInUse` while work runs under
-    /// it, `Unavailable` when the custody cannot be taken now.
+    /// it, `Unavailable` when the custody or the fence cannot be taken now,
+    /// and `AdmissionFence` while an admission (or another fenced write)
+    /// holds the fence. Nothing is appended on any of them.
     fn revoke_controller(
         &self,
         grants: &LocalGrantAuthority,
@@ -351,9 +355,15 @@ impl ApprovalControllerCustody for crate::meerkat_machine::MeerkatMachine {
         issuer: &PrincipalRef,
         grant: &GrantLineageRef,
     ) -> Result<(), GrantRefusal> {
+        let guard = meerkat_core::AdmissionGuard::try_acquire(grants.admission_fences()).map_err(
+            |refusal| match refusal {
+                meerkat_core::AdmissionRefusal::InProgress => GrantRefusal::AdmissionFence,
+                meerkat_core::AdmissionRefusal::Unavailable(_) => GrantRefusal::Unavailable,
+            },
+        )?;
         let mut custody = self
             .try_controller_grant_mutation()
             .map_err(|_| GrantRefusal::Unavailable)?;
-        grants.revoke(issuer, grant, &mut custody)
+        grants.revoke(&guard, issuer, grant, &mut custody)
     }
 }

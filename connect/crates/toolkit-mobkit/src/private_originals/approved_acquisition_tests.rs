@@ -567,7 +567,12 @@ async fn revoked_reviewed_parent_never_enters_acquisition_or_helper() {
                     .source
                     .owner
                     .grants()
-                    .revoke(&parent[0].root_authority, &parent[0], &mut custody)
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &parent[0].root_authority,
+                        &parent[0],
+                        &mut custody,
+                    )
                     .unwrap();
             }
             let first = fixture.submit().await;

@@ -482,6 +482,7 @@ mod tests {
             let base = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     EvidenceId::new("lookup-base").unwrap(),
                     principal("admin"),
@@ -562,6 +563,7 @@ mod tests {
             let base = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     EvidenceId::new(format!("{label}-base")).unwrap(),
                     principal("admin"),

@@ -325,6 +325,8 @@ import type {
   MobFlowsResult as RpcMobFlowsResult,
   MobForceCancelResult as RpcMobForceCancelResult,
   MobForkHelperParams as RpcMobForkHelperParams,
+  MobForkMemberParams as RpcMobForkMemberParams,
+  MobForkMemberResult as RpcMobForkMemberResult,
   MobHelperResult as RpcMobHelperResult,
   MobIngressInteractionParams as RpcMobIngressInteractionParams,
   MobIngressInteractionResult as RpcMobIngressInteractionResult,
@@ -419,6 +421,7 @@ import {
   type MobBoundedHelperResult,
   type MobHandlingMode,
   type MobForkHelperOptions,
+  type MobForkMemberOptions,
   type MobHelperResult,
   type MobHelperOptions,
   type MobKickoffMemberSnapshot,
@@ -4308,6 +4311,47 @@ export class MeerkatClient {
       result,
       "Invalid mob/fork_helper response",
     );
+  }
+
+  /**
+   * Fork a member's session at a message boundary into a new member. The new
+   * member `agentIdentity` holds the source's messages before
+   * `options.messageIndex` (its committed end when absent) and takes the
+   * source member's profile and runtime mode unless named. A source whose
+   * turn is in flight is refused with `SESSION_BUSY`, and nothing is seated.
+   */
+  async forkMobMember(
+    mobId: string,
+    sourceMemberId: string,
+    agentIdentity: string,
+    options?: MobForkMemberOptions,
+  ): Promise<RpcMobForkMemberResult> {
+    const params: RpcMobForkMemberParams = {
+      mob_id: mobId,
+      source_member_id: sourceMemberId,
+      agent_identity: agentIdentity,
+    };
+    if (options?.messageIndex != null) params.message_index = options.messageIndex;
+    if (options?.profile != null) params.profile = options.profile;
+    if (options?.runtimeMode != null) params.runtime_mode = options.runtimeMode;
+    const result = (await this.request("mob/fork_member", params)) as unknown as Record<
+      string,
+      unknown
+    >;
+    const context = "Invalid mob/fork_member response";
+    for (const field of ["agent_identity", "member_ref", "session_id", "source_session_id"]) {
+      if (typeof result[field] !== "string" || result[field] === "") {
+        throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+      }
+    }
+    const messageCount = result.message_count;
+    if (typeof messageCount !== "number" || !Number.isSafeInteger(messageCount) || messageCount < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: message_count must be a non-negative integer`,
+      );
+    }
+    return result as unknown as RpcMobForkMemberResult;
   }
 
   async wireMobMembers(mobId: string, member: string, peer: MobPeerTarget): Promise<void> {

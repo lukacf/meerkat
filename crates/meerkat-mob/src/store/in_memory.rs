@@ -211,6 +211,38 @@ impl InMemoryMobEventStore {
             let _ = release.await;
         }
     }
+
+    /// A handle on this store's event log.
+    pub(crate) fn event_log_for_test(&self) -> InMemoryEventLogForTest {
+        InMemoryEventLogForTest(Arc::clone(&self.aggregate))
+    }
+}
+
+/// Test builds only: a handle on an in-memory store's event log, for rows
+/// that need a stored row as an older build wrote it.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct InMemoryEventLogForTest(Arc<RwLock<InMemoryMobAggregateState>>);
+
+#[cfg(test)]
+impl InMemoryEventLogForTest {
+    /// Drop the internal dispatch admission lineage marker from every stored
+    /// `MemberSpawned` row of `identity`, so each reads back as a row written
+    /// before spawn rows recorded it. Answers how many rows carried it.
+    pub(crate) async fn strip_dispatch_admission_lineage(&self, identity: &AgentIdentity) -> usize {
+        let mut aggregate = self.0.write().await;
+        let mut stripped = 0;
+        for event in &mut aggregate.events {
+            if let MobEventKind::MemberSpawned(spawned) = &mut event.kind
+                && spawned.agent_identity == *identity
+                && spawned.dispatch_admission_lineage
+            {
+                spawned.dispatch_admission_lineage = false;
+                stripped += 1;
+            }
+        }
+        stripped
+    }
 }
 
 impl Default for InMemoryMobEventStore {
@@ -5775,6 +5807,7 @@ mod tests {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

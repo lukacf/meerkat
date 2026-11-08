@@ -124,19 +124,21 @@ impl meerkat_core::auth::TokenStore for CountingTokenStore {
 
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &meerkat_core::auth::TokenKey,
         tokens: &meerkat_core::auth::PersistedTokens,
     ) -> Result<(), meerkat_core::auth::TokenStoreError> {
         self.count();
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
 
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &meerkat_core::auth::TokenKey,
     ) -> Result<(), meerkat_core::auth::TokenStoreError> {
         self.count();
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
 
     async fn list(

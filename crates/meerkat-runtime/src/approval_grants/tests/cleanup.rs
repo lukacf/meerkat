@@ -53,7 +53,12 @@ impl ApprovalControllerCustody for BusyCustody {
         if self.refusing.load(Ordering::SeqCst) {
             return Err(GrantRefusal::Unavailable);
         }
-        grants.revoke(issuer, grant, &mut AnyCustody)
+        grants.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            issuer,
+            grant,
+            &mut AnyCustody,
+        )
     }
 }
 
@@ -207,6 +212,7 @@ async fn an_owner_read_that_answers_unavailable_leaves_the_revoke_to_the_pass_af
         fixture
             .owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &agent("grant-root"),
                 id("unrelated-grant"),
                 owner_agent(),
@@ -412,7 +418,12 @@ async fn swept(phase: DecisionPhase) -> bool {
             // execution is refused `parent_refused`.
             fixture
                 .owner
-                .revoke(&agent("grant-root"), &fixture.offering[0], &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &agent("grant-root"),
+                    &fixture.offering[0],
+                    &mut AnyCustody,
+                )
                 .expect("the offering grant is revoked");
             let _ = fixture.executor_loop().pass().await;
         }

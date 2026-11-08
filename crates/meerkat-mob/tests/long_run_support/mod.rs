@@ -1543,6 +1543,7 @@ fn profile(durable: bool, bundles: Vec<String>) -> Profile {
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: NonZeroU64::new(COMPACTION_THRESHOLD),
         resume_overrides: Vec::new(),

@@ -5204,6 +5204,11 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     marker_field: "expires_at".into(),
                     obligation_field: fld_id("expires_at"),
                 },
+                // The marker's generation is the lease's marker generation:
+                // the adopted marker generation when the lease records one
+                // (a publication it took from another process's record below
+                // its own generation), else the lifecycle event's
+                // `credential_generation`, which this binding names.
                 generation: DurableMarkerFieldBinding {
                     marker_field: "generation".into(),
                     obligation_field: fld_id("credential_generation"),

@@ -222,6 +222,7 @@ of this full catalog.
 | `mob/list_members_matching` | Mob | `MobListMembersMatchingParams` | `MobListMembersMatchingResult` | Label-filtered member listing with server-side filter (mob feature) |
 | `mob/spawn_helper` | Mob | `MobSpawnHelperParams` | `MobHelperResult` | Spawn a helper member and wait for its result (mob feature) |
 | `mob/fork_helper` | Mob | `MobForkHelperParams` | `MobHelperResult` | Fork a helper from an existing member and wait for its result (mob feature) |
+| `mob/fork_member` | Mob | `MobForkMemberParams` | `MobForkMemberResult` | Fork a member's session at a message boundary into a new member (mob feature) |
 | `mob/force_cancel` | Mob | `MobMemberParams` | `MobForceCancelResult` | Force-cancel a member's active work (mob feature) |
 | `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a mob member by identity (mob feature) |
 | `mob/member_status` | Mob | `MobMemberParams` | `MobMemberStatusResult` | Read canonical status for a specific member (mob feature) |
@@ -1102,6 +1103,8 @@ Create a new idle session whose transcript is the source session prefix ending b
 
 `running_behavior` currently supports `"reject"`, which returns `SESSION_BUSY` if the source session has active work.
 
+`session/fork_at`, `session/fork_replace`, `session/rewrite_transcript` and `session/restore_transcript_revision` refuse a mob member's session with `INVALID_PARAMS` (-32602), since the member's mob owns its transcript; fork a member at a message boundary with `mob/fork_member` (below).
+
 `inherited_instructions` decides what the child does with the instruction activations it copies from the prefix. The child is not materialized, so nobody can activate it before its first turn: with the field absent or `"require_explicit_activation"` (the default), and with `"refuse"`, a prefix that carries activation rows is refused before anything is committed with `FORK_INSTRUCTION_REFUSED` (-32037), whose `data` carries `kind: "fork_instruction_refused"` and the typed `fork_instruction_refusal` (`cause`, `keys`). `"reactivate_inherited"` appends the child's own activation of every key that was effective in the source; the result's `reactivated_instruction_count` counts those rows, which `message_count` includes. Under it, a prefix whose last row of a key is one whose body a compaction of the source retired (a later row of that key, past the prefix, superseded it) is refused with cause `head_body_retired`; a fork at a later boundary copies the superseding row, with its body. A prefix without activation rows forks the same way under every value.
 
 ### session/fork_replace
@@ -1161,6 +1164,65 @@ The child does not inherit:
 The child's first turn continues the transcript prefix, System message included; it does not write a second System message from the inherited instructions.
 
 A fork derives the child's build state from its source's. A source with session metadata but no build state is refused before anything is committed, with `INVALID_PARAMS` (-32602) and data `{"kind": "fork_source_build_state_missing", "source_session_id": "<source id>"}`. A child forked by Meerkat 0.9.3 or earlier that never ran a turn has no build state: its `turn/start` fails with `INTERNAL_ERROR` (-32603) "turn abandoned: persisted session `<id>` is missing session build state". Fork its source again instead.
+
+### mob/fork_member
+
+Fork a mob member's session at a message boundary into a new member: the
+member counterpart of `session/fork_at`. The new member `agent_identity` is
+seated on a committed fork of `source_member_id`'s session whose transcript is
+the source's messages before `message_index` (the source's committed end when
+it is absent), System message included. Requires the `mob` feature.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "mob/fork_member",
+  "params": {
+    "mob_id": "team",
+    "source_member_id": "main",
+    "agent_identity": "main-branch",
+    "message_index": 3
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "result": {
+    "agent_identity": "main-branch",
+    "member_ref": "...",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000011",
+    "source_session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "message_count": 3
+  }
+}
+```
+
+The new member takes the source member's profile and runtime mode unless
+`profile` or `runtime_mode` names others, runs with the source's tool
+restrictions, and records the source session as its fork source; the source
+member keeps its session and transcript. The host's fork instruction policy
+decides what the child does with the instruction activations it inherits, as
+for every member fork. A source that runs under the host's tool dispatch
+admission is forked only when the host's spawn customizer installs one for
+the child too, and the child then runs its tool calls under it; otherwise the
+call is refused with `-32602` and `data.kind` `dispatch_admission_required`
+(`member_id`), and nothing is forked. A source whose turn is in flight, or
+that owes queued work, is refused with `SESSION_BUSY` and `data.kind`
+`fork_source_unavailable` (`source_member_id`, `cause` `running`), and
+nothing is seated: fork it again once it is idle. A source without a session
+(`cause` `no_session`) is refused with `-32602` and the same `data.kind`. An
+`agent_identity` that is already a member is refused with `-32602` before
+anything is forked. A fork that committed but could not seat its member is
+refused with `data.kind` `fork_member_provision_failed`, whose
+`fork_session_id` names the committed child session (`recovery`
+`resume_committed_fork_session`); a member seated under `agent_identity`
+between that check and the fork's own seat is answered this way. That
+session is bound to `agent_identity`: resume it under that identity once the
+identity is free, or archive it.
 
 ### session/list
 
@@ -2612,6 +2674,12 @@ while that session's first turn has never started, and then once. Otherwise the
 resume runs no kickoff and does not deliver `initial_message`; a first turn that
 started and was interrupted is not re-run. A placed member follows the same rule;
 a resume on a member host of 0.9.4 or earlier still runs the first turn.
+
+A resume of a session that is bound to another member (its member binding, or
+the comms name it was created under, names another mob or member) is refused
+with `-32602` and `data.kind` `resume_session_bound_to_another_member`
+(`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`), and nothing is
+seated.
 
 ### workgraph/get
 
@@ -4101,6 +4169,8 @@ and `data`, never on the message text.
 | -32035 | Approval commit unknown | The store cannot confirm the commit; reconcile from the store, never resend |
 | -32036 | Stale delivery scope | A scope-bound mob submit named a session that is no longer the member's; re-capture the delivery scope |
 | -32037 | Fork instruction refused | A fork was refused before commit because its child would inherit activated instructions that the fork instruction policy does not carry into it; `data.fork_instruction_refusal` names the cause and keys. Nothing was committed |
+| -32038 | Admission in progress | A realm admission fence the request needs is held, by an admission or another fenced write, beyond the request's bound: `config/set` and `config/patch` (with or without a config runtime). Nothing started and nothing was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts, so an immediate retry is not promised to succeed |
+| -32039 | Admission fence unavailable | A realm admission fence the request needs could not be opened, created, locked or identity-checked. Nothing started and nothing was written (fail closed) |
 
 ### comms/send error data
 

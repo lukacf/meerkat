@@ -37,6 +37,19 @@ them.
 
 ### Breaking
 
+- `meerkat-mob`: `Profile` gains `auth_binding: Option<AuthBindingRef>`, the
+  realm auth binding the profile's members resolve their credentials
+  through, so code that builds a `Profile` literally must set it (`None`
+  keeps the realm's resolution for the provider, as before). A spawn that
+  names its own binding wins over the profile's. A `[profiles.<name>]`
+  table in an operator's own definition may name it; a mob pack's
+  `definition.json` and a Connect application setup definition may not:
+  `meerkat-mob-pack` validation refuses such a pack
+  (`PackValidationError::BadDefinition`) and Connect refuses such a setup
+  definition. The adaptive layer-decision schema does not offer it,
+  and an adaptive layer refuses a profile that names one. A member placed
+  on a member host does not carry it there.
+
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both
@@ -74,6 +87,32 @@ them.
   `AdoptLegacyIdentityEntryRetireUnadopted`, each appended last, so no
   existing variant's discriminant moves. Exhaustive matches must add the
   new variants.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides each member build's tool dispatch admission and
+  records the lineage that runs under one (see Security). `MobMachineInput`
+  (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob::Input` gain `ResolveMemberDispatchAdmission
+  { agent_identity, lineage, host_answer }` and
+  `RecordMemberDispatchAdmissionLineage { agent_identity, agent_runtime_id }`,
+  and `MobMachineInputVariant` (meerkat-machine-schema),
+  `MobMachineCatalogInput` (meerkat-mob) and the kernel `InputKind` gain
+  both names. `MobMachineEffect` and the kernel `Effect` gain
+  `MemberDispatchAdmissionResolved { lineage, host_answer, verdict }`, and
+  the kernel `EffectKind` its name. `MobMachineState` and the kernel `State`
+  gain the field `member_dispatch_admission_lineage` (a map from a member's
+  identity to the runtime id of the incarnation it records), so code that
+  builds the state literally must set it. The kernel
+  `generated::mob::TransitionId` gains
+  `ResolveMemberDispatchAdmission{AskHost,Inherit,Refused,NoneRequired}`
+  in each of the phases `Running`, `Stopped`, `Completed` and `Destroyed`,
+  and `RecordMemberDispatchAdmissionLineageRunning` and
+  `RecordMemberDispatchAdmissionLineageStopped`. The enums
+  `MemberDispatchAdmissionLineage`, `MemberDispatchAdmissionHostAnswer` and
+  `MemberDispatchAdmissionVerdict` are new. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm.
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn
@@ -1009,6 +1048,198 @@ them.
   TypeScript) or as its generated event type (Web); an SDK of 0.9.10 or
   earlier refuses the unknown type, as for any newer contract.
 
+- `meerkat`, `meerkat-core`, `meerkat-mcp`: MCP service-secret write
+  witnesses (see Added). `meerkat`: `set_mcp_service_secret` and
+  `set_mcp_service_secret_entered` return the write's
+  `McpServiceSecretWitness` instead of its `McpServiceSecretRef`
+  (`witness.reference()` is the reference; a caller that ignores the result
+  is unchanged), and `McpServiceSecretObservation` gains the public field
+  `witnesses: BTreeMap<String, McpServiceSecretWitness>`. `meerkat-core`:
+  the struct variant `McpOperationObservation::Callable` gains the field
+  `service_secret_launch: Option<McpServiceSecretLaunch>`. `meerkat-mcp`:
+  `McpCallTarget` and `McpResourceTarget` gain the public field
+  `service_secret_launch: Option<&McpServiceSecretLaunch>`. Code that builds
+  one of them literally must set the new field (`None`, or an empty
+  `witnesses`, where no write is named), and an exhaustive pattern names it
+  or ends with `..`.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a
+  service-secret value is now stored with its write identity beside its
+  reference record. Earlier versions do not read such a row: they report the
+  slot as not stored and refuse the server's launch. Values stored by
+  earlier versions are read and launched as before, with no witness.
+
+- `meerkat-core`, `meerkat-auth-core`, `meerkat`: credential writes take the
+  admission guard of the operation they belong to. `meerkat-core`:
+  `TokenStore::save`, `clear`, `save_for` and `clear_for` take
+  `&AdmissionGuard` as their first parameter, and `TokenStoreError` gains
+  `AdmissionFence`: a persisted store refuses a write whose guard does not
+  cover the credential fence of the written credential's realm under its
+  root, before any byte is written; a store with no fence accepts any guard,
+  `AdmissionGuard::none()` included. The `RefreshFn` and
+  `CredentialMutationFn` closures receive the operation's
+  `Arc<AdmissionGuard>`, and `RefreshError` and `CredentialMutationError`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable`.
+  `save_mcp_service_secret` and `clear_mcp_service_secret` take the guard
+  first. `meerkat-auth-core`: `save_connector_client_secret` and
+  `clear_connector_client_secret` take the guard first;
+  `ManagedStoreOAuthRefreshPrepareFn` receives it first, and
+  `ManagedStoreOAuthRefreshPreparationSlot::claim_refresh_owner`,
+  `prepare_managed_store_oauth_refresh_under_lock`,
+  `prepare_existing_managed_store_oauth_refresh_under_lock` and
+  `publish_managed_store_tokens_lifecycle_and_save` take it first.
+  `meerkat`: `McpServiceSecretUpdateError` gains `AdmissionInProgress` and
+  `AdmissionFenceUnavailable`.
+
+- Behaviour-only (not measured by the gate): `meerkat-auth-core`: a
+  `FileLockCoordinator` takes the credential fence of the key's realm,
+  `<credential root>/<realm>/admission.lock` (the credential root being its
+  lock directory's parent), for every refresh and exclusive mutation: after
+  in-process coalescing and before its lock file and the closure, within the
+  same wait as the lock file. While an admission or another fenced operation
+  holds that fence, a refresh sends no token request and a mutation writes
+  nothing: both refuse `AdmissionInProgress`. A store and a coordinator over
+  different credential roots now refuse every write: pair them as
+  `TokenStoreBackend::open_with_refresh_authority` does. A `KeyringTokenStore`
+  is fenced under the default credential root, the base its refresh locks
+  use. A realm's MCP attachment identity key is read first, without the
+  fence; only a missing key is created under it.
+
+- `meerkat`: the connector-client writers change a client's document entry
+  and its secret as one guarded operation. `put_connector_client`,
+  `rotate_connector_client_secret` and `remove_connector_client` take the
+  realm config documents, `Arc<meerkat_store::FilesystemRealmConfigSource>`,
+  in place of a `ConfigStore`, and write the realm's own document there.
+  Before anything starts they take, in the global order and waiting up to
+  5 s for a holder, the realm document's admission fence (the realm's R, or
+  the user document fence for `global`) and the realm's credential fence;
+  a held or unusable fence refuses as `ConnectorClientUpdateError::Ownership`
+  with nothing written. The update then runs on its own task, which a caller
+  that stops waiting does not cancel and which releases the fences only after
+  its last write; the document write moves its generation. The facade no
+  longer re-exports `save_connector_client_secret` and
+  `clear_connector_client_secret` (`meerkat_auth_core::connector_login`
+  keeps them; `load_connector_client_secret` stays re-exported).
+  `rkat auth connector-client set`, `rotate-secret` and `remove` run through
+  these writers and, under a held fence, exit non-zero with nothing written.
+
+- `meerkat-mcp`: `McpCallTarget` and `McpResourceTarget` gain the public
+  field `credential_publication: Option<CredentialLeasePublication>` (see
+  Added). Code that builds one of them literally sets it (`None` where no
+  credential lease serves the call).
+
+- `meerkat-contracts`: `ErrorCode` gains `AdmissionInProgress`
+  (`ADMISSION_IN_PROGRESS`: JSON-RPC -32038, HTTP 409, CLI exit 58) and
+  `AdmissionFenceUnavailable` (`ADMISSION_FENCE_UNAVAILABLE`: -32039, HTTP
+  503, exit 59), and the closed error vocabularies gain them with it: the
+  generated schemas and the Python, TypeScript and Web SDK error codes. A
+  config write a realm admission fence refused before it started reports
+  them instead of an internal error: JSON-RPC `config/set` and
+  `config/patch` (with or without a config runtime), the REST config writes,
+  the MCP `meerkat_config` tool, and `rkat config set`, `config patch`,
+  `--default-model`, `skill add` and `remove`, `mcp add` and `remove` with
+  `--scope realm`, and `auth login`'s login target and Copilot route
+  writes. `meerkat-rest`: `ApiError` gains
+  `AdmissionInProgress(String)` and `AdmissionFenceUnavailable(String)`.
+- `meerkat-core`: config document writes are fenced by the realm admission
+  fences. `ConfigStore` gains the required raw writes `set_held` and
+  `patch_held`, and the provided `admission_fence` and
+  `patch_held_with_warnings`: they take the `AdmissionGuard` of a caller that
+  already holds the document's fence and custody, and a document-backed store
+  refuses a guard that does not hold its fence, with nothing written. Every
+  implementation must provide them. `ConfigError` and `ConfigRuntimeError`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable(String)`: the
+  write did not start and wrote nothing (`EnteredConfigWriteError::NotWritten`
+  and `McpRealmPersistError::Config` carry the runtime's).
+  `ConfigRuntimeError::Config` is no longer built by `#[from]`; the `From`
+  conversion remains and reports a store's admission refusal as the
+  runtime's own variant. Behaviour: `ConfigRuntime::set`, `patch` and
+  `patch_entered` take the admission fences of the document and of its
+  generation sidecar (named by kind, the user document's and the realm's,
+  for a host's runtime of the `global` realm) before their custody, waiting
+  up to 5 s for a holder. `FileConfigStore`'s public `set`, `patch` and
+  `patch_with_warnings` run the same sequence for their document and now move
+  the generation sidecar beside it. A store that bootstraps its document on
+  read creates it only while its fence and custody are free, never waiting,
+  and otherwise reads it as empty. A runtime whose generation sidecar lies
+  outside its document's directory, other than a user-document store's
+  sidecar in a directory named by a realm id (as a host's runtime of the
+  `global` realm keeps it), now refuses every write with
+  `AdmissionFenceUnavailable` (a fence set outside the global order). Writes
+  create `admission.lock` beside each document they write, and in the
+  `global` realm's directory for a host's `global` write; a store's own
+  writes and create-on-read also write `config_state.json` beside the
+  document. A `ConfigStore` backed by a document must return its fence from
+  `admission_fence` and check `AdmissionGuard::covers` in its raw writes: the
+  default, `None`, declares a store with no document, whose writes the
+  runtime fences by its generation sidecar alone.
+- `meerkat-authorization`, `meerkat-runtime`: grant log writes are fenced
+  by the realm admission fences. `GrantOwnerStore::create` and `append` take
+  the operation's `&AdmissionGuard`, and the trait gains the provided
+  `admission_fence`. `FileGrantOwnerStore::new` takes the log's
+  `GrantLogFence`: `Realm(fence)` for a realm's own grant log, whose
+  `create` and `append` refuse a guard that does not hold that fence before
+  they write, or `NotAdmissionRead` for a log no admission reads, which
+  accepts any guard. `LocalGrantAuthority::new_durable`, `issue_root`,
+  `issue_child`, `issue_or_recover_child_under_exclusion`, `revoke` and
+  `revoke_expecting` take the guard as their first argument, and so do the
+  approval-carried grants' `issue_root_with_child_rule`,
+  `issue_child_with_child_rule`, `issue_approval_child`, `consume_use` and
+  `spend_use_at_entry`, which answer a guard that does not hold the fence
+  `ApprovalChildRefusal::Unavailable` and `ConsumeUseRefusal::Unavailable`,
+  with nothing issued or spent. `GrantRefusal`, `GrantStoreError` and
+  `GrantDurabilityError` gain `AdmissionFence`: refused before anything was
+  written, never uncertain (a revocation reports it as refused). Behaviour:
+  `FileGrantOwnerStore::load` never writes; a torn tail stays until the
+  first `append` truncates it under its guard. An operation's entry that
+  spends a use of an approval-carried grant takes the grant log's fence
+  without waiting, before anything is decided: while an admission or another
+  fenced write holds it, the entry refuses to rebuild (`ReprepareRequired`)
+  with nothing spent. The `grant.child` decision executor takes the fence
+  without waiting before it issues the approval branch's controller grant
+  and the approval-carried grant, and while it is held releases the decision
+  with neither issued, to be executed again at a later pass;
+  `MeerkatMachine`'s `ApprovalControllerCustody::revoke_controller` takes it
+  without waiting before its own custody and refuses `AdmissionFence` while
+  it is held, so a retired branch's cleanup revokes the controller grant at
+  a later pass.
+- `meerkat`: every stock grant command takes the realm's admission fence
+  first, before its custody, waiting up to 5 s for a holder:
+  `grant_stock_agent`, `grant_stock_agent_for_reviewed_installation`,
+  `revoke_stock_agent`, `record_stock_grant_selection`, `govern_stock_realm`
+  (now settled on its own task, which a caller that stops waiting does not
+  cancel) and `finalize_reviewed_connector`, which takes the realm's fence
+  (for the `global` realm the user document fence and the `global` realm's)
+  and runs every later step on its own task. `StagedStockRealm`'s
+  `grant_stock_agent`, which runs under the stage's custody, takes the
+  realm's fence without waiting: a held fence refuses at once.
+  `StockGrantError`, `StockGovernanceError` and `ReviewedConnectorRefusal`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable(String)`, and
+  `HelperChildIssuanceRefusal` gains `AdmissionInProgress`: a helper's child
+  issuance takes the realm grant log's fence without waiting, beside its
+  reservation, and the waiting forms wait a held fence out like a refusal to
+  rebuild. `rkat realm govern`, `grant` and `revoke-grant` refused by a held
+  or unusable fence exit 58 or 59.
+
+- `meerkat-core`: `AuthLeaseSnapshot` gains the public fields
+  `adopted_marker_generation: Option<u64>` (the generation the durable
+  lifecycle marker of the lease's current publication carries when it is not
+  the lease's own generation) and `released_publication_at_millis:
+  Option<u64>` (the publication time of the credential the lease last
+  withdrew) (see Fixed). Code that builds a snapshot literally sets both
+  (`None` for a lease that adopted no record and withdrew no credential).
+  `AuthLeaseSnapshot::marker_generation`,
+  `AuthLeaseTransition::adopted_marker_generation` and
+  `AuthLeaseTransition::marker_generation` are new. `meerkat-machine-schema`
+  and `meerkat-runtime` (the generated AuthMachine): `AuthMachineState` gains
+  the fields `adopted_marker_generation` and `released_publication_at_millis`,
+  and the input variant `AuthMachineInput::RestoreCredentialLifecycleSnapshot`
+  gains the fields `adopted_marker_generation` and
+  `released_publication_at_millis`. `meerkat-machine-kernels` (the generated
+  AuthMachine kernel): `generated::auth::State` and
+  `generated::auth::inputs::RestoreCredentialLifecycleSnapshot` gain the same
+  two fields.
+
 ### Added
 
 - `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-mob-mcp`,
@@ -1076,6 +1307,25 @@ them.
   neither adopted nor retired, because the member's retirement started
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
+
+- `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`, `meerkat-mob`,
+  Python and TypeScript SDKs: `mob/fork_member` forks a member's session at
+  a message boundary into a new member, as `session/fork_at` forks a
+  session. The new member `agent_identity` holds the source's messages
+  before `message_index` (its committed end when absent), takes the source
+  member's profile and runtime mode unless the call names others, keeps the
+  source's tool restrictions and records the source session as its fork
+  source; the result names its `session_id`, `source_session_id` and
+  `message_count`. An `agent_identity` that is already a member is refused
+  before anything is forked. A source whose turn is in flight is refused with
+  `SESSION_BUSY` and nothing is seated: `MobError::ForkSourceUnavailable`
+  now carries `data.kind` `fork_source_unavailable` (`source_member_id`,
+  `cause`: `running`, `no_session` or `remote_read_unavailable`) on every
+  mob method, and its `running` cause answers `SESSION_BUSY`. New
+  `MobMcpState::mob_fork_member` and `ForkSourceUnavailableCause::as_str`;
+  `ForkMemberResult` gains `source_session_id` and `message_count`. The
+  SDKs add `fork_mob_member` and `Mob.fork_member` (Python) and
+  `forkMobMember` and `Mob.forkMember` (TypeScript). (#2117, thanks @zond)
 
 - Peers keep the original requester in process. A governed agent's comms
   send in process carries the origin of the governed work it was sent
@@ -2054,6 +2304,127 @@ them.
   `WireMobToolConfig` and `MobToolConfigInput` carry `grant_gated` as the
   generated `WireGrantGatedTools`.
 
+- `meerkat-core`, `meerkat-mcp`, `meerkat`: a credential continuity witness
+  for MCP stdio service secrets. Every write of a service secret draws a
+  write identity (`McpServiceSecretWriteId`: 128 bits of OS entropy, never
+  derived from the value) and stores it in the same row, beside the
+  reference record. The write's `McpServiceSecretWitness` (the defining
+  realm, the server, the slot, the server's launch meaning and the write;
+  nonsecret, and serializable in a checked form a host can keep with what it
+  binds to the credential) is what `set_mcp_service_secret` and
+  `set_mcp_service_secret_entered` return, what
+  `RealmMcpServiceSecrets::observe` reports as each slot's current write
+  (`McpServiceSecretObservation::witnesses`; the core read is
+  `observe_mcp_service_secret_witness`), and what a stdio launch records for
+  each value it injects. The realm custody reads each value with its write
+  from the same row (`load_mcp_service_secret_into`), and the connection
+  keeps that record (`McpServiceSecretLaunch`) for its lifetime: it is
+  stated by `McpConnection::service_secret_launch`, by a callable
+  `McpOperationObservation` and by the `McpCallTarget` and
+  `McpResourceTarget` a host's call preparation receives for every request
+  over that connection, so each actual call names the writes whose values
+  serve it. A host reads the witness of a stored row with
+  `McpServiceSecretRef::witness_of`, and the launch record of the values it
+  read with `McpServiceSecretValues::launch`. `RealmMcpServiceSecrets::recheck`
+  later answers for a witness from durable state (the realm documents and the
+  credential store, read unattended and uncached) with an
+  `McpServiceSecretRecheck`, returning no value: `Current`, `Rotated` (a
+  newer write, or one that names none), `Removed`, or `DefinitionChanged`
+  (the server's defining realm or definition is no longer the one the
+  witness names, or it was uninstalled; an identical reinstallation in the
+  same realm is the same reference). `recheck_mcp_service_secret` is its
+  store read. A value stored before writes were named launches and observes
+  as before with no witness, and every witness rechecks against it as
+  `Rotated` until the next write names one.
+
+- `meerkat-authorization`: `GrantLogFence`, and
+  `LocalGrantAuthority::admission_fences`, the fences of an owner's writes
+  (its durable log's fence, none in memory).
+- `meerkat-core`: `authorization::ChildIssuanceAdmissionInProgress`, a work
+  owner's answer, boxed in place of the grant owner's outcome, for a child
+  issuance a held grant log fence refused before anything was decided or
+  appended; the waiting child issuance forms wait it out like a refusal to
+  rebuild, within the same bounds.
+- `meerkat-core`: `ConfigRuntime::set_under`, `patch_under`,
+  `patch_entered_under` and `admission_fences`, and
+  `McpRealmPersistTarget::add_under`, for an operation that already holds the
+  document's admission fences; `FileConfigStore` is `Clone`.
+- `meerkat-core`: `realm_admission` (native targets), the realm admission
+  fences. `AdmissionFence` names a fence file (`admission.lock`) and its
+  place in one global order: `user_document` (U), `credentials` (C of a
+  realm id), `realm` and `realm_chain` (R; chain positions come only from the
+  composed chain), and `beside` (a document's directory, only ever the one
+  fence of its set). `AdmissionGuard::acquire` and `try_acquire` take a set
+  EXCLUSIVE in that order, with bounded waits that never block a runtime
+  thread; a refusal is `AdmissionRefusal::InProgress` or
+  `AdmissionRefusal::Unavailable(FenceUnavailable)`, with a typed
+  `FenceUnavailableCause`, and nothing has started. `covers` answers only
+  from the guard's own acquisition, matching by fence file, and
+  `AdmissionGuard::none` covers nothing. `AdmissionHold` takes a set SHARED
+  and never creates a fence; `settle_entered` keeps an entered operation's
+  guard until its work returns; `directory_hosts_fences` is the one
+  filesystem predicate; `file_coverage`, `require_files_covered` and
+  `credential_entry_coverage` (with `FileCoverage` and
+  `ImmutableInstallationFiles`) check that every file a verifier reads is
+  fenced or an immutable installation file. A fence root that holds
+  `composed-install.json` makes acquisition refuse, instead of skip, a fence
+  on a filesystem that cannot host one. It also adds `AdmissionFenceKind`,
+  `FenceIdentity` (the device and inode of a fence file), `EnteredWorkLost`,
+  `UncoveredFile` and `UncoveredCredentialEntry`; the constants
+  `ADMISSION_LOCK_FILE`, `INTERACTIVE_FENCE_WAIT` and `COMPOSED_INSTALL_FILE`;
+  and, for a verifier, `AdmissionFence::ensure_exists`, `identity`,
+  `covers_file`, `directory`, `path` and `kind`, `AdmissionGuard::fences` and
+  `identities`, `AdmissionHold::identities`, `fences`, `require_current` and
+  `release`, and `ImmutableInstallationFiles::from_checked_install_owner`,
+  `none` and `contains`.
+- `meerkat-rpc`: `error::ADMISSION_IN_PROGRESS` (-32038) and
+  `error::ADMISSION_FENCE_UNAVAILABLE` (-32039), the JSON-RPC codes of a
+  request a realm admission fence refused before it started, taken from
+  `ErrorCode`.
+- `rkat storage hosts-fences DIR...`: whether each directory's filesystem can
+  host a realm admission fence, from the one predicate fence writers, holders
+  and verifiers use (`meerkat_core::realm_admission::directory_hosts_fences`),
+  run in the process's own view of the filesystem before any realm, state,
+  config, auth or migration step. It prints one JSON object per directory and
+  line, in argument order, and nothing else on stdout:
+  `{"dir": PATH, "hosts": BOOL}`, or
+  `{"dir": PATH, "unavailable": {"kind": KIND, "cause": TEXT}}`, KIND being
+  the new `FenceUnavailableCause::kind()`, a stable snake_case name per cause.
+  Exit 0 when every directory was evaluated, 1 when the report could not be
+  written, 2 on a usage error (no directory, or any global option) or, as for
+  every command, when the process could not start at all.
+
+- `meerkat-core`: `RefreshCoordinator::with_exclusive_mutation_under`, for an
+  operation that already holds the credential fence of the key's realm (its
+  default refuses with nothing run), and `AdmissionGuard` on wasm32, with
+  `none()` only. `meerkat-auth-core`: `TokenStoreBackend::credential_root`.
+
+- `meerkat-core`: `RefreshCoordinator::credential_fence` (native targets), the
+  credential fence a coordinator takes for a realm's keys, for an operation
+  that takes it in one set with other fences and then enters through
+  `with_exclusive_mutation_under`; `None` for a store with no fence, and its
+  default refuses.
+
+- `meerkat-core`, `meerkat-auth-core`, `meerkat-mcp`: lease publications on
+  MCP calls. `handles::CredentialLeasePublication` names one publication of
+  credential material to an auth lease (the lease, the generation the
+  publication advanced it to and its publication time; nonsecret), taken
+  from a lease snapshot with `CredentialLeasePublication::of` and read with
+  `lease`, `generation` and `credential_published_at_millis`. The time is
+  part of the name: a lease that adopts a credential another process
+  published keeps the larger of the two generations, so after a logout and a
+  login elsewhere two credentials can share a generation in one process.
+  `McpOAuthAuthority::credential_publication` reads the publication its
+  lease for a target holds, from the lease alone;
+  `McpAuthResolver::credential_publication` states it for a resolver (none by
+  default; a resolver that wraps another forwards it), and
+  `McpConnection::credential_publication` for a connection's credential
+  owner. Every `McpCallTarget` and `McpResourceTarget` a host's call
+  preparation receives names the publication read when the call was
+  prepared: the call's requests carry that publication or a later one, so a
+  host that finds the lease's current publication different knows the
+  credential changed.
+
 ### Changed
 
 - `meerkat-runtime`: DurableDecisionMachine, not the decision service, decides
@@ -2297,6 +2668,18 @@ them.
   them, within its 30 s budget, and a revocation of a grant in a held
   input's stored controller lineage is still refused as in use.
 
+- `rkat realm delete` and `rkat realm prune` take the realm's admission fence
+  first, without waiting and before the lease check, and hold it through the
+  removal: a realm an admission holds is not removed, whatever `--force` says
+  (it overrides heartbeat leases only). `realm delete` then exits 58
+  (`ADMISSION_IN_PROGRESS`), or 59 for an unusable fence; `realm prune` keeps
+  the realm, counted as active, and reports an unusable fence as a leftover.
+  `rkat storage migrate --apply` takes the admission fence of every copy of a
+  split-brain realm the same way, before its maintenance fence, and refuses
+  the resolution while any of them is held or unusable, naming the fence.
+  These are the only operations that remove or move a live `admission.lock`,
+  and only while they hold it.
+
 ### Deprecated
 
 - `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
@@ -2328,6 +2711,31 @@ them.
   cancel taken while a run is current now reaches that run only through the
   executor's exact-run boundary handle, and an executor-wide cancel with no
   run active is a no-op for every shipped executor.
+
+- `meerkat-mob-mcp`: after an in-place model, provider, endpoint or
+  auth-binding switch (a turn that names `model`, `provider`,
+  `self_hosted_server_id` or `auth_binding`), `delegate` runs its helper on
+  the session's current identity: the model, provider and self-hosted
+  server the session runs on when the call runs, and its auth binding, so
+  the helper reaches the session's endpoint with the session's credentials.
+  Before, the helper ran on the route the session was built with and
+  resolved its credentials through the realm's default binding. The
+  session's implicit delegation mob records that route, binding included,
+  on its `delegate` profile, and the first `delegate` after the route
+  changed replaces the mob, as a model change did. Replacing the mob
+  destroys everything in it, members the model spawned there included, and
+  that now also happens after an in-place switch. A session with no auth
+  binding leaves its helpers to the realm's resolution, as before. An
+  implicit mob made by an earlier release records no binding, so a session
+  that has one gets its implicit mob replaced, once, at its next
+  `delegate`. Three cases are left as they were: a `delegate` given an
+  inline `tooling` profile builds its helper on that profile, which names
+  no binding; one whose `tooling` names a realm profile builds on that
+  profile's binding, or on the realm's default; and a helper placed on
+  another host resolves its credentials on that host. The current identity
+  is read from the session's retained metadata; a session on
+  `EphemeralSessionService`, which keeps none, still delegates on the route
+  it was built with. (#2102, thanks @zond)
 
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
@@ -2369,6 +2777,17 @@ them.
   `agent_identity` label with the member id, so a legacy member whose
   member id is an escaped form of its name was not adopted through the
   label.
+
+- `meerkat-mob`, `meerkat-rpc`: a resume (`mob/spawn` with a `resume`
+  `launch_mode`) of a session that is bound to another member is refused
+  typed, with the new `MobError::ResumeSessionBoundToAnotherMember`
+  (`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`): over RPC
+  invalid params with `data.kind` `resume_session_bound_to_another_member`.
+  It was an internal error whose message held a debug rendering of the
+  session's member binding. In a `MobHandle::spawn_many` batch the refusal
+  is observed as a session error. With a declared role migration the refusal
+  stays `MemberRoleMigrationRejected`, whose reason now names the session and
+  the member it is bound to. (#2117, thanks @zond)
 
 - `meerkat-mcp`: retained attachment controls are released when the
   router's close begins (`McpRouterAdapter::begin_close`), so a router whose
@@ -2701,6 +3120,25 @@ them.
   resumes, one already stuck this way included, with no repair: the
   replayed abandonment changes and ends nothing, since the later member
   ended on its own. Affects 0.8.0 through 0.9.10.
+- MCP OAuth and connector OAuth: a long-running process serves the
+  credential another process stores after logging the target out and in
+  again, both when its credential lease was ahead of that login (it had
+  published the credential more often) and when its lease had withdrawn its
+  credential before (a logout, or a read that found the credential
+  removed), instead of answering that reauthentication is required on every
+  read until it logged in itself or restarted. A failed save of that
+  process's refresh stores the other process's credential back with the
+  generation it was published under, instead of one the publishing process
+  refuses. The lease keeps the larger of the two generations, which never
+  goes back, and records the one the stored record carries and the
+  publication time of a credential it withdrew; a record published at or
+  before that time stays refused. A managed-store provider lease that
+  withdrew its credential takes such a later login too.
+- GitHub Copilot: a long-running process that picks up a later sign-in
+  another process stored for the same account (for example when it reads
+  the account's status) no longer keeps serving the earlier sign-in's
+  token from its cache, for an operator token kept in the credential store
+  and for the device sign-in alike.
 
 ### Security
 
@@ -2770,6 +3208,38 @@ them.
   one, watch the session with `session/stream_open` (a mob member with
   `mob/stream_open`).
   (#2116, thanks @zond)
+
+- `meerkat-mob`, `meerkat-mob-mcp`: a member created by `fork_off`, by a
+  `council` branch or by another fork (`MobHandle::fork_member` and its
+  siblings, a live delegation), a member a spawn policy seated, and a member
+  rebuilt by a resume or a reload ran without the tool dispatch admission
+  its host installs (`SpawnMemberSpec::tool_dispatch_admission`, which a
+  `SpawnMemberCustomizer` sets): its tool calls reached the host's tools
+  without passing the host's gate. MobMachine now decides each such build's
+  admission. A fork of a member whose build runs under one asks the host's
+  customizer for the child and runs under what it installs, or is refused
+  with the new `MobError::DispatchAdmissionRequired` before the child is
+  seated (a refused `fork_off` or handle fork forks nothing; a refused
+  council branch is refused after the council forked its source for it, and
+  the council's cleanup removes that fork). MobMachine records that the
+  child's incarnation runs under an admission, and the child's spawn row
+  persists the record, so each later build of it (a wake, a restore after a
+  restart, a reload, an explicit resume, a respawn) asks again and is
+  refused when the customizer installs none. A fork child seated by an earlier release, whose
+  spawn row records nothing, is gated by the host's customizer when it is
+  rebuilt: it runs under the admission the customizer installs for it, and
+  as before when it installs none. A `fork_helper` child of such a member,
+  whose spawn asks the customizer as before, is refused the same way when it
+  installs none. A member a spawn policy seats now asks the customizer for
+  its admission alone (`SpawnSource::PolicySpawn`) and runs under what it
+  installs. An ordinary member's reload and explicit resume run under the
+  admission the customizer gives the rebuild. Affects 0.8.42 through 0.9.10.
+  Until you upgrade, do not offer `fork_off` or `council` to members you
+  gate, and do not combine a spawn policy with a customizer that gates.
+  Downgrade: an earlier release ignores the record on spawn rows and
+  rebuilds those fork children without the admission again, and seats
+  policy members without one.
+
 
 ### Upgrade notes
 
@@ -3006,6 +3476,37 @@ them.
   family only). Take the server gates out, or the servers they gate, before
   a rollback.
 
+- Upgrade every process that launches from a realm's credential store
+  before setting MCP service-secret values with this version: a rollback to
+  0.9.10 or earlier reads a value stored by this version as not stored and
+  refuses the server's launch (see Breaking). After such a rollback, set the
+  value again with the earlier version.
+
+- A custom `TokenStore` takes the guard in its writes, and a persisted one
+  refuses a guard that does not cover its credential fence
+  (`AdmissionFence::credentials` of its root and the key's realm). A custom
+  `RefreshCoordinator` hands its closures the guard of the operation: the
+  coordinator of a persisted store acquires the credential fence, and that of
+  a store with no fence hands `AdmissionGuard::none()`. The connector-client
+  writers enter it through `credential_fence` and
+  `with_exclusive_mutation_under`, whose defaults refuse.
+
+- Forks of gated members fail closed. A host that sets
+  `SpawnMemberSpec::tool_dispatch_admission` on its spawn requests itself,
+  with no `SpawnMemberCustomizer`, can no longer fork those members: a fork
+  of a member whose build runs under an admission asks the customizer for
+  the child, and with no customizer the fork is refused with
+  `MobError::DispatchAdmissionRequired`. Install a customizer that sets the
+  admission (it is asked with `SpawnSource::PersistedForkResume` for a
+  fork's child, `SpawnSource::AttachedForkedParticipant` for a council
+  branch) to keep forking them.
+
+- A host without a `SpawnMemberCustomizer` that runs live delegation can
+  no longer fork the delegated worker, its own `fork_off` included: the
+  worker runs under its delegation's gate, so a fork of it needs an
+  admission from the host's customizer, and with none the fork is refused
+  with `MobError::DispatchAdmissionRequired`.
+
 - Upgrade the SDKs with the server before a host asks for compactions
   (`session/compact`, `mob/compact_member`): a Python, TypeScript or Web SDK
   of 0.9.10 or earlier refuses the new `requested_compaction_skipped` event
@@ -3069,6 +3570,15 @@ them.
 - The derivation of an access offer in a peer work (the asking agent, the
   requester and the origin from the work the asking agent sent) is covered
   at the runtime level only.
+
+- `meerkat-mob-mcp`: on a session service that keeps no retained session
+  metadata (`EphemeralSessionService`), `delegate` still runs its helper on
+  the route the session was built with, and the helper resolves its
+  credentials through the realm, even after an in-place model, provider,
+  endpoint or auth-binding switch. `rkat` and the JSON-RPC, REST and MCP
+  servers run `PersistentSessionService`, so their sessions follow the
+  switch.
+
 
 ## [0.9.10] - 2026-11-04
 

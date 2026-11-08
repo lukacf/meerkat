@@ -974,6 +974,28 @@ impl MobDefinition {
         provider: Option<meerkat_core::Provider>,
         self_hosted_server_id: Option<String>,
     ) -> Self {
+        Self::implicit_on_route(
+            bridge_session_id,
+            model,
+            provider,
+            self_hosted_server_id,
+            None,
+        )
+    }
+
+    /// [`Self::implicit_with_provider`] whose `delegate` profile also records
+    /// `auth_binding`, the binding the owner session resolves its credentials
+    /// through, so its helpers authenticate as the session does. `None`
+    /// leaves the helpers on the binding their realm resolves for the
+    /// provider.
+    #[doc(hidden)]
+    pub fn implicit_on_route(
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<String>,
+        auth_binding: Option<meerkat_core::AuthBindingRef>,
+    ) -> Self {
         let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -983,6 +1005,7 @@ impl MobDefinition {
                 model: model.to_string(),
                 provider,
                 self_hosted_server_id,
+                auth_binding,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1772,6 +1795,7 @@ deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
             model: "claude-sonnet-4-5".to_string(),
             provider: Some(meerkat_core::Provider::Anthropic),
             self_hosted_server_id: Some("local-a".to_string()),
+            auth_binding: None,
             image_generation_provider: Some(meerkat_core::Provider::Gemini),
             auto_compact_threshold: std::num::NonZeroU64::new(120_000),
             resume_overrides: vec![crate::profile::ResumeOverrideField::Model],
@@ -1940,6 +1964,7 @@ deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
                         model: "claude-opus-4-8".to_string(),
                         provider: None,
                         self_hosted_server_id: None,
+                        auth_binding: None,
                         image_generation_provider: None,
                         auto_compact_threshold: None,
                         resume_overrides: Vec::new(),
@@ -2053,6 +2078,50 @@ id = "minimal"
         let profile = self_hosted.resolve_inline_profile(&delegate).unwrap();
         assert_eq!(profile.provider, Some(meerkat_core::Provider::SelfHosted));
         assert_eq!(profile.self_hosted_server_id.as_deref(), Some("local"));
+    }
+
+    /// The implicit definition's `delegate` profile records the owner's auth
+    /// binding when given one, and that record survives persistence (a
+    /// serialize and parse); without one it is exactly the provider-route
+    /// definition.
+    #[test]
+    fn implicit_definition_records_the_owners_auth_binding() {
+        let delegate = ProfileName::from("delegate");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").unwrap(),
+            binding: meerkat_core::BindingId::parse("endpoint_two").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        assert_eq!(
+            MobDefinition::implicit_on_route(
+                "bridge-session",
+                "gpt-5.4",
+                Some(meerkat_core::Provider::OpenAI),
+                None,
+                None,
+            ),
+            MobDefinition::implicit_with_provider(
+                "bridge-session",
+                "gpt-5.4",
+                Some(meerkat_core::Provider::OpenAI),
+                None,
+            ),
+            "no binding is exactly the provider-route definition"
+        );
+
+        let def = MobDefinition::implicit_on_route(
+            "bridge-session",
+            "gpt-5.4",
+            Some(meerkat_core::Provider::OpenAI),
+            None,
+            Some(binding.clone()),
+        );
+        let profile = def.resolve_inline_profile(&delegate).unwrap();
+        assert_eq!(profile.auth_binding.as_ref(), Some(&binding));
+        let restored: MobDefinition =
+            serde_json::from_value(serde_json::to_value(&def).unwrap()).unwrap();
+        assert_eq!(restored, def, "the binding survives persistence");
     }
 
     #[test]

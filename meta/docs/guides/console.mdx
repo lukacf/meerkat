@@ -489,7 +489,12 @@ as they were.
   the side chat is closed as well. A private side chat convenes no council:
   its `council` call is refused as a policy denial
   (`private_member_council`), since the council's participants would carry
-  its conversation to members others share.
+  its conversation to members others share. The schedules its agent writes
+  are aimed at itself only (`private_member_schedule_target` refuses any
+  other target), and the schedule tools of an agent not private to you
+  neither list, read nor change them. A WorkGraph goal for it is refused for
+  you too (`private_member_workgraph_target`): it is built without WorkGraph
+  tools, so no binding can serve it.
 - On a console without sign-in, a side chat stays shared, and so does one
   opened by a caller who is not a signed-in person (a service token) or
   before side chats were private. A shared side chat's audience is exactly

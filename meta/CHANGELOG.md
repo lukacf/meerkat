@@ -388,17 +388,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A WorkGraph goal, reassignment or supervisor key that names a member
   hidden from the caller is refused as naming an unknown member in every
   target form (the identity, an owner key, a session), and an attention
-  list filtered by one lists what a name no member holds lists.
+  list filtered by one lists what a name no member holds lists. One that
+  names a member private to a person is refused for every other caller
+  too, its owner and access admins included (`-32602`,
+  `private_member_workgraph_target`): a private member is built without
+  WorkGraph tools, so no binding can serve it.
 - `meta/routing/routes/list`, `meta/delivery/history`,
   `meta/reconcile_edges` and `meta/storage/doctor` leave out every row
   that names a member hidden from the caller, payloads included; access
   admins and the member's owner read them whole.
 - A member private to a person convenes no council: its agent's `council`
   call is refused as a policy denial (`private_member_council`).
-- An agent's `mob_check_member` naming a member private to a person the
-  agent does not act for answers as for a member that does not exist, and
-  the agent's schedule tools refuse a target that names one
-  (`access_denied`).
+- An agent's `mob_check_member` and `mob_retire_member`, and Meerkat's
+  member tools (`member_status`, `retire_member`, `force_cancel_member`),
+  naming a member private to a person the agent does not act for answer
+  as for a member that does not exist. The agent's schedule tools leave a
+  schedule aimed at such a member out of its list, answer every verb that
+  names one by its id as for an id no schedule holds, and refuse a target
+  that names one (`access_denied`). A private member's own schedule tools
+  write only schedules aimed at itself; any other target, and an update of
+  a schedule aimed elsewhere, is refused as a policy denial
+  (`private_member_schedule_target`).
 
 ### Fixed
 

@@ -374,16 +374,24 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     think by default. A model id with no catalog row (a dated snapshot, a
     proxy alias, a `[models.<id>]` entry) gets the control beside
     configured `adaptive` or `enabled` thinking, on every request; with
-    thinking omitted it gets none, since no catalog row names its default,
-    so configure thinking for such a model. It is never sent beside
-    `between_tools` or `disabled`, and only on the Anthropic API, Vertex and
-    Foundry: Amazon Bedrock and the Copilot route do not send it. A request
-    that forces a tool call with thinking omitted is sent as before, without
-    the control: Meerkat refuses a forced tool call beside explicit thinking,
-    and a forced call skips thinking on the models that accept one. The model
-    answers that turn without the dropped reasoning and the prompt cache
-    restarts at the first dropped block; Meerkat logs a warning naming each
-    dropped block.
+    thinking omitted it gets none, since no catalog row names its default.
+    It is never sent beside `between_tools` or `disabled`, and only on the
+    Anthropic API, Vertex and Foundry: Amazon Bedrock and the Copilot route
+    do not send it. A request to one of these models, or to a model id with
+    no catalog row, that carries no control replays the thinking blocks of
+    the turn in progress only, never those of completed turns, which
+    Anthropic allows (a completed turn's server compaction block stays).
+    When a change within the turn (a tool loaded or a server connected
+    while it runs) still gets such a request refused with a 400, Meerkat
+    sends it once more without any thinking block, and without manual
+    `enabled` thinking, which needs one, logs a warning with the number of
+    blocks it removed, and returns the first error if that request fails
+    too. A request that forces a tool call with thinking omitted is sent as
+    before, without the control: Meerkat refuses a forced tool call beside
+    explicit thinking, and a forced call skips thinking on the models that
+    accept one. The model answers that turn without the dropped reasoning
+    and the prompt cache restarts at the first dropped block; Meerkat logs a
+    warning naming each dropped block.
 
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,

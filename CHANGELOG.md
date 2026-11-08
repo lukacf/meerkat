@@ -935,9 +935,28 @@ them.
   on an account that enforces thinking-block binding, when its requests
   configure `adaptive` or `enabled` thinking (a legacy budget lowers to
   `enabled`): they carry the same `drop_block` control and beta header, on
-  every request of the session. With thinking omitted such an id still gets
-  no control, since no catalog row names its default (see Known
-  limitations).
+  every request of the session. With thinking omitted such an id gets no
+  control, since no catalog row names its default; its requests replay no
+  thinking from completed turns instead (see the next entry).
+
+- `meerkat-anthropic`: a thinking session whose requests cannot carry the
+  thinking-block binding control no longer fails after a mid-session tool
+  change on an account that enforces thinking-block binding. That covers
+  every request on the GitHub Copilot and Amazon Bedrock routes, which do
+  not take the control, and, on the other routes, thinking `between_tools`
+  or `disabled` on Claude Sonnet 5.5 or Haiku 5.5 and a model id with no
+  catalog row with thinking omitted. Such a request to Claude Fable 5.1,
+  Opus 5.5, Sonnet 5.5 or Haiku 5.5, or to a model id with no catalog row,
+  no longer replays the thinking blocks of completed turns, which Anthropic
+  allows: only the turn in progress keeps its thinking, and a completed
+  turn's server compaction block stays. When a change within a turn (a tool
+  loaded or a server connected while the turn runs) gets such a request
+  refused with a 400, the client sends it once more without any thinking
+  block (and without manual `enabled` thinking, which needs one, so the
+  model's own default applies) and logs a warning with the number of blocks
+  it removed. If that request fails too, the first error is returned. The
+  model answers without the omitted reasoning. Nothing new is sent to
+  Copilot or Bedrock, and their prompt-cache default is unchanged.
 
 - `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
   claims forced tool choice support. Anthropic answers 400 to `tool_choice`
@@ -1203,18 +1222,6 @@ them.
   receiver whose composition installs another ingress domain, such as a
   peer under another composition or realm in the same process, refuses the
   work at admission.
-
-- `meerkat-anthropic`: the thinking-block binding control is not sent on the
-  Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
-  thinking-block binding a thinking session there still fails after a
-  mid-session tool change.
-
-- `meerkat-anthropic`: a model id with no catalog row gets the thinking-block
-  binding control only beside configured `adaptive` or `enabled` thinking.
-  With thinking omitted it gets none, since no catalog row names its
-  default, so on an account that enforces thinking-block binding such a
-  session still fails after a mid-session tool change when its model checks
-  replayed thinking blocks. Configure thinking for such a model.
 
 - `meerkat-runtime`: a takeover acquire that a host store grants after the
   writer gave up on it, and after the writer's next successful acquire,

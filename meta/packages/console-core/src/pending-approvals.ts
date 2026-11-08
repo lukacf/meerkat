@@ -55,9 +55,40 @@ export interface PendingApprovalSnapshot {
   status: "loading" | "ready" | "stale" | "unavailable" | "forbidden" | "unsupported";
   requests: readonly PendingApproval[];
   decisions: Readonly<Record<string, ApprovalDecisionState>>;
+  /** Requests that left the pending list without this console deciding
+   * them (decided elsewhere, or expired), newest first. */
+  departed?: readonly DepartedApproval[];
   readOnly: boolean;
+  /** Why the requests are read-only, when the console knows it: `sign_in`
+   * when the caller is no signed-in person (only a person decides). */
+  readOnlyReason?: "sign_in";
   updatedAtMs?: number;
   error?: string;
+}
+/** A request decided elsewhere: what was asked, and once the gating audit
+ * says so, what was decided and by whom. */
+export interface DepartedApproval {
+  request: PendingApproval;
+  /** When this console saw it leave the pending list. */
+  departedAtMs: number;
+  /** The recorded decision: `approve`, `reject` or `escalate`, or `expired`
+   * when the deadline passed. `by` is the decider's name as the record keeps
+   * it (the signed-in person, else the approver the decision named). */
+  decided?: { action: ApprovalAction | "expired"; by?: string };
+}
+/** Who looks at the approvals: whether they decide in this console (a
+ * signed-in person) and the approver ids they hold (`meta/console/whoami`). */
+export interface ApprovalViewer {
+  decides: boolean;
+  approverIds: readonly string[];
+}
+/** Whom a pending request waits for, seen by its viewer: the viewer (it is
+ * routed to an approver id they hold, or to no one), or the approver it
+ * names. */
+export type ApprovalAudience = { kind: "you" } | { kind: "other"; approver: string };
+export function approvalAudience(request: PendingApproval, viewer: ApprovalViewer): ApprovalAudience {
+  const approver = request.requestedApprover;
+  return !approver || viewer.approverIds.includes(approver) ? { kind: "you" } : { kind: "other", approver };
 }
 export interface ApprovalResourceEnvironment {
   now(): number;
@@ -138,6 +169,7 @@ const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   approver_mismatch: "This request is waiting for another approver.",
   unknown_pending_id: "This request was already decided or has expired.",
   empty_principal: "Sign in to decide approvals.",
+  approver_unauthenticated: "Only a signed-in person can decide approvals. Sign in as yourself; nothing was decided.",
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again.",
 };
 export function approvalRefusal(error: unknown): ApprovalRefusal | null {
@@ -160,22 +192,56 @@ function unavailableCapability(error: unknown): { method: string; availableMetho
     && Array.isArray(record.availableMethods) && record.availableMethods.every((method) => typeof method === "string")
     ? { method: record.method, availableMethods: record.availableMethods } : null;
 }
+/** Denied for good: the caller may not see approvals (403, `access_denied`).
+ * A 401 is not a denial: the login ended, and the console's sign-in state
+ * owns it; the resource stays readable once the caller signs in again. */
 const isDenied = (error: unknown) => {
   const record = error as { httpStatus?: number; rpcError?: { code?: number; data?: { kind?: string } } } | null;
-  return record?.httpStatus === 401 || record?.httpStatus === 403 || record?.rpcError?.code === -32030 || record?.rpcError?.data?.kind === "access_denied";
+  return record?.httpStatus === 403 || record?.rpcError?.code === -32030 || record?.rpcError?.data?.kind === "access_denied";
 };
+
+/** How many requests decided elsewhere the snapshot keeps. */
+const DEPARTED_LIMIT = 20;
+const DECIDED_EVENTS: Readonly<Record<string, ApprovalAction | "expired">> = {
+  approval_decided: "approve",
+  rejection_decided: "reject",
+  escalation_decided: "escalate",
+  timeout_fallback: "expired",
+};
+/** The decisions a gating audit read records, by request. */
+function recordedDecisions(value: unknown): Map<string, NonNullable<DepartedApproval["decided"]>> {
+  const payload = value && typeof value === "object" ? value as { entries?: unknown } : undefined;
+  const entries = Array.isArray(value) ? value : Array.isArray(payload?.entries) ? payload.entries : [];
+  const found = new Map<string, NonNullable<DepartedApproval["decided"]>>();
+  for (const entry of entries) {
+    const record = entry && typeof entry === "object" ? entry as Record<string, unknown> : null;
+    const pendingId = text(record?.pending_id);
+    const action = typeof record?.event_type === "string" ? DECIDED_EVENTS[record.event_type] : undefined;
+    if (!pendingId || !action || found.has(pendingId)) continue;
+    const detail = record?.detail && typeof record.detail === "object" ? record.detail as Record<string, unknown> : {};
+    const by = action === "expired" ? undefined : text(detail.deciding_principal) || text(detail.approver_id);
+    found.set(pendingId, { action, ...(by ? { by } : {}) });
+  }
+  return found;
+}
 
 /** One active scoped owner feeds the inbox and every attention/inline view. */
 export function createPendingApprovalResource(input: {
   scopeKey: string;
   load(signal: AbortSignal): Promise<unknown>;
   decide(pendingId: string, action: ApprovalAction, signal: AbortSignal): Promise<unknown>;
+  /** Reads the gating audit, to say who decided a request that left the
+   * pending list. Without it a departed request reads "decided elsewhere". */
+  loadDecisions?(signal: AbortSignal): Promise<unknown>;
   readOnly?: boolean;
+  /** Why `readOnly` holds, for the cards' words (see the snapshot's field). */
+  readOnlyReason?: "sign_in";
   environment?: ApprovalResourceEnvironment;
 }): PendingApprovalResource {
   const env = input.environment || browserEnvironment();
   let snapshot: PendingApprovalSnapshot = {
-    scopeKey: input.scopeKey, status: "loading", requests: [], decisions: {}, readOnly: input.readOnly === true,
+    scopeKey: input.scopeKey, status: "loading", requests: [], decisions: {}, departed: [], readOnly: input.readOnly === true,
+    ...(input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}),
   };
   const listeners = new Set<() => void>();
   const lifetime = new AbortController();
@@ -194,6 +260,18 @@ export function createPendingApprovalResource(input: {
   };
   const stale = () => {
     if (snapshot.status === "ready" && snapshot.updatedAtMs !== undefined && env.now() - snapshot.updatedAtMs >= STALE_MS) publish({ status: "stale" });
+  };
+  // Who decided the requests that left: one audit read after each departure.
+  // A failed read leaves them "decided elsewhere".
+  const readDecisions = async () => {
+    try {
+      const found = recordedDecisions(await input.loadDecisions!(lifetime.signal));
+      if (disposed || denied || !found.size) return;
+      publish({ departed: (snapshot.departed ?? []).map((item) => item.decided || !found.has(item.request.pendingId)
+        ? item : { ...item, decided: found.get(item.request.pendingId) }) });
+    } catch {
+      // The tombstone keeps saying the request was decided elsewhere.
+    }
   };
   const schedule = () => {
     if (timer !== undefined) env.clearTimeout(timer);
@@ -229,13 +307,22 @@ export function createPendingApprovalResource(input: {
           if (!request) throw new Error("Pending approval response contains an invalid request");
           if (!ids.has(request.pendingId)) { ids.add(request.pendingId); requests.push(request); }
         }
-        publish({ requests, status: "ready", updatedAtMs: env.now(), error: undefined });
+        // A request that left the list without this console deciding it was
+        // decided elsewhere (or expired): its card stays, saying so.
+        const left = snapshot.status === "loading" ? [] : snapshot.requests.filter((old) => old.status === "pending" && !ids.has(old.pendingId)
+          && snapshot.decisions[old.pendingId]?.phase !== "settled" && snapshot.decisions[old.pendingId]?.phase !== "submitting");
+        const departed = [
+          ...left.map((request) => ({ request, departedAtMs: env.now() })),
+          ...(snapshot.departed ?? []).filter((old) => !ids.has(old.request.pendingId) && !left.some((request) => request.pendingId === old.request.pendingId)),
+        ].slice(0, DEPARTED_LIMIT);
+        publish({ requests, departed, status: "ready", updatedAtMs: env.now(), error: undefined });
+        if (left.length && input.loadDecisions) void readDecisions();
       } catch (error) {
         if (disposed || denied) return;
         const unsupported = unavailableCapability(error)?.method === CONSOLE_RPC_METHODS.gatingPending;
         if (isDenied(error) || unsupported) {
           denied = true;
-          publish({ requests: [], decisions: {}, status: isDenied(error) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error) });
+          publish({ requests: [], decisions: {}, departed: [], status: isDenied(error) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error) });
           lifetime.abort();
         } else if (generation === decisionGeneration) {
           publish({ status: snapshot.updatedAtMs === undefined ? "unavailable" : "stale", error: errorText(error) });
@@ -306,7 +393,7 @@ export function createPendingApprovalResource(input: {
             });
           } else if (isDenied(error) || capability?.method === CONSOLE_RPC_METHODS.gatingDecide) {
             denied = true;
-            publish({ requests: [], decisions: {}, status: isDenied(error) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error) });
+            publish({ requests: [], decisions: {}, departed: [], status: isDenied(error) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error) });
             lifetime.abort();
           } else {
             const refusal = approvalRefusal(error);
@@ -332,7 +419,7 @@ export function createPendingApprovalResource(input: {
       listeners.clear();
       // Preserve a stable detached empty snapshot for references retained by a
       // view while React swaps to the next authority-scoped resource.
-      snapshot = { scopeKey: input.scopeKey, status: "unavailable", requests: [], decisions: {}, readOnly: true };
+      snapshot = { scopeKey: input.scopeKey, status: "unavailable", requests: [], decisions: {}, departed: [], readOnly: true };
     },
   };
   schedule();

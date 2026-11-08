@@ -3246,6 +3246,7 @@ jobs:
           python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
           python3 -B -m unittest -v scripts.test_assemble_connect_product
           python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+          python3 -B -m unittest -v scripts.test_release_payload_privacy_scan
 
       - name: Install candidate and preparation test dependencies
         run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0

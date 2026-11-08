@@ -5,6 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Service finalization reads its retained documents (the receipt, the MCP
+  document, the selected configuration and the selected service inputs) only
+  from a regular file of at most 1 MiB. A symbolic link, a FIFO or another
+  special file at that path is now refused before any read, so finalization
+  no longer waits on a FIFO that has no writer.
+
 ## [0.9.10] - 2026-11-05
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10

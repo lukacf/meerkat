@@ -916,6 +916,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
+- `SettleRetainedRun`(run_id: Option<RunId>)
 
 ## Signals
 - `Initialize`
@@ -1191,6 +1192,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeRegistrationReleased`(agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 - `InputControllerReleased`
+- `RetainedRunSettleResolved`(verdict: RetainedRunSettleVerdict, run_id: Option<RunId>)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -29254,6 +29256,214 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_controller_held`
 - Emits: `InputControllerReleased`
 - To: `Stopped`
+
+### `SettleRetainedRunAcceptedIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_not_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunAcceptedAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_not_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyRunCurrentInitializing`
+- From: `Initializing`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Initializing`
+
+### `SettleRetainedRunBusyRunCurrentIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunBusyRunCurrentAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyRunCurrentRunning`
+- From: `Running`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Running`
+
+### `SettleRetainedRunBusyRunCurrentRetired`
+- From: `Retired`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Retired`
+
+### `SettleRetainedRunBusyRunCurrentStopped`
+- From: `Stopped`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Stopped`
+
+### `SettleRetainedRunBusyDrainingIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunBusyDrainingAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyStaleRunIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_not_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunBusyStaleRunAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_not_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyNotServingInitializing`
+- From: `Initializing`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Initializing`
+
+### `SettleRetainedRunBusyNotServingRunning`
+- From: `Running`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Running`
+
+### `SettleRetainedRunBusyNotServingRetired`
+- From: `Retired`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Retired`
+
+### `SettleRetainedRunBusyNotServingStopped`
+- From: `Stopped`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Stopped`
+
+### `SettleRetainedRunNotRetainedInitializing`
+- From: `Initializing`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Initializing`
+
+### `SettleRetainedRunNotRetainedIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunNotRetainedAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunNotRetainedRunning`
+- From: `Running`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Running`
+
+### `SettleRetainedRunNotRetainedRetired`
+- From: `Retired`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Retired`
+
+### `SettleRetainedRunNotRetainedStopped`
+- From: `Stopped`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Stopped`
+
+### `SettleRetainedRunInertDestroyed`
+- From: `Destroyed`
+- On: `SettleRetainedRun`(run_id)
+- Emits: `RetainedRunSettleResolved`
+- To: `Destroyed`
 
 ## Coverage
 ### Code Anchors

@@ -428,19 +428,15 @@ async function main() {
     await clickNav(page, "gating");
     await page.getByTestId("gating-panel").waitFor();
     if (await page.locator('[data-testid^="gating-pending:"]').count()) {
-      const originalPendingId = await currentPendingId(page);
-      await page.getByTestId(`gating-action:${originalPendingId}:escalate`).click();
-      await page.waitForFunction(
-        (previousId) => {
-          const next = document.querySelector('[data-testid^="gating-pending:"]');
-          return next && next.getAttribute("data-testid") !== `gating-pending:${previousId}`;
-        },
-        originalPendingId,
-      );
-      const successorPendingId = await currentPendingId(page);
-      assert.notEqual(successorPendingId, originalPendingId, "escalation should create successor pending entry");
-      await page.getByTestId(`gating-action:${successorPendingId}:approve`).click();
-      await page.waitForFunction(() => document.querySelectorAll('[data-testid^="gating-pending:"]').length === 0);
+      // The console decides an approval only as the signed-in person on the
+      // connection. This pack's console has no sign-in, so its approvals
+      // are read-only.
+      const pendingId = await currentPendingId(page);
+      for (const action of ["approve", "reject", "escalate"]) {
+        const button = page.getByTestId(`gating-action:${pendingId}:${action}`);
+        if (await button.count()) assert.equal(await button.isDisabled(), true, `${action} should be read-only without a signed-in person`);
+      }
+      await waitForText(page.getByTestId(`gating-pending:${pendingId}`), "Read-only access");
     } else {
       await waitForText(page.getByTestId("gating-panel"), "No pending items.");
     }

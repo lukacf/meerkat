@@ -6,7 +6,7 @@ import {
   type LivePlaybackOwnerReadiness,
   type PendingLiveChannelHandle,
 } from "../../../sdk/typescript/src/live";
-import { callConsoleRpc } from "./network";
+import { callConsoleRpc, callerScopeParam } from "./network";
 import { errorMessage, httpStatusCode, jsonRpcErrorCode } from "./errors";
 import { CONSOLE_RPC_PATHS } from "./contract";
 import { parseVoiceContextStatus, type VoiceContextPreparation } from "./voice-context";
@@ -227,7 +227,37 @@ export function isTransientRpcFailure(error: unknown): boolean {
   return true;
 }
 
-function browserEnvironment(baseUrl: string): VoiceSessionEnvironment {
+/** The caller voice requests name: a caller scope, a promise of one while
+ * the console reads it (refused when the console does not know it), or
+ * `undefined` for none. */
+export type VoiceCallerScope = () => Promise<string | undefined> | string | undefined;
+
+/** The browser voice requests' JSON-RPC call. Every request names the
+ * caller the console acts as (`expected_caller_scope`) and waits for the
+ * console to know it: the gateway refuses a voice open made for another
+ * caller (`caller_changed`), and no request leaves while the caller is
+ * unknown (the getter refuses). The first caller named stays the session's,
+ * as the console instance's does. A refused request is reported, so an
+ * ended login or another caller reaches the console's sign-in state or its
+ * switch, as its other requests do. */
+export function createVoiceRpc(
+  baseUrl: string,
+  callerScope?: VoiceCallerScope,
+  reportFailure?: (error: unknown) => void,
+): VoiceSessionEnvironment["rpc"] {
+  let named: { scope: string | undefined } | undefined;
+  return async (method, params, timeoutMs) => {
+    named ??= { scope: await callerScope?.() };
+    try {
+      return await callConsoleRpc(baseUrl, method, { ...params, ...callerScopeParam(named.scope) }, timeoutMs);
+    } catch (error) {
+      reportFailure?.(error);
+      throw error;
+    }
+  };
+}
+
+function browserEnvironment(baseUrl: string, callerScope?: VoiceCallerScope, reportFailure?: (error: unknown) => void): VoiceSessionEnvironment {
   return {
     voiceAvailable: (identity) => queryVoiceAvailability(baseUrl, identity),
     createAudioContext: () => {
@@ -248,7 +278,7 @@ function browserEnvironment(baseUrl: string): VoiceSessionEnvironment {
     createPeerConnection: () => new RTCPeerConnection(),
     createMediaStream: (tracks) => new MediaStream(tracks ?? []),
     createAudioElement: () => document.createElement("audio"),
-    rpc: (method, params, timeoutMs) => callConsoleRpc(baseUrl, method, params, timeoutMs),
+    rpc: createVoiceRpc(baseUrl, callerScope, reportFailure),
     pagehideClose: (params) => {
       // Keepalive is needed specifically during document unloading, unlike ordinary console RPC.
       void fetch(`${baseUrl}${CONSOLE_RPC_PATHS.jsonRpc}`, {
@@ -415,8 +445,12 @@ export interface VoiceSession {
 export function createVoiceSession(
   baseUrl: string,
   environment?: VoiceSessionEnvironment,
+  /** The caller the console acts as, for the browser environment's requests. */
+  callerScope?: VoiceCallerScope,
+  /** Hears the browser environment's refused requests (`createVoiceRpc`). */
+  reportFailure?: (error: unknown) => void,
 ): VoiceSession {
-  const env = environment ?? browserEnvironment(baseUrl);
+  const env = environment ?? browserEnvironment(baseUrl, callerScope, reportFailure);
   const listeners = new Set<() => void>();
   let snapshot: VoiceSessionSnapshot = {
     phase: "idle", target: null, microphoneMuted: false, speakerMuted: false,

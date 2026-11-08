@@ -167,7 +167,9 @@ pub enum LlmError {
     /// The provider's response ended before its terminal event: a stream
     /// that stopped without `Done` (`ensure_terminal_done`), an SSE buffer cut
     /// mid-event, or a terminal response the provider marked incomplete for a
-    /// reason with no stop-reason mapping. Retryable: nothing of the attempt
+    /// reason with no stop-reason mapping. It is also how a GitHub Copilot
+    /// Responses stream fails whose terminal output does not line up with the
+    /// output items the stream announced. Retryable: nothing of the attempt
     /// is committed (the adapter returns the error before assembling a
     /// result), and the agent loop's bounded retry policy replays the turn
     /// under the same assistant message id.
@@ -739,16 +741,24 @@ impl LlmError {
         Self::from_http_status(status, message, retry_after_ms)
     }
 
+    /// A `Retry-After` value as the milliseconds to wait: a number of seconds
+    /// (a fractional one too), or an HTTP date (RFC 9110 section 5.6.7:
+    /// IMF-fixdate, or the obsolete RFC 850 and asctime forms every recipient
+    /// reads), the delay until that date, none once it is past. A number of
+    /// seconds too large for milliseconds is the largest delay. Anything else
+    /// gives no hint.
     pub fn parse_retry_after(value: &str) -> Option<u64> {
-        if let Ok(secs) = value.trim().parse::<u64>() {
-            return Some(secs * 1000);
+        let value = value.trim();
+        if let Ok(secs) = value.parse::<u64>() {
+            return Some(secs.saturating_mul(1000));
         }
-        if let Ok(secs) = value.trim().parse::<f64>()
+        if let Ok(secs) = value.parse::<f64>()
             && secs > 0.0
         {
             return Some((secs * 1000.0) as u64);
         }
-        None
+        let delay = http_date(value)?.signed_duration_since(chrono::Utc::now());
+        Some(u64::try_from(delay.num_milliseconds()).unwrap_or(0))
     }
 
     pub fn failure_reason(&self) -> LlmFailureReason {
@@ -927,6 +937,21 @@ impl LlmError {
             }
         }
     }
+}
+
+/// An HTTP date (RFC 9110 section 5.6.7): IMF-fixdate (`Sun, 06 Nov 1994
+/// 08:49:37 GMT`), or the obsolete RFC 850 (`Sunday, 06-Nov-94 08:49:37
+/// GMT`) and asctime (`Sun Nov  6 08:49:37 1994`) forms, all in UTC.
+fn http_date(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone as _;
+
+    if let Ok(date) = chrono::DateTime::parse_from_rfc2822(value) {
+        return Some(date.with_timezone(&chrono::Utc));
+    }
+    ["%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
+        .iter()
+        .find_map(|format| chrono::NaiveDateTime::parse_from_str(value, format).ok())
+        .map(|date| chrono::Utc.from_utc_datetime(&date))
 }
 
 #[cfg(test)]
@@ -1318,6 +1343,70 @@ mod tests {
     #[test]
     fn test_parse_retry_after_negative() {
         assert_eq!(LlmError::parse_retry_after("-5"), None);
+    }
+
+    /// `Retry-After` given as an HTTP date (IMF-fixdate, or the obsolete
+    /// RFC 850 and asctime forms every recipient must read) is the delay
+    /// until that date, and a date already past is no delay. (Fails-old: only
+    /// a number of seconds was read, so a date gave no hint.)
+    #[test]
+    fn an_http_date_retry_after_is_the_delay_until_that_date() {
+        let at = chrono::Utc::now() + chrono::Duration::seconds(120);
+        for (form, value) in [
+            (
+                "IMF-fixdate",
+                at.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+            ),
+            (
+                "RFC 850",
+                at.format("%A, %d-%b-%y %H:%M:%S GMT").to_string(),
+            ),
+            ("asctime", at.format("%a %b %e %H:%M:%S %Y").to_string()),
+        ] {
+            let delay = LlmError::parse_retry_after(&value);
+            assert!(
+                delay.is_some_and(|ms| (100_000..=120_000).contains(&ms)),
+                "{form} {value:?}: {delay:?}"
+            );
+        }
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        assert_eq!(LlmError::parse_retry_after(&past), Some(0));
+    }
+
+    /// A rate limit whose `Retry-After` is an HTTP date carries the delay
+    /// until that date. (Fails-old: the date gave no hint.)
+    #[test]
+    fn a_rate_limit_with_an_http_date_retry_after_carries_the_delay() {
+        let at = (chrono::Utc::now() + chrono::Duration::seconds(60))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_str(&at).expect("a header value"),
+        );
+        let error = LlmError::from_http_response(429, "rate limited".to_string(), &headers);
+        assert!(
+            matches!(
+                error,
+                LlmError::RateLimited {
+                    retry_after_ms: Some(ms)
+                } if (40_000..=60_000).contains(&ms)
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// A number of seconds too large for milliseconds is the largest delay,
+    /// never an overflow. (Fails-old: the multiplication overflowed.)
+    #[test]
+    fn a_retry_after_too_large_for_milliseconds_saturates() {
+        assert_eq!(
+            LlmError::parse_retry_after("18446744073709551615"),
+            Some(u64::MAX)
+        );
     }
 
     #[test]

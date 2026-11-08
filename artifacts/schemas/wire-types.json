@@ -135533,6 +135533,11 @@
             "const": "not_observed_while_retiring",
             "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
             "type": "string"
+          },
+          {
+            "const": "store_refused",
+            "description": "The store refuses to read the member's session until its realm is\nreopened (a host store whose scope of the session, or whose realm, is\npoisoned). Later reads of the member answer the same until then.",
+            "type": "string"
           }
         ]
       },
@@ -192286,6 +192291,11 @@
       {
         "const": "not_observed_while_retiring",
         "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
+        "type": "string"
+      },
+      {
+        "const": "store_refused",
+        "description": "The store refuses to read the member's session until its realm is\nreopened (a host store whose scope of the session, or whose realm, is\npoisoned). Later reads of the member answer the same until then.",
         "type": "string"
       }
     ],

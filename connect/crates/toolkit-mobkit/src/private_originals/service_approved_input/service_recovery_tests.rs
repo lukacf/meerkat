@@ -173,6 +173,16 @@ async fn operator_recovery_restores_file_owner_and_cleans_unpublished_intent_wit
     }))
     .catch_unwind()
     .await;
+    // The reopen below takes the grant store's lease, which the first owners
+    // hold until their last reference drops. Their close settles the host,
+    // but tasks of the closed runtime can still hold them for a few
+    // milliseconds after the drops below, so they are watched.
+    let first_grants = Arc::downgrade(&first.source.owner.grants());
+    let first_owner = Arc::downgrade(&first.source.owner);
+    let first_source = Arc::downgrade(&first.source);
+    let first_machine = Arc::downgrade(&first.machine);
+    let first_service = Arc::downgrade(&first.service);
+    let first_store = Arc::downgrade(&first.store);
     let closed = first.close_durable_owners().await;
     drop(continuation);
     drop(history);
@@ -182,6 +192,24 @@ async fn operator_recovery_restores_file_owner_and_cleans_unpublished_intent_wit
         Ok(value) => value,
         Err(panic) => std::panic::resume_unwind(panic),
     };
+    let held = || {
+        first_grants.strong_count()
+            + first_owner.strong_count()
+            + first_source.strong_count()
+            + first_machine.strong_count()
+            + first_service.strong_count()
+            + first_store.strong_count()
+    };
+    // A host close does not yet guarantee that the grant store's lease is released at once.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while held() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first owners must drop once their close settled: {} references held",
+            held()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
     let (fixture, history, continuation) =
         ContinuationFixture::reopen_durable_continuation(retained).await;
     let result = AssertUnwindSafe(Box::pin(async {

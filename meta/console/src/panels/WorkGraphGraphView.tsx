@@ -69,6 +69,9 @@ export interface WorkGraphItemHandlers {
   onClose?: (input: { itemId: string; revision?: number }) => void;
   /// Hands a claimed item back (in progress to open).
   onRelease?: (input: { itemId: string; revision?: number }) => void;
+  /// Whether Release is offered for this item: only the claim's owner
+  /// releases it. Absent: for every claim.
+  canRelease?: (item: WorkGraphWireItem) => boolean;
 }
 
 /// Two CAS classes on the binding actions: goal actions (confirm /
@@ -115,7 +118,7 @@ export function workGraphItemActions(
   item: WorkGraphWireItem,
   itemId: string,
   canManage: boolean,
-  { onClaim, onClose, onRelease }: WorkGraphItemHandlers,
+  { onClaim, onClose, onRelease, canRelease }: WorkGraphItemHandlers,
   options: { variant?: "ghost" | "default"; release?: boolean } = {},
 ): React.ReactNode {
   const status = item.status || "open";
@@ -123,7 +126,8 @@ export function workGraphItemActions(
   const title = item.title || "this work item";
   const claim = canManage && onClaim && status === "open" && !workGraphItemOwner(item);
   const close = canManage && onClose && !isWorkGraphTerminal(status) && status !== "blocked";
-  const release = options.release && canManage && onRelease && status === "in_progress";
+  const release = options.release && canManage && onRelease && status === "in_progress"
+    && (canRelease?.(item) ?? true);
   if (!claim && !close && !release) return null;
   const variant = options.variant ?? "ghost";
   return (

@@ -884,9 +884,10 @@ impl LocalGrantAuthority {
     /// a reference that is not an exact retained grant, is `Denied` before
     /// any custody or publication reservation is taken, so a busy
     /// reservation never hides that refusal. Nothing waits: a busy or
-    /// poisoned grant owner is `Unavailable` for every caller, and once
-    /// custody permits mutation, busy or poisoned local publication/grant
-    /// locks return `Unavailable` without waiting, mutation or publication.
+    /// poisoned grant owner, or one whose custody ended, is `Unavailable`
+    /// for every caller, and once custody permits mutation, busy or poisoned
+    /// local publication/grant locks return `Unavailable` without waiting,
+    /// mutation or publication.
     pub fn revoke(
         &self,
         caller: &PrincipalRef,
@@ -947,7 +948,8 @@ impl LocalGrantAuthority {
     /// Read-only and without waiting: `caller` may revoke the exact retained
     /// `grant` (the configured root or its issuer). The root and issued
     /// records never change, so this answer cannot go stale; the generated
-    /// owner still decides at the mutation itself.
+    /// owner still decides at the mutation itself. An owner whose custody
+    /// ended answers `Unavailable` to every caller.
     fn check_revoke_authority(
         &self,
         caller: &PrincipalRef,
@@ -958,6 +960,7 @@ impl LocalGrantAuthority {
             .owner
             .try_lock()
             .map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let record = exact_record(&owner, grant)?;
         if owner.state().root.as_ref() == Some(&actor) || record.issuer == actor {
             Ok(())

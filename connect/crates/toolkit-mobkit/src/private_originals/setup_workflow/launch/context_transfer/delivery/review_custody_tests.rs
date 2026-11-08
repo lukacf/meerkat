@@ -230,16 +230,16 @@ struct DeferredSettlement {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for DeferredBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         let BoundGovernedInput {
             input,
             settlement,
             entry_fence,
-        } = self.0.bind(context, input).await?;
+        } = self.0.try_bind(context, input).await?;
         Ok(BoundGovernedInput {
             input,
             entry_fence,
@@ -269,12 +269,12 @@ impl GovernedEntryFence for RefusedFence {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for RefusedBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
-        let mut bound = self.0.bind(context, input).await?;
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        let mut bound = self.0.try_bind(context, input).await?;
         bound.entry_fence = Some(Arc::new(RefusedFence));
         Ok(bound)
     }

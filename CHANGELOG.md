@@ -592,15 +592,6 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
-- `meerkat-mob`: `MobBuilder::with_member_tool_audience` takes a host's
-  `MemberToolAudience`, the host's rule for the members of the mob that
-  another member's own mob operator tools may not know of. The member tools
-  `member_status`, `retire_member` and `force_cancel_member` answer a member
-  it hides from the calling member exactly as a member the mob does not
-  hold (`member_not_found`), for a caller with manage scope too, and do
-  nothing to it. Without an audience every member is known to every
-  member's tools, as before.
-
 - Peers keep the original requester in process. A governed agent's comms
   send in process carries the origin of the governed work it was sent
   under: its requester, the sending agent, and every work it names. Core's
@@ -1232,6 +1223,46 @@ them.
   model, is a catalog image generation model. Select it by model; it runs on
   the hosted Responses image tool, as the default does.
 
+- `meerkat_core::protected_section`: protected sections, the places where code
+  must not wait because its caller holds what other actors need: a governed
+  bind under the identity's lifecycle lock, the governed entry, native
+  admission reads, the historical admission callback and a host's store
+  transaction. A debug build panics when code inside one waits outside a
+  listed known wait (`assert_may_wait`, `known_wait`). An asynchronous section
+  carries its attempt's effect mark (`note_effect`, `effect_recorded`,
+  `within_marked`, `effect_mark`, `EffectMark::enter` for a blocking writer
+  the attempt hands work to) and its decision point (`note_decided`); the
+  write witness `assert_effect_marked` reports a durable write inside a
+  governed bind attempt that neither passed its decision point nor recorded an
+  effect. Release builds check nothing.
+- `authorization::NotNowWait` and `OwnerChangeChurn::wait_until_clear`: a
+  "not now" answer's wait, bounded by the caller's deadline;
+  `ControllerReadinessFailure::SourceHeld` and `PreparationStale`, and
+  `ControllerReadinessFailure::as_str`.
+- `meerkat_authorization_contracts::work_association::AssociationDigest`
+  (`ASSOCIATION_DIGEST_VERSION`, `AssociationDigestError`) and
+  `InputAuthorityAssociation::digest`: a versioned digest of an association's
+  canonical bytes, re-exported by `meerkat-runtime`.
+- `MeerkatMachine::governed_input_by_key`: read a governed submission's
+  outcome by its raw idempotency key and its association, through Core's own
+  key qualification (a deduplicated submission answers with its canonical
+  input).
+- `PeerIngressBindRequest::not_now_waiter` (`PeerIngressWaiter`): a peer
+  binder waits out a "not now" inside its bind, outside every protected
+  section, within the request's deadline.
+- `OwnerChangeChurn::reporting_to` and `OperationRefusalSurface::GovernedInput`:
+  a host reports its own operation's waits (a governed input's "not now"
+  waits) to the operation refusal observer it installed.
+
+- `meerkat-mob`: `MobBuilder::with_member_tool_audience` takes a host's
+  `MemberToolAudience`, the host's rule for the members of the mob that
+  another member's own mob operator tools may not know of. The member tools
+  `member_status`, `retire_member` and `force_cancel_member` answer a member
+  it hides from the calling member exactly as a member the mob does not
+  hold (`member_not_found`), for a caller with manage scope too, and do
+  nothing to it. Without an audience every member is known to every
+  member's tools, as before.
+
 - `meerkat-core`, `meerkat`: a session build can carry its own MCP
   credential source, `SessionBuildOptions::mcp_auth_resolver_override`: an
   `Arc<dyn McpAuthResolver>` erased as `llm_client_override` is, set with
@@ -1271,20 +1302,6 @@ them.
   add once, at the first boundary after its release settles, where every
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
-
-- `meerkat-mob`: a member seated exempt from the definition's wiring rules
-  (`SpawnMemberSpec::definition_wiring`, `DefinitionWiring::Exempt`) is
-  also outside the definition's role-wide flow dispatch: a role-wide step
-  never dispatches to it, a flow's supervisor escalation never picks it,
-  and a role whose only Active members are exempt gets a provisioned flow
-  member. A run whose role targets name it still dispatches to it.
-
-- `meerkat-mob`: a durable fork of a member seated exempt from the
-  definition's wiring rules is seated exempt too, whatever seating its
-  spawn request states (`MobHandle::fork_member`, an agent's `fork_off`
-  child, a temporary council's local participant, and the live delegation
-  worker `MobHandle::fork_member_at_turn_boundary` seats). A fork of a
-  member the rules apply to keeps the seating its request states.
 
 - `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
   decision kind it registers instead of the whole store, so two runtimes on
@@ -1544,6 +1561,32 @@ them.
   on the default; the `generate_image` tool description and the docs no
   longer advise against it. With `jpeg`, which cannot carry one, the
   request is denied with `projection_unsupported` before the provider call.
+
+- A volatile peer delivery whose binding stays pending is offered again with
+  backoff within the owner-change bound, then dropped with a warning, instead
+  of being dropped at its first pending answer. A durable claim keeps its
+  path.
+- A durable grant change (`LocalGrantAuthority`) calls the write witness
+  (debug builds only).
+- Debug builds only: reserving `LocalAuthorizationPublication`'s writer for
+  an owner change inside a protected section (Core's native admission reads,
+  its historical admission callback) panics, naming `publication.writer`, so
+  a host whose admission callback takes it there fails in a debug build.
+  Release builds check nothing.
+
+- `meerkat-mob`: a member seated exempt from the definition's wiring rules
+  (`SpawnMemberSpec::definition_wiring`, `DefinitionWiring::Exempt`) is
+  also outside the definition's role-wide flow dispatch: a role-wide step
+  never dispatches to it, a flow's supervisor escalation never picks it,
+  and a role whose only Active members are exempt gets a provisioned flow
+  member. A run whose role targets name it still dispatches to it.
+
+- `meerkat-mob`: a durable fork of a member seated exempt from the
+  definition's wiring rules is seated exempt too, whatever seating its
+  spawn request states (`MobHandle::fork_member`, an agent's `fork_off`
+  child, a temporary council's local participant, and the live delegation
+  worker `MobHandle::fork_member_at_turn_boundary` seats). A fork of a
+  member the rules apply to keeps the seating its request states.
 
 ### Deprecated
 
@@ -1967,12 +2010,14 @@ them.
 - `meerkat-mob`: a rotation of a member onto a fresh session (a
   `rotate_member`: a reset, or a deleted identity created anew) settles the
   session it leaves before its terminal step. A member that compacted inside
-  a run its stop committed as interrupted owed that compaction's memory
-  projection until its next wake, and a lazy start does not wake it for
-  that: rotated while dormant, its batch stayed staged and invisible and its
-  outbox row pending, for good. Now the batch is finalized into the old
-  session's memory and the row acknowledged. A settle that fails leaves
-  them owed, as before, and never fails the rotation.
+  a run that a stop, or the rotation's own cancel of the running run,
+  committed as interrupted owed that compaction's memory projection until
+  its next wake, and a lazy start does not wake it for that: once rotated,
+  its batch stayed staged and invisible and its outbox row pending, for
+  good. Now the batch is finalized into the old session's memory and the
+  row acknowledged before the rotation journals the member's retirement. A
+  settle that fails leaves them owed, as before, and never fails the
+  rotation.
 
 - `meerkat-mob`: a mob composed non-authoritative
   (`MobBuilder::with_composition_authority(MobCompositionAuthority::NonAuthoritative)`,
@@ -2155,22 +2200,16 @@ them.
   runs have no requester). The mob refuses a requester on any delivery that
   cannot carry it, so none is dropped silently.
 
-- `meerkat-mob`: a rotation a host starts directly on the mob
-  (`MobHandle::rotate_member`) finalizes a dormant member's owed compaction
-  projection, but Meerkat Meta does not distill its discards into agent
-  memory; use Meta's verbs (delete, reset, a role move, the roster's
-  unlisting) to have them distilled.
-
 - `meerkat-mob`: a worker's `respawn` and a mob's destroy end a member's
   session for good without settling it: a dormant worker that owes a
   compaction projection keeps its batch staged and its outbox row pending,
-  as before.
-
-- Meerkat Meta keeps the compaction harvest a step owes the session it
-  ends (the settled batch, or the fallback read of the session's memory)
-  in process until the retirement's side effects run: a restart in
-  between leaves the records searchable in the old session's memory but
-  never distilled.
+  as before. A plain retirement (`MobHandle::retire`) does not settle the
+  member's session either, since the session can be resumed: a compaction
+  projection it owes (one a stop committed, or the retirement's own cancel
+  of a running run) stays owed until the session's next wake. A member the
+  roster unlisted while its run carried an owed compaction projection, and
+  that is then deleted or reset before any wake, loses that batch: its fresh
+  life lets the archived session go without a settle.
 
 - `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`, Web SDK: operator
   instructions have no REST route, no MCP tool and no Web SDK method. A

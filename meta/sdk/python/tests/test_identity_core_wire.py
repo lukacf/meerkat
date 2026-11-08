@@ -165,6 +165,25 @@ def test_a_roster_wide_history_failure_names_no_identity() -> None:
     )
 
 
+def test_a_held_governed_send_is_retryable_with_its_kind_exposed() -> None:
+    # Every bind of a governed send answered "not now" until its door's budget
+    # ended: nothing was submitted, and the same input may be sent again.
+    data = {
+        "kind": "governed_input_held",
+        "condition": "source_held",
+        "waited_ms": 300,
+        "binds": 3,
+        "input_id": "0193f0a4-6c1e-7c3a-9a1b-2f4e5d6c7b8a",
+        "submitted": False,
+        "retryable": True,
+    }
+    err = _refusal(-32052, data)
+    assert type(err) is IdentityHistoryUnavailableError
+    assert err.retryable is True
+    assert (err.kind, err.identity, err.session_id) == ("governed_input_held", None, None)
+    assert err.data == data
+
+
 def test_host_adopted_refusal_is_typed() -> None:
     err = _refusal(
         -32053, {"kind": "identity_host_adopted", "identity": "w", "retryable": False}

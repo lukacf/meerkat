@@ -1057,7 +1057,12 @@ impl LocalGrantAuthority {
     ) -> Result<(), GrantRefusal> {
         require_custody(owner)?;
         match &self.durable {
-            Some(durable) => durable.apply(owner, publication, input),
+            Some(durable) => {
+                // The write witness: a durable grant change inside a bind
+                // attempt needs the attempt's effect mark first.
+                meerkat_core::protected_section::assert_effect_marked("grants.change");
+                durable.apply(owner, publication, input)
+            }
             None => owner
                 .apply(input)
                 .map(|_| ())

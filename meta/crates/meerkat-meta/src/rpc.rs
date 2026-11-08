@@ -7807,6 +7807,11 @@ pub(crate) fn identity_error_code(err: &crate::identity_first::IdentityRuntimeEr
         | IdentityRuntimeError::MemberHistoryUnavailable { .. }
         | IdentityRuntimeError::IdentityWakeRetryable { .. }
         | IdentityRuntimeError::IdentitySessionAbsent { .. } => IDENTITY_HISTORY_UNAVAILABLE_CODE,
+        // A governed send held past its door's budget: retryable, nothing
+        // was submitted (data `kind` "governed_input_held").
+        IdentityRuntimeError::GovernedInput(crate::identity_first::GovernedInputError::Held(_)) => {
+            IDENTITY_HISTORY_UNAVAILABLE_CODE
+        }
         IdentityRuntimeError::IdentityHostAdopted { .. } => IDENTITY_HOST_ADOPTED_CODE,
         // The first-boot manifest: the migrated state directory and
         // Core's stores disagree, the storage-resolution class. So does a

@@ -4448,12 +4448,15 @@ struct NeverBound;
 
 #[async_trait::async_trait]
 impl crate::identity_first::bridge::GovernedInputBinder for NeverBound {
-    async fn bind(
+    async fn try_bind(
         &self,
         _context: &crate::identity_first::bridge::GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<crate::identity_first::bridge::BoundGovernedInput, String> {
-        Err("never bound".to_string())
+    ) -> Result<
+        crate::identity_first::bridge::BoundGovernedInput,
+        crate::identity_first::bridge::GovernedBindError,
+    > {
+        Err(crate::identity_first::bridge::GovernedBindRefusal::denied("never bound").into())
     }
 
     fn retain_unresolved(

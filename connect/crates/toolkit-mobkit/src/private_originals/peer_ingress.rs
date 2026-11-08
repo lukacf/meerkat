@@ -717,7 +717,14 @@ impl PrivateOriginals {
         let owner = self.clone();
         let reference = reference.clone();
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || handle.block_on(async {
+        // The bind attempt, for the blocking writer's issuance (the PI also
+        // enters the bind with its source record marked).
+        let attempt = meerkat_core::protected_section::effect_mark();
+        tokio::task::spawn_blocking(move || {
+            let _attempt = attempt
+                .as_ref()
+                .map(meerkat_core::protected_section::EffectMark::enter);
+            handle.block_on(async {
             let _writer=owner.owner.source_writer().await;
             let row=owner.store.get(&owner.key(&reference)?).await.map_err(store_error)?.ok_or(PrivateOriginalError::Unavailable)?;
             let current=owner.decode_record(&row,&reference)?;
@@ -743,7 +750,12 @@ impl PrivateOriginals {
                         let id=peer.child_id(&target).map_err(denied)?;
                         let child=match context.grants.issued_reference(&id).map_err(grant_error)? {
                             Some(child)=>child,
-                            None=>context.grants.issue_child(&context.application,parent,id,selected.route.logical_executor.clone(),bounds.clone()).map_err(grant_error)?,
+                            None=>{
+                                // A bind attempt's durable effect: no "not now"
+                                // may follow it.
+                                if let Some(attempt)=&attempt { attempt.note("peer.operation_grant"); }
+                                context.grants.issue_child(&context.application,parent,id,selected.route.logical_executor.clone(),bounds.clone()).map_err(grant_error)?
+                            }
                         };
                         let lineage=vec![parent.clone(),child];
                         let leaf=context.grants.resolve_lineage(&lineage,&selected.route.logical_executor,represented).map_err(grant_error)?;
@@ -754,7 +766,10 @@ impl PrivateOriginals {
                     Ok(WorkAuthorityBasis::TargetedGrantLineages { base:None,targets })
                 })
             }).await.map_err(host_error)
-        })).await.map_err(|_| PrivateOriginalError::Unavailable)?
+        })
+        })
+        .await
+        .map_err(|_| PrivateOriginalError::Unavailable)?
     }
     fn check_peer_parents(&self, peer: &PeerSource) -> Result<(), PrivateOriginalError> {
         self.check_peer_selection(peer)?;
@@ -1035,6 +1050,9 @@ impl PrivateOriginals {
             Err(PrivateOriginalError::Denied) => {
                 // A definite owner refusal becomes terminal only after the
                 // existing canonical cancellation publication is acknowledged.
+                // A durable effect; the bind then ends Denied. This runs
+                // before the PI enters its section, so it records nothing.
+                meerkat_core::protected_section::note_effect("peer.operation_cancelled");
                 self.record_operation_cancelled(&reference)
                     .await
                     .map_err(|_| unavailable())?;
@@ -1096,10 +1114,20 @@ impl PrivateOriginals {
             approved_login: None,
         });
         let offered = request.input;
-        let mut bound = binder
-            .bind(&context, offered.clone())
-            .await
-            .map_err(|_| unavailable())?;
+        // The shared binder's decision, as in a governed send's bind: a
+        // protected section, where it never waits. The peer source record
+        // written above is the attempt's first durable effect.
+        let mut bound = meerkat_core::protected_section::within(
+            meerkat_core::protected_section::ProtectedSection::GovernedBind,
+            async {
+                // The peer source record written above is this attempt's
+                // first durable effect: no "not now" may follow it.
+                meerkat_core::protected_section::note_effect("peer.source_record");
+                binder.try_bind(&context, offered.clone()).await
+            },
+        )
+        .await
+        .map_err(|_| unavailable())?;
         if bound.entry_fence.is_some() {
             return Err(unavailable());
         }

@@ -9,6 +9,26 @@ use meerkat_authorization_contracts::{
     work_association::{GrantTarget, TargetGrantLineage},
 };
 
+/// Issue one callback leaf under its issued `root`: the leaf issuance's own
+/// branch, a bind attempt's durable effect, marked before the write.
+pub(crate) fn issue_callback_leaf(
+    grants: &meerkat_authorization::grants::LocalGrantAuthority,
+    application: &meerkat_core::PrincipalRef,
+    root: &meerkat_authorization_contracts::grant::GrantLineageRef,
+    id: EvidenceId,
+    executor: meerkat_core::PrincipalRef,
+    bounds: meerkat_authorization_contracts::constraints::ExecutionRestrictions,
+) -> Result<
+    meerkat_authorization_contracts::grant::GrantLineageRef,
+    meerkat_authorization::grants::GrantRefusal,
+> {
+    // A bind attempt's durable effect: no "not now" may follow it.
+    meerkat_core::protected_section::note_effect("original.callback_grant");
+    crate::no_wait::wait_at("class_callbacks.issue_leaf", || {
+        grants.issue_child(application, root, id, executor, bounds)
+    })
+}
+
 fn root_id(bundle: &str) -> Result<EvidenceId, HostLifetimeError> {
     EvidenceId::new(format!("{bundle}/grant")).map_err(|_| invalid())
 }
@@ -42,6 +62,8 @@ impl ServicePolicyOwner {
         route: &meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceRoute,
         issue: bool,
     ) -> Result<Vec<TargetGrantLineage>, HostLifetimeError> {
+        // Held by another class's callback issuance across its grant write.
+        crate::no_wait::may_wait("class_callbacks.exclusion");
         let _exclusion = self.exclusion.lock().await;
         let current = self
             .observed_admission(&expected.instance.member.member)?
@@ -101,16 +123,21 @@ impl ServicePolicyOwner {
             {
                 Some(root) => (root, false),
                 None if issue => (
-                    context
-                        .grants
-                        .issue_root(
-                            &context.operator,
-                            id,
-                            context.application.clone(),
-                            route.represented_subject.clone(),
-                            root_bounds.clone(),
-                        )
-                        .map_err(|_| unavailable())?,
+                    {
+                        // A bind attempt's durable effect: no "not now" may
+                        // follow it.
+                        meerkat_core::protected_section::note_effect("original.callback_grant");
+                        crate::no_wait::wait_at("class_callbacks.issue_root", || {
+                            context.grants.issue_root(
+                                &context.operator,
+                                id,
+                                context.application.clone(),
+                                route.represented_subject.clone(),
+                                root_bounds.clone(),
+                            )
+                        })
+                    }
+                    .map_err(|_| unavailable())?,
                     true,
                 ),
                 None => return Err(unavailable()),
@@ -148,16 +175,15 @@ impl ServicePolicyOwner {
                 {
                     Some(leaf) => (leaf, false),
                     None if issue => (
-                        context
-                            .grants
-                            .issue_child(
-                                &context.application,
-                                &root,
-                                id,
-                                route.logical_executor.clone(),
-                                bounds.clone(),
-                            )
-                            .map_err(|_| unavailable())?,
+                        issue_callback_leaf(
+                            &context.grants,
+                            &context.application,
+                            &root,
+                            id,
+                            route.logical_executor.clone(),
+                            bounds.clone(),
+                        )
+                        .map_err(|_| unavailable())?,
                         true,
                     ),
                     None => return Err(unavailable()),

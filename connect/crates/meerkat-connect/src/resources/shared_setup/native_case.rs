@@ -1530,7 +1530,10 @@ impl Case {
             // Registration retains only the desired identity row. Active
             // state and continuity come from the actual Core member already
             // created above, observed through this runtime's real bridge.
-            identities.register(row.clone()).await;
+            identities
+                .register(row.clone())
+                .await
+                .expect("the identity registers");
             let observed = identities.status(&identity).await.unwrap();
             assert_eq!(observed.state, IdentityLifecycleState::Active);
             assert_eq!(observed.session_id.as_ref(), Some(&session));

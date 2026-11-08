@@ -273,9 +273,14 @@ impl PrivateOriginals {
         let source = self.clone();
         let source_route = reference.route.clone();
         let runtime = tokio::runtime::Handle::current();
+        // The bind attempt, for the blocking writer's issuance.
+        let attempt = meerkat_core::protected_section::effect_mark();
         // The actual blocking writer owns the same login reservation through
         // native issuance even if the waiting binder is dropped.
         let lineage = tokio::task::spawn_blocking(move || {
+            let _attempt = attempt
+                .as_ref()
+                .map(meerkat_core::protected_section::EffectMark::enter);
             runtime.block_on(source.with_selected_setup_caller(&selected_caller, selected_admission.as_ref(), || {
             super::first_input::with_controller_login(console.as_ref(), None, || {
                 lifetime.with_current_setup(|| {
@@ -304,13 +309,20 @@ impl PrivateOriginals {
                         })?;
                         let child = match grants.issued_reference(&child_id)? {
                             Some(child) => child,
-                            None => grants.issue_child(
-                                &caller,
-                                parent.last().ok_or(GrantRefusal::Denied)?,
-                                child_id.clone(),
-                                executor.clone(),
-                                bounds,
-                            )?,
+                            None => {
+                                // A bind attempt's durable effect: no "not
+                                // now" may follow it.
+                                if let Some(attempt) = &attempt {
+                                    attempt.note("original.setup_request_grant");
+                                }
+                                grants.issue_child(
+                                    &caller,
+                                    parent.last().ok_or(GrantRefusal::Denied)?,
+                                    child_id.clone(),
+                                    executor.clone(),
+                                    bounds,
+                                )?
+                            }
                         };
                         let mut lineage = parent;
                         lineage.push(child);
@@ -334,7 +346,7 @@ impl PrivateOriginals {
                     for target in &targets {
                         current_caller()?;
                         issued_targets.extend(super::setup_targets::issue_targets(&owner, &caller, &executor, represented.as_ref(),
-                            &origin, &child_id, std::slice::from_ref(target))?);
+                            &origin, &child_id, std::slice::from_ref(target), attempt.as_ref())?);
                     }
                     current_caller()?;
                     super::setup_targets::project(lineage, issued_targets)

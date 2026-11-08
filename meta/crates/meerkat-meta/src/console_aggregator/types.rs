@@ -46,6 +46,10 @@ pub enum ConsoleFrameStatus {
     DeliveryFailed,
     Completed,
     Redacted,
+    /// A governed send's bind answered bound and its input is being
+    /// submitted: from here it is delivered or fails, and is never held.
+    /// Declared last so the earlier variants keep their discriminants.
+    Submitted,
 }
 
 impl ConsoleFrameStatus {
@@ -53,6 +57,7 @@ impl ConsoleFrameStatus {
         match self {
             Self::Accepted => "accepted",
             Self::Dispatching => "dispatching",
+            Self::Submitted => "submitted",
             Self::Delivered => "delivered",
             Self::DeliveryFailed => "delivery_failed",
             Self::Completed => "completed",
@@ -64,6 +69,7 @@ impl ConsoleFrameStatus {
         match value {
             "accepted" => Self::Accepted,
             "dispatching" => Self::Dispatching,
+            "submitted" => Self::Submitted,
             "delivered" => Self::Delivered,
             "delivery_failed" => Self::DeliveryFailed,
             "redacted" => Self::Redacted,

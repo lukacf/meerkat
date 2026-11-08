@@ -196,6 +196,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The enum is exhaustive, so a downstream exhaustive match needs the new
   arm, or a wildcard arm.
 
+- `GovernedInputBinder::bind` is replaced by `try_bind`, which answers
+  `Ok(BoundGovernedInput)`, `Err(GovernedBindError::Refused(GovernedBindRefusal))`
+  or `Err(GovernedBindError::NotNow(GovernedNotNow))`, and `wait_budget`
+  (default: Core's owner-change bound). A send's one loop waits out "not now"
+  answers outside the identity's lifecycle lock, then binds again with fresh
+  facts, within the door's budget.
+- `GovernedInputError::Bind` is removed. Added `Refused(GovernedBindRefusal)`
+  (kinds `denied`, `closed`, `unavailable`, `withheld`) and
+  `Held(GovernedHold)` (every bind answered "not now" until the budget ended;
+  nothing was submitted). `AdmissionUnresolved` gains
+  `receipt: Option<Box<GovernedSubmissionReceipt>>`.
+- `SendTransition::MarkHeld`: a held governed Console dispatch returns its
+  send from `Dispatching` to `AcceptedPersisted`.
+- `SendState::Submitted`, `SendTransition::MarkSubmitted` and
+  `ConsoleFrameStatus::Submitted` (frame status `submitted`): a governed
+  Console send whose host's binder bound it is submitted, from
+  `Dispatching`; from there it is delivered or fails, and is never held.
+  `MarkHeld` is accepted only from `Dispatching`. New variants of
+  exhaustive public enums.
+- `SendTransition::MarkUnresolved`: a governed Console send whose
+  submission answered unresolved stays `Submitted`. A new variant of an
+  exhaustive public enum.
+
 - The labels only Meta writes are reserved: `side_chat_of`,
   `side_chat_of_session`, `side_chat_creator` and `console.private_to`.
   Member creation refuses each of them as invalid params naming the label:
@@ -609,10 +632,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the exported bridge implement it.
 
 - `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
-  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
-  step owed the session it ended failed. Its record has its own key, apart
-  from the retirement's distillation, and goes once the fallback read of
-  the session's memory harvested them. Earlier releases neither write nor
+  `lifecycle_effect_failed`): the harvest of the compactions a retired
+  session holds failed. Its record has its own key, apart from the
+  retirement's distillation, and goes once the fallback read of the
+  session's memory harvested them. Earlier releases neither write nor
   read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
   (provided, removes nothing by default) removes such a record; the SQLite,
   in-memory and host store placements implement it.
@@ -771,6 +794,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   instruction either: a member owed its snapshot stays owed until the
   authoritative launch delivers it, and a `candidate launch census` WARN
   counts such members.
+
+- `GovernedSubmissionReceipt` (`GOVERNED_SUBMISSION_RECEIPT_VERSION`): an
+  opaque, versioned locator of one governed submission, read by key through
+  Core; not evidence of admission.
+- Structured error data kinds: `governed_input_refused`, `governed_input_held`
+  (JSON-RPC -32052, retryable, with `condition`, `waited_ms`, `binds`,
+  `input_id`, `submitted: false`) and `governed_admission_unresolved`
+  (`kind` only). The Python and TypeScript SDKs raise
+  `IdentityHistoryUnavailableError` for the held kind, with `kind` exposed.
+- `ConsoleLogStore::transition_send_frame` (a send state transition applied
+  to the frame's own state, atomically) and
+  `ConsoleLogStore::take_send_frame_hold` (a compare-and-set on a send's
+  hold); by default unsupported, the in-memory and SQLite stores implement
+  both, and answer `true` from `ConsoleLogStore::supports_send_transitions`
+  (provided, `false` by default; a wrapper forwards all three).
+  `MetaConsoleAggregator::mark_interaction_delivery_held`.
+- `GovernedInputBinder::submitting(session_id)` (provided, `Ok` by default):
+  called once after a bind answered bound and before the input is submitted,
+  with the session the bind bound, outside the protected section and under
+  the identity's lifecycle lock; an `Err` refuses the send and nothing is
+  submitted.
+- `IdentityRuntime::with_operation_refusal_observer`: a governed send's
+  waits for its binder's "not now" answers are reported to the host's
+  operation refusal observer (`OperationRefusalSurface::GovernedInput`).
+  The unified runtime builder's `operation_refusal_observer` installs it.
 
 - The console experience's side chat rows carry `side_chat_audience`:
   `private_to_you`, `private_to_creator` (an access admin viewing another
@@ -1153,6 +1201,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `gpt-image-2.6-sunburst`, Core 0.9.11's OpenAI image default, unless
   `RKAT_INCIDENT_IMAGE_MODEL` names another model (was `gpt-image-2`).
 
+- A governed Console send whose every bind answered "not now" until its
+  door's budget ended is held, not failed: its `user_input` frame stays
+  `accepted` and records `delivery_hold` (`condition`, `waited_ms`, `binds`,
+  `retryable`), emitted as a frame update. A replay of a governed send that
+  submitted nothing (held, or stopped before its submission with no
+  dispatch owner left) dispatches the same input again (the governed
+  input's id now derives from the send's frame): it begins the dispatch,
+  then takes the hold, each a compare-and-set, unless the runtime's
+  evidence shows the input admitted, which settles it delivered; evidence
+  the replay cannot read does not stop it. A governed send's frame records
+  `governed: true` from its acceptance; one an earlier version left
+  unsettled carries neither that nor a hold and is settled from evidence
+  only. A held steer answers HTTP 503 `governed_input_held` (Console
+  JSON-RPC -32052); a refused one answers 409 `governed_input_refused` with
+  the refusal's kind; an unresolved one (its native admission's answer was
+  lost: the input may have run) answers 504 `governed_admission_unresolved`
+  (Console JSON-RPC -32000), to be retried only under the same key or read
+  with `meta/console/recover_send`. Both were 500 `internal_error`.
+- A governed Console send's frame records `dispatching` while it is
+  dispatched and `submitted` once its host's binder bound it, with the
+  session the bind bound (`bound_session_id`), before the input is
+  submitted. Its dispatch is owned by its request or task together with the
+  runtime-owned operation that submits it. A replay, a recovery or the
+  gateway's start fails a submitted send whose input the runtime does not
+  hold in the session its bind bound, once nothing owns its dispatch, its
+  outcome unknown (`delivery_failure`:
+  `{reason: "outcome_unknown", retryable: true}`); it is never dispatched
+  again. A governed send whose native admission is unresolved (its answer
+  was lost: the input may have run) is never failed for it: the operation
+  that submitted it records the answer, whether or not the send's request
+  is still waiting, so the send stays `submitted` and records
+  `delivery_unresolved`
+  (`{reason: "admission_unresolved", retryable: false}`), and a replay or a
+  recovery settles it `delivered` once the runtime's evidence shows its
+  input admitted. Its absence is final only in a later gateway: in the one
+  that saw the unresolved answer an absent read leaves it submitted.
+  Downgrade: an older binary reads a frame's `submitted` status as
+  `completed`, so a send in flight at a rollback shows completed even if it
+  then fails; nothing is sent twice.
+- A Console whose log store does not record a send's states refuses every
+  governed send before anything is reserved (403 `governed_send_refused`),
+  instead of leaving it accepted with no owner.
+- A replay or recovery of a governed Console send reads the runtime's
+  evidence by the send's own input id: Core indexes a governed input under
+  its key as qualified by its association, so the read by the raw key never
+  found it, and an admitted governed send now settles delivered.
+- The Console UI shows a held send ("Message held: nothing was delivered yet.
+  Check before sending it again.") until a dispatch clears the hold, and an
+  unresolved one ("Message may have run. Check before sending it again.")
+  until the runtime's evidence settles it.
+- A governed Console send verifies its human again at every bind, a bind after
+  a wait included, and a shutdown ends a send's wait at once.
+
 - On a console with sign-in, a side chat is private to the person who
   opened it; access admins can also see it. It holds with or without an
   access configuration, on the console's routes, streams and panels; the
@@ -1413,30 +1514,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   composition that is not authoritative) answers `AdmissionFailed`
   instead of `IdentityWakeRetryable`.
 
-- A delete, reset, role move or unlisting of an identity whose member was
-  stopped after it compacted inside a run, and has not woken since, now
-  harvests that compaction's discarded history into agent memory. The stop
-  had committed the run with the compaction's memory projection still owed,
-  a lazy start does not wake the member for it, and the distiller harvests
-  discards only when a live member finalizes them, so the identity's next
-  life lost them. The step now settles the projection in Core before it
-  asks Core to end the session, and the distiller reads the settled
-  discards before it distills the transcript (and, for a delete, before the
-  session's memory scope is dropped). When the settle answers no discards
-  (an earlier finalization published them), the distiller reads the
-  compaction's discards from the session's memory instead. When the
-  settle fails or is busy, it reads them there once Core ended the
-  session, which publishes them only for a reset, a role move or a delete
-  (Core's rotation settles the session it leaves) and only when that
-  settle succeeds; the roster's unlisting leaves them owed in Core, as
-  before, for the session's next settle or wake. A harvest that times out,
-  is denied by the realm's budget or fails is recorded as a failed
-  compaction harvest (`lifecycle_effect_failed`, effect
-  `compaction_harvest`) and attempted again through that read, bounded
-  like the other side effects; the record goes once that read harvested
-  the discards. A step Core refuses before any of it reaches Core harvests
-  the discards it settled, or those the session's memory already holds, as
-  the session's live compaction's would be.
+- A delete, reset, role move or unlisting of an identity, and a rotation a
+  host starts directly on the mob, now harvest the compactions the session
+  they end holds into agent memory. The distiller harvested a compaction's
+  discarded history only when a live member finalized it, so a member
+  stopped after it compacted inside a run (the stop committed the run with
+  the compaction's memory projection still owed, and a lazy start does not
+  wake the member for it), and a live member whose run the step's rotation
+  cancelled, lost them to the identity's next life. Each of Meta's steps
+  settles the projection in Core before it asks Core to end the session,
+  and Core's rotation onto a fresh session settles the session it leaves
+  after its archive. The retirement's side effects, run from Core's
+  journal (so a restart in between runs them too), then harvest the batch
+  the step's settle answered, or else read the compactions the session's
+  memory holds, before they distill the transcript and before a delete
+  drops the session's memory scope. That memory holds what the session
+  still owed only when one of those settles succeeded: the roster's
+  unlisting is not a rotation, so a batch its own settle could not publish
+  stays owed in Core, as before, for the session's next settle or wake. A
+  harvest that times out, is denied by the realm's budget or fails is
+  recorded as a failed compaction harvest (`lifecycle_effect_failed`,
+  effect `compaction_harvest`) and attempted again through that read,
+  bounded like the other side effects; the record goes once that read
+  harvested the discards. A step Core refuses before any of it reaches
+  Core, and a roster declaration whose unlisting Core does not carry out
+  (it refuses the declaration, or its seal fails to retire the member),
+  harvest the discards the step settled, or those the session's memory
+  already holds, as the session's live compaction's would be: the
+  declaration hands its batch back at once and records no unlisted intent.
+  A refused delete does so before it answers the refusal, since the retry
+  it invites drops the session's memory scope.
+
+- The distiller's compaction harvest reads the newest 64 records of a
+  session's memory scope, where the latest compaction's discards are. It
+  read the oldest 64, so in a session whose scope had grown past that, each
+  harvest read the same old records and none of the latest compaction's.
 
 - Release notes: Forge 0.3.1 ships for Linux x86_64; macOS arm64 follows in
   Forge 0.3.2. The 0.9.10 notes named both targets.
@@ -1485,17 +1597,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   but nobody can read or answer it, and a new one starts only after the
   application restarts.
 
-- A rotation a host starts directly on the mob (`MobHandle::rotate_member`),
-  with no Meta verb behind it, finalizes a dormant member's owed compaction
-  projection, but its discards are not distilled into agent memory; use a
-  delete, reset, role move or the roster's unlisting to have them
-  distilled.
-
-- The compaction harvest a step owes the session it ends (the settled
-  batch, or the fallback read of the session's memory) is kept in process
-  until the retirement's side effects run: a restart in between leaves the
-  records searchable in the old session's memory but never distilled.
-
 - Meta does not register identities created at runtime yet (Core's created
   entries, whose records the mob's identity store owns): no roster pass
   lists them, so the identity runtime does not serve them. A send by name,
@@ -1535,6 +1636,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     answers in the native Toolkit setup panel; with Meta 0.9.10 only the
     front refuses its frontend approvals, controller review answers and
     setup bridge answers.
+
+- A governed send through the Console gateway (`meta_gateway`) or the SDK
+  RPC gateway (`rpc_gateway`) reports no wait for its binder's "not now"
+  answers to a host's operation refusal observer: neither gateway gives an
+  observer to its identity runtime. A host that builds its runtime with the
+  unified runtime builder's `operation_refusal_observer` gets the reports.
 
 - The console audit read numbers its rows (`seq`) over the rows it leaves
   out for a reader, and its `latest_seq` counts them: a reader sees gaps

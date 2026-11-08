@@ -45,6 +45,8 @@ pub(super) fn child_id(
 /// A selected target and the grant lineage it is issued under.
 type TargetLineage = (Option<GrantTarget>, Vec<GrantLineageRef>);
 
+/// `attempt` is the bind attempt's effect handle when a bind issues them
+/// (on its blocking writer): each issuance records the attempt's effect.
 pub(super) fn issue_targets(
     owner: &ToolkitOriginalOwner,
     application: &PrincipalRef,
@@ -53,6 +55,7 @@ pub(super) fn issue_targets(
     origin: &HelperSetupOrigin,
     find_id: &EvidenceId,
     selected: &[CompiledAgentSetupTarget],
+    attempt: Option<&meerkat_core::protected_section::EffectMark>,
 ) -> Result<Vec<TargetLineage>, HostLifetimeError> {
     issue_selected_targets(
         owner,
@@ -63,9 +66,11 @@ pub(super) fn issue_targets(
         find_id,
         selected,
         false,
+        attempt,
     )
 }
 
+/// [`issue_targets`] for a shared workflow selection.
 pub(super) fn issue_workflow_targets(
     owner: &ToolkitOriginalOwner,
     application: &PrincipalRef,
@@ -74,6 +79,7 @@ pub(super) fn issue_workflow_targets(
     origin: &HelperSetupOrigin,
     find_id: &EvidenceId,
     selected: &[CompiledAgentSetupTarget],
+    attempt: Option<&meerkat_core::protected_section::EffectMark>,
 ) -> Result<Vec<TargetLineage>, HostLifetimeError> {
     issue_selected_targets(
         owner,
@@ -84,6 +90,7 @@ pub(super) fn issue_workflow_targets(
         find_id,
         selected,
         true,
+        attempt,
     )
 }
 
@@ -96,6 +103,7 @@ fn issue_selected_targets(
     find_id: &EvidenceId,
     selected: &[CompiledAgentSetupTarget],
     shared: bool,
+    attempt: Option<&meerkat_core::protected_section::EffectMark>,
 ) -> Result<Vec<TargetLineage>, HostLifetimeError> {
     if shared {
         targets::validate_workflow_compiled(selected)?;
@@ -137,13 +145,20 @@ fn issue_selected_targets(
                     .map_err(|_| GrantRefusal::Unavailable)?;
                 let leaf = match grants.issued_reference(&id)? {
                     Some(leaf) => leaf,
-                    None => grants.issue_child(
-                        application,
-                        &selected.parent,
-                        id,
-                        executor.clone(),
-                        requested,
-                    )?,
+                    None => {
+                        // A bind attempt's durable effect: no "not now"
+                        // may follow it.
+                        if let Some(attempt) = attempt {
+                            attempt.note("original.setup_target_grant");
+                        }
+                        grants.issue_child(
+                            application,
+                            &selected.parent,
+                            id,
+                            executor.clone(),
+                            requested,
+                        )?
+                    }
                 };
                 let lineage = vec![selected.parent.clone(), leaf];
                 // Issuance above is never replayed. Only a disposable child read

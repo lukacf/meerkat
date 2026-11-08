@@ -1146,6 +1146,8 @@ impl ServiceToolPolicyTransaction {
 }
 
 mod member_classes;
+#[cfg(test)]
+pub(crate) use member_classes::issue_callback_leaf;
 
 #[cfg(test)]
 mod tests;

@@ -10,9 +10,9 @@ use meerkat_authorization_contracts::{
 };
 use meerkat_core::SessionId;
 use meerkat_mobkit::identity_first::{
-    BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityRuntimeError, PublicIdentityRuntime,
-    TurnTracking,
+    BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedBindError,
+    GovernedBindRefusal, GovernedBindRefusalKind, GovernedInputBinder, GovernedInputError,
+    GovernedNotNow, GovernedSettlement, IdentityRuntimeError, PublicIdentityRuntime, TurnTracking,
 };
 use meerkat_runtime::{
     Input, PromptInput, identifiers::IdempotencyKey, input_state::verify_exact_replay,
@@ -54,6 +54,51 @@ pub enum PrivateSourceSettlement {
     FreshAcceptancePromoted,
     RetryWithdrawn,
     PostAdmissionPublicationFailed,
+}
+
+/// Why one of this crate's binders bound nothing, typed before it is
+/// answered to Meta ([`GovernedBindError`]). A plain detail is an
+/// unavailability: the binder could not decide or complete the bind and
+/// offers no wait. A verdict, a closure, a capture and a "not now" say so.
+#[derive(Debug)]
+pub(crate) enum BindFailure {
+    Refused(GovernedBindRefusalKind, String),
+    NotNow(GovernedNotNow),
+}
+
+impl BindFailure {
+    pub(crate) fn denied(detail: impl Into<String>) -> Self {
+        Self::Refused(GovernedBindRefusalKind::Denied, detail.into())
+    }
+
+    pub(crate) fn closed(detail: impl Into<String>) -> Self {
+        Self::Refused(GovernedBindRefusalKind::Closed, detail.into())
+    }
+
+    pub(crate) fn withheld(detail: impl Into<String>) -> Self {
+        Self::Refused(GovernedBindRefusalKind::Withheld, detail.into())
+    }
+
+    pub(crate) fn into_error(self) -> GovernedBindError {
+        match self {
+            Self::Refused(kind, detail) => {
+                GovernedBindError::Refused(GovernedBindRefusal::new(kind, detail))
+            }
+            Self::NotNow(not_now) => GovernedBindError::NotNow(not_now),
+        }
+    }
+}
+
+impl From<String> for BindFailure {
+    fn from(detail: String) -> Self {
+        Self::Refused(GovernedBindRefusalKind::Unavailable, detail)
+    }
+}
+
+impl From<&str> for BindFailure {
+    fn from(detail: &str) -> Self {
+        Self::from(detail.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +146,8 @@ impl PrivateOriginals {
             IdentityRuntimeError::GovernedInput(error) => match error {
                 GovernedInputError::Unsupported(_) => "GovernedInput::Unsupported",
                 GovernedInputError::BindingChanged => "GovernedInput::BindingChanged",
-                GovernedInputError::Bind(_) => "GovernedInput::Bind",
+                GovernedInputError::Refused(_) => "GovernedInput::Refused",
+                GovernedInputError::Held(_) => "GovernedInput::Held",
                 GovernedInputError::Unbound => "GovernedInput::Unbound",
                 GovernedInputError::Mob(_) => "GovernedInput::Mob",
                 GovernedInputError::AdmissionUnresolved { .. } => {
@@ -738,7 +784,7 @@ fn definite_original_refusal(error: &IdentityRuntimeError, session: &SessionId) 
         IdentityRuntimeError::GovernedInput(
             GovernedInputError::Unbound
             | GovernedInputError::EntryRefused(_)
-            | GovernedInputError::Bind(_),
+            | GovernedInputError::Refused(_),
         ) => true,
         IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(error)) => {
             matches!(error.as_ref(), meerkat_mob::MobError::MemberInputRefused { session_id, .. } if session_id == session)
@@ -749,35 +795,14 @@ fn definite_original_refusal(error: &IdentityRuntimeError, session: &SessionId) 
 
 #[async_trait]
 impl GovernedInputBinder for OriginalBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
-        self.source
-            .with_new_work_admission(|| ())
-            .map_err(|_| "Toolkit source admission is stopped".to_owned())?;
-        // Reservation is synchronous and precedes child issuance and source
-        // binding. No login mutex survives into the native or store awaits.
-        let reservation = match (&self.console, &self.approved_login) {
-            (Some(entry), None) => Some(entry.reserve()?),
-            (None, Some(login)) => Some(
-                login
-                    .reserve()
-                    .map_err(|_| "The approved Console login refused entry")?,
-            ),
-            (None, None) => None,
-            _ => return Err("The original has conflicting login custody".into()),
-        };
-        let result = self.bind_retained(context, input).await;
-        if result.is_ok()
-            && let Some(reservation) = reservation
-        {
-            reservation.settled();
-        }
-        // A failed or dropped entered binder retains uncertainty on its exact
-        // login. This does not cancel work or replace native source custody.
-        result
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.bind_reserved(context, input)
+            .await
+            .map_err(BindFailure::into_error)
     }
 
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -789,11 +814,69 @@ impl GovernedInputBinder for OriginalBinder {
 }
 
 impl OriginalBinder {
+    /// "Not now": another owner's short section holds the source
+    /// collection (or changes the publication). Answered only before the
+    /// attempt's first durable effect; Meta waits, outside the identity's
+    /// lock, until the source clears, then binds again.
+    fn source_held(&self) -> BindFailure {
+        let condition = meerkat_core::authorization::ControllerReadinessFailure::SourceHeld;
+        #[cfg(any(test, feature = "test-support"))]
+        let _ = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::OriginalNotNow,
+            condition.as_str(),
+        );
+        let owner = self.source.owner.clone();
+        BindFailure::NotNow(GovernedNotNow {
+            condition,
+            until: meerkat_core::authorization::NotNowWait::until_clear(move || {
+                owner.sources_held()
+            }),
+        })
+    }
+
+    async fn bind_reserved(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, BindFailure> {
+        self.source
+            .with_new_work_admission(|| ())
+            .map_err(|_| BindFailure::closed("Toolkit source admission is stopped"))?;
+        // Reservation is synchronous and precedes child issuance and source
+        // binding. No login mutex survives into the native or store awaits.
+        let reservation =
+            match (&self.console, &self.approved_login) {
+                (Some(entry), None) => Some(entry.reserve().map_err(BindFailure::denied)?),
+                (None, Some(login)) => Some(login.reserve().map_err(|_| {
+                    BindFailure::closed("The approved Console login refused entry")
+                })?),
+                (None, None) => None,
+                _ => {
+                    return Err(BindFailure::denied(
+                        "The original has conflicting login custody",
+                    ));
+                }
+            };
+        let result = self.bind_retained(context, input).await;
+        if let Some(reservation) = reservation {
+            match &result {
+                // Nothing entered: a "not now" leaves the login settled, not
+                // uncertain, and the next bind reserves it again.
+                Ok(_) | Err(BindFailure::NotNow(_)) => reservation.settled(),
+                // A failed or dropped entered binder retains uncertainty on
+                // its exact login. This does not cancel work or replace
+                // native source custody.
+                Err(BindFailure::Refused(..)) => drop(reservation),
+            }
+        }
+        result
+    }
+
     async fn bind_retained(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, BindFailure> {
         self.bind_retained_with_workflow(context, input, None, None)
             .await
     }
@@ -807,12 +890,12 @@ impl OriginalBinder {
         input: Input,
         planning: Option<&setup_workflow::PreparedWorkflowLaunch>,
         replay: Option<&Weak<PendingOriginalAdmission>>,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, BindFailure> {
         // Console/workflow binders also enter here, including already-bound
         // sources. Enrollment rechecks after the asynchronous preparation.
         self.source
             .with_new_work_admission(|| ())
-            .map_err(|_| "Toolkit source admission is stopped".to_owned())?;
+            .map_err(|_| BindFailure::closed("Toolkit source admission is stopped"))?;
         if let Some(entry) = &self.console {
             entry.check()?;
         }
@@ -827,7 +910,9 @@ impl OriginalBinder {
                 || self.console.is_some()
                 || self.approved_login.is_some()
             {
-                return Err("The workflow launch has conflicting source custody".into());
+                return Err(BindFailure::denied(
+                    "The workflow launch has conflicting source custody",
+                ));
             }
             self.source
                 .binding_for_workflow_input(&self.original, context, planning.selection())
@@ -877,7 +962,9 @@ impl OriginalBinder {
                     .get()
                     .is_some_and(|current| current.same_owner(&candidate))
             {
-                return Err("The original belongs to another Console login".into());
+                return Err(BindFailure::denied(
+                    "The original belongs to another Console login",
+                ));
             }
         }
         if let Some(login) = &self.approved_login {
@@ -890,7 +977,9 @@ impl OriginalBinder {
                     .get()
                     .is_some_and(|current| current.same_owner(&candidate))
             {
-                return Err("The approved original belongs to another Console login".into());
+                return Err(BindFailure::denied(
+                    "The approved original belongs to another Console login",
+                ));
             }
         }
         // A binder never changes the keeper after returning a settlement.
@@ -901,7 +990,7 @@ impl OriginalBinder {
                 .get()
                 .is_some_and(|existing| Arc::ptr_eq(existing, &existing_candidate))
         {
-            return Err("Toolkit original custody changed".to_owned());
+            return Err(BindFailure::denied("Toolkit original custody changed"));
         }
         self.source
             .restore_promoted_custody(
@@ -916,25 +1005,50 @@ impl OriginalBinder {
         // Console owns the raw input's key and canonical source bytes.
         // Keep that exact value before native adds its authority and custody.
         let console_input = self.console.as_ref().map(|_| input.clone());
-        let mut prepared = self
-            .source
-            .owner
-            .prepare_authenticated_input(
-                &held.original,
-                &context.session_id,
-                input,
-                self.event_key.clone(),
-                self.authentication.clone(),
-                context.controller.clone(),
-            )
-            .map_err(|_error| {
-                #[cfg(test)]
-                PrivateOriginals::synthetic_admission_diagnostic(
-                    "original.input_binding.refused",
-                    _error,
-                );
-                "Toolkit could not bind this authenticated original".to_owned()
-            })?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::OriginalPrepare,
+            self.original.original.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        let input_refused = |_error: meerkat_runtime::RuntimeDriverError| {
+            #[cfg(test)]
+            PrivateOriginals::synthetic_admission_diagnostic(
+                "original.input_binding.refused",
+                _error,
+            );
+            "Toolkit could not bind this authenticated original".to_owned()
+        };
+        // (P), the input preparation's retained-source check: before the
+        // attempt's first durable effect a held source answers "not now";
+        // past it, the shipped refusal.
+        let mut prepared = if crate::no_wait::may_answer_not_now() {
+            self.source
+                .owner
+                .try_prepare_authenticated_input(
+                    &held.original,
+                    &context.session_id,
+                    input,
+                    self.event_key.clone(),
+                    self.authentication.clone(),
+                    context.controller.clone(),
+                )
+                .map_err(input_refused)?
+                .ok_or_else(|| self.source_held())?
+        } else {
+            self.source
+                .owner
+                .prepare_authenticated_input(
+                    &held.original,
+                    &context.session_id,
+                    input,
+                    self.event_key.clone(),
+                    self.authentication.clone(),
+                    context.controller.clone(),
+                )
+                .map_err(input_refused)?
+        };
         // Peer projections refresh only their observation time on retry.
         // Select the source's first exact bytes before observing admitted
         // custody too, so replay never replaces its input or attempt record.
@@ -944,7 +1058,7 @@ impl OriginalBinder {
                 prepared.input(),
                 peer,
             )
-            .map_err(|_| "Toolkit first peer input changed")?
+            .map_err(|_| BindFailure::denied("Toolkit first peer input changed"))?
         {
             prepared = self
                 .source
@@ -959,9 +1073,30 @@ impl OriginalBinder {
                 )
                 .map_err(|_| "Toolkit could not rebind the exact first peer input")?;
         }
-        let admitted = prepared
-            .admitted()
-            .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::OriginalAdmitted,
+            self.original.original.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        // (A), the admitted-custody check: as (P).
+        let admitted = if crate::no_wait::may_answer_not_now() {
+            match prepared
+                .try_admitted()
+                .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?
+            {
+                crate::original_ingress::AdmittedNow::Held => return Err(self.source_held()),
+                crate::original_ingress::AdmittedNow::Checked(admitted) => *admitted,
+            }
+        } else {
+            prepared
+                .admitted()
+                .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?
+        };
+        // The decision point: this binder answers no "not now" after its
+        // admitted-custody check, so the writes below need no effect mark.
+        meerkat_core::protected_section::note_decided("original.admitted");
         if admitted.is_none() && held.peer_ingress.is_none() {
             let retained = if held.console_child_input {
                 cold_service_admission::RetainedBoundInput::retain_exact_for_attempt(
@@ -974,7 +1109,9 @@ impl OriginalBinder {
                     prepared.input(),
                 )
             };
-            if let Some(exact) = retained.map_err(|_| "Toolkit first original input changed")? {
+            if let Some(exact) =
+                retained.map_err(|_| BindFailure::denied("Toolkit first original input changed"))?
+            {
                 prepared = self
                     .source
                     .owner
@@ -1002,6 +1139,8 @@ impl OriginalBinder {
             || held.retain_bound_input
             || workflow.is_some()
         {
+            // A bind attempt's durable effect, kept marked past the decision.
+            meerkat_core::protected_section::note_effect("original.bound_input");
             self.source
                 .retain_bound_service_input_from_console(
                     &self.original,
@@ -1020,6 +1159,8 @@ impl OriginalBinder {
                 })?;
         }
         if admitted.is_none() {
+            // A bind attempt's durable effect, kept marked past the decision.
+            meerkat_core::protected_section::note_effect("original.custody_attempt");
             self.source
                 .persist_first_custody_attempt_from(
                     &held,
@@ -1037,6 +1178,12 @@ impl OriginalBinder {
             login
                 .check()
                 .map_err(|_| "The approved Console login is unavailable")?;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) =
+            crate::source_hold_probe::observe(crate::source_hold_probe::Site::OriginalEnroll, "")
+        {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
         }
         let (input, pending) = self
             .source
@@ -1085,6 +1232,11 @@ impl OriginalBinder {
                             let (input, pending) = prepared
                                 .stage()
                                 .map_err(|_| PrivateOriginalError::Unavailable)?;
+                            #[cfg(any(test, feature = "test-support"))]
+                            let _ = crate::source_hold_probe::observe(
+                                crate::source_hold_probe::Site::OriginalStaged,
+                                "",
+                            );
                             let handoff = custody_recovery::CustodyHandoff::new(
                                 selected && pending.is_first_candidate(),
                                 &self.source,
@@ -1125,7 +1277,9 @@ impl OriginalBinder {
         // this binder until either definite refusal or retained uncertainty.
         if self.pending.set(pending.clone()).is_err() {
             pending.handoff.foreground_finished();
-            return Err("Toolkit original was bound more than once".to_owned());
+            return Err(BindFailure::denied(
+                "Toolkit original was bound more than once",
+            ));
         }
         // First-attempt persistence already happened. Keep its actual recovery
         // owner before any effect-stage refusal; a local guard drop alone would
@@ -1139,7 +1293,7 @@ impl OriginalBinder {
             // withdrawal before dropping the retained candidate guard.
             drop(settlement);
             pending.handoff.record_definite_refusal();
-            return Err("The planning workflow could not stage effect custody".to_owned());
+            return Err("The planning workflow could not stage effect custody".into());
         }
         let entry_fence = if let Some(batch) = &self.batch {
             let login = self

@@ -13,12 +13,12 @@
 //! | Journal fact | Side effects |
 //! |---|---|
 //! | the seat of an identity's member, while Core still holds that incarnation | the customizer's `after_create`, with the session the seat names |
-//! | a retirement the roster's unlisting asked for, or Core's seal unlisted | the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
-//! | a reset's rotation onto a fresh session (online, or a first-boot `Fresh` row's) | the distillation of the retired session behind its reset boundary, the retirement hook (`reset`) |
-//! | a delete's rotation onto a fresh session | the drop of the retired session's semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
-//! | a role move's rotation onto a fresh session, or one no Meta verb asked for (a host's legacy respawn included) that seated another role | the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
-//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own, or its legacy respawn whose retirement no Meta verb's record answered) | the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
-//! | the fresh life a reset or a delete seats after an incarnation Core had already retired | that verb's memory side effects of the session the retired incarnation left, and no retirement hook |
+//! | a retirement the roster's unlisting asked for, or Core's seal unlisted | the harvest of the compactions the retired session holds, the distillation of the retired session, the exit interview (`retire`), the retirement hook (`unlisted`) |
+//! | a reset's rotation onto a fresh session (online, or a first-boot `Fresh` row's) | the harvest of the compactions the retired session holds and the distillation of the retired session, both behind its reset boundary, the retirement hook (`reset`) |
+//! | a delete's rotation onto a fresh session | the harvest of the compactions the retired session holds, then the drop of its semantic-memory scope, the exit interview (`delete`), the retirement hook (`delete`) |
+//! | a role move's rotation onto a fresh session, or one no Meta verb asked for (a host's legacy respawn included) that seated another role | the harvest of the compactions the retired session holds, the distillation of the retired session as a retirement's (no reset boundary), the retirement hook (`role_move`) |
+//! | a rotation onto a fresh session under the same role no Meta verb asked for (a host's own, or its legacy respawn whose retirement no Meta verb's record answered) | the harvest of the compactions the retired session holds, the distillation of the retired session as a retirement's, the retirement hook (`rotated`) |
+//! | the fresh life a reset or a delete seats after an incarnation Core had already retired | that verb's memory side effects of the session the retired incarnation left (the harvest of its compactions included), and no retirement hook |
 //! | any other retirement: a reload's, a respawn on the same session, Core's own | none |
 //!
 //! A release (`retire`, a scoped retire, a reprofile) is no journaled step:
@@ -49,10 +49,10 @@
 //! interview write that failed or did not land within it, is attempted
 //! again, at most [`EFFECT_ATTEMPTS`] times in all; a distillation is
 //! attempted once, within the distiller's own pre-rotation bound. The
-//! harvest of a compaction a step owed the session it ended is attempted
-//! once with the batch Core's settle answered, then, when that failed or no
-//! batch came back, through a fallback read of the session's memory, at
-//! most [`EFFECT_ATTEMPTS`] times, each within that bound. An answer
+//! harvest of the compactions a retired session holds is attempted once
+//! with the batch the step's settle answered, then, when that failed or no
+//! batch came back, through a read of the session's memory, at most
+//! [`EFFECT_ATTEMPTS`] times, each within that bound. An answer
 //! the host gives (an error of the hook or of `after_create`) is final. A
 //! side effect that failed is recorded durably
 //! ([`crate::runtime::LifecycleEffectFailure`]) and reported on the error
@@ -130,25 +130,25 @@
 //! until Core journals which request a rotation carried out. Once the
 //! cursor past the fact that consumed a record is recorded, the record goes.
 //! A roster pass that lists an identity again takes back an unlisting whose
-//! retirement Core's standing shows never started. Whether a member is the
+//! retirement Core's standing shows never started, and hands a batch the
+//! unlisting settled back to the session. Whether a member is the
 //! identity's is read from the marker or the label its binding carries, in
 //! one place ([`PageMembers`]), until membership is read from Core's
 //! identity entry fact.
 //!
 //! What a step knows that no durable record keeps (the exact registration
 //! the retiring incarnation held, read before Core was asked; the build
-//! draft an `after_create` reports; the compaction harvest a step owes the
-//! session it ends, the batch Core's settle answered or a fallback read of
-//! the session's memory) is kept in this process, and the
+//! draft an `after_create` reports; the batch a step's settle answered for
+//! the session it ends) is kept in this process, and the
 //! projection takes it under the identity's lifecycle lock, which the step
 //! holds until it answers. It waits for the lock at most a side effect's
 //! deadline: a step that holds it longer (a build stuck in the customizer)
 //! holds back no side effect, and the retirement hook then names no
 //! registration. After a restart the retirement hook names no registration,
 //! `after_create` reports a context derived from the identity's roster
-//! spec (or from Core's binding), with no system prompt, and an owed
-//! compaction harvest is gone: its discards stay searchable in the old
-//! session's memory, never distilled.
+//! spec (or from Core's binding), with no system prompt, and the
+//! retirement's harvest reads a settled batch from the old session's
+//! memory, where the settle published it.
 //!
 //! # A predecessor's backlog
 //!
@@ -390,11 +390,12 @@ pub(super) struct LifecycleProjection {
     /// as the retirement hook reads it, by identity: its registration was
     /// read before Core was asked.
     retiring: StdMutex<BTreeMap<AgentIdentity, Retiring>>,
-    /// The compaction harvest a step owes the session it asked Core to
-    /// end, by identity and the generation of the incarnation it ends:
-    /// the retirement's side effects harvest it before they distill the
-    /// transcript, and a step Core refused hands an answered batch to the
-    /// ordinary compaction harvest.
+    /// What a step hands the retirement of the session it asked Core to
+    /// end, of a compaction the session owed, by identity and the
+    /// generation of the incarnation it ends: the retirement's side effects
+    /// harvest the batch in place of a read of the session's memory, and a
+    /// step Core refused hands an answered batch to the ordinary compaction
+    /// harvest.
     owed_compactions: StdMutex<BTreeMap<(AgentIdentity, u64), OwedCompaction>>,
     /// What the build of a seat-like step made, by identity, until Core
     /// answers the step with its session.
@@ -440,12 +441,12 @@ struct Owner {
     by_context: bool,
 }
 
-/// What a step's cold settle of the session it ends left the step to
-/// harvest of a compaction the session owed.
-pub(super) enum OwedSettle {
+/// What a step's cold settle of the session it ends left the step to hand
+/// over of a compaction the session owed.
+enum OwedSettle {
     /// Nothing: nothing was owed; Core hosts the session live (its agent
-    /// finalizes the projection and the ordinary harvest reads it); no
-    /// Distiller is wired; or the bridge has no settle.
+    /// finalizes the projection, or Core's rotation settles it as it ends
+    /// the session); no Distiller is wired; or the bridge has no settle.
     Nothing,
     /// The batch Core's settle published and answered.
     Batch {
@@ -465,20 +466,20 @@ pub(super) enum OwedSettle {
     Unsettled,
 }
 
-/// The harvest of a compaction a step owes the session it ends, kept for
-/// the retirement's side effects of that incarnation.
-pub(super) enum OwedCompaction {
+/// What a step hands the retirement's side effects of the incarnation it
+/// ends, of a compaction the session owed.
+enum OwedCompaction {
     /// The batch Core's settle answered.
     Batch {
         session_key: String,
         discards: Vec<DiscardEntry>,
     },
-    /// One fallback harvest of the session's compaction discards, read
-    /// from its memory; `failed` holds why an earlier attempt failed.
-    /// `published` names the session whose memory already holds the batch
-    /// (Core's settle, or an earlier finalization, published it): nothing
-    /// is owed in Core any more, so a step Core refuses harvests it from
-    /// there. Without it the batch is still owed in Core.
+    /// A harvest of the session's compaction discards, read from its
+    /// memory; `failed` holds why an earlier attempt failed. `published`
+    /// names the session whose memory already holds the batch (Core's
+    /// settle, or an earlier finalization, published it): nothing is owed
+    /// in Core any more, so a step Core refuses harvests it from there.
+    /// Without it the batch is still owed in Core.
     Fallback {
         failed: Option<String>,
         published: Option<String>,
@@ -801,6 +802,8 @@ impl LifecycleProjection {
 pub(super) struct PreparedRetirement {
     identity: AgentIdentity,
     generation: u64,
+    /// The verb whose step it is.
+    verb: LifecycleEffectVerb,
     /// Core had retired the incarnation before the step was asked: the step
     /// seats the fresh life after it.
     predecessor_retired: bool,
@@ -1102,6 +1105,12 @@ struct RetirementMemory {
     /// Bind the retired generation to its session for the distiller's
     /// evidence.
     generation_mark: bool,
+    /// Harvest the compactions the retired session's memory holds before
+    /// the session is distilled or its scope dropped: the batch the step
+    /// settled and handed over, or else a read of that memory, where Core's
+    /// rotation onto a fresh session published what the session still owed
+    /// as it ended it (when its own settle of the session succeeded).
+    harvest_compaction: bool,
     /// Distill the retired session, with this cause.
     distill: Option<DistillCause>,
     /// Drop the retired session's semantic-memory scope: the identity never
@@ -1112,9 +1121,13 @@ struct RetirementMemory {
 }
 
 impl RetirementMemory {
+    /// The memory side effects a retirement of `cause` owes. Each retirement
+    /// that distills the session it ends, or drops its scope, harvests the
+    /// compactions that session holds first.
     fn of(cause: RetiredIdentityCause) -> Self {
         match cause {
             RetiredIdentityCause::Unlisted => Self {
+                harvest_compaction: true,
                 distill: Some(DistillCause::Retire),
                 exit_interview: Some("retire"),
                 ..Self::default()
@@ -1124,6 +1137,7 @@ impl RetirementMemory {
             RetiredIdentityCause::Reset => Self {
                 reset_boundary: true,
                 generation_mark: true,
+                harvest_compaction: true,
                 distill: Some(DistillCause::Reset),
                 ..Self::default()
             },
@@ -1132,11 +1146,14 @@ impl RetirementMemory {
             // boundary, since nobody asked for a clean slate.
             RetiredIdentityCause::RoleMove | RetiredIdentityCause::Rotated => Self {
                 generation_mark: true,
+                harvest_compaction: true,
                 distill: Some(DistillCause::Retire),
                 ..Self::default()
             },
-            // The delete distilled the session before Core was asked.
+            // The delete distilled the session before Core was asked; the
+            // compactions it holds are harvested before its scope is dropped.
             RetiredIdentityCause::Delete => Self {
+                harvest_compaction: true,
                 drop_scope: true,
                 exit_interview: Some("delete"),
                 ..Self::default()
@@ -2261,6 +2278,7 @@ impl IdentityRuntime {
         Ok(Some(PreparedRetirement {
             identity: identity.clone(),
             generation,
+            verb,
             predecessor_retired,
             recorded,
             retiring,
@@ -2289,7 +2307,10 @@ impl IdentityRuntime {
     /// not asked of Core, or Core's journal holds no fact of the identity's
     /// member after the head the step read before it asked. Its record goes,
     /// the one an earlier step recorded for the same incarnation is put back,
-    /// and what this process kept of it goes.
+    /// and what this process kept of it goes: a batch it settled is handed
+    /// back to the session, which goes on ([`Self::hand_back_owed_compaction`];
+    /// a delete's within its bound, since the retry its refusal invites
+    /// drops the session's scope).
     pub(super) async fn abandon_lifecycle_retirement(&self, prepared: Option<PreparedRetirement>) {
         let Some(prepared) = prepared else {
             return;
@@ -2297,8 +2318,12 @@ impl IdentityRuntime {
         let _ = self
             .lifecycle_projection
             .take_retiring(&prepared.identity, prepared.generation);
-        self.hand_back_owed_compaction(&prepared.identity, prepared.generation)
-            .await;
+        self.hand_back_owed_compaction(
+            &prepared.identity,
+            prepared.generation,
+            prepared.verb == LifecycleEffectVerb::Delete,
+        )
+        .await;
         // The key reads the whole step, so it is taken before `recorded`
         // moves out of it.
         let key = prepared.key();
@@ -2321,17 +2346,20 @@ impl IdentityRuntime {
         }
     }
 
-    /// The incarnation `generation` of `identity` that a step, or a
-    /// declaration, asked Core to end was not ended: the session goes on. A
-    /// batch settled for it, or one its memory already holds (Core's settle,
-    /// or an earlier finalization, published it, so nothing is owed in Core
-    /// any more), is harvested as its live compaction's would have been. A
-    /// batch still owed in Core (the settle failed or answered busy) stays
-    /// owed to the session's next settle or wake.
+    /// A step, or a declaration, that would have ended `identity`'s
+    /// incarnation `generation` did not end it, so the session goes on: a
+    /// batch settled for it, or one its memory already holds (Core's
+    /// settle, or an earlier finalization, published it, so nothing is
+    /// owed in Core any more), is harvested as its live compaction's would
+    /// have been. With `awaited` the harvest ends, within its bound, before
+    /// this answers; otherwise it runs detached. A batch still owed in Core
+    /// (the settle failed or answered busy) stays owed to the session's
+    /// next settle or wake.
     pub(super) async fn hand_back_owed_compaction(
         &self,
         identity: &AgentIdentity,
         generation: u64,
+        awaited: bool,
     ) {
         let harvest = match self
             .lifecycle_projection
@@ -2350,18 +2378,35 @@ impl IdentityRuntime {
             })
             | None => None,
         };
-        if let Some((session_key, discards)) = harvest
-            && let Some(memory) = self.agent_memory.read().await.clone()
-        {
+        let Some((session_key, discards)) = harvest else {
+            return;
+        };
+        let Some(memory) = self.agent_memory.read().await.clone() else {
+            return;
+        };
+        if !awaited {
             memory.spawn_compaction_harvest(identity, &session_key, discards);
+            return;
+        }
+        if let Err(error) = memory
+            .harvest_compaction_within_bound(identity, &session_key, discards, true)
+            .await
+        {
+            tracing::warn!(
+                %identity,
+                session_key = %session_key,
+                %error,
+                "the compaction harvest of a session a refused step keeps failed; the \
+                 session's next compaction or retirement reads its memory again"
+            );
         }
     }
 
     /// Settle the compaction projections `identity`'s current session
     /// still owes, before a step asks Core to end that session
     /// ([`SessionBridge::settle_owed_compaction_projections`]): Core
-    /// finalizes each owed memory batch cold and answers it. Answers what
-    /// the step has to harvest ([`OwedSettle`]):
+    /// finalizes each owed memory batch cold into the session's memory and
+    /// answers it. Answers what the step hands over ([`OwedSettle`]):
     /// - the batch, when every settled projection came back with its
     ///   entries;
     /// - the session's memory, when a settled projection came back with
@@ -2375,10 +2420,11 @@ impl IdentityRuntime {
     ///   (the roster's unlisting) leaves the batch owed in Core, for the
     ///   session's next settle or wake, and the read finds none of it;
     /// - nothing, when nothing is owed, when Core hosts the session live
-    ///   (its live agent finalizes the projection at its boundary, and
-    ///   its `CompactionCompleted` triggers the ordinary harvest), when no
-    ///   Distiller is wired, or when the bridge has no settle.
-    pub(super) async fn settle_owed_compaction(&self, identity: &AgentIdentity) -> OwedSettle {
+    ///   (its live agent finalizes the projection at its boundary, or
+    ///   Core's rotation settles it after its archive; the retirement's
+    ///   harvest reads the session's memory), when no Distiller is wired,
+    ///   or when the bridge has no settle.
+    async fn settle_owed_compaction(&self, identity: &AgentIdentity) -> OwedSettle {
         let Some(memory) = self.agent_memory.read().await.clone() else {
             return OwedSettle::Nothing;
         };
@@ -2411,8 +2457,9 @@ impl IdentityRuntime {
             Ok(meerkat_session::OwedCompactionSettlement::Live) => {
                 tracing::debug!(
                     %identity,
-                    "Core hosts the session live: its agent finalizes an owed compaction, \
-                     and the ordinary harvest reads it"
+                    "Core hosts the session live: its agent finalizes an owed compaction, or \
+                     Core's rotation settles it as it ends the session, and the retirement's \
+                     harvest reads it from the session's memory"
                 );
                 OwedSettle::Nothing
             }
@@ -2430,28 +2477,10 @@ impl IdentityRuntime {
         }
     }
 
-    /// Owe the retirement `prepared` prepared, of a live incarnation of
-    /// `identity`, the compaction harvest `owed`: its side effects harvest
-    /// it before they distill the transcript, and a step Core refuses
-    /// harvests what is already published of it
-    /// ([`Self::abandon_lifecycle_retirement`]). A step that prepared no
-    /// such retirement owes it nothing.
-    pub(super) fn owe_compaction(
-        &self,
-        identity: &AgentIdentity,
-        prepared: Option<&PreparedRetirement>,
-        owed: OwedCompaction,
-    ) {
-        if let Some(generation) = prepared.and_then(PreparedRetirement::live_generation) {
-            self.lifecycle_projection
-                .stash_owed_compaction(identity, generation, owed);
-        }
-    }
-
     /// [`Self::settle_owed_compaction`] for a step that ends a live
-    /// incarnation whose retirement owes side effects (`prepared`): the
-    /// settled batch waits for them, and the lifecycle projection's
-    /// retirement harvests it before it distills the transcript.
+    /// incarnation whose retirement owes side effects (`prepared`): what it
+    /// answers waits for them, and the lifecycle projection's retirement
+    /// harvests a settled batch in place of a read of the session's memory.
     pub(super) async fn settle_owed_compaction_for_retirement(
         &self,
         identity: &AgentIdentity,
@@ -2496,18 +2525,23 @@ impl IdentityRuntime {
         true
     }
 
-    /// The harvest of the compaction a step owed the retired session, in
-    /// the retirement's side effects: the batch Core's settle answered,
-    /// or a fallback that reads the session's compaction discards from
-    /// its memory. A harvest that fails (a timeout, a denial of the
-    /// realm's budget, a failed read or extraction) is recorded as a failed
-    /// compaction harvest, under a key of its own (apart from the
-    /// retirement's distillation), and leaves one fallback harvest owed,
-    /// attempted like the other side effects (at most [`EFFECT_ATTEMPTS`]
-    /// times, each within its bound): a fallback that still fails replaces
-    /// that record, and one that harvested the discards removes it, so no
-    /// record stands for a harvest that was made good. Only a failure to
-    /// record fails the page.
+    /// The harvest of the compactions the retired session holds, in the
+    /// retirement's side effects: the batch the step's settle answered, or
+    /// a read of the session's compaction discards from its memory. Once
+    /// Core ended the session, that memory holds what the session still
+    /// owed only when Core's rotation, which settles the session it leaves
+    /// after its archive, settled it: a settle that failed or ran past the
+    /// retirement's deadline, and the roster's unlisting, which is no
+    /// rotation, leave the batch owed in Core, and the read finds none of
+    /// it. A harvest that fails (a timeout, a denial of the realm's budget,
+    /// a failed read or extraction) is recorded as a failed compaction
+    /// harvest, under a key of its own (apart from the retirement's
+    /// distillation), and leaves one fallback harvest owed, attempted like
+    /// the other side effects (at most [`EFFECT_ATTEMPTS`] times, each
+    /// within its bound): a fallback that still fails replaces that record,
+    /// and one that harvested the discards removes it, so no record stands
+    /// for a harvest that was made good. Only a failure to record fails the
+    /// page.
     #[allow(clippy::too_many_arguments)]
     async fn harvest_owed_compaction(
         &self,
@@ -2519,12 +2553,14 @@ impl IdentityRuntime {
         owed: Owed<'_>,
         limits: EffectLimits,
     ) -> Result<(), String> {
+        // No life resumes the retired session: its harvest fires no
+        // compaction follow-up.
         let earlier = match owed_compaction {
             OwedCompaction::Batch {
                 session_key: batch_session,
                 discards,
             } => match memory
-                .harvest_compaction_within_bound(identity, &batch_session, Some(discards))
+                .harvest_compaction_within_bound(identity, &batch_session, Some(discards), false)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -2546,8 +2582,8 @@ impl IdentityRuntime {
                 let failed = harvest_failure(
                     1,
                     format!(
-                        "the owed compaction's harvest failed ({error}); a fallback harvest \
-                         of the session's memory follows"
+                        "the harvest of the settled compaction batch failed ({error}); a \
+                         fallback harvest of the session's memory follows"
                     ),
                 );
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
@@ -2558,7 +2594,7 @@ impl IdentityRuntime {
         };
         let fallback = bounded(limits, move || async move {
             memory
-                .harvest_compaction_within_bound(identity, session_key, None)
+                .harvest_compaction_within_bound(identity, session_key, None, false)
                 .await
         })
         .await;
@@ -2567,8 +2603,8 @@ impl IdentityRuntime {
                 let failed = harvest_failure(
                     fallback.attempts,
                     format!(
-                        "the owed compaction's fallback harvest of the session's memory failed: \
-                         {error}"
+                        "the fallback harvest of the compactions the session's memory holds \
+                         failed: {error}"
                     ),
                 );
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
@@ -2759,7 +2795,9 @@ impl IdentityRuntime {
 
     /// A roster pass lists `roster`: an unlisting whose retirement Core
     /// never started is taken back, so a later retirement of that
-    /// incarnation that no Meta verb asked for owes nothing. Core's standing
+    /// incarnation that no Meta verb asked for owes nothing, and a batch the
+    /// unlisting settled is handed back to the session, which goes on
+    /// ([`Self::hand_back_owed_compaction`]). Core's standing
     /// of the identity's member says so: it still holds the incarnation the
     /// unlisting named, seated and not retiring. An unlisting whose
     /// retirement Core started (it journaled the start, and the member reads
@@ -2850,17 +2888,25 @@ impl IdentityRuntime {
                 standing,
                 MemberStanding::Seated { generation } if generation == intent.generation
             );
-            if never_started
-                && let Err(error) = store
-                    .clear_lifecycle_effect_intent(&mob_id, &intent.key())
-                    .await
+            if !never_started {
+                continue;
+            }
+            match store
+                .clear_lifecycle_effect_intent(&mob_id, &intent.key())
+                .await
             {
-                tracing::warn!(
+                // The session goes on: a batch the unlisting settled for it
+                // is handed back, as a step Core refused hands its own.
+                Ok(()) => {
+                    self.hand_back_owed_compaction(&identity, intent.generation, false)
+                        .await;
+                }
+                Err(error) => tracing::warn!(
                     %identity,
                     generation = intent.generation,
                     %error,
                     "the unlisting of a relisted identity could not be taken back"
-                );
+                ),
             }
         }
     }
@@ -4068,13 +4114,20 @@ impl IdentityRuntime {
                 if owes.generation_mark {
                     memory.note_session_generation(identity, session_key, retirement.generation);
                 }
-                // The compaction the step owed the session it ended: its
-                // discards are harvested after the marks (a reset's land
+                // The compactions the session it ended holds: the batch the
+                // step settled and handed over, or a read of the session's
+                // memory. They are harvested after the marks (a reset's land
                 // quarantined), before the transcript is distilled and
-                // before a delete drops the scope, which waits for it.
+                // before a delete drops the scope, which waits for them.
                 if let Some(owed_compaction) = self
                     .lifecycle_projection
                     .take_owed_compaction(identity, retirement.generation)
+                    .or_else(|| {
+                        owes.harvest_compaction.then_some(OwedCompaction::Fallback {
+                            failed: None,
+                            published: None,
+                        })
+                    })
                 {
                     self.harvest_owed_compaction(
                         identity,
@@ -4542,6 +4595,32 @@ mod tests {
         assert!(RetirementMemory::of(Cause::Reset).reset_boundary);
         assert!(!RetirementMemory::of(Cause::RoleMove).reset_boundary);
         assert!(!RetirementMemory::of(Cause::Rotated).reset_boundary);
+    }
+
+    /// The harvest of the compactions a retired session holds is planned
+    /// from the retirement's cause alone, as every other memory side effect
+    /// is: each retirement that distills the session it ends, or drops its
+    /// scope, harvests them first; a release owes none.
+    #[test]
+    fn each_retirement_that_distills_or_drops_its_session_harvests_its_compactions() {
+        use RetiredIdentityCause as Cause;
+        for (cause, harvests) in [
+            (Cause::Unlisted, true),
+            (Cause::Reset, true),
+            (Cause::RoleMove, true),
+            (Cause::Rotated, true),
+            (Cause::Delete, true),
+            (Cause::Retire, false),
+            (Cause::Scoped, false),
+        ] {
+            let owes = RetirementMemory::of(cause);
+            assert_eq!(owes.harvest_compaction, harvests, "{cause:?}");
+            assert_eq!(
+                owes.harvest_compaction,
+                owes.distill.is_some() || owes.drop_scope,
+                "{cause:?}: the harvest goes with a distillation or a scope drop"
+            );
+        }
     }
 
     /// A fresh life owes the incarnation it follows the memory side effects

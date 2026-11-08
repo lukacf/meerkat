@@ -38,13 +38,16 @@ pub use bridge::{
     CommittedBoundaryRecoverer, CommittedBoundaryRepair, CompactionFloorRegistry,
     ControllerPinSource, CoreBrokenMember, CoreIdentityEntry, CoreMember, CoreNameKind,
     DeclaredIdentity, DeclaredIdentityAnswer, DeclaredIdentityBuild, DeclaredRosterAnswer,
-    DeclaredRosterRequest, GovernedAdmission, GovernedAdmissionRecord, GovernedBindContext,
-    GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
-    GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, MemberInspection, MemberLifecycleFact, MemberLifecycleFactRecord,
-    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding,
-    MobSessionBridge, NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeRejectionKind,
-    ResumeSessionOutcome, SessionBridge, UnlistedIdentityAnswer,
+    DeclaredRosterRequest, GOVERNED_SUBMISSION_RECEIPT_VERSION, GovernedAdmission,
+    GovernedAdmissionRecord, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedBindRefusalKind, GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence,
+    GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedHold,
+    GovernedInputBinder, GovernedInputError, GovernedNotNow, GovernedSettlement,
+    GovernedSubmissionReceipt, GovernedWaitBudget, MemberInspection, MemberLifecycleFact,
+    MemberLifecycleFactRecord, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding, MobSessionBridge, NativeInputAdmissionSettlement,
+    QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
+    UnlistedIdentityAnswer,
 };
 pub use build_preparer::IdentityBuildPreparer;
 pub use contracts::*;

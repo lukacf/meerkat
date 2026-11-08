@@ -340,6 +340,55 @@ async fn a_rounded_down_remaining_lease_does_not_poison_the_writers_own_late_gra
 }
 
 // A renew stop at 1 s; the exclusive acquire at 2 s never answers and times
+// out at 3 s; another writer takes the fence over at 2.5 s (token 2, its
+// lease until 5.5 s) and is gone at once: nobody renews token 2. The store
+// answers `Held` with its remaining lease rounded down to whole multiples of
+// 3 s, so the re-acquire at 3 s meets token 2 with 0 s left and the writer's
+// recorded end is 3 s. From then on every acquire answers 0.5 s after the
+// store decided it, as over a slow network: at 4 s the store still names
+// token 2 with 0 s left, an answer that arrives at 4.5 s. The lease did not
+// move, so the writer waits again, acquires token 3 once token 2's lease
+// ended and resumes. Before, the writer read the end as the answer's arrival
+// plus its remaining lease (4.5 s), past its recorded end plus one renew
+// interval (4 s), took token 2 for a holder that renewed, and lost the realm.
+#[tokio::test(start_paused = true)]
+async fn a_slow_answer_does_not_read_an_unrenewed_holder_as_renewed() {
+    let host = fast_host();
+    let (realm, _store) = open_fast(&host, AcquireMode::Exclusive).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1;
+        faults.acquire_hang = 1;
+        faults.held_remaining_floor = Some(Duration::from_secs(3));
+    }
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    {
+        let (other_realm, _other_store) = open_fast(&host, AcquireMode::Takeover).await;
+        assert_eq!(other_realm.fence().get(), 2);
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the writer waits out token 2: {:?}",
+        realm.realm_poisoned()
+    );
+    host.faults.lock().unwrap().acquire_delay = Some(Duration::from_millis(500));
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "a slow answer naming a holder nobody renewed is not a renewed lease: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert_eq!(
+        realm.fence().get(),
+        3,
+        "on a fresh grant after token 2's lease"
+    );
+}
+
+// A renew stop at 1 s; the exclusive acquire at 2 s never answers and times
 // out at 3 s; another writer takes the fence over at 2.5 s (token 2). The
 // re-acquire then meets token 2 through a store that answers `Held` with a
 // remaining lease beyond any lease (outside the contract). The writer caps

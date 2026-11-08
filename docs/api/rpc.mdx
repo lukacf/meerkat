@@ -3799,9 +3799,11 @@ For mob-wide streams the event is an `AttributedEvent` (`source` member identity
 
 A member stream's events also carry `epoch`: the sequence space of the
 envelope's `event.seq`. `epoch` and `event.seq` together are the event's
-position in the member's event sequence. The epoch changes when the runtime
-restarts or a placed member moves to a new host binding. Mob-wide events
-interleave several members' sequences and carry no `epoch`.
+position in the member's event sequence. The epoch changes whenever the
+member's sequence space restarts: after a runtime restart, when the member
+moves to another session, or when a placed member moves to a new host
+binding. Mob-wide events interleave several members' sequences and carry no
+`epoch`.
 
 A member stream opened without `cursor` is live: it delivers only events
 published after it opens. To continue a member stream after a disconnect,
@@ -3823,18 +3825,21 @@ open it again with `cursor` set to the position of the last event received:
 The new stream first replays the events the member still retains after that
 position (each member keeps its latest 1024 events and 4 MiB by default),
 then streams live, with nothing delivered twice or skipped between the two.
-If the retained events no longer reach back to the position, the replay
-starts with a `stream_truncated` event
-(`reason: {"kind":"stream_lagged","dropped":N}`). A `stream_truncated` event
-does not move the position a client resumes from. A cursor of another
-sequence space, or one ahead of the space's newest event, replays the current
-space from its earliest retained event instead; its events carry the current
-`epoch`, so the client sees the change. A member that is dormant when the
-stream opens (seated, but not materialized in this runtime) is not woken by
-it: the stream attaches when the member wakes and replays from the woken
-member's first retained event, whatever the cursor. A `cursor` without
-`agent_identity`, or one whose `epoch` is not a UUID, is refused with
-`-32602` (invalid params).
+If the member is live when the stream opens and its retained events no
+longer reach back to the position, the replay starts with a
+`stream_truncated` event (`reason: {"kind":"stream_lagged","dropped":N}`). A
+`stream_truncated` event does not move the position a client resumes from. A
+cursor of another sequence space, or one ahead of the space's newest event,
+replays the current space from its earliest retained event instead; its
+events carry the current `epoch`, so the client sees the change. A member
+that is dormant when the stream opens (seated, but not materialized in this
+runtime) is not woken by it: the stream attaches when the member wakes and
+replays from the woken member's first event, whatever the cursor. The events
+the member published after the cursor and before it went dormant are not
+replayed, and no `stream_truncated` event marks them: a client that resumes a
+dormant member reads them from its history (`mob/member_history`). A
+`cursor` without `agent_identity`, or one whose `epoch` is not a UUID, is
+refused with `-32602` (invalid params).
 
 ### mob/stream_end notifications
 

@@ -461,7 +461,10 @@ them.
   member's move to a new host binding), or one ahead of the space's newest
   event, replays the current space from its earliest retained event, whose
   events carry the current `epoch`. Without a cursor the stream is live, as
-  before. The SDKs' member subscriptions take the cursor
+  before. A member that is dormant when the stream opens replays from its
+  wake: the events it published after the cursor and before it went dormant
+  are read from its history (`mob/member_history`). The SDKs' member
+  subscriptions take the cursor
   (`subscribe_mob_member_events(..., cursor=...)`,
   `subscribeMobMemberEvents(..., { cursor })` and the `Mob` wrappers) and
   report the last event's epoch (`last_event_epoch`, `lastEventEpoch`).

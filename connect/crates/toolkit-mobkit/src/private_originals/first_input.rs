@@ -423,8 +423,8 @@ impl PrivateOriginals {
                 );
                 bounds.delegation_depth = DelegationDepth::remaining(0);
                 let mut candidate = InputAuthorityAssociationCandidate {
-                    requester: record.source.requester.clone(),
-                    ingress_actor: record.source.ingress_actor.clone(),
+                    requester: record.bound_requester().clone(),
+                    ingress_actor: record.bound_ingress_actor().clone(),
                     represented_subject: record.source.represented_subject.clone(),
                     original_authentication: super::governed_submit::evidence(
                         &record.source.authentication_domain,
@@ -440,15 +440,7 @@ impl PrivateOriginals {
                         &record.source.event_domain,
                         &record.event.root_event,
                     )?,
-                    contributing_work: record
-                        .event
-                        .contributors
-                        .iter()
-                        .map(|work| OriginalWorkRef {
-                            authority: record.source.source_authority.clone(),
-                            work: work.clone(),
-                        })
-                        .collect(),
+                    contributing_work: record.bound_contributors(),
                     authority_basis: selected_basis,
                     controller_grant_lineage: parent.clone(),
                     controller_model: Some(context.controller.selection().clone()),
@@ -616,13 +608,16 @@ impl PrivateOriginals {
                 } else {
                     native_operations::selected_targets(&record)
                 };
+                // A delivery that governed work sent is bound under that
+                // work's requester and sending agent; every other one under
+                // its route's, which these equal (checked above).
                 let original = self
                     .owner
                     .bind_native_targets_async(
                         association,
                         custody,
-                        requester,
-                        actor,
+                        record.bound_requester(),
+                        record.bound_ingress_actor(),
                         &selected,
                         |association| async move {
                             self.persist_or_observe_binding(reference, &association, true)

@@ -942,6 +942,10 @@ naming what the authoritative launch's reconcile would wire
 logs a `candidate launch peer-edge census` line. A report without `applied`
 was applied.
 
+On the console, every edge, member and failure row of the report that names
+a member hidden from the caller is left out; access admins and the member's
+owner read the whole report.
+
 ### `meta/reconcile_identity`
 
 Re-run the roster provider and `restore_flow` (Python `runtime.reconcile()`).
@@ -1487,8 +1491,11 @@ Returns `{runs: MobRun[]}` carrying the full meerkat ledger projection:
 `flow_state`, `activation_params`, `schema_version`,
 `root_step_outputs`, `loop_iteration_outputs`, and `role_targets` for a
 role-targeted run (see `meta/run_flow`). On the console, a run that reached
-a member hidden from the caller is left out (`meta/flow_status` answers it
-as a run that does not exist).
+a member hidden from the caller is left out (`meta/flow_status` and
+`meta/cancel_flow` answer it as a run that does not exist). A run's members
+are the members its `role_targets` name and every member the mob's
+per-target records of the run (dispatched, completed, failed) name: the
+step ledger records every step under the flow's own system member.
 
 ### `meta/run_flow`
 
@@ -1859,7 +1866,9 @@ confuse it with an authored route's `route_key`.
 
 ### `meta/routing/routes/list`
 
-List all registered routes.
+List all registered routes. On the console, a route that names a member
+hidden from the caller (its recipient, its key or any other field) is left
+out; access admins and the member's owner read every route.
 
 ### `meta/routing/routes/add`
 
@@ -2022,7 +2031,10 @@ Send a message through a resolved route.
 Return `{deliveries: DeliveryRecord[]}` as a bounded history snapshot, not a
 cursor-paginated result. HTTP accepts `limit` (default `50`); SDK/stdin also
 accepts exact `recipient` and `sink` filters and defaults `limit` to `20`.
-Neither surface supports `cursor` pagination.
+Neither surface supports `cursor` pagination. On the console, a delivery
+that names a member hidden from the caller, as its recipient or anywhere in
+its payload, is left out; access admins and the member's owner read every
+delivery.
 
 ---
 
@@ -3305,7 +3317,9 @@ doctor, and `identity` does not narrow it.
 
 Available on the module-only, unified, and console (`POST /console/rpc`,
 read method, `runtime.admin` grant) surfaces. Additive method — no
-`contract_version` bump.
+`contract_version` bump. On the console, a finding or inventory row that
+names a member hidden from the caller, or its session, is left out; access
+admins and the member's owner read the whole diagnosis.
 
 <Accordion title="Parameters">
 | Param | Type | Required | Description |

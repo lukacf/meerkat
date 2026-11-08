@@ -229,6 +229,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   release is bound to its revision, and the work graph's Released event
   records the admin and the claim released (`break_glass`).
 
+- The console experience's side chat rows carry `side_chat_audience`:
+  `private_to_you`, `private_to_creator` (an access admin viewing another
+  person's) or `shared`; the side chat's header names it.
+- Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
+  `AccessView::hides_agent` and `AccessView::private_owner_key`;
+  `ConsoleSendGateRefusal::UnknownIdentity`.
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals
@@ -259,6 +266,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedules. Under enforced access each agent's experience affordances
   carry `can_manage_schedules`, and the stock Console offers schedule
   changes only where it is true.
+
+- The stock gateways keep the gating owner's state (pending approvals and
+  the gating audit) in the realm's metadata store across restarts.
+  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
+  embedded runtime; a host that persists `gating_state_snapshot` itself
+  leaves it off.
+- Memory written from the console names the person who wrote it: its
+  author, `application` before, is now the operator with the caller's
+  principal (an operator naming no one for an anonymous caller of an open
+  console). A quarantine review made in the console names its reviewer on
+  the record it releases.
+- A console session revocation records who revoked (`revoked_by` in the
+  fence record and the answer), and an access edit its author, time and
+  revision (`last_edit` on `meta/access/get`).
+
+- On a console with sign-in, a side chat is private to the person who
+  opened it; access admins can also see it. It holds with or without an
+  access configuration, on the console's routes, streams and panels; the
+  access control guide's Known limitations name what it does not cover
+  (the stdio gateway, WorkGraph reads, a taken name). The members a
+  private side chat creates are private to the same person too, by the
+  private owner Meta writes on them: a member its turn spawns, in its own
+  mob or in a mob it creates (`mob_create`, the implicit mob `delegate`
+  runs its helpers in), a `fork_off` child and a helper forked from it.
+  They stay private after the side chat is closed and after a restart,
+  and they are seated outside the shared topology (exempt from the
+  definition's wiring rules, so no role-wide flow step reaches them). Side
+  chats opened before this release keep their audience, and consoles
+  without sign-in keep side chats shared.
+- A private member's memory stays its own: the memory distiller never
+  reads its conversation, the memory steward never dreams over its memory,
+  proposals or exit interview, and its `memory` tool proposes nothing to
+  its mob (`propose_to_mob` is refused). A private member is built without
+  WorkGraph tools, the voice preface names no private peer, and an
+  announcement role template never takes a private member.
+- No console surface names a member hidden from the caller: the run
+  records (`meta/flow_status` answers a run that reached one as a run that
+  does not exist, and `meta/list_runs` leaves it out), wiring and operator
+  events, peer lists (`wired_to`, `topology_peers`), `meta/reset_all`
+  (which no longer closes another person's private side chat), the
+  announcement listings, the memory panel's proposals, the readiness and
+  completion listings, the host send precheck, and a console with no local
+  runtime, which reads its runtimes' members before it decides a timeline
+  frame or a multipart send.
+- On a console with sign-in, a non-administrator is shown no memory scope,
+  and attaches no session, of a member the console does not know (one
+  that ended before this process read who its members are private to): it
+  may have been private. Who each member is private to is read in the
+  background from the start, and read again until it is read; until then
+  a spawn into a mob a member created before the restart is refused as
+  retryable.
+- The SDK gateway's strict live voice authority decides with the
+  configured access controller, primed from the roster, so its access rules
+  and the private-owner rule apply to its configured principal; without an
+  access configuration the stdio gateway stays the trusted host plane.
+- The host send precheck (`ConsoleSendPrecheck::check`) decides with the
+  viewer's audience whether or not the console has an access controller, and
+  refuses a target the runtime holds no member or registered identity for
+  (`UnknownIdentity`), as `POST /console/send` refuses it.
+- A private owner on a member's own roster labels names its owner whatever
+  made the member (Meta, or a host that declares it); it no longer counts
+  only on a verified side chat.
+- A fork Meerkat makes of a private member (the member's own `fork_off`
+  child, a temporary council's participant) takes the member's exemption
+  from the definition's wiring rules as well as its private owner: no
+  definition edge and no role-wide flow step reaches it.
+- A run's members are read from the mob's per-target dispatch records, so
+  a role-wide run that reached a member hidden from the caller (one a host
+  seats private to a person and leaves under the definition's wiring) is
+  answered as a run that does not exist: `meta/flow_status`,
+  `meta/cancel_flow`, `meta/list_runs` and the run's structural events.
+- A WorkGraph goal, reassignment or supervisor key that names a member
+  hidden from the caller is refused as naming an unknown member in every
+  target form (the identity, an owner key, a session), and an attention
+  list filtered by one lists what a name no member holds lists.
+- `meta/routing/routes/list`, `meta/delivery/history`,
+  `meta/reconcile_edges` and `meta/storage/doctor` leave out every row
+  that names a member hidden from the caller, payloads included; access
+  admins and the member's owner read them whole.
+- A member private to a person convenes no council: its agent's `council`
+  call is refused as a policy denial (`private_member_council`).
+- An agent's `mob_check_member` naming a member private to a person the
+  agent does not act for answers as for a member that does not exist, and
+  the agent's schedule tools refuse a target that names one
+  (`access_denied`).
 
 ### Fixed
 
@@ -321,86 +413,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
   who revoked.
 
-### Changed
-
-- The stock gateways keep the gating owner's state (pending approvals and
-  the gating audit) in the realm's metadata store across restarts.
-  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
-  embedded runtime; a host that persists `gating_state_snapshot` itself
-  leaves it off.
-- Memory written from the console names the person who wrote it: its
-  author, `application` before, is now the operator with the caller's
-  principal (an operator naming no one for an anonymous caller of an open
-  console). A quarantine review made in the console names its reviewer on
-  the record it releases.
-- A console session revocation records who revoked (`revoked_by` in the
-  fence record and the answer), and an access edit its author, time and
-  revision (`last_edit` on `meta/access/get`).
-
-### Fixed
-
 - The Approvals panel's Audit tab shows who decided and with what
   assurance ("Decided by alice@example.test (as Release manager) - person
   authenticated") when the record names the verified decider, not only
   the approver label, and says when the gateway keeps its records in
   memory, where decisions from before a gateway restart may be missing.
 
-- The console experience's side chat rows carry `side_chat_audience`:
-  `private_to_you`, `private_to_creator` (an access admin viewing another
-  person's) or `shared`; the side chat's header names it.
-- Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
-  `AccessView::hides_agent` and `AccessView::private_owner_key`;
-  `ConsoleSendGateRefusal::UnknownIdentity`.
+### Known limitations
 
-### Changed
-
-- On a console with sign-in, a side chat is private to the person who
-  opened it; access admins can also see it. It holds with or without an
-  access configuration, on the console's routes, streams and panels; the
-  access control guide's Known limitations name what it does not cover
-  (the stdio gateway, WorkGraph reads, a taken name). The members a
-  private side chat creates are private to the same person too, by the
-  private owner Meta writes on them: a member its turn spawns, in its own
-  mob or in a mob it creates (`mob_create`, the implicit mob `delegate`
-  runs its helpers in), a `fork_off` child and a helper forked from it.
-  They stay private after the side chat is closed and after a restart,
-  and they are seated outside the shared topology (exempt from the
-  definition's wiring rules, so no role-wide flow step reaches them). Side
-  chats opened before this release keep their audience, and consoles
-  without sign-in keep side chats shared.
-- A private member's memory stays its own: the memory distiller never
-  reads its conversation, the memory steward never dreams over its memory,
-  proposals or exit interview, and its `memory` tool proposes nothing to
-  its mob (`propose_to_mob` is refused). A private member is built without
-  WorkGraph tools, the voice preface names no private peer, and an
-  announcement role template never takes a private member.
-- No console surface names a member hidden from the caller: the run
-  records (`meta/flow_status` answers a run that reached one as a run that
-  does not exist, and `meta/list_runs` leaves it out), wiring and operator
-  events, peer lists (`wired_to`, `topology_peers`), `meta/reset_all`
-  (which no longer closes another person's private side chat), the
-  announcement listings, the memory panel's proposals, the readiness and
-  completion listings, the host send precheck, and a console with no local
-  runtime, which reads its runtimes' members before it decides a timeline
-  frame or a multipart send.
-- On a console with sign-in, a non-administrator is shown no memory scope,
-  and attaches no session, of a member the console does not know (one
-  that ended before this process read who its members are private to): it
-  may have been private. Who each member is private to is read in the
-  background from the start, and read again until it is read; until then
-  a spawn into a mob a member created before the restart is refused as
-  retryable.
-- The SDK gateway's strict live voice authority decides with the
-  configured access controller, primed from the roster, so its access rules
-  and the private-owner rule apply to its configured principal; without an
-  access configuration the stdio gateway stays the trusted host plane.
-- The host send precheck (`ConsoleSendPrecheck::check`) decides with the
-  viewer's audience whether or not the console has an access controller, and
-  refuses a target the runtime holds no member or registered identity for
-  (`UnknownIdentity`), as `POST /console/send` refuses it.
-- A private owner on a member's own roster labels names its owner whatever
-  made the member (Meta, or a host that declares it); it no longer counts
-  only on a verified side chat.
+- The console audit read numbers its rows (`seq`) over the rows it leaves
+  out for a reader, and its `latest_seq` counts them: a reader sees gaps
+  where rows naming a member hidden from them sit, never their content.
 
 ## [0.9.10] - 2026-11-04
 

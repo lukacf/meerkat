@@ -861,6 +861,8 @@ async fn exercise(
                 .any(|entry| entry.agent_identity == member_b),
             "Core retirement must finish before the durable resume probe"
         );
+        // B is an identity entry: the probe acts for its entry, so the entry
+        // gate admits it and the durable identity check decides.
         let attempted = handle
             .spawn_spec(
                 SpawnMemberSpec::new(b_status.profile.unwrap(), member_b)
@@ -868,7 +870,8 @@ async fn exercise(
                     .with_launch_mode(meerkat_mob::MemberLaunchMode::Resume {
                         bridge_session_id: old.clone(),
                         resume_from_role: Some(ProfileName::from("original-a")),
-                    }),
+                    })
+                    .with_entry_custody(true),
             )
             .await;
         let refusal = attempted.expect_err("B cannot resume A's actual persisted session");

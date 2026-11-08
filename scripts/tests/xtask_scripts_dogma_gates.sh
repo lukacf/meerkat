@@ -819,6 +819,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessAdoptedEntryEnds is violated."' \
   'echo "Error: Action property NotAuditWitnessAdoptionMarkReplayed is violated."' \
   'echo "Error: Action property NotAuditWitnessSealSparesIntentNamed is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesUnseatedIntentNamed is violated."' \
   'echo "Error: Action property NotAuditWitnessCandidateRefused is violated."' \
   'echo "Error: Action property NotAuditWitnessNameHeldByWorker is violated."' \
   'echo "Error: Action property NotAuditWitnessHostAdopted is violated."' \

@@ -14739,6 +14739,50 @@ mod tests {
         );
     }
 
+    /// An unseated Declared entry the roster leaves out is no entry to end,
+    /// and no cause to refuse the seal, while a host's intent row names it:
+    /// the seal leaves an entry a host's intent row names as it is. The seal
+    /// seals and the entry stands; the same seal without the intent row is
+    /// refused while the entry remains.
+    #[test]
+    fn a_seal_leaves_an_unseated_entry_a_hosts_intent_row_names() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = AgentIdentity::from("unseated-intent-named-entry");
+        assert_eq!(
+            declare(&mut authority, &entry, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SealDeclaredRoster {
+                desired: std::collections::BTreeSet::new(),
+                intent_named: std::collections::BTreeSet::from([entry.clone()]),
+            },
+        )
+        .expect("the seal answers");
+        assert!(
+            transition.effects().iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::DeclaredRosterSealed {
+                    verdict: DeclaredRosterSealVerdict::Sealed
+                }
+            )),
+            "the seal seals: {:?}",
+            transition.effects()
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_origins
+                .contains_key(&entry),
+            "the entry a host's intent row names stands"
+        );
+        assert!(
+            seal_refused(&mut authority, std::collections::BTreeSet::new()),
+            "without the intent row the seal is refused while the entry remains"
+        );
+    }
+
     /// The seal of a complete roster listing `desired`, no host's intent row
     /// naming any entry.
     fn seal(

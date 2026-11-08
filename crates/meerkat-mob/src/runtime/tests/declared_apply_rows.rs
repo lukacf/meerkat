@@ -3562,6 +3562,246 @@ async fn a_host_adoption_of_an_unseated_declared_entry_ends_the_entry_and_materi
         .expect("shut the resumed mob down");
 }
 
+/// A complete roster's seal leaves an unseated declared entry a host's
+/// intent row names as it is, whether the roster lists the identity or not:
+/// the roster does not own it. The seal neither unlists the entry (which
+/// would end the identity and its scoped tool grants) nor is refused for it.
+/// The host adopts the identity while its own retirement of the entry's
+/// member is in flight, so that retirement's end leaves the entry unseated,
+/// owed its seat, with the host's intent row naming it, and an operator's
+/// grant to the identity outlives that retirement. A complete roster that
+/// does not list the identity then seals: the entry stands, unlisted by
+/// nothing, and the grant stays active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seal_leaves_an_unseated_entry_a_hosts_intent_row_names_and_its_grants() {
+    use meerkat_core::tool_grant::{ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
+    use meerkat_runtime::tool_grant::{ToolGrantRequest, ToolGrantStatus, ToolGrantWindow};
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-seal-spares-intent-named"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create the mob");
+    handle
+        .spawn_spec(worker_spec("named").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    let session = handle
+        .resolve_bridge_session_id(&id("named"))
+        .await
+        .expect("a session-backed member");
+    let runtime = service
+        .canonical_runtime_adapter()
+        .expect("the service's runtime");
+    let subject = ToolGrantSubject::member(
+        handle.mob_id().as_str(),
+        &handle.live_incarnation(),
+        "named",
+    );
+    let grant = runtime
+        .grant_tool(
+            ToolGrantRequest {
+                subject: subject.clone(),
+                target: ToolGrantTarget::Family {
+                    family: "shell".to_string(),
+                    names: std::iter::once(meerkat_core::types::ToolName::from("shell")).collect(),
+                },
+                issuer: ToolGrantIssuer::Operator {
+                    caller: None,
+                    decision_ref: None,
+                },
+                reason: None,
+                window: ToolGrantWindow::For(Duration::from_mins(10)),
+            },
+            None,
+        )
+        .await
+        .expect("the identity is granted");
+
+    // The host retires the entry's member, and adopts the identity while
+    // that retirement is in flight.
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("named"),
+        "retire-runtime-quiesce",
+    );
+    let retiring = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.retire(id("named")).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the host's retirement is in flight");
+    super::member_history::adopt_existing_member(&handle, &id("named"), &session, "worker").await;
+    hold.release();
+    tokio::time::timeout(STEP, retiring)
+        .await
+        .expect("the retire answers")
+        .expect("the retire task")
+        .expect("the host's retirement ends");
+    let unseated_entry = |handle: &MobHandle| {
+        matches!(
+            handle.identity_entry(&id("named")),
+            Ok(IdentityEntryRead::Entry(view))
+                if view.origin == crate::runtime::IdentityEntryOrigin::Declared
+                    && view.standing == EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+        )
+    };
+    assert!(
+        unseated_entry(&handle),
+        "the host's retirement leaves a declared entry no member holds: {:?}",
+        handle.identity_entry(&id("named"))
+    );
+
+    let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
+        .await
+        .expect("the apply answers")
+        .expect("the seal is not refused for the entry");
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        unseated_entry(&handle),
+        "the entry a host's intent row names stands: {:?}",
+        handle.identity_entry(&id("named"))
+    );
+    let listing = runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    assert_eq!(
+        listing.grants[0].status,
+        ToolGrantStatus::Active,
+        "the identity keeps its grant"
+    );
+    tokio::time::timeout(STEP, handle.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("shut the mob down");
+}
+
+/// The control of the row above: the same unseated declared entry with no
+/// host's intent row naming it is the roster's to end. A complete roster
+/// that does not list it unlists it first, on the seal's own step, which
+/// ends the identity and its scoped tool grant, and then seals.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seal_unlists_an_unseated_entry_no_intent_row_names_first() {
+    use meerkat_core::tool_grant::{ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget};
+    use meerkat_runtime::tool_grant::{ToolGrantRequest, ToolGrantStatus, ToolGrantWindow};
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-seal-unlists-unnamed"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create the mob");
+    handle
+        .spawn_spec(worker_spec("unnamed").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    let runtime = service
+        .canonical_runtime_adapter()
+        .expect("the service's runtime");
+    let subject = ToolGrantSubject::member(
+        handle.mob_id().as_str(),
+        &handle.live_incarnation(),
+        "unnamed",
+    );
+    let grant = runtime
+        .grant_tool(
+            ToolGrantRequest {
+                subject: subject.clone(),
+                target: ToolGrantTarget::Family {
+                    family: "shell".to_string(),
+                    names: std::iter::once(meerkat_core::types::ToolName::from("shell")).collect(),
+                },
+                issuer: ToolGrantIssuer::Operator {
+                    caller: None,
+                    decision_ref: None,
+                },
+                reason: None,
+                window: ToolGrantWindow::For(Duration::from_mins(10)),
+            },
+            None,
+        )
+        .await
+        .expect("the identity is granted");
+    tokio::time::timeout(STEP, handle.retire(id("unnamed")))
+        .await
+        .expect("the retire answers")
+        .expect("the host retires the entry's member");
+    assert!(
+        matches!(
+            handle.identity_entry(&id("unnamed")),
+            Ok(IdentityEntryRead::Entry(view))
+                if view.standing == EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+        ),
+        "the host's retirement leaves a declared entry no member holds: {:?}",
+        handle.identity_entry(&id("unnamed"))
+    );
+
+    let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs");
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("unnamed")),
+            Some(UnlistedEntryOutcome::Removed)
+        ),
+        "the seal's step unlists the entry first: {outcome:?}"
+    );
+    assert!(
+        matches!(
+            handle.identity_entry(&id("unnamed")),
+            Ok(IdentityEntryRead::NotAnEntry { .. })
+        ),
+        "the entry ended: {:?}",
+        handle.identity_entry(&id("unnamed"))
+    );
+    let listing = runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    assert_eq!(
+        listing.grants[0].status,
+        ToolGrantStatus::Revoked,
+        "the unlist ended the identity's grant"
+    );
+    tokio::time::timeout(STEP, handle.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("shut the mob down");
+}
+
 /// The shape a host that names its identities in a form no member id can
 /// spell leaves behind: the member id encodes the identity (`team:carol` as
 /// `mk--team_ccarol`), the label spells the identity, and the spawn row

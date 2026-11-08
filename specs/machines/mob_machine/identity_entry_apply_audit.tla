@@ -867,6 +867,18 @@ AuditWitnessSealSparesIntentNamed ==
     /\ Id1 \in DOMAIN identity_to_runtime
     /\ SealDeclaredRosterSealed({}, {Id1})
 NotAuditWitnessSealSparesIntentNamed == [][~AuditWitnessSealSparesIntentNamed]_vars
+\* The seal of a roster that leaves out an unseated entry a host's intent row
+\* names seals, and the entry stands, while the one-entry unlist would end
+\* that entry (no member step of it is in flight): an entry a host's intent
+\* row names is no entry to end, so it neither refuses the seal nor is ended
+\* by it.
+AuditWitnessSealSparesUnseatedIntentNamed ==
+    /\ Id1 \in Entries
+    /\ Id1 \in DOMAIN identity_entry_unseated
+    /\ ENABLED UnlistIdentityEntryRemoved(Id1)
+    /\ SealDeclaredRosterSealed({}, {Id1})
+    /\ Id1 \in DOMAIN identity_entry_origins'
+NotAuditWitnessSealSparesUnseatedIntentNamed == [][~AuditWitnessSealSparesUnseatedIntentNamed]_vars
 NotAuditWitnessHostAdopted == [][~AuditWitnessHostAdopted]_vars
 NotAuditWitnessDeclareOverAdopting == [][~AuditWitnessDeclareOverAdopting]_vars
 NotAuditWitnessSealSparesAdopting == [][~AuditWitnessSealSparesAdopting]_vars

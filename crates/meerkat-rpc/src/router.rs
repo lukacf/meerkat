@@ -9333,6 +9333,44 @@ mod tests {
             );
         }
 
+        /// A host's adoption of a declared identity ends the identity's
+        /// entry, not the identity: the identity continues under the host's
+        /// intent and keeps its scoped tool grants. An operator's grant to
+        /// the declared identity before the adoption still admits the member
+        /// the reconciler materializes under the host's intent, and the list
+        /// reads it active.
+        #[tokio::test]
+        async fn a_host_adoption_of_a_declared_identity_keeps_its_grants() {
+            let mut rig = rig().await;
+            create_mob(&rig, "adopt-grants", shell_gated_role()).await;
+            declare_entry(&rig, "adopt-grants", "entry-1").await;
+            let grant = grant_identity_shell(&rig, "adopt-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+
+            adopt_identity(&rig, "adopt-grants", "entry-1", None).await;
+            let handle = mob_handle(&rig, "adopt-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            assert!(
+                matches!(
+                    handle.identity_entry(&entry),
+                    Ok(meerkat_mob::IdentityEntryRead::NotAnEntry { .. })
+                ),
+                "the adoption ended the identity's entry: {:?}",
+                handle.identity_entry(&entry)
+            );
+            let listed = list_identity(&rig, "adopt-grants", "entry-1", false).await;
+            assert_eq!(listed.len(), 1, "the identity keeps its grant: {listed:?}");
+            assert_eq!(listed[0]["grant_id"], grant["grant_id"], "{listed:?}");
+            assert_eq!(listed[0]["status"], "active", "{listed:?}");
+            let adopted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            assert_eq!(
+                adopted.grant_refusal(),
+                None,
+                "the grant admits the member the host's intent materialized: {adopted:?}"
+            );
+        }
+
         /// A complete roster's seal ends every unseated entry it does not
         /// list in its one step, and their grants with them, before the
         /// step commits. When no entry's grant end succeeds (the grant

@@ -1,0 +1,743 @@
+//! A mob member's session cannot be forked at a chosen message boundary
+//! over RPC.
+//!
+//! A standalone session forks at a message boundary through `session/fork_at`
+//! (exact context: the child's history is the prefix). For a mob member's
+//! session that call is refused by the router ("mob-owned session
+//! transcripts cannot be edited through the generic session surface"), and
+//! the mob methods the RPC surface offers give no boundary:
+//! `mob/fork_helper` renders `ForkContext::{FullHistory, LastMessages}` as
+//! text into a fresh session's first prompt (prompt context), and
+//! `mob/spawn` with `launch_mode = resume` takes a whole session.
+//!
+//! The mob runtime does own an exact-prefix member fork in process,
+//! [`meerkat_mob::MobHandle::fork_member`] with an explicit
+//! `message_count`, but it seats the child under a new identity and no RPC
+//! method reaches it. The `today_` tests pin all of this; the ignored test
+//! states the intended RPC method.
+
+#![allow(
+    clippy::expect_used,
+    clippy::large_futures,
+    clippy::panic,
+    clippy::unwrap_used
+)]
+#![cfg(feature = "mob")]
+
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use meerkat::AgentFactory;
+use meerkat_client::{LlmClient, LlmError};
+use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore, StopReason};
+use meerkat_rpc::protocol::{RpcId, RpcRequest, RpcResponse};
+use meerkat_rpc::router::{MethodRouter, NotificationSink};
+use meerkat_rpc::session_runtime::SessionRuntime;
+use meerkat_store::MemoryBlobStore;
+use serde_json::{Value, json};
+use tokio::sync::Notify;
+
+const MODEL: &str = "claude-sonnet-4-5";
+const MOB_ID: &str = "tui";
+const MAIN: &str = "main";
+/// The user turns every source session runs.
+const PROMPTS: [&str; 3] = ["first question", "second question", "third question"];
+/// The boundary: the index of the second user message in the session's
+/// history (`[system, user, assistant, user, ...]`), so the prefix is the
+/// system prompt and the first exchange.
+const BOUNDARY: usize = 3;
+/// A prompt the scripted client holds until the test releases it.
+const HOLD: &str = "hold this turn";
+
+/// Answers every call with `reply to: <last user text>` and records the tool
+/// names each call offers. A call whose last user message is [`HOLD`]
+/// signals `entered` and waits for `release`.
+#[derive(Default)]
+struct ScriptedClient {
+    tools: Mutex<Vec<Vec<String>>>,
+    entered: Notify,
+    release: Notify,
+}
+
+fn last_user_text(messages: &[meerkat_core::Message]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            let value = serde_json::to_value(message).ok()?;
+            (value["role"] == "user").then(|| text_of(&value["content"]))
+        })
+        .unwrap_or_default()
+}
+
+/// The text of a message's content, whatever its block shape: every string
+/// under a `text` key, or the content itself when it is a string.
+fn text_of(content: &Value) -> String {
+    fn collect(value: &Value, out: &mut String) {
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    match field {
+                        Value::String(text) if key == "text" || key == "content" => {
+                            out.push_str(text);
+                        }
+                        Value::String(_) => {}
+                        other => collect(other, out),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Value::String(text) = content {
+        return text.clone();
+    }
+    let mut out = String::new();
+    collect(content, &mut out);
+    out
+}
+
+#[async_trait]
+impl LlmClient for ScriptedClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>>
+    {
+        self.tools.lock().unwrap().push(
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
+        );
+        let user = last_user_text(&request.messages);
+        let hold = user.contains(HOLD);
+        Box::pin(async_stream::stream! {
+            if hold {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            yield Ok(meerkat_client::LlmEvent::TextDelta {
+                delta: format!("reply to: {user}"),
+                meta: None,
+            });
+            yield Ok(meerkat_client::LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    meerkat_core::Provider::Anthropic,
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            });
+            yield Ok(meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::success(StopReason::EndTurn),
+            });
+        })
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+struct Rig {
+    router: MethodRouter,
+    client: Arc<ScriptedClient>,
+    _temp: tempfile::TempDir,
+}
+
+fn rig() -> Rig {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let mut config = Config::default();
+    config.agent.model = MODEL.to_string();
+    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+    let blob_store: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
+    let runtime = SessionRuntime::new(
+        factory,
+        config.clone(),
+        10,
+        meerkat::PersistenceBundle::new(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            blob_store,
+        )
+        .expect("construct runtime authority"),
+        NotificationSink::noop(),
+    )
+    .expect("compose the RPC session runtime");
+    let config_store: Arc<dyn meerkat_core::ConfigStore> =
+        Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+    let client = Arc::new(ScriptedClient::default());
+    runtime.set_default_llm_client(Some(client.clone()));
+    runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+        Arc::clone(&config_store),
+        temp.path().join("config_state.json"),
+    )));
+    let router = MethodRouter::new(Arc::new(runtime), config_store, NotificationSink::noop())
+        .expect("construct the method router");
+    Rig {
+        router,
+        client,
+        _temp: temp,
+    }
+}
+
+fn request(method: &str, params: &Value) -> RpcRequest {
+    RpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(RpcId::Num(1)),
+        method: method.to_string(),
+        params: Some(
+            serde_json::value::RawValue::from_string(params.to_string()).expect("raw params"),
+        ),
+    }
+}
+
+impl Rig {
+    async fn call(&self, method: &str, params: Value) -> RpcResponse {
+        self.router
+            .dispatch(request(method, &params))
+            .await
+            .expect("a request with an id is answered")
+    }
+
+    async fn ok(&self, method: &str, params: Value) -> Value {
+        let response = self.call(method, params).await;
+        assert!(
+            response.error.is_none(),
+            "{method} must succeed: {:?}",
+            response.error
+        );
+        serde_json::from_str(response.result.as_ref().expect("a result").get()).expect("json")
+    }
+
+    /// `(role, text)` of every message of a session's history after its
+    /// system prompt (asserted to be first); a `block_assistant` row reads
+    /// as `assistant`.
+    async fn history(&self, session_id: &str) -> Vec<(String, String)> {
+        let history = self
+            .ok("session/history", json!({ "session_id": session_id }))
+            .await;
+        history["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                let role = message["role"].as_str().unwrap_or_default();
+                if role == "system" {
+                    assert_eq!(index, 0, "the system prompt is the first row");
+                    return None;
+                }
+                let role = if role == "block_assistant" {
+                    "assistant"
+                } else {
+                    role
+                };
+                let mut body = message.clone();
+                if let Some(fields) = body.as_object_mut() {
+                    fields.remove("role");
+                }
+                Some((role.to_string(), text_of(&body)))
+            })
+            .collect()
+    }
+
+    /// Create mob `tui` with one turn-driven profile and seat `main` in it,
+    /// optionally under a tool access policy.
+    async fn seat_main(&self, tool_access_policy: Option<Value>) -> String {
+        self.ok(
+            "mob/create",
+            json!({
+                "definition": {
+                    "id": MOB_ID,
+                    "profiles": {
+                        "main": { "model": MODEL, "tools": { "comms": true } }
+                    }
+                }
+            }),
+        )
+        .await;
+        let mut spawn = json!({
+            "mob_id": MOB_ID,
+            "profile": "main",
+            "agent_identity": MAIN,
+            "runtime_mode": "turn_driven"
+        });
+        if let Some(policy) = tool_access_policy {
+            spawn["tool_access_policy"] = policy;
+        }
+        self.ok("mob/spawn", spawn).await;
+        self.member_session(MAIN).await
+    }
+
+    async fn member_session(&self, identity: &str) -> String {
+        let handle = self.mob().await;
+        handle
+            .resolve_bridge_session_id(&meerkat_mob::AgentIdentity::from(identity))
+            .await
+            .expect("the member has a bridge session")
+            .to_string()
+    }
+
+    async fn mob(&self) -> meerkat_mob::MobHandle {
+        self.router
+            .mob_state()
+            .handle_for(&meerkat_mob::MobId::from(MOB_ID))
+            .await
+            .expect("mob handle")
+    }
+
+    async fn member_turn(&self, identity: &str, prompt: &str) {
+        self.ok(
+            "mob/turn_start",
+            json!({ "mob_id": MOB_ID, "agent_identity": identity, "prompt": prompt }),
+        )
+        .await;
+    }
+
+    async fn roster(&self) -> Vec<String> {
+        let mut identities: Vec<String> = self
+            .mob()
+            .await
+            .list_all_members()
+            .await
+            .into_iter()
+            .map(|entry| entry.agent_identity.to_string())
+            .collect();
+        identities.sort();
+        identities
+    }
+}
+
+/// The deny list the restricted tests seat `main` under.
+fn deny_peers() -> Value {
+    json!({ "type": "deny_list", "value": ["peers"] })
+}
+
+/// Every model call since the last clear offered the comms tools but not
+/// `peers`.
+fn assert_denies_peers(rig: &Rig, what: &str) {
+    let offered = rig.client.tools.lock().unwrap().clone();
+    assert!(
+        !offered.is_empty()
+            && offered.iter().all(|tools| {
+                tools.iter().any(|t| t == "send_message") && !tools.iter().any(|t| t == "peers")
+            }),
+        "{what}: {offered:?}"
+    );
+}
+
+/// A fork child of `main` under `identity`, turn-driven like its source.
+fn child_spec(identity: &str) -> meerkat_mob::SpawnMemberSpec {
+    let mut spec = meerkat_mob::SpawnMemberSpec::new("main", identity);
+    spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+    spec
+}
+
+/// The source history after [`PROMPTS`]: one user message and one reply per
+/// prompt.
+fn three_exchanges() -> Vec<(String, String)> {
+    PROMPTS
+        .iter()
+        .flat_map(|prompt| {
+            [
+                ("user".to_string(), (*prompt).to_string()),
+                ("assistant".to_string(), format!("reply to: {prompt}")),
+            ]
+        })
+        .collect()
+}
+
+/// The prefix's history after its system prompt: the first exchange.
+fn prefix() -> Vec<(String, String)> {
+    three_exchanges()[..BOUNDARY - 1].to_vec()
+}
+
+/// Setup proof: a standalone session with three user turns forks at its
+/// second user message (message index 3, after the system prompt) through
+/// `session/fork_at`, and the child's history is exactly the prefix (exact
+/// context, not a rendered prompt).
+#[tokio::test]
+async fn a_standalone_session_forks_at_a_message_boundary() {
+    let rig = rig();
+    let created = rig
+        .ok("session/create", json!({ "prompt": PROMPTS[0] }))
+        .await;
+    let source = created["session_id"].as_str().unwrap().to_string();
+    for prompt in &PROMPTS[1..] {
+        rig.ok(
+            "turn/start",
+            json!({ "session_id": &source, "prompt": prompt }),
+        )
+        .await;
+    }
+    assert_eq!(rig.history(&source).await, three_exchanges());
+
+    let forked = rig
+        .ok(
+            "session/fork_at",
+            json!({
+                "session_id": &source,
+                "message_index": BOUNDARY,
+                "running_behavior": "reject"
+            }),
+        )
+        .await;
+    let child = forked["session_id"].as_str().unwrap().to_string();
+    assert_ne!(child, source);
+    assert_eq!(forked["source_session_id"], source.as_str());
+    assert_eq!(forked["message_count"], BOUNDARY);
+    assert_eq!(rig.history(&child).await, prefix());
+}
+
+/// Today: none of the RPC routes forks a member's session at a boundary.
+///
+/// Delete with the fix; [`a_member_session_forks_at_a_message_boundary`] is
+/// the intended behaviour.
+///
+/// - `session/fork_at` on the member's session is refused by the router.
+/// - `mob/fork_helper` with `LastMessages { count }` yields a fresh session
+///   whose first user message is the source rendered as text plus the task:
+///   prompt context, not the prefix.
+/// - `mob/spawn` with `launch_mode = resume` on the member's session (after
+///   the member is retired) brings back the whole history.
+#[tokio::test]
+async fn today_a_member_session_cannot_be_forked_at_a_boundary_over_rpc() {
+    let rig = rig();
+    let source = rig.seat_main(None).await;
+    for prompt in PROMPTS {
+        rig.member_turn(MAIN, prompt).await;
+    }
+    // Setup took effect: the member's session holds the three exchanges.
+    assert_eq!(rig.history(&source).await, three_exchanges());
+
+    let refused = rig
+        .call(
+            "session/fork_at",
+            json!({
+                "session_id": &source,
+                "message_index": BOUNDARY,
+                "running_behavior": "reject"
+            }),
+        )
+        .await;
+    let error = refused
+        .error
+        .expect("session/fork_at refuses a member session");
+    assert_eq!(error.code, meerkat_rpc::error::INVALID_PARAMS);
+    assert_eq!(
+        error.message,
+        "mob-owned session transcripts cannot be edited through the generic session surface"
+    );
+    assert_eq!(rig.roster().await, vec![MAIN.to_string()]);
+
+    let helper = rig
+        .ok(
+            "mob/fork_helper",
+            json!({
+                "mob_id": MOB_ID,
+                "source_member_id": MAIN,
+                "agent_identity": "rewind-helper",
+                "prompt": "continue from here",
+                "result_label": "answer",
+                "max_text_bytes": 4096,
+                "fork_context": { "type": "last_messages", "count": 2 }
+            }),
+        )
+        .await;
+    let helper_session = helper["session_id"].as_str().unwrap().to_string();
+    assert_ne!(helper_session, source);
+    let helper_history = rig.history(&helper_session).await;
+    let users: Vec<&str> = helper_history
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert_eq!(
+        users.len(),
+        2,
+        "the helper's history is one pasted context and the task, not the prefix: \
+         {helper_history:?}"
+    );
+    let pasted = users[0];
+    assert!(
+        pasted.starts_with("[Forked conversation context from member 'main']")
+            && pasted.ends_with("[End of forked context]"),
+        "the source arrives as one rendered text message: {pasted}"
+    );
+    assert!(
+        pasted.contains("[user]: third question") && !pasted.contains("first question"),
+        "`LastMessages` counts back from the end; it names no boundary: {pasted}"
+    );
+    assert_eq!(users[1], "continue from here");
+    assert_ne!(helper_history, prefix());
+
+    rig.ok(
+        "mob/retire",
+        json!({ "mob_id": MOB_ID, "agent_identity": MAIN }),
+    )
+    .await;
+    rig.ok(
+        "mob/spawn",
+        json!({
+            "mob_id": MOB_ID,
+            "profile": "main",
+            "agent_identity": MAIN,
+            "runtime_mode": "turn_driven",
+            "launch_mode": { "mode": "resume", "bridge_session_id": &source }
+        }),
+    )
+    .await;
+    assert_eq!(rig.member_session(MAIN).await, source);
+    assert_eq!(
+        rig.history(&source).await,
+        three_exchanges(),
+        "resume takes the whole session"
+    );
+}
+
+/// Today, in process: the mob runtime's own exact-prefix fork,
+/// [`meerkat_mob::MobHandle::fork_member`] with `message_count`, gives the
+/// prefix and records the lineage, but under a new identity, and no RPC
+/// method reaches it. The child keeps the source's tool restrictions; a
+/// running source is refused and seats nothing.
+///
+/// Delete with the fix; the intended RPC method is
+/// [`a_member_session_forks_at_a_message_boundary`].
+#[tokio::test]
+async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
+    let rig = rig();
+    let source = rig.seat_main(Some(deny_peers())).await;
+    for prompt in PROMPTS {
+        rig.member_turn(MAIN, prompt).await;
+    }
+    assert_denies_peers(&rig, "setup: the source's deny list took effect");
+    assert_eq!(rig.history(&source).await, three_exchanges());
+    let handle = rig.mob().await;
+    let main = meerkat_mob::AgentIdentity::from(MAIN);
+
+    // The same identity cannot receive the fork while it is seated.
+    let same_identity = handle
+        .fork_member(&main, child_spec(MAIN), Some(BOUNDARY))
+        .await;
+    assert!(
+        same_identity.is_err(),
+        "a fork onto the seated identity is refused: {same_identity:?}"
+    );
+
+    let fork = handle
+        .fork_member(&main, child_spec("main-rewound"), Some(BOUNDARY))
+        .await
+        .expect("the in-process exact-prefix fork");
+    let child = fork.session_id.to_string();
+    assert_eq!(fork.agent_identity.to_string(), "main-rewound");
+    assert_ne!(child, source);
+    assert_eq!(rig.history(&child).await, prefix());
+    let entry = handle
+        .get_member(&fork.agent_identity)
+        .await
+        .expect("roster read")
+        .expect("the child is seated");
+    let lineage = entry
+        .fork_source
+        .expect("the child records its fork source");
+    assert_eq!(lineage.source_session_id.to_string(), source);
+    assert_eq!(rig.history(&source).await, three_exchanges());
+    assert_eq!(
+        rig.roster().await,
+        vec![MAIN.to_string(), "main-rewound".to_string()]
+    );
+
+    // The child keeps the source's tool restrictions.
+    rig.client.tools.lock().unwrap().clear();
+    rig.member_turn("main-rewound", "child turn").await;
+    assert_denies_peers(&rig, "the fork child keeps its source's deny list");
+    // A running source is refused and seats nothing.
+    let held = {
+        let router_turn = rig.call(
+            "mob/turn_start",
+            json!({ "mob_id": MOB_ID, "agent_identity": MAIN, "prompt": HOLD }),
+        );
+        let entered = rig.client.entered.notified();
+        tokio::pin!(router_turn);
+        tokio::select! {
+            () = entered => {}
+            response = &mut router_turn => panic!("the held turn finished early: {:?}", response.error),
+        }
+        let refused = handle
+            .fork_member(&main, child_spec("main-while-running"), Some(BOUNDARY))
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_mob::MobError::ForkSourceUnavailable { .. })
+            ),
+            "a running source is refused: {refused:?}"
+        );
+        assert_eq!(
+            rig.roster().await,
+            vec![MAIN.to_string(), "main-rewound".to_string()],
+            "the refused fork seats nothing"
+        );
+        rig.client.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(30), router_turn)
+            .await
+            .expect("the held turn finishes once released")
+    };
+    assert!(held.error.is_none(), "{:?}", held.error);
+}
+
+/// Today: the identity `main` cannot be re-seated on an in-process fork's
+/// session. The fork child and `main` are retired, and `mob/spawn` of `main`
+/// with `launch_mode = resume` on the child's session is refused: the
+/// session is durably bound to the child's identity.
+///
+/// Delete with the fix; [`a_member_session_forks_at_a_message_boundary`]
+/// is the intended behaviour (a new session for the same identity).
+#[tokio::test]
+async fn today_main_cannot_be_reseated_on_an_in_process_fork_session() {
+    let rig = rig();
+    let source = rig.seat_main(None).await;
+    for prompt in PROMPTS {
+        rig.member_turn(MAIN, prompt).await;
+    }
+    let handle = rig.mob().await;
+    let fork = handle
+        .fork_member(
+            &meerkat_mob::AgentIdentity::from(MAIN),
+            child_spec("main-rewound"),
+            Some(BOUNDARY),
+        )
+        .await
+        .expect("the in-process exact-prefix fork");
+    let child = fork.session_id.to_string();
+    assert_eq!(rig.history(&child).await, prefix());
+    for identity in ["main-rewound", MAIN] {
+        rig.ok(
+            "mob/retire",
+            json!({ "mob_id": MOB_ID, "agent_identity": identity }),
+        )
+        .await;
+    }
+    assert!(rig.roster().await.is_empty(), "both members are retired");
+
+    let reseat = rig
+        .call(
+            "mob/spawn",
+            json!({
+                "mob_id": MOB_ID,
+                "profile": "main",
+                "agent_identity": MAIN,
+                "runtime_mode": "turn_driven",
+                "launch_mode": { "mode": "resume", "bridge_session_id": &child }
+            }),
+        )
+        .await;
+    let error = reseat
+        .error
+        .expect("`main` cannot be seated on the fork child's session");
+    assert_eq!(error.code, meerkat_rpc::error::INVALID_PARAMS);
+    assert!(
+        error.message.contains("persisted mob member binding")
+            && error.message.contains("main-rewound")
+            && error.message.contains("contradicts"),
+        "the child's session is bound to the child's identity: {}",
+        error.message
+    );
+    assert!(rig.roster().await.is_empty(), "the refusal seats nothing");
+
+    // Control: `main` can be seated again on its own session.
+    rig.ok(
+        "mob/spawn",
+        json!({
+            "mob_id": MOB_ID,
+            "profile": "main",
+            "agent_identity": MAIN,
+            "runtime_mode": "turn_driven",
+            "launch_mode": { "mode": "resume", "bridge_session_id": &source }
+        }),
+    )
+    .await;
+    assert_eq!(rig.member_session(MAIN).await, source);
+}
+
+/// Intended: a member's session forked at its second user message through a
+/// mob-owned RPC method becomes the identity's new session, has exactly the prefix as its
+/// history, records its lineage and keeps the source's tool restrictions.
+/// (Refusing a running source without seating anything is pinned for the
+/// in-process fork by
+/// [`today_the_exact_prefix_member_fork_exists_only_in_process`].)
+///
+/// The method does not exist; [`fork_member_at`] stands in for it and fails.
+#[tokio::test]
+#[ignore = "no RPC method forks a member's session at a message boundary (proposed: mob/fork_member_at), see the PR"]
+async fn a_member_session_forks_at_a_message_boundary() {
+    let rig = rig();
+    let source = rig.seat_main(Some(deny_peers())).await;
+    for prompt in PROMPTS {
+        rig.member_turn(MAIN, prompt).await;
+    }
+    assert_eq!(rig.history(&source).await, three_exchanges());
+    assert_denies_peers(&rig, "setup: the source's deny list took effect");
+
+    let forked = fork_member_at(&rig, MAIN, BOUNDARY)
+        .await
+        .unwrap_or_else(|error| panic!("fork the member at boundary {BOUNDARY}: {error}"));
+    let child = forked["session_id"].as_str().unwrap().to_string();
+    assert_ne!(child, source);
+    assert_eq!(forked["source_session_id"], source.as_str());
+    assert_eq!(rig.history(&child).await, prefix());
+    assert_eq!(rig.history(&source).await, three_exchanges());
+    assert_eq!(rig.member_session(MAIN).await, child);
+
+    rig.client.tools.lock().unwrap().clear();
+    rig.member_turn(MAIN, "after rewind").await;
+    assert_denies_peers(&rig, "the child keeps the source's tool restrictions");
+    let entry = rig
+        .mob()
+        .await
+        .get_member(&meerkat_mob::AgentIdentity::from(MAIN))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entry
+            .fork_source
+            .expect("lineage")
+            .source_session_id
+            .to_string(),
+        source
+    );
+}
+
+/// Stand-in for the proposed `mob/fork_member_at {mob_id, agent_identity,
+/// message_index, inherited_instructions}`: a new session for the same
+/// identity whose history is exactly the prefix, lineage recorded, the
+/// source's tool restrictions kept, an idle source only (`SESSION_BUSY` for a
+/// running one, nothing seated). Replace the body with the call.
+async fn fork_member_at(
+    _rig: &Rig,
+    _identity: &str,
+    _message_index: usize,
+) -> Result<Value, String> {
+    Err(
+        "no RPC method forks a member's session at a message boundary (proposed: mob/fork_member_at)"
+            .to_string(),
+    )
+}

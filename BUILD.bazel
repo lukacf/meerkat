@@ -875,6 +875,7 @@ test_suite(
         "//crates/meerkat-rpc:lazy_resume_uncommitted_terminal_test",
         "//crates/meerkat-rpc:live_dependency_guards_test",
         "//crates/meerkat-rpc:meerkat_rpc_unit_test",
+        "//crates/meerkat-rpc:member_session_fork_at_boundary_test",
         "//crates/meerkat-rpc:mob_registration_redrive_ordering_test",
         "//crates/meerkat-rpc:multi_process_delivery_test",
         "//crates/meerkat-rpc:realm_config_ingress_test",

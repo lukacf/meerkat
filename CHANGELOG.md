@@ -1208,6 +1208,14 @@ them.
   server-side deadline below Core's acquire timeout
   (`SpiRealmConfig::renew_timeout`) avoids it.
 
+- `meerkat-mob-mcp`: on a session service that keeps no retained session
+  metadata (`EphemeralSessionService`), `delegate` still runs its helper on
+  the route the session was built with, and the helper resolves its
+  credentials through the realm, even after an in-place model, provider,
+  endpoint or auth-binding switch. `rkat` and the JSON-RPC, REST and MCP
+  servers run `PersistentSessionService`, so their sessions follow the
+  switch.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

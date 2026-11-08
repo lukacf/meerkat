@@ -330,34 +330,21 @@ async fn close_during_committed_access_store_wait_prevents_native_child_write() 
     assert!(lifetime.with_current_setup(|| Ok(())).is_err());
     store.release.notify_one();
     let outcome = pending.await.unwrap();
-    // The settled close released the originals store, so the closed host
-    // cannot record its refusal either: the decision stays pending for the
-    // next owner's reconciliation, and no native child exists.
-    assert_eq!(
-        outcome.state,
-        PrivateServiceGrantState::PendingReconciliation
-    );
-    assert_eq!(store.writes.load(Ordering::SeqCst), 2); // Pending row, then the refused record.
+    assert_eq!(outcome.state, PrivateServiceGrantState::GrantUnavailable);
+    assert_eq!(store.writes.load(Ordering::SeqCst), 2); // Pending row, then honest refusal.
     let after = fs::read(path.join("grants.jsonl")).unwrap();
     assert_eq!(
         after.split(|byte| *byte == b'\n').count(),
         before.split(|byte| *byte == b'\n').count()
     );
     assert_eq!(after, before);
-    let rows = toolkit_store::SqliteStore::open_existing(path.join("originals.sqlite3"))
-        .unwrap()
-        .list_records(&scope, None, 10)
-        .await
-        .unwrap();
+    let rows = store.inner.list_records(&scope, None, 10).await.unwrap();
     let access: Vec<_> = rows
         .iter()
         .filter(|row| row.data.schema == "toolkit.authenticated-service-access-decision")
         .collect();
     assert_eq!(access.len(), 1);
-    assert_eq!(
-        access[0].data.body["issuance"]["state"],
-        "pending_native_issuance"
-    );
+    assert_eq!(access[0].data.body["issuance"]["state"], "native_refused");
 }
 
 // These use actual SQLite admission and native grant storage. The changed

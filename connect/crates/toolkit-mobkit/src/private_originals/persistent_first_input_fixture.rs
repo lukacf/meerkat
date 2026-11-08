@@ -212,7 +212,12 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         if local.state != HostCloseState::Settled {
             return Err(format!("host close: {local:?}"));
         }
-        Ok(())
+        // Every join of this host returned, its native runtime's and its
+        // lifetime's: the close's final release ends the native custody.
+        self._lifetime
+            .release_native_custody()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub(super) async fn publish_fixture_controller(

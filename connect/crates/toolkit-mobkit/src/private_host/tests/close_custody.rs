@@ -19,17 +19,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use toolkit_store::{StoreError, StoreKey, StoreScope, ToolkitStore};
 
-/// Stand-in until the lifetime's final custody release exists: it releases
-/// nothing. The change that adds the release removes it.
-trait FinalCustodyRelease {
-    async fn release_native_custody(&self) -> Result<(), HostLifetimeError>;
-}
-impl FinalCustodyRelease for NativeHostLifetime {
-    async fn release_native_custody(&self) -> Result<(), HostLifetimeError> {
-        Ok(())
-    }
-}
-
 /// A real selected lifetime serving the private host, with its grant owner
 /// and originals store bound as its native custody, and one retained
 /// original whose cancellation the store can hold in its write.

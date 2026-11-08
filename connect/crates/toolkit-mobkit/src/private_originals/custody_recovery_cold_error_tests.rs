@@ -88,8 +88,8 @@ async fn cold_native_observation_survives_failed_terminal_write_and_cached_close
                     store.terminal_returns.load(Ordering::SeqCst),
                     store.terminal_calls.load(Ordering::SeqCst)
                 );
-                // The settled close released the store: read what it retained
-                // as the next opener does.
+                // The close released the store: read what it retained as the
+                // next opener does.
                 let row = fixture.closed_source_record().await;
                 let attempt: CustodyAttempt =
                     serde_json::from_value(row.data.body["custody_attempt"].clone()).unwrap();

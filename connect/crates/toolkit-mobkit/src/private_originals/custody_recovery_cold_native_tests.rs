@@ -189,8 +189,8 @@ async fn cold_restore_control(tampered: bool) {
                     tokio::join!(native_close.join(), fixture.source.join_custody_recovery());
                 assert!(native.is_ok(), "first native and local owners: {native:?}");
                 assert!(source.is_ok(), "first source owner: {source:?}");
-                // The settled close released the store: read what it retained
-                // as the next opener does.
+                // The close released the store: read what it retained as the
+                // next opener does.
                 let source_record = fixture.closed_source_record().await;
                 assert_eq!(source_record.data.version, 4);
                 let attempt: CustodyAttempt =

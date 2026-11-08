@@ -250,8 +250,8 @@ async fn exercise(case: Case) {
                 assert!(matches!(source, Err(PrivateOriginalError::Unavailable)));
                 assert!(wrapper.as_ref().unwrap().terminal_calls.load(Ordering::SeqCst) > 0);
             } else { assert!(source.is_ok(), "actual promoted close: {source:?}"); }
-            // The settled close released the store: read what it retained as
-            // the next opener does.
+            // The close released the store: read what it retained as the next
+            // opener does.
             let row = fixture.closed_store().get(&helper_key).await.unwrap().unwrap();
             assert!(attempt(&row).decision() == if fail_terminal { CustodyDecision::Pending } else { CustodyDecision::Promoted });
             assert_eq!(row.data.body["bound_input"], enrolled.data.body["bound_input"]);

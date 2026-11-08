@@ -1382,17 +1382,6 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
     store.release();
 }
 
-/// Stand-in until the lifetime's final custody release exists: it releases
-/// nothing. The change that adds the release removes it.
-trait FinalCustodyRelease {
-    async fn release_native_custody(&self) -> Result<()>;
-}
-impl FinalCustodyRelease for NativeHostLifetime {
-    async fn release_native_custody(&self) -> Result<()> {
-        Ok(())
-    }
-}
-
 /// A settled join of the host's close leaves the bound native grant owner in
 /// custody: work the host admitted before its close that still holds the
 /// owner keeps using and changing it. The close's final release, taken once

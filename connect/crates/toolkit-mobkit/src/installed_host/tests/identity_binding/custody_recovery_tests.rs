@@ -392,10 +392,11 @@ async fn prepared_close_before_adoption_joins_entered_canonical_read() {
 }
 
 /// The gateway's close drains custody recovery, the round in flight and its
-/// final round after stop, before the host's settled close ends the custody
-/// of the native grant owner and store those rounds read: while a recovery
-/// read is held, the close waits and both stay leased; once it returns, the
-/// close settles, reports complete and hands both back.
+/// final round after stop, before its native join, and the close's final
+/// release ends the custody of the native grant owner and store those rounds
+/// read only after that: while a recovery read is held, the close waits and
+/// both stay leased; once it returns, the close settles and reports
+/// complete, and the final release hands both back.
 #[tokio::test]
 async fn gateway_close_drains_custody_recovery_before_releasing_native_custody() {
     use meerkat_authorization::{
@@ -508,13 +509,16 @@ async fn gateway_close_drains_custody_recovery_before_releasing_native_custody()
                 .expect("the close reports complete once recovery drained");
             assert_eq!(store.completed.load(Ordering::SeqCst), 1);
             assert_eq!(store.cancelled.load(Ordering::SeqCst), 0);
+            host.release_native_custody()
+                .await
+                .expect("the close's final release follows its joins");
             assert!(
                 SqliteStore::open_existing(&originals_path).is_ok(),
-                "the settled close handed the native store back"
+                "the final release handed the native store back"
             );
             assert!(
                 restore_grants().is_ok(),
-                "the settled close handed the native grant owner back"
+                "the final release handed the native grant owner back"
             );
         }))
         .catch_unwind()
@@ -531,17 +535,6 @@ async fn gateway_close_drains_custody_recovery_before_releasing_native_custody()
         Ok(Ok(())) => (),
         Ok(Err(_)) => panic!("bounded gateway custody recovery close control"),
         Err(payload) => std::panic::resume_unwind(payload),
-    }
-}
-
-/// Stand-in until the gateway host's final custody release exists: it
-/// releases nothing. The change that adds the release removes it.
-trait FinalCustodyRelease {
-    async fn release_native_custody(&self) -> Result<(), GatewayHostError>;
-}
-impl FinalCustodyRelease for ToolkitGatewayHost {
-    async fn release_native_custody(&self) -> Result<(), GatewayHostError> {
-        Ok(())
     }
 }
 

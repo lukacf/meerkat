@@ -146,6 +146,21 @@ impl Driver {
             }
         }
     }
+    /// The close's final release of the installed host's native custody, once
+    /// every join that can still touch it has returned. Without an installed
+    /// host there is none.
+    async fn release_native_custody(&self) -> Result<(), GatewayHostError> {
+        let host = self
+            .publication
+            .lock()
+            .map_err(|_| GatewayHostError::Unavailable)?
+            .installed
+            .clone();
+        match host {
+            Some(host) => host.release_native_custody().await,
+            None => Ok(()),
+        }
+    }
 }
 
 struct LiveRoster(Arc<ApplicationSetupCompilation>);
@@ -475,9 +490,9 @@ impl GatewayHostComposition for Driver {
             .map(|publication| publication.installed.clone())
             .map_err(|_| GatewayHostError::Unavailable);
         // The selected source's custody recovery drains first, its final
-        // round after stop included: the installed host's settled close then
-        // ends the custody of the native grant owner and store that round
-        // reads and writes.
+        // round after stop included, then the installed host's close is
+        // joined. Neither ends the native custody: the process's close
+        // releases it after every join.
         let source_result = self.runtime.join_custody_close().await;
         let host_close = async {
             match host {
@@ -958,11 +973,21 @@ pub async fn run(
     });
     let native = run_persistent_with_host(control, driver.clone()).await;
     let closing = driver.begin_close(GatewayHostCloseReason::Shutdown);
-    let private = match actor.await {
-        Ok(Ok(running)) => running.finish().await,
-        Ok(Err(error)) => Err(error),
-        Err(error) => Err(error.to_string()),
-    };
+    // The private host's admitted work and its presenters join within the
+    // host close's join bound.
+    let private = tokio::time::timeout(toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND, async {
+        match actor.await {
+            Ok(Ok(running)) => running.finish().await,
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(error.to_string()),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("private host cleanup did not finish within the close bound".into()));
+    // Meta's host join, the private host's admitted work and the presenters
+    // are done (or out of time): only now does the close end the custody of
+    // the native grant owner and store they used.
+    let custody = driver.release_native_custody().await;
     let mut failures = Vec::new();
     if let Err(error) = native {
         failures.push(error.to_string());
@@ -972,6 +997,9 @@ pub async fn run(
     }
     if let Err(error) = private {
         failures.push(error);
+    }
+    if let Err(error) = custody {
+        failures.push(error.to_string());
     }
     if failures.is_empty() {
         Ok(())

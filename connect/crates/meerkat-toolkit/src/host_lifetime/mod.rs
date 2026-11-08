@@ -1,9 +1,11 @@
 //! Toolkit activation/component lifetime. Native runtime work and grants have
 //! their own owners; this module retains only selected deployment/component
-//! close state and its physical settlement guards. The settled activation
-//! close ends the custody of the bound native grant owner and of the bound
-//! native store (see [`NativeHostLifetime::bind_native_grant_custody`] and
-//! [`NativeHostLifetime::bind_native_store_custody`]).
+//! close state and its physical settlement guards. The close's final release,
+//! once the activation close settled, ends the custody of the bound native
+//! grant owner and of the bound native store (see
+//! [`NativeHostLifetime::bind_native_grant_custody`],
+//! [`NativeHostLifetime::bind_native_store_custody`] and
+//! [`PrivateHostLifetimeControl::release_native_custody`]).
 
 pub mod control;
 pub(crate) mod fence;
@@ -391,12 +393,12 @@ pub struct NativeHostLifetime {
     components: BTreeMap<Id, Arc<ComponentOwner>>,
     closed: Notify,
     native_publication: Option<LocalAuthorizationPublication>,
-    /// The native grant owner whose custody the settled activation close
-    /// ends. Held weakly: this lifetime never keeps the owner alive, and an
-    /// owner already dropped released its custody then.
+    /// The native grant owner whose custody the close's final release ends.
+    /// Held weakly: this lifetime never keeps the owner alive, and an owner
+    /// already dropped released its custody then.
     native_grant_custody: Option<Weak<LocalGrantAuthority>>,
-    /// The native host's published store whose custody the settled activation
-    /// close ends. Held weakly, as the grant owner is.
+    /// The native host's published store whose custody the close's final
+    /// release ends. Held weakly, as the grant owner is.
     native_store_custody: Option<Weak<SqliteStore>>,
 }
 
@@ -539,13 +541,13 @@ impl NativeHostLifetime {
     }
 
     /// Install the native grant owner whose custody this host's close ends,
-    /// before this lifetime is shared, beside its publication. Once every
-    /// component and the activation have settled (after the host's last
-    /// legitimate change, before the close reports `Settled`), the close
-    /// releases the owner's custody: a reference a task of this host still
-    /// holds can no longer change or use it, and the store's lease is handed
-    /// back, so a successor in this process restores the same owner at once.
-    /// Rebinding is refused.
+    /// before this lifetime is shared, beside its publication. The close's
+    /// final release ([`PrivateHostLifetimeControl::release_native_custody`]),
+    /// taken once the activation has settled and every join that can still
+    /// touch the owner has returned, ends it: a reference a task of this
+    /// host still holds can no longer change or use the owner, and the
+    /// store's lease is handed back, so a successor in this process restores
+    /// the same owner at once. Rebinding is refused.
     pub fn bind_native_grant_custody(&mut self, grants: &Arc<LocalGrantAuthority>) -> Result<()> {
         self.validate_current_selection()?;
         if self.native_grant_custody.is_some() {
@@ -555,7 +557,7 @@ impl NativeHostLifetime {
         Ok(())
     }
 
-    /// End the bound native grant owner's custody at the settled close.
+    /// End the bound native grant owner's custody (the close's final release).
     fn release_native_grant_custody(&self) -> Result<()> {
         match self.native_grant_custody.as_ref().and_then(Weak::upgrade) {
             Some(grants) => grants
@@ -567,11 +569,11 @@ impl NativeHostLifetime {
 
     /// Install the native host's published store whose custody this host's
     /// close ends, before this lifetime is shared, beside the grant owner.
-    /// Once every component and the activation have settled, the close
-    /// releases the store's custody: a reference a task of this host still
-    /// holds can no longer read or change it, and its physical owner is
-    /// handed back, so a successor in this process opens the same store at
-    /// once. Rebinding is refused.
+    /// The close's final release ends it, as it ends the grant owner's: a
+    /// reference a task of this host still holds can no longer read or
+    /// change the store, and its physical owner is handed back, so a
+    /// successor in this process opens the same store at once. Rebinding is
+    /// refused.
     pub fn bind_native_store_custody(&mut self, store: &Arc<SqliteStore>) -> Result<()> {
         self.validate_current_selection()?;
         if self.native_store_custody.is_some() {
@@ -581,7 +583,7 @@ impl NativeHostLifetime {
         Ok(())
     }
 
-    /// End the bound native store's custody at the settled close.
+    /// End the bound native store's custody (the close's final release).
     async fn release_native_store_custody(&self) -> Result<()> {
         match self.native_store_custody.as_ref().and_then(Weak::upgrade) {
             Some(store) => store
@@ -851,12 +853,6 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
                     .activation
                     .join(handle, self.native_publication.as_ref())
                     .await?;
-                if observation.state == HostCloseState::Settled {
-                    // Both custodies end, whichever release fails.
-                    let grants = self.release_native_grant_custody();
-                    let store = self.release_native_store_custody().await;
-                    grants.and(store)?;
-                }
                 Ok(observation)
             }
             HostCloseScope::Component { component } => {
@@ -865,6 +861,30 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
                     .await
             }
         }
+    }
+
+    async fn release_native_custody(&self) -> Result<()> {
+        // Only the activation machine's settled close ends the bound custody.
+        // Its join confirms settlement only after every component settled.
+        {
+            let machine = self
+                .activation
+                .machine
+                .read()
+                .map_err(|_| HostLifetimeError::Unavailable)?;
+            let observation = ComponentOwner::close_observation(
+                &machine,
+                self.incarnation,
+                HostCloseScope::Activation,
+            )?;
+            if observation.state != HostCloseState::Settled {
+                return Err(HostLifetimeError::NotSettled);
+            }
+        }
+        // Both custodies end, whichever release fails.
+        let grants = self.release_native_grant_custody();
+        let store = self.release_native_store_custody().await;
+        grants.and(store)
     }
 
     fn host_lost(&self) -> Result<HostCloseObservation> {

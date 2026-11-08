@@ -335,15 +335,12 @@ impl OperatorSetup {
             })?;
             open_owner_pair(&selection, &native, &operator, startup)
         })?;
-        let originals = Arc::new(originals);
         lifetime.bind_native_authorization_publication(source.publication())?;
-        lifetime.bind_native_grant_custody(&source.grants())?;
-        lifetime.bind_native_store_custody(&originals)?;
         Ok(Self {
             lifetime: Arc::new(lifetime),
             native,
             operator,
-            originals,
+            originals: Arc::new(originals),
             source,
             helper_selection: None,
             additional_helpers: vec![],

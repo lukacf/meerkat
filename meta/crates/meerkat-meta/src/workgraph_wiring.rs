@@ -1306,6 +1306,126 @@ comms = true
         runtime.handle().stop().await.expect("stop");
     }
 
+    /// A member private to a person is built without WorkGraph tools, so the
+    /// agent tool plane binds no WorkGraph work to one, as the RPC methods
+    /// refuse it: a coordinate-mode agent's witnessed
+    /// `workgraph_attention_reassign` onto such a member's session, and its
+    /// `workgraph_policy_escalate` naming the member as supervisor, are both
+    /// refused (`private_member_workgraph_target`). The binding stays where
+    /// it was: the same witness and revision still reassign onto a free
+    /// target.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_plane_binds_no_workgraph_work_to_a_private_member() {
+        let (runtime, service, dispatcher, _dir, mob_id) = bootstrapped_tool_plane().await;
+        runtime
+            .handle()
+            .spawn_spec(
+                meerkat_mob::SpawnMemberSpec::new("worker", "private-helper").with_labels(
+                    std::collections::BTreeMap::from([(
+                        crate::access::PRIVATE_TO_LABEL.to_string(),
+                        "console-caller:v1:someone".to_string(),
+                    )]),
+                ),
+            )
+            .await
+            .expect("spawn a member private to a person");
+        let private = meerkat_mob::ids::AgentIdentity::from("private-helper");
+        let private_session = runtime
+            .handle()
+            .resolve_bridge_session_id_observation(&private)
+            .await
+            .expect("member bridge session id");
+        let mover = create_session_goal(
+            &service,
+            "mover",
+            SESSION_MOVER,
+            meerkat::WorkAttentionMode::Coordinate,
+        )
+        .await;
+        let context = witness_context(&service, &mover.attention.binding_id).await;
+        let refused =
+            |answer: &Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>| {
+                matches!(
+                    answer,
+                    Err(meerkat_core::ToolError::PolicyDenied { denial })
+                        if denial.code == "private_member_workgraph_target"
+                )
+            };
+
+        let onto_private = reassign_args(&mover, &private_session.to_string());
+        let reassigned = dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "call-private-target",
+                    name: "workgraph_attention_reassign",
+                    args: &onto_private,
+                },
+                &context,
+            )
+            .await;
+        assert!(
+            refused(&reassigned),
+            "a reassign onto a member private to a person is refused: {reassigned:?}"
+        );
+        let escalate = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "id": mover.item.id,
+                "expected_revision": mover.item.revision,
+                "completion_policy": {
+                    "kind": "supervisor",
+                    "owner_key": {
+                        "kind": "agent",
+                        "id": format!("mob/{mob_id}/agent/private-helper"),
+                    },
+                },
+            })
+            .to_string(),
+        )
+        .expect("escalate args");
+        let escalated = dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "call-private-supervisor",
+                    name: "workgraph_policy_escalate",
+                    args: &escalate,
+                },
+                &context,
+            )
+            .await;
+        assert!(
+            refused(&escalated),
+            "an escalation naming a member private to a person as supervisor is refused: \
+             {escalated:?}"
+        );
+        let bindings = service
+            .list_attention(meerkat::AttentionListRequest::default())
+            .await
+            .expect("list attention");
+        assert!(
+            bindings.attention.iter().all(|binding| {
+                binding
+                    .target
+                    .owner_key()
+                    .is_none_or(|key| !key.canonical().contains("private-helper"))
+            }),
+            "no binding names the private member"
+        );
+
+        let onto_free = reassign_args(&mover, SESSION_FREE);
+        dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "call-free-after-private",
+                    name: "workgraph_attention_reassign",
+                    args: &onto_free,
+                },
+                &context,
+            )
+            .await
+            .expect("the binding stays where it was and still reassigns onto a free target");
+        runtime.handle().stop().await.expect("stop");
+    }
+
     /// An UNFILLED admission slot (non-mob embedder: no runtime, no roster)
     /// forwards without any meta-side occupancy check. Since meerkat
     /// 0.7.25 (ask 25) the STORE owns binding uniqueness, so the forwarded

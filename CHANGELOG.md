@@ -366,6 +366,11 @@ them.
   publication time of a credential it withdrew; a record published at or
   before that time stays refused. A managed-store provider lease that
   withdrew its credential takes such a later login too.
+- GitHub Copilot: a long-running process that picks up a later sign-in
+  another process stored for the same account (for example when it reads
+  the account's status) no longer keeps serving the earlier sign-in's
+  token from its cache, for an operator token kept in the credential store
+  and for the device sign-in alike.
 
 ### Upgrade notes
 

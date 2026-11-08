@@ -142,8 +142,14 @@ impl Fixture {
     }
 
     fn durable(store: Arc<dyn GrantOwnerStore>) -> Self {
+        Self::durable_under(&AdmissionGuard::none(), store)
+    }
+
+    /// A durable owner over `store`, created under `guard`.
+    fn durable_under(guard: &AdmissionGuard, store: Arc<dyn GrantOwnerStore>) -> Self {
         Self {
             authority: LocalGrantAuthority::new_durable(
+                guard,
                 LocalGrantConfiguration {
                     root: who("root"),
                     namespace: id("namespace"),
@@ -155,6 +161,12 @@ impl Fixture {
             )
             .expect("durable owner"),
         }
+    }
+
+    /// A durable owner over the realm grant log `log`, created under its
+    /// fence, which is released when this returns.
+    fn fenced(log: &FencedLog) -> Self {
+        Self::durable_under(&log.guard(), log.store())
     }
 
     fn restored(store: Arc<dyn GrantOwnerStore>) -> Self {
@@ -170,22 +182,32 @@ impl Fixture {
 
     /// The owner's delegation to its agent, under the owner's child rule.
     fn ruled_parent(&self, rule: ChildApprovalRule) -> GrantLineageRef {
-        self.authority
-            .issue_root_with_child_rule(
-                &who("root"),
-                id("owner-delegation"),
-                who("owner-agent"),
-                None,
-                delegation(1),
-                rule,
-            )
+        self.try_ruled_parent(&AdmissionGuard::none(), rule)
             .expect("ruled parent")
+    }
+
+    /// [`Self::ruled_parent`], appended under `guard`.
+    fn try_ruled_parent(
+        &self,
+        guard: &AdmissionGuard,
+        rule: ChildApprovalRule,
+    ) -> Result<GrantLineageRef, GrantRefusal> {
+        self.authority.issue_root_with_child_rule(
+            guard,
+            &who("root"),
+            id("owner-delegation"),
+            who("owner-agent"),
+            None,
+            delegation(1),
+            rule,
+        )
     }
 
     /// The same delegation without a child rule.
     fn plain_parent(&self) -> GrantLineageRef {
         self.authority
             .issue_root(
+                &AdmissionGuard::none(),
                 &who("root"),
                 id("plain-delegation"),
                 who("owner-agent"),
@@ -252,7 +274,19 @@ impl Fixture {
         child: &str,
         approval: GrantApproval,
     ) -> Result<GrantLineageRef, ApprovalChildRefusal> {
+        self.issue_under(&AdmissionGuard::none(), parent, child, approval)
+    }
+
+    /// [`Self::issue`], appended under `guard`.
+    fn issue_under(
+        &self,
+        guard: &AdmissionGuard,
+        parent: &GrantLineageRef,
+        child: &str,
+        approval: GrantApproval,
+    ) -> Result<GrantLineageRef, ApprovalChildRefusal> {
         self.authority.issue_approval_child(
+            guard,
             &who("owner-agent"),
             parent,
             id(child),
@@ -338,9 +372,20 @@ fn consume_own(
     lineage: &[GrantLineageRef],
     approver_current: bool,
 ) -> Result<(), ConsumeUseRefusal> {
+    consume_own_under(fixture, &AdmissionGuard::none(), lineage, approver_current)
+}
+
+/// [`consume_own`], appended under `guard`.
+fn consume_own_under(
+    fixture: &Fixture,
+    guard: &AdmissionGuard,
+    lineage: &[GrantLineageRef],
+    approver_current: bool,
+) -> Result<(), ConsumeUseRefusal> {
     let requester = who("requester");
     let approved = work("approved-work-1");
     fixture.authority.consume_use(
+        guard,
         lineage,
         &who("branch"),
         None,
@@ -364,6 +409,7 @@ fn a_child_without_the_parents_approvers_decision_is_refused() {
     // A plain child of a grant under a rule: no decision at all.
     assert_eq!(
         fixture.authority.issue_child(
+            &AdmissionGuard::none(),
             &who("owner-agent"),
             &parent,
             id("plain-child"),
@@ -411,6 +457,7 @@ fn an_approval_child_without_a_parent_rule_is_refused() {
         fixture
             .authority
             .issue_child(
+                &AdmissionGuard::none(),
                 &who("owner-agent"),
                 &parent,
                 id("plain-child"),
@@ -500,6 +547,7 @@ fn an_approval_child_must_have_depth_zero_a_window_and_uses() {
     let parent = fixture
         .authority
         .issue_root_with_child_rule(
+            &AdmissionGuard::none(),
             &who("root"),
             id("deep-delegation"),
             who("owner-agent"),
@@ -514,6 +562,7 @@ fn an_approval_child_must_have_depth_zero_a_window_and_uses() {
     approval.request_digest = fixture.terms_digest(&parent, &delegable, &approval);
     assert_eq!(
         fixture.authority.issue_approval_child(
+            &AdmissionGuard::none(),
             &who("owner-agent"),
             &parent,
             id("approval-child"),
@@ -530,6 +579,7 @@ fn an_approval_child_must_have_depth_zero_a_window_and_uses() {
     let approval = fixture.approval(&parent, "decision-2");
     assert_eq!(
         fixture.authority.issue_approval_child(
+            &AdmissionGuard::none(),
             &who("owner-agent"),
             &parent,
             id("approval-child"),
@@ -606,7 +656,14 @@ fn consume_use_spends_once_and_advances_the_revision() {
     // A plain lineage spends nothing: there is no use to count.
     let plain = fixture
         .authority
-        .issue_root(&who("root"), id("plain"), who("branch"), None, offered())
+        .issue_root(
+            &AdmissionGuard::none(),
+            &who("root"),
+            id("plain"),
+            who("branch"),
+            None,
+            offered(),
+        )
         .expect("plain grant");
     assert_eq!(
         consume_own(&fixture, &[plain], true),
@@ -661,18 +718,26 @@ impl GrantOwnerStore for Scripted {
     fn load(&self) -> Result<Option<DurableGrantOwner>, GrantStoreError> {
         self.inner.load()
     }
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
-        self.inner.create(identity)
+    fn create(
+        &self,
+        guard: &AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
+        self.inner.create(guard, identity)
     }
     fn release(&self) {
         self.inner.release();
     }
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        guard: &AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
         match self.next.lock().expect("script").take() {
-            None => self.inner.append(change),
+            None => self.inner.append(guard, change),
             Some(error) => {
                 if *self.land_before_failing.lock().expect("script") {
-                    self.inner.append(change)?;
+                    self.inner.append(guard, change)?;
                 }
                 Err(error)
             }
@@ -763,6 +828,7 @@ fn a_0910_reader_reads_plain_records_and_refuses_approval_records() {
     fixture
         .authority
         .issue_child(
+            &AdmissionGuard::none(),
             &who("owner-agent"),
             &plain,
             id("plain-child"),
@@ -772,7 +838,12 @@ fn a_0910_reader_reads_plain_records_and_refuses_approval_records() {
         .expect("plain child");
     fixture
         .authority
-        .revoke(&who("root"), &plain, &mut NoControllerCustody)
+        .revoke(
+            &AdmissionGuard::none(),
+            &who("root"),
+            &plain,
+            &mut NoControllerCustody,
+        )
         .expect("revoked");
     let parent = fixture.ruled_parent(rule(GrantDeviceTrust::Refused));
     let lineage = approved_child(&fixture, &parent);
@@ -890,5 +961,189 @@ fn a_spent_use_survives_a_restart_through_the_journal() {
     assert_eq!(
         consume_own(&restored, &lineage, true),
         Err(ConsumeUseRefusal::Denied)
+    );
+}
+
+/// A realm's grant log in a fresh directory, and its admission fence: the
+/// store over it appends only under a guard that holds the fence.
+struct FencedLog {
+    _directory: tempfile::TempDir,
+    fence: AdmissionFence,
+    path: std::path::PathBuf,
+}
+
+impl FencedLog {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let realm = meerkat_core::connection::RealmId::parse("fenced").expect("realm id");
+        let fence = AdmissionFence::realm(directory.path(), &realm).expect("fence");
+        let path = fence
+            .directory()
+            .join("authorization")
+            .join("grant-owner.jsonl");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        Self {
+            _directory: directory,
+            fence,
+            path,
+        }
+    }
+
+    fn store(&self) -> Arc<dyn GrantOwnerStore> {
+        Arc::new(FileGrantOwnerStore::new(
+            &self.path,
+            GrantLogFence::Realm(self.fence.clone()),
+        ))
+    }
+
+    /// The log's fence, taken now without waiting.
+    fn guard(&self) -> Arc<AdmissionGuard> {
+        AdmissionGuard::try_acquire(vec![self.fence.clone()]).expect("the log's fence is free")
+    }
+
+    /// An admission's hold of the log's fence.
+    fn hold(&self) -> meerkat_core::AdmissionHold {
+        meerkat_core::AdmissionHold::try_acquire(vec![self.fence.clone()])
+            .expect("an admission holds the log's fence")
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.path).expect("the grant log")
+    }
+}
+
+/// A root under a child rule is appended only under the grant log's
+/// admission fence: while an admission holds the fence, a caller that may
+/// not wait is refused at once, and a guard that does not hold the fence is
+/// refused with nothing appended. Once the hold ends, the root is issued
+/// under the fence and journaled.
+#[test]
+fn a_held_grant_log_fence_refuses_a_ruled_root_with_nothing_appended() {
+    let log = FencedLog::new();
+    let fixture = Fixture::fenced(&log);
+    let written = log.bytes();
+
+    let mut hold = log.hold();
+    assert_eq!(
+        AdmissionGuard::try_acquire(fixture.authority.admission_fences()).err(),
+        Some(meerkat_core::AdmissionRefusal::InProgress),
+        "a caller that may not wait is refused at once"
+    );
+    assert_eq!(
+        fixture.try_ruled_parent(&AdmissionGuard::none(), rule(GrantDeviceTrust::Refused)),
+        Err(GrantRefusal::AdmissionFence),
+        "a guard that does not hold the fence is refused"
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    assert_eq!(
+        fixture.authority.issued_reference(&id("owner-delegation")),
+        Ok(None),
+        "nothing was issued"
+    );
+
+    hold.release();
+    let guard = AdmissionGuard::try_acquire(fixture.authority.admission_fences())
+        .expect("the fence is free once the hold ends");
+    let issued = fixture.try_ruled_parent(&guard, rule(GrantDeviceTrust::Refused));
+    assert!(issued.is_ok(), "issued under the fence: {issued:?}");
+    assert!(log.bytes().len() > written.len(), "and journaled");
+    if let Ok(root) = issued {
+        assert!(
+            fixture.record(&root).child_approval.is_some(),
+            "the root carries its child rule"
+        );
+    }
+}
+
+/// With the grant log's admission fence free, every approval-carried append
+/// is made under a guard that holds it: a root and a child under a child
+/// rule, the approval-carried child, and the spend of its use. A guard that
+/// does not hold the fence is refused each of them first, with nothing
+/// appended and the use unspent, and the journal restores exactly the
+/// fenced appends.
+#[test]
+fn approval_carried_appends_are_made_under_the_free_grant_log_fence() {
+    let log = FencedLog::new();
+    let fixture = Fixture::fenced(&log);
+    let guard = log.guard();
+    let unfenced = AdmissionGuard::none();
+
+    // A root under a child rule.
+    assert_eq!(
+        fixture.try_ruled_parent(&unfenced, rule(GrantDeviceTrust::Refused)),
+        Err(GrantRefusal::AdmissionFence)
+    );
+    let parent = fixture
+        .try_ruled_parent(&guard, rule(GrantDeviceTrust::Refused))
+        .expect("the ruled root, under the fence");
+    // A child under a rule of its own, of a plain parent.
+    let plain = fixture
+        .authority
+        .issue_root(
+            &guard,
+            &who("root"),
+            id("plain-delegation"),
+            who("owner-agent"),
+            None,
+            delegation(1),
+        )
+        .expect("the plain parent, under the fence");
+    let ruled_child = |guard: &AdmissionGuard| {
+        fixture.authority.issue_child_with_child_rule(
+            guard,
+            &who("owner-agent"),
+            &plain,
+            id("ruled-child"),
+            who("sub-agent"),
+            delegation(0),
+            rule(GrantDeviceTrust::Refused),
+        )
+    };
+    assert_eq!(ruled_child(&unfenced), Err(GrantRefusal::AdmissionFence));
+    ruled_child(&guard).expect("the ruled child, under the fence");
+    // The approval-carried child.
+    let approval = fixture.approval(&parent, "decision-1");
+    let written = log.bytes();
+    assert_eq!(
+        fixture.issue_under(&unfenced, &parent, "approval-child", approval.clone()),
+        Err(ApprovalChildRefusal::Unavailable)
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    let child = fixture
+        .issue_under(&guard, &parent, "approval-child", approval)
+        .expect("the approval-carried child, under the fence");
+    let lineage = vec![parent, child];
+    // The spend of its use.
+    let written = log.bytes();
+    assert_eq!(
+        consume_own_under(&fixture, &unfenced, &lineage, true),
+        Err(ConsumeUseRefusal::Unavailable)
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    resolve_own(&fixture, &lineage, None).expect("the refused spend spent nothing");
+    consume_own_under(&fixture, &guard, &lineage, true).expect("spent under the fence");
+    assert!(resolve_own(&fixture, &lineage, None).is_err());
+    drop(fixture);
+    drop(guard);
+
+    // The journal holds exactly the fenced appends.
+    let restored = Fixture::restored(log.store());
+    let state = restored
+        .authority
+        .owner
+        .lock()
+        .expect("owner")
+        .state()
+        .clone();
+    assert_eq!(state.records.len(), 4, "two roots and two children");
+    assert_eq!(state.spent.get(&lineage[1].grant_id), Some(&1));
+    assert_eq!(state.consumed, 1);
+    assert!(state.carried_decisions.contains(&decision("decision-1")));
+    assert!(
+        restored
+            .authority
+            .issued_reference(&id("ruled-child"))
+            .expect("the restored owner answers")
+            .is_some()
     );
 }

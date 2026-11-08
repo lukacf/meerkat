@@ -515,13 +515,24 @@ impl LocalGrantAuthority {
         represented_subject: Option<PrincipalRef>,
         restrictions: ExecutionRestrictions,
     ) -> Result<GrantLineageRef, GrantRefusal> {
-        self.issue_root_carrying(caller, id, grantee, represented_subject, restrictions, None)
+        self.issue_root_carrying(
+            guard,
+            caller,
+            id,
+            grantee,
+            represented_subject,
+            restrictions,
+            None,
+        )
     }
 
     /// [`issue_root`](Self::issue_root) with an optional child rule: every
     /// child of the root then carries a person's decision for its approver id.
+    /// Its append takes `guard` as [`issue_root`](Self::issue_root)'s does.
+    #[allow(clippy::too_many_arguments)]
     fn issue_root_carrying(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         id: EvidenceId,
         grantee: PrincipalRef,
@@ -587,7 +598,7 @@ impl LocalGrantAuthority {
         grantee: PrincipalRef,
         requested: ExecutionRestrictions,
     ) -> Result<GrantLineageRef, GrantRefusal> {
-        self.issue_child_carrying(caller, parent, id, grantee, requested, None, None)
+        self.issue_child_carrying(guard, caller, parent, id, grantee, requested, None, None)
     }
 
     /// [`issue_child`](Self::issue_child) with an optional child rule of its
@@ -595,10 +606,12 @@ impl LocalGrantAuthority {
     /// decides both: a child of a grant under a rule must carry a decision
     /// that meets it, and an approval-carried child needs such a parent,
     /// terms equal to the approved request's, depth 0, a window, at least
-    /// one use and a decision no other grant carries.
+    /// one use and a decision no other grant carries. Its append takes
+    /// `guard` as [`issue_child`](Self::issue_child)'s does.
     #[allow(clippy::too_many_arguments)]
     fn issue_child_carrying(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         parent: &GrantLineageRef,
         id: EvidenceId,

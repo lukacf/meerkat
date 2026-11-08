@@ -951,20 +951,36 @@ them.
   `admission_fence` and check `AdmissionGuard::covers` in its raw writes: the
   default, `None`, declares a store with no document, whose writes the
   runtime fences by its generation sidecar alone.
-- `meerkat-authorization`: grant log writes are fenced by the realm
-  admission fences. `GrantOwnerStore::create` and `append` take the
-  operation's `&AdmissionGuard`, and the trait gains the provided
+- `meerkat-authorization`, `meerkat-runtime`: grant log writes are fenced
+  by the realm admission fences. `GrantOwnerStore::create` and `append` take
+  the operation's `&AdmissionGuard`, and the trait gains the provided
   `admission_fence`. `FileGrantOwnerStore::new` takes the log's
   `GrantLogFence`: `Realm(fence)` for a realm's own grant log, whose
   `create` and `append` refuse a guard that does not hold that fence before
   they write, or `NotAdmissionRead` for a log no admission reads, which
   accepts any guard. `LocalGrantAuthority::new_durable`, `issue_root`,
   `issue_child`, `issue_or_recover_child_under_exclusion`, `revoke` and
-  `revoke_expecting` take the guard as their first argument. `GrantRefusal`,
-  `GrantStoreError` and `GrantDurabilityError` gain `AdmissionFence`:
-  refused before anything was written, never uncertain (a revocation reports
-  it as refused). Behaviour: `FileGrantOwnerStore::load` never writes; a
-  torn tail stays until the first `append` truncates it under its guard.
+  `revoke_expecting` take the guard as their first argument, and so do the
+  approval-carried grants' `issue_root_with_child_rule`,
+  `issue_child_with_child_rule`, `issue_approval_child`, `consume_use` and
+  `spend_use_at_entry`, which answer a guard that does not hold the fence
+  `ApprovalChildRefusal::Unavailable` and `ConsumeUseRefusal::Unavailable`,
+  with nothing issued or spent. `GrantRefusal`, `GrantStoreError` and
+  `GrantDurabilityError` gain `AdmissionFence`: refused before anything was
+  written, never uncertain (a revocation reports it as refused). Behaviour:
+  `FileGrantOwnerStore::load` never writes; a torn tail stays until the
+  first `append` truncates it under its guard. An operation's entry that
+  spends a use of an approval-carried grant takes the grant log's fence
+  without waiting, before anything is decided: while an admission or another
+  fenced write holds it, the entry refuses to rebuild (`ReprepareRequired`)
+  with nothing spent. The `grant.child` decision executor takes the fence
+  without waiting before it issues the approval branch's controller grant
+  and the approval-carried grant, and while it is held releases the decision
+  with neither issued, to be executed again at a later pass;
+  `MeerkatMachine`'s `ApprovalControllerCustody::revoke_controller` takes it
+  without waiting before its own custody and refuses `AdmissionFence` while
+  it is held, so a retired branch's cleanup revokes the controller grant at
+  a later pass.
 - `meerkat`: every stock grant command takes the realm's admission fence
   first, before its custody, waiting up to 5 s for a holder:
   `grant_stock_agent`, `grant_stock_agent_for_reviewed_installation`,

@@ -58,6 +58,14 @@ fn who(name: &str) -> PrincipalRef {
 fn id(name: &str) -> EvidenceId {
     EvidenceId::new(name).expect("id")
 }
+/// The fixture grant owner's configured root, namespace and generation.
+fn fixture_configuration() -> LocalGrantConfiguration {
+    LocalGrantConfiguration {
+        root: who("root"),
+        namespace: id("grants"),
+        generation: 1,
+    }
+}
 fn domain(name: &str) -> ResourceDomain {
     ResourceDomain {
         authority: who("resource"),
@@ -298,23 +306,54 @@ impl Fixture {
     fn new_with(currentness: Option<Arc<dyn crate::grants::ApprovalUseCurrentness>>) -> Self {
         let publication = LocalAuthorizationPublication::new();
         let clock = Arc::new(Clock(AtomicU64::new(100), AtomicBool::new(false)));
-        let owner = LocalGrantAuthority::new(
-            LocalGrantConfiguration {
-                root: who("root"),
-                namespace: id("grants"),
-                generation: 1,
-            },
+        let owner =
+            LocalGrantAuthority::new(fixture_configuration(), publication.clone(), clock.clone())
+                .expect("grant owner");
+        Self::issued(
+            owner,
+            &meerkat_core::AdmissionGuard::none(),
+            currentness,
+            publication,
+            clock,
+        )
+    }
+
+    /// [`Self::new_with`] over a durable grant owner whose journal is
+    /// `store`, created and issued under `guard`, which holds the journal's
+    /// fence when it has one.
+    fn durable_with(
+        currentness: Option<Arc<dyn crate::grants::ApprovalUseCurrentness>>,
+        store: Arc<dyn crate::grants::GrantOwnerStore>,
+        guard: &meerkat_core::AdmissionGuard,
+    ) -> Self {
+        let publication = LocalAuthorizationPublication::new();
+        let clock = Arc::new(Clock(AtomicU64::new(100), AtomicBool::new(false)));
+        let owner = LocalGrantAuthority::new_durable(
+            guard,
+            fixture_configuration(),
+            store,
             publication.clone(),
             clock.clone(),
         )
-        .expect("grant owner");
+        .expect("durable grant owner");
+        Self::issued(owner, guard, currentness, publication, clock)
+    }
+
+    /// The fixture's grants, issued by `owner` under `guard`.
+    fn issued(
+        owner: LocalGrantAuthority,
+        guard: &meerkat_core::AdmissionGuard,
+        currentness: Option<Arc<dyn crate::grants::ApprovalUseCurrentness>>,
+        publication: LocalAuthorizationPublication,
+        clock: Arc<Clock>,
+    ) -> Self {
         let grants = Arc::new(match currentness {
             Some(currentness) => owner.with_approval_use_currentness(currentness),
             None => owner,
         });
         let root = grants
             .issue_root(
-                &meerkat_core::AdmissionGuard::none(),
+                guard,
                 &who("root"),
                 id("root-grant"),
                 who("first"),
@@ -324,7 +363,7 @@ impl Fixture {
             .expect("root");
         let child = grants
             .issue_child(
-                &meerkat_core::AdmissionGuard::none(),
+                guard,
                 &who("first"),
                 &root,
                 id("child"),
@@ -334,7 +373,7 @@ impl Fixture {
             .expect("child");
         let leaf = grants
             .issue_child(
-                &meerkat_core::AdmissionGuard::none(),
+                guard,
                 &who("second"),
                 &child,
                 id("leaf"),
@@ -344,7 +383,7 @@ impl Fixture {
             .expect("leaf");
         let controller = grants
             .issue_root(
-                &meerkat_core::AdmissionGuard::none(),
+                guard,
                 &who("root"),
                 id("controller"),
                 who("executor"),

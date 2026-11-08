@@ -1028,6 +1028,7 @@ impl Grants {
         delegable.delegation_depth = DelegationDepth::remaining(1);
         let controller = owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &grant_root(),
                 id("owner-agent-controller"),
                 owner_agent(),
@@ -1037,6 +1038,7 @@ impl Grants {
             .expect("the owner's agent's controller grant");
         let offering = owner
             .issue_root_with_child_rule(
+                &meerkat_core::AdmissionGuard::none(),
                 &grant_root(),
                 id("owner-delegation"),
                 owner_agent(),
@@ -1050,6 +1052,7 @@ impl Grants {
             .expect("the owner's delegation, under its child rule");
         let holds = owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &grant_root(),
                 id("owner-holds"),
                 owner_agent(),

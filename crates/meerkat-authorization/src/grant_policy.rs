@@ -275,9 +275,28 @@ impl GrantUseSpend {
     /// denied with nothing spent; an owner that cannot say now is
     /// unavailable with nothing spent; and a spend whose acknowledgement is
     /// unknown counts as spent and is unavailable.
+    ///
+    /// The spend is appended under the grant log's admission fence, which
+    /// the entry takes without waiting, before anything is decided: while
+    /// an admission (or another fenced write) holds it, the entry refuses to
+    /// rebuild (`ReprepareRequired`) with nothing spent, as a work owner's
+    /// step refuses while another holder holds what it needs, and an entry
+    /// made again once the hold ends spends the use. A fence that cannot be
+    /// taken is unavailable, with nothing spent.
     pub(crate) fn spend(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        let guard = match meerkat_core::AdmissionGuard::try_acquire(self.grants.admission_fences())
+        {
+            Ok(guard) => guard,
+            Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+            }
+            Err(meerkat_core::AdmissionRefusal::Unavailable(_)) => {
+                return Err(meerkat_core::OperationAuthorizationError::Unavailable);
+            }
+        };
         self.grants
             .spend_use_at_entry(
+                &guard,
                 &self.lineage,
                 &self.executor,
                 self.represented_subject.as_ref(),

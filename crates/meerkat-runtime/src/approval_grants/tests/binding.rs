@@ -119,7 +119,12 @@ async fn the_executor_resolves_the_parent_lineage_before_it_opens_a_branch() {
     fixture.decide(&held, true);
     fixture
         .owner
-        .revoke(&agent("grant-root"), &fixture.offering[0], &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &agent("grant-root"),
+            &fixture.offering[0],
+            &mut AnyCustody,
+        )
         .expect("the offering grant is revoked after the approval");
     let pass = fixture.executor_loop().pass().await;
     assert!(
@@ -157,6 +162,7 @@ async fn the_executor_refuses_a_branch_that_acts_for_another_subject_since_the_h
     let controller = fixture
         .owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &agent("grant-root"),
             id("data-agent-other-controller"),
             data_agent(),
@@ -221,7 +227,12 @@ fn access_offer_refuses_a_parent_that_is_no_longer_current() {
     let fixture = Fixture::new();
     fixture
         .owner
-        .revoke(&agent("grant-root"), &fixture.offering[0], &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &agent("grant-root"),
+            &fixture.offering[0],
+            &mut AnyCustody,
+        )
         .expect("the offering grant is revoked");
     assert_eq!(refusal(fixture.offer(true)), no_longer_current);
     assert_eq!(fixture.decision_count(), 0, "nothing was held");
@@ -459,6 +470,7 @@ async fn the_use_time_currentness_answers_for_the_person_who_decided() {
     let requester = requester();
     let spend = || {
         fixture.owner.spend_use_at_entry(
+            &meerkat_core::AdmissionGuard::none(),
             &lineage,
             &branch,
             None,
@@ -608,6 +620,7 @@ fn access_offer_answers_an_unavailable_grant_owner_retryably_at_plan_time() {
         fixture
             .owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &agent("grant-root"),
                 id("unrelated-grant"),
                 owner_agent(),

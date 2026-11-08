@@ -99,6 +99,41 @@ const PRIMITIVES: &[(&str, &str, usize)] = &[
     ),
     (
         "crates/meerkat-authorization/src/grants/mod.rs",
+        "issue_root_carrying",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/mod.rs",
+        "issue_child_carrying",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/approval.rs",
+        "issue_root_with_child_rule",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/approval.rs",
+        "issue_child_with_child_rule",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/approval.rs",
+        "issue_approval_child",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/approval.rs",
+        "consume_use",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/approval.rs",
+        "spend_use_at_entry",
+        1,
+    ),
+    (
+        "crates/meerkat-authorization/src/grants/mod.rs",
         "issue_or_recover_child_under_exclusion",
         1,
     ),
@@ -213,6 +248,30 @@ const ACQUISITION_SITES: &[(&str, &str, &str, usize)] = &[
     (
         "crates/meerkat-authorization/src/work.rs",
         "issue_child_if_current_within",
+        "AdmissionGuard::try_acquire",
+        1,
+    ),
+    // The spend of an approval-carried grant's use at an operation's entry,
+    // which may not wait: without waiting.
+    (
+        "crates/meerkat-authorization/src/grant_policy.rs",
+        "spend",
+        "AdmissionGuard::try_acquire",
+        1,
+    ),
+    // A `grant.child` decision's execution: the approval branch's controller
+    // grant and the approval-carried grant under one hold, without waiting.
+    (
+        "crates/meerkat-runtime/src/approval_grants/executor.rs",
+        "execute",
+        "AdmissionGuard::try_acquire",
+        1,
+    ),
+    // The revocation of a retired approval branch's controller grant, before
+    // the runtime's native custody: without waiting.
+    (
+        "crates/meerkat-runtime/src/approval_grants/seams.rs",
+        "revoke_controller",
         "AdmissionGuard::try_acquire",
         1,
     ),

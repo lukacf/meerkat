@@ -817,6 +817,7 @@ impl CustodyEnd {
                 store.fail_next(GrantStoreError::Uncertain, false);
                 assert_eq!(
                     fixture.authority.issue_root(
+                        &AdmissionGuard::none(),
                         &who("root"),
                         id("unrelated"),
                         who("branch"),
@@ -950,9 +951,14 @@ fn an_unknown_spend_outcome_is_uncertain_and_ends_the_owners_custody() {
             Err(GrantRefusal::Unavailable)
         );
         assert_eq!(
-            fixture
-                .authority
-                .issue_root(&who("root"), id("after"), who("branch"), None, offered()),
+            fixture.authority.issue_root(
+                &AdmissionGuard::none(),
+                &who("root"),
+                id("after"),
+                who("branch"),
+                None,
+                offered(),
+            ),
             Err(GrantRefusal::Unavailable)
         );
         fixture
@@ -1389,4 +1395,59 @@ fn approval_carried_appends_are_made_under_the_free_grant_log_fence() {
             .expect("the restored owner answers")
             .is_some()
     );
+}
+
+/// A spend on a fenced grant log needs both the owner's custody and the
+/// log's admission fence. In custody, a guard that does not hold the fence
+/// is refused with nothing appended, and the owner keeps its custody. Once
+/// the custody ended at its host's close, a guard that holds the fence is
+/// refused as unavailable with nothing appended, and the owner names no
+/// fence; a successor restored from the log spends the use once under the
+/// fence.
+#[test]
+fn a_fenced_spend_needs_both_the_custody_and_the_fence() {
+    let log = FencedLog::new();
+    let fixture = Fixture::fenced(&log);
+    let guard = log.guard();
+    let parent = fixture
+        .try_ruled_parent(&guard, rule(GrantDeviceTrust::Refused))
+        .expect("the ruled root, under the fence");
+    let approval = fixture.approval(&parent, "decision-1");
+    let child = fixture
+        .issue_under(&guard, &parent, "approval-child", approval)
+        .expect("the approval child, under the fence");
+    let lineage = vec![parent, child];
+    let written = log.bytes();
+
+    assert_eq!(
+        consume_own_under(&fixture, &AdmissionGuard::none(), &lineage, true),
+        Err(ConsumeUseRefusal::Unavailable),
+        "in custody, a guard without the fence is refused"
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    assert_eq!(
+        owner_state(&fixture).lifecycle_phase,
+        dsl::GrantAuthorityPhase::Active,
+        "a fence refusal keeps the custody"
+    );
+
+    fixture
+        .authority
+        .release_custody()
+        .expect("the host's close releases custody");
+    assert_eq!(
+        consume_own_under(&fixture, &guard, &lineage, true),
+        Err(ConsumeUseRefusal::Unavailable),
+        "outside custody, the fence's own guard is refused"
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    assert!(
+        fixture.authority.admission_fences().is_empty(),
+        "a released owner writes nothing, so it names no fence"
+    );
+    drop(fixture);
+
+    let successor = Fixture::restored(log.store());
+    consume_own_under(&successor, &guard, &lineage, true).expect("the use was never spent");
+    assert!(log.bytes().len() > written.len(), "the spend is journaled");
 }

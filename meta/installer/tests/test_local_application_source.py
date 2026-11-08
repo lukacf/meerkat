@@ -283,6 +283,19 @@ def test_current_arbitrary_guide_reaches_original_factory_and_protected_workspac
     assert contents(f.output) == before
 
 
+def test_new_local_applications_build_with_named_console_accounts(initial):
+    # Forge builds new applications with named accounts. The installation's
+    # own account keeps its operator and its two private fields, so the
+    # operator's sign-in is unchanged and now signs in a person.
+    f = initial
+    host = create(f)()
+    protected = dict(host._protected)
+    assert json.loads(protected["application/console.json"].read()) == {"authentication": "local-accounts"}
+    fields = json.loads(protected["application/configuration.json"].read())["fields"]
+    assert [row["key"] for row in fields] == ["CONSOLE_USER_ID", "CONSOLE_LOGIN_PASSWORD"]
+    assert host.console_operator_declaration()["id"] == "forge-" + f.saved["id"]
+
+
 @pytest.mark.parametrize("change", ["version", "missing-guide", "unsupported-helper"])
 def test_unadmitted_guide_or_setup_choice_refuses_before_output(initial, monkeypatch, change):
     f = initial

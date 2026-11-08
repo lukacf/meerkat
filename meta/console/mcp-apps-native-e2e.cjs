@@ -361,7 +361,13 @@ async function main() {
     assert.equal(locator.toolCallId, "fixture-apps-native-display");
     const call = requests.find(request => request.path === "/console/mcp-apps/call-tool" && request.status === 200);
     assert(call, "button action must use native admission");
-    assert.deepEqual(JSON.parse(call.body), { ...locator, name: "refresh", arguments: longPolling
+    // The console names the caller it acts as on every App action, and the
+    // native admission refuses another caller's, so a 200 proves it is this
+    // console's own.
+    const { expectedCallerScope, ...callBody } = JSON.parse(call.body);
+    assert.match(expectedCallerScope ?? "", /^console-caller:v1:[0-9a-f]{64}$/,
+      "an App action names the caller the console acts as");
+    assert.deepEqual(callBody, { ...locator, name: "refresh", arguments: longPolling
       ? { viewId: 'display', requestId: 'display-refresh' } : {} });
     await page.reload({ waitUntil: "domcontentloaded" });
     for (const view of apps) {

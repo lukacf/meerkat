@@ -24,7 +24,7 @@ import {
 import { groupCopyText } from "../../../packages/console-components/src/conversation/conversation-message-group";
 import { buildSidebarViewState, buildWorkGraphOperatorResultFrame, mapFramesToTimelineEntries } from "./adapters";
 import { CONSOLE_COMMAND_NAMES } from "./headless";
-import { resolveWorkGraphGoalItemRevision, type WorkGraphCommandRunner } from "./workgraph-actions";
+import { workGraphConflictRefreshRequest } from "./workgraph-actions";
 import { Sidebar } from "../panels/Sidebar";
 import { MemoryLiveStrip, MemoryPanel } from "../panels/MemoryPanel";
 import { WorkGraphPanel, type WorkGraphPanelData } from "../panels/WorkGraphPanel";
@@ -886,22 +886,15 @@ test("WorkGraphCard goal actions on an unfolded goal item carry NO revision so t
       { action: "request-close", input: { bindingId: "b-unfolded", revision: undefined } },
     ], "neither the root's revision 4 nor the binding's machine revision 7 leaks into the goal payload");
 
-    // The revision-less payload is exactly what drives the host's live
-    // resolution (revisionOr → resolveWorkGraphGoalItemRevision): the same
-    // dispatch the app performs resolves the goal item via goal/status.
-    const queries: Array<{ command: string; params: Record<string, unknown> }> = [];
-    const runner: WorkGraphCommandRunner = async (command, params) => {
-      queries.push({ command, params });
-      return { item: { id: "goal-unfolded", revision: 12 } };
-    };
+    // The revision-less payload is what makes the host hold the action: it
+    // sends no confirm, and plans the re-read of the binding's goal through
+    // goal/status, so the card folds a revision the viewer then sees.
     const payload = calls[0].input;
-    const expectedRevision = payload.revision !== undefined
-      ? payload.revision
-      : await resolveWorkGraphGoalItemRevision(runner, payload.bindingId);
-    assert.equal(expectedRevision, 12, "the CAS token comes from the live read, never another item");
-    assert.deepEqual(queries, [
-      { command: CONSOLE_COMMAND_NAMES.workgraphGoalStatus, params: { binding_id: "b-unfolded" } },
-    ]);
+    assert.equal(payload.revision, undefined);
+    assert.deepEqual(workGraphConflictRefreshRequest({ binding_id: payload.bindingId }), {
+      command: CONSOLE_COMMAND_NAMES.workgraphGoalStatus,
+      params: { binding_id: "b-unfolded" },
+    });
   } finally {
     root.unmount();
     globalThis.window = previousWindow;

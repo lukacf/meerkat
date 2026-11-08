@@ -171,6 +171,33 @@ fn refusal_or_internal_error(
     }
 }
 
+/// The error a failed WholeBlob checkpoint write (a round commit or a closing
+/// save) answers. A batch the host store left unsettled when its writer's
+/// fence window closed ([`RuntimeStoreError::UnsettledAtFenceWindow`]) may or
+/// may not have landed, so the live actor and the store can no longer be
+/// proved to be one image: the write answers the teardown class, which the
+/// checkpoint returns at once, and the actor is reloaded from what the store
+/// holds (what a reopen of the realm loads). Such a write is never taken for
+/// one the stopped writer refused before it changed anything: it is not
+/// waited on and not written again. Any other failure keeps its internal
+/// error.
+fn whole_blob_checkpoint_write_error(
+    session_id: &SessionId,
+    error: RuntimeStoreError,
+) -> AgentError {
+    match error {
+        error @ RuntimeStoreError::UnsettledAtFenceWindow { .. } => {
+            AgentError::session_durable_projection_authority_unknown(format!(
+                "session {session_id}: its checkpoint may or may not have landed ({error}); \
+                 live actor reload required"
+            ))
+        }
+        other => AgentError::InternalError(format!(
+            "failed to write WholeBlob provisional checkpoint for session {session_id}: {other}"
+        )),
+    }
+}
+
 /// Map a failed read of a HeadCanonical session's boundary authority: a
 /// store refusal until the realm is reopened keeps its typed store error
 /// ([`refusal_or_internal_error`]).
@@ -2651,12 +2678,7 @@ impl StoreCheckpointer {
             .runtime_store
             .write_prepared_whole_blob_provisional_tail(&runtime_id, prepared)
             .await
-            .map_err(|error| {
-                AgentError::InternalError(format!(
-                    "failed to write WholeBlob provisional checkpoint for session {}: {error}",
-                    session.id()
-                ))
-            })?;
+            .map_err(|error| whole_blob_checkpoint_write_error(session.id(), error))?;
         if stored_authority != expected_authority {
             return Err(AgentError::InternalError(format!(
                 "WholeBlob provisional checkpoint store acknowledged a different candidate for session {}",
@@ -3438,15 +3460,17 @@ impl meerkat_core::SessionCheckpointer for StoreCheckpointer {
     /// bounded, for the writer's re-acquire and is written again, once, when
     /// that restored the writer. When the writer stays stopped through the
     /// whole wait, a round commit of the runtime's run on this actor
-    /// suspends the run there, as at a dispatch: nothing of the round was
-    /// written, so the run resumes from its last round commit and does the
-    /// round again, as after a crash. A closing save comes after the run's
-    /// terminal (its cursor is gone by then), so a closing save still refused
-    /// after its one wait returns its refusal, and the runtime ends the turn
-    /// with the teardown class (its terminal is already recorded). A round
-    /// commit of a run the runtime did not dispatch here also returns its
-    /// refusal after the wait, and a refusal of the teardown class is
-    /// returned at once.
+    /// suspends the run there, as at a dispatch: the run resumes from its last
+    /// committed round and does the round again, as after a crash. A closing
+    /// save comes after the run's terminal (its cursor is gone by then), so a
+    /// closing save still refused after its one wait returns its refusal, and
+    /// the runtime ends the turn with the teardown class (its terminal is
+    /// already recorded). A round commit of a run the runtime did not dispatch
+    /// here also returns its refusal after the wait, and a refusal of the
+    /// teardown class is returned at once: among them a write whose batch the
+    /// host store left unsettled when the writer's fence window closed, which
+    /// may or may not have landed, so it is neither waited on nor written
+    /// again.
     async fn checkpoint_run(
         &self,
         session: &mut Session,
@@ -3797,11 +3821,12 @@ impl StoreCheckpointer {
         ))
     }
 
-    /// The retryable refusal a direct turn answers when its round commit was
-    /// refused (`error`) while the store's writer was stopped, the writer
+    /// The retryable refusal a direct turn answers when its round commit
+    /// failed (`error`) while the store's writer was stopped, the writer
     /// stayed stopped through the commit's whole wait with no other writer
-    /// found (a store fence gap), and its run was suspended there: the round
-    /// was not written, and nothing proves another owner.
+    /// found (a store fence gap), and its run was suspended there: nothing
+    /// proves another owner. It says the commit failed, not that nothing was
+    /// written: a commit whose retry budget ran out may still have landed.
     fn commit_fence_gap_refusal(
         &self,
         window: meerkat_core::host_store::SelfFenceWindow,
@@ -3810,7 +3835,7 @@ impl StoreCheckpointer {
         AgentError::StoreError(format!(
             "{}: this writer's self-fence window stayed closed through its round commit's wait \
              ({:?} since its last acquire or renew started, window {:?}, renew failed: {}) and no \
-             other writer was found; the round was not written ({error}), and the turn can be \
+             other writer was found; the round commit failed ({error}), and the turn can be \
              retried once the store's fence is back",
             self.session_label(),
             window.elapsed,
@@ -31887,6 +31912,342 @@ mod tests {
         meerkat_core::SessionCheckpointer::dispatch_fence_ready(&unfenced, None)
             .await
             .expect("a store without a lease allows a waiting dispatch");
+    }
+
+    /// A writer whose self-fence window closed (a renew failed) and whose
+    /// re-acquire, when a caller waits for it, resumes the writer at once.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct ClosedWindowFence {
+        dispatch_waits: AtomicUsize,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::host_store::SelfFence for ClosedWindowFence {
+        fn window(&self) -> meerkat_core::host_store::SelfFenceWindow {
+            meerkat_core::host_store::SelfFenceWindow {
+                elapsed: std::time::Duration::from_secs(3),
+                window: std::time::Duration::from_secs(2),
+                renew_failed: true,
+            }
+        }
+
+        async fn dispatch_window(&self) -> meerkat_core::host_store::SelfFenceWindow {
+            self.dispatch_waits.fetch_add(1, Ordering::SeqCst);
+            meerkat_core::host_store::SelfFenceWindow {
+                elapsed: std::time::Duration::ZERO,
+                window: std::time::Duration::from_secs(2),
+                renew_failed: false,
+            }
+        }
+    }
+
+    /// A runtime store over a host store whose round-commit write stopped
+    /// unsettled when its fence window closed (its batch may or may not have
+    /// landed), with that writer's [`ClosedWindowFence`]. Everything else
+    /// reaches the in-memory store.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct UnsettledRoundCommitStore {
+        inner: InMemoryRuntimeStore,
+        fence: Arc<ClosedWindowFence>,
+        tail_writes: AtomicUsize,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl RuntimeStore for UnsettledRoundCommitStore {
+        fn session_authority_ops(&self) -> &dyn meerkat_runtime::store::RuntimeSessionAuthorityOps {
+            self.inner.session_authority_ops()
+        }
+
+        fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
+            RuntimeSessionPersistenceProfile::WholeBlobV1
+        }
+
+        fn session_boundary_authority_read_cost(
+            &self,
+        ) -> meerkat_runtime::store::RuntimeSessionAuthorityReadCost {
+            self.inner.session_boundary_authority_read_cost()
+        }
+
+        fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
+            Some(Arc::clone(&self.fence) as Arc<dyn meerkat_core::host_store::SelfFence>)
+        }
+
+        async fn write_prepared_whole_blob_provisional_tail(
+            &self,
+            _runtime_id: &LogicalRuntimeId,
+            _prepared: PreparedWholeBlobProvisionalTail,
+        ) -> Result<
+            meerkat_runtime::store::WholeBlobProvisionalTailAuthority,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.tail_writes.fetch_add(1, Ordering::SeqCst);
+            Err(
+                meerkat_runtime::store::RuntimeStoreError::UnsettledAtFenceWindow {
+                    cause: "host store batch is unsettled: the self-fence window of fence token \
+                            1 closed (attempts sent: 5; last answer: unavailable: down)"
+                        .to_string(),
+                },
+            )
+        }
+
+        async fn commit_prepared_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            request: meerkat_runtime::PreparedRuntimeSessionCommit,
+        ) -> Result<
+            meerkat_runtime::store::PreparedRuntimeSessionCommitResult,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .commit_prepared_session_boundary(runtime_id, request)
+                .await
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SerializedSessionSnapshot,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn commit_prepared_whole_blob_rewrite_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            boundary: meerkat_runtime::store::PreparedWholeBlobRewriteStoreParts,
+        ) -> Result<WholeBlobStoreAuthority, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<SerializedSessionSnapshot>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<InputStatePersistenceRecord>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<meerkat_runtime::InputStateRow>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Arc<Vec<u8>>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn clear_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.clear_session_snapshot(runtime_id).await
+        }
+
+        async fn replace_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+            replacement: Vec<u8>,
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                .await
+        }
+
+        async fn clear_session_snapshot_if_current(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            expected_current: &[u8],
+        ) -> Result<bool, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .clear_session_snapshot_if_current(runtime_id, expected_current)
+                .await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &InputStatePersistenceRecord,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_machine_lifecycle_record(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_machine_lifecycle_record(runtime_id).await
+        }
+
+        async fn commit_machine_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[InputStatePersistenceRecord],
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+
+        async fn load_whole_blob_store_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<WholeBlobStoreAuthority>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner.load_whole_blob_store_authority(runtime_id).await
+        }
+
+        async fn load_committed_whole_blob_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<CommittedWholeBlobSnapshot>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner
+                .load_committed_whole_blob_snapshot(runtime_id)
+                .await
+        }
+
+        async fn list_runtimes_with_recovery_work(
+            &self,
+        ) -> Result<Vec<LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.list_runtimes_with_recovery_work().await
+        }
+    }
+
+    /// A round commit whose batch the host store left unsettled when its
+    /// fence window closed (`RuntimeStoreError::UnsettledAtFenceWindow`) may
+    /// or may not have landed. The checkpoint answers the teardown class at
+    /// once, so the live actor is reloaded from what the store holds after
+    /// the reopen: it does not wait for the writer's re-acquire and does not
+    /// write the round again, as it does for a write the stopped writer
+    /// refused before it changed anything. Before, it waited for the
+    /// re-acquire and wrote the round again. Unrun until the candidate's
+    /// validation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_round_commit_unsettled_at_the_fence_window_answers_the_teardown_class_at_once() {
+        let inner = InMemoryRuntimeStore::new();
+        let mut session = Session::new();
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let artifact = session
+            .to_persisted_artifact()
+            .expect("encode initial WholeBlob session");
+        inner
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: artifact.bytes_arc(),
+                },
+            )
+            .await
+            .expect("commit initial WholeBlob authority");
+        let authority = inner
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .expect("load initial WholeBlob authority")
+            .expect("initial WholeBlob authority should exist");
+        let store = Arc::new(UnsettledRoundCommitStore {
+            inner,
+            fence: Arc::new(ClosedWindowFence::default()),
+            tail_writes: AtomicUsize::new(0),
+        });
+        let checkpointer = StoreCheckpointer {
+            runtime_store: Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(Some(authority)),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            runtime_run: std::sync::Mutex::new(None),
+            service_turn: std::sync::Mutex::new(ServiceTurnSlot::Closed),
+            run_suspension: std::sync::OnceLock::new(),
+            rewrite_audit: None,
+        };
+        let run_id = RunId::new();
+        session.push(Message::User(UserMessage::text("a round's prompt")));
+        session
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                0,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            ))
+            .expect("the run's cursor");
+
+        let outcome = meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            None,
+        )
+        .await;
+        assert_eq!(
+            store.tail_writes.load(Ordering::SeqCst),
+            1,
+            "a round commit whose outcome is unknown is never written again: {outcome:?}"
+        );
+        assert_eq!(
+            store.fence.dispatch_waits.load(Ordering::SeqCst),
+            0,
+            "nor does it wait for the writer's re-acquire: {outcome:?}"
+        );
+        let error = outcome.expect_err("the round commit's outcome is unknown");
+        assert_teardown_required_projection_authority(error, "self-fence window");
     }
 
     struct WholeBlobAuthorityReadProbe {

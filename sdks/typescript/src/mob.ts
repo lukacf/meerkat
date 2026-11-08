@@ -181,9 +181,10 @@ export interface MobMemberSnapshot {
   /**
    * Set when this read did not observe the member's session: `outputPreview`
    * and `tokensUsed` are then missing, not an empty preview and a zero count.
-   * Absent when they are observations.
+   * Absent when they are observations. A reason this SDK does not know reads
+   * as `{ unknown: <value> }`.
    */
-  previewUnavailable?: WireMemberPreviewUnavailable;
+  previewUnavailable?: WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown;
   /**
    * Set when the member's host refused its restored registration: the hook
    * call that refused it. The member stays broken until an explicit repair.
@@ -203,6 +204,15 @@ export interface MobMemberSnapshot {
  * refused.
  */
 export interface MobMemberCustodyUnknown {
+  unknown: string;
+}
+
+/**
+ * A preview-unavailable reason this SDK does not know, as the server sent
+ * it: the vocabulary may grow, and an unknown reason is surfaced, not
+ * refused.
+ */
+export interface MobMemberPreviewUnavailableUnknown {
   unknown: string;
 }
 
@@ -231,7 +241,7 @@ export interface MobKickoffMemberSnapshot {
   isFinal: boolean;
   peerConnectivity?: MobPeerConnectivity;
   /** As on {@link MobMemberSnapshot.previewUnavailable}. */
-  previewUnavailable?: WireMemberPreviewUnavailable;
+  previewUnavailable?: WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown;
   /** As on {@link MobMemberSnapshot.registrationRefusal}. */
   registrationRefusal?: WireMemberRegistrationHookCall;
   /** As on {@link MobMemberSnapshot.custodyDeferred}. */

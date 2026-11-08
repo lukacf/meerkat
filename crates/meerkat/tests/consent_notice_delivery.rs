@@ -123,6 +123,7 @@ fn approved_owing_row(
             )
             .expect("approver"),
             assurance: ApprovalAssurance::PersonAuthenticated,
+            authentication_scope_digest: None,
         }),
         origin: Some(ApprovalConsentOrigin {
             retained_work: origin.clone(),

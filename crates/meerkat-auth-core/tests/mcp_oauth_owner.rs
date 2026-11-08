@@ -9501,6 +9501,363 @@ async fn profile_updates_are_refused_typed_and_write_nothing() {
         .unwrap();
 }
 
+/// The records a host's administration recorder received.
+#[derive(Default)]
+struct RecordedAdministrations(parking_lot::Mutex<Vec<meerkat_core::AdministrationRecord>>);
+
+impl meerkat_core::AdministrationRecorder for RecordedAdministrations {
+    fn record(&self, record: meerkat_core::AdministrationRecord) {
+        self.0.lock().push(record);
+    }
+}
+
+/// The administrator a host authenticated, in its own trust domain.
+fn fixture_administrator() -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "admin-7",
+        meerkat_core::TrustDomainId::new("example-idp").unwrap(),
+    )
+    .unwrap()
+}
+
+/// A host's entry check that admits its authenticated administrator,
+/// logged in at `login`, and states them on the admission with the host's
+/// recorder.
+struct StatingEntry {
+    recorder: Arc<RecordedAdministrations>,
+    login: &'static str,
+}
+
+impl meerkat_core::AdministrationEntry for StatingEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        let administrator = meerkat_core::AdministeringPrincipal::new(fixture_administrator())
+            .unwrap()
+            .with_authentication_scope(
+                &meerkat_core::approval::consent::HostAuthenticationScope::new(self.login),
+            );
+        Ok(
+            meerkat_core::EnteredAdministration::admitted().administered_by(
+                administrator,
+                Arc::clone(&self.recorder) as Arc<dyn meerkat_core::AdministrationRecorder>,
+            ),
+        )
+    }
+}
+
+/// Each profile update the host admitted with a stated administrator
+/// settles one typed record to the recorder on its admission: the
+/// administrator, the digest of their login, the slot's install, replace or
+/// removal, and its committed outcome. A refused update records nothing, and
+/// no record carries the client secret.
+#[tokio::test]
+async fn client_profile_admission_settles_to_the_host_recorder() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "fixed-recorded");
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let profile = |client: &str| {
+        McpOAuthClientProfile::new(
+            base.clone(),
+            client,
+            redirect.clone(),
+            method,
+            McpOAuthClientSecret::new(FIXED_CLIENT_SECRET),
+        )
+    };
+    let recorder = Arc::new(RecordedAdministrations::default());
+    let stating = |login: &'static str| {
+        Arc::new(StatingEntry {
+            recorder: Arc::clone(&recorder),
+            login,
+        }) as Arc<dyn meerkat_core::AdministrationEntry>
+    };
+
+    authority
+        .install_client_profile_entered(
+            &target,
+            profile("client-a"),
+            Some(&registered_base()),
+            stating("login-1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client_profile_refusal(
+            authority
+                .replace_client_profile_entered(
+                    &target,
+                    profile("client-b"),
+                    Some(&registered_base()),
+                    Arc::new(RefuseEntry)
+                )
+                .await
+        ),
+        McpOAuthClientProfileRefusal::NotAdmitted(
+            meerkat_core::AdministrationEntryRefusal::NotAdministrator
+        )
+    );
+    authority
+        .replace_client_profile_entered(
+            &target,
+            profile("client-b"),
+            Some(&registered_base()),
+            stating("login-2"),
+        )
+        .await
+        .unwrap();
+    authority
+        .remove_client_profile_entered(&target, stating("login-3"))
+        .await
+        .unwrap();
+
+    let records = std::mem::take(&mut *recorder.0.lock());
+    assert_eq!(
+        records.len(),
+        3,
+        "one record per admitted update, none for the refused one"
+    );
+    let scoped = target.scoped_to(authority.realm()).unwrap();
+    let (realm, server, slot) = (
+        scoped.realm().cloned(),
+        "fixed-recorded".to_owned(),
+        scoped
+            .auth_binding_ref()
+            .unwrap()
+            .binding
+            .as_str()
+            .to_owned(),
+    );
+    let expected = [
+        (
+            meerkat_core::AdministeredChange::McpOauthClientProfileInstall {
+                realm: realm.clone(),
+                server: server.clone(),
+                slot: slot.clone(),
+            },
+            "login-1",
+        ),
+        (
+            meerkat_core::AdministeredChange::McpOauthClientProfileReplace {
+                realm: realm.clone(),
+                server: server.clone(),
+                slot: slot.clone(),
+            },
+            "login-2",
+        ),
+        (
+            meerkat_core::AdministeredChange::McpOauthClientProfileRemove {
+                realm,
+                server,
+                slot,
+            },
+            "login-3",
+        ),
+    ];
+    for (record, (change, login)) in records.iter().zip(expected) {
+        assert_eq!(record.administrator, fixture_administrator());
+        assert_eq!(
+            record.authentication_scope_digest,
+            Some(meerkat_core::approval::consent::HostAuthenticationScope::new(login).digest())
+        );
+        assert_eq!(record.change, Some(change));
+        assert_eq!(
+            record.outcome,
+            meerkat_core::AdministrationOutcome::Committed
+        );
+    }
+    let rendered = serde_json::to_string(&records).unwrap();
+    assert!(
+        !rendered.contains(FIXED_CLIENT_SECRET),
+        "the client secret never reaches a record"
+    );
+}
+
+/// A host's entry check that reports when the update's owner entered it,
+/// then waits (blocking, as an entry check that reads its state at once
+/// does) until it is released, and admits the host's administrator as
+/// [`StatingEntry`] does.
+struct HeldStatingEntry {
+    recorder: Arc<RecordedAdministrations>,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl meerkat_core::AdministrationEntry for HeldStatingEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        let entered = self.entered.lock().take();
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        let release = self.release.lock().take();
+        if let Some(release) = release {
+            let _ = release.recv();
+        }
+        StatingEntry {
+            recorder: Arc::clone(&self.recorder),
+            login: "login-1",
+        }
+        .enter()
+    }
+}
+
+/// A caller that stops waiting while its profile update is at the update's
+/// entry does not lose the record: the credential mutation owner's own task
+/// admits the update, writes it, and hands the recorder exactly one record
+/// when it settles, committed. The entry check blocks the owner's task, so
+/// the runtime has more than one worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_profile_admission_settles_to_the_host_recorder_after_the_caller_stopped_waiting() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "fixed-abandoned");
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let recorder = Arc::new(RecordedAdministrations::default());
+    let (entered, on_entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let entry = Arc::new(HeldStatingEntry {
+        recorder: Arc::clone(&recorder),
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(Some(released)),
+    });
+    let caller = tokio::spawn({
+        let (authority, target) = (authority.clone(), target.clone());
+        let profile = McpOAuthClientProfile::new(
+            base.clone(),
+            "client-a",
+            redirect,
+            method,
+            McpOAuthClientSecret::new(FIXED_CLIENT_SECRET),
+        );
+        async move {
+            authority
+                .install_client_profile_entered(&target, profile, Some(&registered_base()), entry)
+                .await
+        }
+    });
+
+    // The owner's task is at the update's entry; the caller stops waiting.
+    on_entered.await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(
+        recorder.0.lock().is_empty(),
+        "nothing is recorded before the update settles"
+    );
+
+    // Released, the owner admits and writes the update, and the record
+    // arrives when it settles.
+    release.send(()).unwrap();
+    let records = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let records = std::mem::take(&mut *recorder.0.lock());
+            if !records.is_empty() {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the settled update is recorded");
+    assert_eq!(records.len(), 1, "one record for the update");
+    assert_eq!(records[0].administrator, fixture_administrator());
+    assert_eq!(
+        records[0].outcome,
+        meerkat_core::AdministrationOutcome::Committed
+    );
+    assert!(matches!(
+        records[0].change,
+        Some(meerkat_core::AdministeredChange::McpOauthClientProfileInstall { .. })
+    ));
+    assert_eq!(
+        installed_client_id(&authority, &target).await.as_deref(),
+        Some("client-a"),
+        "the owner wrote the update its caller stopped waiting for"
+    );
+    assert!(
+        recorder.0.lock().is_empty(),
+        "no other record arrives for the update"
+    );
+}
+
+/// A configured server URL can carry credentials in its userinfo or its
+/// query. No client-profile record carries them: the install, replace and
+/// removal of such a slot are each recorded without them.
+#[tokio::test]
+async fn client_profile_records_carry_no_credential_from_the_server_url() {
+    let method = McpOAuthClientAuthMethod::ClientSecretPost;
+    let (base, state) = spawn_fixed_client_fixture(method).await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = McpServerIdentity::from_server_config(
+        "fixed-canary",
+        "https://svc:CANARY_PW@mcp.example.com/mcp?tenant_key=CANARY_Q",
+    )
+    .with_expected_account("fixture-account-42")
+    .unwrap();
+    let redirect = authority
+        .registered_redirect_uri(&target, &registered_base())
+        .unwrap();
+    let profile = |client: &str| {
+        McpOAuthClientProfile::new(
+            base.clone(),
+            client,
+            redirect.clone(),
+            method,
+            McpOAuthClientSecret::new(FIXED_CLIENT_SECRET),
+        )
+    };
+    let recorder = Arc::new(RecordedAdministrations::default());
+    let stating = |login: &'static str| {
+        Arc::new(StatingEntry {
+            recorder: Arc::clone(&recorder),
+            login,
+        }) as Arc<dyn meerkat_core::AdministrationEntry>
+    };
+
+    authority
+        .install_client_profile_entered(
+            &target,
+            profile("client-a"),
+            Some(&registered_base()),
+            stating("login-1"),
+        )
+        .await
+        .unwrap();
+    authority
+        .replace_client_profile_entered(
+            &target,
+            profile("client-b"),
+            Some(&registered_base()),
+            stating("login-2"),
+        )
+        .await
+        .unwrap();
+    authority
+        .remove_client_profile_entered(&target, stating("login-3"))
+        .await
+        .unwrap();
+
+    let records = std::mem::take(&mut *recorder.0.lock());
+    assert_eq!(records.len(), 3, "one record per admitted update");
+    for record in &records {
+        let rendered = serde_json::to_string(record).unwrap();
+        assert!(
+            !rendered.contains("CANARY_PW") && !rendered.contains("CANARY_Q"),
+            "no record carries the server URL's userinfo or query: {rendered}"
+        );
+    }
+}
+
 /// Without a profile nothing changes: a dynamically registered credential
 /// stores no profile, and its token requests are a public client's. A
 /// profile installed later leaves it alone: it keeps refreshing as the

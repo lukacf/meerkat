@@ -33,14 +33,14 @@ async function explicitLegacyImport({ embeddedHttp = false } = {}) {
     (item.path.endsWith("/send") || item.request.includes('"method":"meta/console/send"')));
   const requests = async () => (await (await fetch(fixture.backendUrl + "/__fixture/requests")).json());
   try {
-    if (embeddedHttp) {
-      const response = await fetch(`${fixture.baseUrl}/console/experience`);
-      assert.equal(response.status, 200);
-      const experience = await response.json();
-      assert.equal(typeof experience.storage_scope, "string", "default embedded persistence needs server-owned storage authority");
-      assert(experience.storage_scope.trim());
-      namespace = JSON.stringify([origin, experience.storage_scope]);
-    }
+    // The console keeps this user's queue under the server's per-user storage
+    // scope, combined with the scoped host's namespace when it names one.
+    const response = await fetch(`${fixture.baseUrl}/console/experience`);
+    assert.equal(response.status, 200);
+    const experience = await response.json();
+    assert.equal(typeof experience.storage_scope, "string", "default embedded persistence needs server-owned storage authority");
+    assert(experience.storage_scope.trim());
+    namespace = JSON.stringify([embeddedHttp ? origin : namespace, experience.storage_scope]);
     queueKey = `meta-send-attempts:v1:${encodeURIComponent(namespace)}:${encodeURIComponent(identity)}`;
     await navigation(page, "open legacy-import host", async () => {
       const response = await page.goto(origin + (embeddedHttp ? "/console" : "/scoped"));
@@ -115,7 +115,9 @@ async function explicitLegacyImport({ embeddedHttp = false } = {}) {
     assert.equal(envelope.content, text);
     assert.equal(envelope.identity, identity);
     await eventually(async () => !await importButton.count(), "one-time import action disappears");
-    assert.equal(await page.evaluate(key => localStorage.getItem(key), legacyKey), legacyBytes, "original bytes are preserved");
+    // Imported once: the unscoped bytes go, so no other account of this
+    // browser is offered them.
+    assert.equal(await page.evaluate(key => localStorage.getItem(key), legacyKey), null, "original bytes are removed after the import");
     const saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), queueKey);
     assert.equal(saved.legacyImported, true);
     await reload();
@@ -125,7 +127,7 @@ async function explicitLegacyImport({ embeddedHttp = false } = {}) {
     await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
     assert.equal(await importButton.count(), 0);
     assert.equal(sends().length, 1, "reload cannot resubmit the imported intent");
-    assert.equal(await page.evaluate(key => localStorage.getItem(key), legacyKey), legacyBytes);
+    assert.equal(await page.evaluate(key => localStorage.getItem(key), legacyKey), null);
     if (embeddedHttp) {
       assert.equal(await page.getByTestId(`chat-composer:${identity}`).first().inputValue(), unsentDraft,
         "importing an older queued intent cannot erase the current unsent draft");
@@ -134,7 +136,7 @@ async function explicitLegacyImport({ embeddedHttp = false } = {}) {
     monitor.assertClean();
     await fs.mkdir(dir, { recursive: true });
     await page.screenshot({ path: path.join(dir, `${screenshotPrefix}-after-reload.png`), fullPage: true });
-    await fs.writeFile(path.join(dir, `${screenshotPrefix}.json`), JSON.stringify({ embeddedHttp, namespace, saved, envelope, geometry, originalBytesPreserved: true, sends: sends(), errors, expectedFailures, requestFailures }, null, 2));
+    await fs.writeFile(path.join(dir, `${screenshotPrefix}.json`), JSON.stringify({ embeddedHttp, namespace, saved, envelope, geometry, originalBytesRemoved: true, sends: sends(), errors, expectedFailures, requestFailures }, null, 2));
     monitor.assertClean();
   } catch (error) {
     await fs.mkdir(dir, { recursive: true });

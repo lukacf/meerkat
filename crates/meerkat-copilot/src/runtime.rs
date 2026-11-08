@@ -8090,6 +8090,132 @@ mod tests {
             );
         }
 
+        /// A record the lease takes at its own generation is another
+        /// publication: the account does not serve the token cached for the
+        /// earlier one. This lease publishes a stored token; another process
+        /// stores a later token at its own generation 1, and a status read
+        /// takes that record into the lease, which keeps generation 1 and the
+        /// later publication time. The next use serves the later token.
+        #[tokio::test]
+        async fn a_record_taken_at_the_same_generation_is_not_served_from_the_cache() {
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let store = harness
+                .operator
+                .env
+                .provider_auth_persistence()
+                .expect("provider-auth persistence")
+                .token_store();
+            let identity = account_identity();
+            let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+            let stored = |token: String| PersistedTokens {
+                auth_mode: PersistedAuthMode::StaticBearer,
+                primary_secret: Some(token),
+                refresh_token: None,
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: Vec::new(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            let first = stored(user_token("stored-first"));
+            let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                &harness.operator.auth_lease,
+                &identity,
+                &first,
+            )
+            .expect("this lease publishes");
+            let first = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &first,
+                &transition,
+            )
+            .expect("mark the first token");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &first)
+                .await
+                .expect("store the first token");
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .expect("the first token serves");
+            let (_, bearer) = authorize_once(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(bearer, format!("Bearer {}", user_token("stored-first")));
+
+            // Another process stores a later token under its own lease.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let later = stored(user_token("stored-later"));
+            let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+                &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+                &lease_key(),
+                meerkat_core::persisted_token_expires_at_epoch_secs(&later),
+            )
+            .expect("another process publishes");
+            assert_eq!(transition.generation(), 1);
+            let later = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &later,
+                &transition,
+            )
+            .expect("mark the later token");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &later)
+                .await
+                .expect("store the later token");
+            // A status read takes the later record into the lease.
+            let before = harness.operator.lease();
+            meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+                store.as_ref(),
+                &harness.operator.auth_lease,
+                &identity,
+                PersistedAuthMode::StaticBearer,
+                Utc::now(),
+            )
+            .await
+            .expect("the status read answers")
+            .expect("the later record is stored");
+            let after = harness.operator.lease();
+            assert_eq!(
+                (after.generation, after.adopted_marker_generation),
+                (before.generation, None),
+                "the lease takes the later record at its own generation"
+            );
+            assert_ne!(
+                after.credential_published_at_millis, before.credential_published_at_millis,
+                "under the later publication"
+            );
+
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .expect("the later token serves");
+            let (_, bearer) = authorize_once(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(
+                bearer,
+                format!("Bearer {}", user_token("stored-later")),
+                "the account serves the later token, not the one cached for the earlier publication"
+            );
+        }
+
         /// A refusal of a stored token names the publication the token was
         /// stored under (its record's durable marker), not a lease snapshot
         /// read after the value. A newer token being stored meanwhile (its

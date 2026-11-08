@@ -2897,3 +2897,68 @@ async fn a_connector_lease_ahead_serves_a_login_from_another_process() {
         );
     }
 }
+
+/// A connector lease that withdrew its credential takes a later login from
+/// another process. This process logs the slot in; another process logs it
+/// out, and this process's next read finds no credential, so its lease is
+/// released; then another process logs the slot in again. This process
+/// serves that login's credential.
+#[tokio::test]
+async fn a_released_connector_lease_serves_a_later_login_from_another_process() {
+    let fx = fixture().await;
+    let work = slot("tenant-a", "drive-released");
+    fx.grant("code-a", "access-a", "subject-a", Some("files.read"));
+    fx.login(&work, AccountSelection::Discover, "code-a")
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.authority.bearer_token(&work).await.unwrap().as_deref(),
+        Some("access-a")
+    );
+
+    another_process(&fx)
+        .logout(&work)
+        .await
+        .expect("another process logs the slot out");
+    assert_eq!(
+        fx.authority
+            .bearer_token(&work)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(None),
+        "after another process's logout this process reads no credential"
+    );
+
+    // A publication time later than every one before it.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    fx.grant("code-b", "access-b", "subject-a", Some("files.read"));
+    let other = another_process(&fx);
+    let start = other
+        .login_start(
+            &fx.target(&work, AccountSelection::Discover),
+            &redirect(41003),
+        )
+        .await
+        .expect("admit");
+    other
+        .login_complete(
+            &work,
+            ConnectorOAuthCallback {
+                redirect_uri: redirect(41003),
+                state: start.state,
+                code: "code-b".to_owned(),
+                host_attempt_handle: None,
+            },
+        )
+        .await
+        .expect("another process logs the slot in again");
+
+    assert_eq!(
+        fx.authority
+            .bearer_token(&work)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(Some("access-b".to_owned())),
+        "this process serves the later login's credential"
+    );
+}

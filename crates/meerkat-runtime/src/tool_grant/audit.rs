@@ -29,6 +29,9 @@ pub enum ToolGrantExpiryDriver {
     Run,
     /// Durable-tail recovery, closing the run a stopped process left open.
     Recovery,
+    /// A build reading which gated MCP servers a live grant covers, to
+    /// decide which to attach.
+    Build,
 }
 
 /// Why a gated call was refused.

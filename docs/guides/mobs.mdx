@@ -292,17 +292,25 @@ the build withholds; then the name is checked only at call time.
 
 ### Granting tools to a member at run time
 
-`tools.grant_gated` mounts built-in tool families and tool names hidden: the
-member is not shown them and every call is refused until a live
-[scoped tool grant](/concepts/tools#scoped-tool-grants) opens them, for a
-bounded window. Leave a gated family's switch off; the gate mounts it closed,
-and a binary that does not know the gate keeps it off.
+`tools.grant_gated` mounts built-in tool families, tool names and the tools of
+MCP servers hidden: the member is not shown them and every call is refused
+until a live [scoped tool grant](/concepts/tools#scoped-tool-grants) opens
+them, for a bounded window. Leave a gated family's switch off; the gate mounts
+it closed, and a binary that does not know the gate keeps it off.
 
 ```toml
 [profiles.worker.tools]
 comms = true
-grant_gated = { families = ["shell"], tools = ["deploy"] }
+grant_gated = { families = ["shell"], tools = ["deploy"], mcp_servers = ["tickets"] }
 ```
+
+A gated MCP server the profile configures (`tools.mcp_servers`) starts no
+process until a live grant of that server (`{"kind": "mcp_server", "server":
+"tickets"}`) covers the member at a build, so the member connects it at its
+next build, a respawn for one, and not before; the build decides this as it
+composes the member's tools. `unconfigured_mcp_servers =
+true` gates every MCP server the profile does not configure, whatever path
+attaches it later; the servers it configures stay open.
 
 At every build, resume included, a member's gate is its own profile's gate
 joined with its role's current gate, so a member spawned with its own profile
@@ -312,8 +320,8 @@ of the role is: its own gate is the role's current gate, less the families its
 declaration switches off; one declared with an exact profile of its own
 (`profile_override`) gets the role's gate as role entries, and so does one
 whose desired material does not record where its profile came from (one
-adopted by an earlier release). A role entry never
-fails the build: a role tool name is gated from the moment it appears, a role
+adopted by an earlier release). A role entry never fails the build: a role
+tool name and a role MCP server are gated from the moment they appear, a role
 family is gated where the member mounts it, and a role family the member does
 not mount is ignored. A grant to the member's identity (`tool_grants/grant`
 with `{"kind": "identity", "mob_id", "identity"}`) follows the member across
@@ -324,8 +332,15 @@ or a complete roster's seal, of an unseated identity entry; at the removal
 of an unseated store-owned identity; when a respawn whose replacement fails
 after the old member's archive is abandoned, by its own step or by the
 resume after a stop; or at a reset of the mob. A name
-created again needs a grant of its own. A member whose gate names anything
-cannot be placed on another host.
+created again needs a grant of its own. A grant between a respawn's
+retirement of the old member and the seating of its replacement answers
+`subject_unknown`, since the identity is out of the roster then: retry it
+once the respawn answers. An identity grant answers `applies`,
+whether the member's running build gates its target (`at_next_build` for a
+gated server the profile configures that the running build left
+unattached), and `tool_grants/list`
+answers the member's gate, running and next build. A member whose gate names
+anything cannot be placed on another host.
 
 ### Opting into host tool bundles
 

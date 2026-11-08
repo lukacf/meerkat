@@ -2230,39 +2230,52 @@ export class MeerkatClient {
   }
 
   /**
-   * Grant one of a subject's grant-gated tool names, or a gated built-in tool
-   * family, for a bounded window: `{ durationMs }` from the server's clock or
+   * Grant one of a subject's grant-gated tool names, a gated built-in tool
+   * family, or a gated MCP server (`{ mcpServer, serverTools? }`: every tool
+   * the server provides, or only the named ones), for a bounded window:
+   * `{ durationMs }` from the server's clock or
    * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
    * subject is a session id, or a mob member identity
    * (`{ mobId, identity }`), whose grant applies to the member's builds in
    * the mob's running incarnation, across respawns. The session's build, or
    * the member's gate (its profile's joined with its role's), must gate the
    * target; a family grant's `target.names` are the names the server took
-   * for it. `options.scope` `"current_run"` also scopes the grant to the run
-   * the subject is running now (an identity's: the run of the session its
-   * member holds on the server): it opens the target in that run only and
-   * ends with it; a subject that runs no turn refuses it (the request
-   * refusal `run_not_active`: `data.kind` `"tool_grant_request_refused"`,
-   * `data.tool_grant_request_refusal.kind` `"run_not_active"`). Omitted, or
-   * `"window"`, the grant lasts for its
+   * for it, and an identity grant's `applies` says whether the member's
+   * running build gates the target. `options.scope` `"current_run"` also
+   * scopes the grant to the run the subject is running now (an identity's:
+   * the run of the session its member holds on the server): it opens the
+   * target in that run only and ends with it; a subject that runs no turn
+   * refuses it (the request refusal `run_not_active`: `data.kind`
+   * `"tool_grant_request_refused"`, `data.tool_grant_request_refusal.kind`
+   * `"run_not_active"`). Omitted, or `"window"`, the grant lasts for its
    * window. `options.decisionRef` records the host's reference to the
    * decision it made before issuing, as attribution. Throws `INVALID_ARGS`
-   * unless the target names exactly one of `tool` and `family`, and the
-   * window exactly one of `durationMs` and `expiresAtMs`.
+   * unless the target names exactly one of `tool`, `family` and `mcpServer`
+   * (`serverTools` only with `mcpServer`), and the window exactly one of
+   * `durationMs` and `expiresAtMs`.
    */
   async grantTool(
     subject: string | ToolGrantMemberSubject,
-    target: { tool: string; family?: never } | { family: string; tool?: never },
+    target:
+      | { tool: string; family?: never; mcpServer?: never; serverTools?: never }
+      | { family: string; tool?: never; mcpServer?: never; serverTools?: never }
+      | { mcpServer: string; serverTools?: string[]; tool?: never; family?: never },
     window:
       | { durationMs: number; expiresAtMs?: never }
       | { expiresAtMs: number; durationMs?: never },
     options?: { reason?: string; scope?: "window" | "current_run"; decisionRef?: string },
   ): Promise<RpcGrantToolResult> {
-    const { tool, family } = target as { tool?: string; family?: string };
-    if ((tool === undefined) === (family === undefined)) {
+    const { tool, family, mcpServer, serverTools } = target as {
+      tool?: string;
+      family?: string;
+      mcpServer?: string;
+      serverTools?: string[];
+    };
+    const named = [tool, family, mcpServer].filter((value) => value !== undefined).length;
+    if (named !== 1 || (serverTools !== undefined && mcpServer === undefined)) {
       throw new MeerkatError(
         "INVALID_ARGS",
-        "grantTool needs exactly one of target.tool and target.family",
+        "grantTool needs exactly one of target.tool, target.family and target.mcpServer",
       );
     }
     const { durationMs, expiresAtMs } = window as { durationMs?: number; expiresAtMs?: number };
@@ -2272,12 +2285,20 @@ export class MeerkatClient {
         "grantTool needs exactly one of window.durationMs and window.expiresAtMs",
       );
     }
+    let wireTarget: RpcGrantToolParams["target"];
+    if (tool !== undefined) {
+      wireTarget = { kind: "tool", name: tool };
+    } else if (family !== undefined) {
+      wireTarget = { kind: "family", family };
+    } else {
+      wireTarget =
+        serverTools === undefined
+          ? { kind: "mcp_server", server: mcpServer as string }
+          : { kind: "mcp_server", server: mcpServer as string, tools: [...serverTools] };
+    }
     const params: RpcGrantToolParams = {
       subject: toolGrantSubject(subject),
-      target:
-        tool !== undefined
-          ? { kind: "tool", name: tool }
-          : { kind: "family", family: family as string },
+      target: wireTarget,
     };
     if (durationMs !== undefined) {
       params.duration_ms = durationMs;
@@ -2355,8 +2376,12 @@ export class MeerkatClient {
    * identity `{ mobId, identity }`, whose retired history stays readable),
    * each due grant settled as expired first. Ended (expired, revoked or
    * run-ended) grants are listed only with `includeEnded`; `unreadable`
-   * names any stored grant the server cannot read. On a 0.9.11 or newer
-   * server that keeps durable decisions, the subject's grant requests
+   * names any stored grant the server cannot read. For a member identity in
+   * the mob's roster the result also carries `gate`: `running`, what the
+   * member's live build gates and the names it ignored as not mounted
+   * (`null` when no build of it is live on the server), and `next_build`,
+   * the gate its next build resolves. The gate is advisory. On a 0.9.11 or
+   * newer server that keeps durable decisions, the subject's grant requests
    * (`requestToolGrant`) follow its grants: open and approved ones as
    * `requested` and, with `includeEnded`, recently declined ones as
    * `declined`.

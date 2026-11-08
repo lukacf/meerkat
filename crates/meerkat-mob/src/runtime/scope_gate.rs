@@ -196,6 +196,10 @@ impl MobCommand {
             | Self::RotateSupervisor { .. }
             | Self::SetOperatorInstruction { .. }
             | Self::RevokeOperatorInstruction { .. } => Some(ControlScope::AdminHost),
+            // A scoped tool grant to a member identity is the host's
+            // administration of what the member may run.
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => Some(ControlScope::AdminHost),
 
             // ── SubscribeEvents: the mob event journal surface ──
             Self::PollEvents { .. } | Self::ReplayAllEvents { .. } => {
@@ -489,6 +493,9 @@ impl MobCommand {
             // Operator instructions are the host's; no agent writes them.
             | Self::SetOperatorInstruction { .. }
             | Self::RevokeOperatorInstruction { .. } => AgentLaneAdmission::HostOnly,
+            // No agent grants a member tools.
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -923,6 +930,12 @@ impl MobCommand {
             Self::SetOperatorInstruction { reply_tx, .. }
             | Self::RevokeOperatorInstruction { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error.into()));
+            }
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(super::member_grant_gate::MemberToolGrantError::Mob(
+                    error,
+                )));
             }
             Self::PrepareMemberInstructionDelivery { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));

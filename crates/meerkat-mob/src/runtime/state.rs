@@ -1977,6 +1977,20 @@ pub(super) enum MobCommand {
             >,
         >,
     },
+    /// Issue a scoped tool grant to a member identity, decided against the
+    /// live roster as it commits: the identity must be in the roster and
+    /// bound to a member, and the grant's subject names the mob's live
+    /// incarnation. Ordered with the retirement, identity-entry end and
+    /// reset that end an identity's grants, so a grant never outlives a
+    /// retirement. Host verb (`AdminHost`), never an agent tool.
+    #[cfg(feature = "runtime-adapter")]
+    GrantMemberTool {
+        identity: AgentIdentity,
+        grant: Box<super::member_grant_gate::MemberToolGrant>,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_runtime::tool_grant::StoredToolGrant, super::member_grant_gate::MemberToolGrantError>,
+        >,
+    },
     /// The mob's delivery owner asks MobMachine to prepare one owed member's
     /// operator-instruction delivery (internal).
     PrepareMemberInstructionDelivery {
@@ -2470,6 +2484,8 @@ impl MobCommand {
             Self::Grants { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SetOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RevokeOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2700,6 +2716,8 @@ impl MobCommand {
             Self::Grants { .. } => "Grants",
             Self::SetOperatorInstruction { .. } => "SetOperatorInstruction",
             Self::RevokeOperatorInstruction { .. } => "RevokeOperatorInstruction",
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => "GrantMemberTool",
             Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
             Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
             Self::PollEvents { .. } => "PollEvents",

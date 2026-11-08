@@ -192,7 +192,33 @@ async def test_grant_tool_needs_exactly_one_of_tool_and_family() -> None:
         await client.grant_tool(
             SESSION_ID, tool="deploy", family="shell", duration_ms=1
         )
+    with pytest.raises(ValueError):
+        await client.grant_tool(
+            SESSION_ID, tool="deploy", mcp_server="tickets", duration_ms=1
+        )
+    with pytest.raises(ValueError):
+        await client.grant_tool(
+            SESSION_ID, tool="deploy", server_tools=["open_ticket"], duration_ms=1
+        )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_grant_tool_sends_an_mcp_server_target_narrowed_to_its_tools() -> None:
+    client, calls = fake_client({"tool_grants/grant": {"grant": GRANT}})
+
+    await client.grant_tool(SESSION_ID, mcp_server="tickets", duration_ms=60_000)
+    await client.grant_tool(
+        SESSION_ID,
+        mcp_server="tickets",
+        server_tools=["open_ticket"],
+        duration_ms=60_000,
+    )
+
+    assert [params["target"] for _, params in calls] == [
+        {"kind": "mcp_server", "server": "tickets"},
+        {"kind": "mcp_server", "server": "tickets", "tools": ["open_ticket"]},
+    ]
 
 
 @pytest.mark.asyncio

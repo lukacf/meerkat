@@ -220,13 +220,14 @@ See the [built-in tools reference](/reference/builtin-tools) for the mechanical 
 
 ### Scoped tool grants
 
-A build can mark built-in tool families and individual tool names
-**grant-gated**. A gated name is mounted, a gated family as if it were enabled,
-but it stays hidden from the model and is refused at dispatch until a live
-scoped tool grant that covers it is admitted. A grant never widens a session
-past its build: it opens only names the build gated, and the static tool
-policy, the application tool policy, governed authority, review and
-confinement all still apply to every call it opens.
+A build can mark built-in tool families, individual tool names and MCP
+servers **grant-gated**. A gated name is mounted, a gated family as if it were
+enabled, and every tool a gated MCP server provides is gated from the moment
+it appears, but each stays hidden from the model and is refused at dispatch
+until a live scoped tool grant that covers it is admitted. A grant never
+widens a session past its build: it opens only what the build gated, and the
+static tool policy, the application tool policy, governed authority, review
+and confinement all still apply to every call it opens.
 
 - **Gating a build.** In Rust, set `grant_gated_tools` on
   `SessionBuildOptions` or `AgentBuildConfig`, for example
@@ -263,10 +264,32 @@ confinement all still apply to every call it opens.
   live member keeps the gate its build installed until its next build. A
   member whose own gate or role gate names anything cannot be placed on
   another host.
+- **Gating MCP servers.** A gate's `mcp_servers` names MCP servers (in Rust,
+  `GrantGatedTools::with_mcp_server`; `{"mcp_servers": [...]}` over JSON-RPC
+  and in a mob profile's `grant_gated`). A gated server need not be
+  configured: it may be attached later, and its tools are gated by their
+  provenance from the moment they appear; each model-request boundary also
+  gates the names a gated server provides then, so a name such a server had
+  stays gated for the rest of the build, whichever source provides it later.
+  `unconfigured_mcp_servers: true` (`with_unconfigured_mcp_servers`) gates
+  every MCP server the build does not configure itself, whatever path
+  attaches it later (`mcp/add` included); the servers the build configures
+  stay open. A host's callback tools and tool bundles are never a server's.
+  A gated server the build configures starts no process until a live grant
+  of that server covers it when a build reads the grants (a respawn or a
+  resume): until then nothing of it is connected, and a call naming one of
+  its tools finds no tool. The build decides this itself as it composes the
+  session's tools; MeerkatMachine's gated stage (`SurfaceStageGatedAdd`,
+  `McpRouter::stage_add_gated`) is the check of a grant-time live attach of
+  a gated server, and its caller lands with the live attach. A tool name only
+  a gated server provides is granted through its server, not by name. A role
+  server, like a role tool name, is gated from the moment it appears and
+  never fails the member's build.
 - **Granting.** `MeerkatMachine::grant_tool` issues a grant for a subject (a
   session, or a mob member identity in one mob incarnation,
-  `ToolGrantSubject::member`), a target (one tool name, or a built-in family
-  with the names it provides, which `meerkat::tool_family_names` answers) and
+  `ToolGrantSubject::member`), a target (one tool name, a built-in family
+  with the names it provides, which `meerkat::tool_family_names` answers, or
+  an MCP server, optionally narrowed to some of its tools) and
   a window of at most the host policy's maximum lifetime, 24 hours by default.
   A grant can also be scoped to one run of its subject
   (`ToolGrantRequest::run_scope`; over JSON-RPC, `scope: {"kind":
@@ -277,14 +300,24 @@ confinement all still apply to every call it opens.
   grants of its identity and of its session.
   `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
   the Rust API; `ToolGrantService` offers the same operations over any
-  `RuntimeStore`. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
+  `RuntimeStore`. Grant a mob member identity with
+  `MobHandle::grant_member_tool`: the mob's actor decides it against its live
+  roster as it commits, in order with the retirements that end an identity's
+  grants, so a member retired before the commit is refused and a retirement
+  after the commit ends the grant. The direct writers,
+  `MeerkatMachine::grant_tool` and `ToolGrantService::grant` with a member
+  subject, do not consult the roster: a grant they write for an identity
+  that has retired is issued, and a name seated again in the same incarnation
+  holds it. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
   `tool_grants/list` and `tool_grants/audit` serve them for sessions and mob
   member identities (see
   [scoped tool grants over JSON-RPC](/api/rpc#scoped-tool-grants)), and the
-  Python and TypeScript SDKs wrap them. A member's build reads its identity's
-  grants first, then its session's, so an identity grant follows the member
-  across respawns and restarts; its grants end when its identity ends, and a
-  reset of its mob, which ends every identity the mob held, ends them too.
+  Python and TypeScript SDKs wrap them; `tool_grants/grant` commits an
+  identity grant through the mob's actor. A member's build reads its
+  identity's grants first, then its session's, so an identity grant follows
+  the member across respawns and restarts; its grants end when its identity
+  ends, and a reset of its mob, which ends every identity the mob held, ends
+  them too.
 - **Requesting.** A host can ask for a grant that a person approves instead
   of issuing it: `MeerkatMachine::request_tool_grant`, or
   `tool_grants/request` over JSON-RPC (Python `request_tool_grant`,
@@ -313,19 +346,27 @@ confinement all still apply to every call it opens.
   receives an input when its request ends (a member identity's request
   reaches the session its member holds then, through the mob's member
   input).
-- **Adjudication.** Every model-request boundary opens the gated names a live
-  grant admits at that moment, in the boundary's run, and every gated call is
-  adjudicated again immediately before it is handed to its tool, so a call at
-  or after the deadline is refused even when the boundary that showed the tool
-  ran before it. A run-scoped grant admits only the calls of its own run: a
-  call outside any run is refused and leaves the grant live for its run, and a
-  call or boundary of a later run ends it. A refusal is an ordinary
-  `policy_denied` tool error with the code
+- **Adjudication.** Every model-request boundary first gates the names each
+  gated MCP server provides now, then opens the gated names a live grant
+  admits at that moment, in the boundary's run (a server grant opens its
+  server's gated names then), and every gated call is adjudicated again
+  immediately before it is handed to its tool, so a call at or after the
+  deadline is refused even when the boundary that showed the tool ran before
+  it. A run-scoped grant admits only the calls of its own run: a call outside
+  any run is refused and leaves the grant live for its run, and a call or
+  boundary of a later run ends it. A build belongs to no run, so a run-scoped
+  server grant starts no gated server the build configures; it opens the
+  names of a gated server that is attached during its run. The dispatch gate
+  authorizes a gated MCP call before the host prepares it
+  (`McpCallContextProvider::prepare`), so a refused call never selects a
+  credential. A refusal is an ordinary `policy_denied` tool error with the code
   `tool_grant_required`, `tool_grant_expired`, `tool_grant_revoked` or
   `tool_grant_unavailable` (a grant that ended with its run, or a run-scoped
   grant asked outside its run, opens nothing: `tool_grant_required`), which
-  the model reads as
-  `Tool call denied (<code>): <message>`. When the grants cannot be read, the gate stays
+  the model reads as `Tool call denied (<code>): <message>`; a call of a
+  closed gated tool behind the deferred catalog is refused the same way. When
+  the grants cannot be read, or a boundary cannot gate a gated server's
+  names, the gate stays
   closed and the session records a warning notice.
 - **Lifecycle.** The canonical `ToolGrantLifecycleMachine` owns each grant:
   issued, then expired at its fixed deadline, revoked before it, or, for a

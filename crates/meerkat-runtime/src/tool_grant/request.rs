@@ -299,6 +299,21 @@ fn target_key(target: &ToolGrantTarget) -> String {
     match target {
         ToolGrantTarget::Tool { name } => format!("tool:{name}"),
         ToolGrantTarget::Family { family, .. } => format!("family:{family}"),
+        ToolGrantTarget::McpServer {
+            server,
+            tools: None,
+        } => format!("mcp_server:{server}"),
+        ToolGrantTarget::McpServer {
+            server,
+            tools: Some(tools),
+        } => {
+            let tools = tools
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("mcp_server:{server}:tools={tools}")
+        }
     }
 }
 
@@ -319,6 +334,21 @@ fn rendering_text(body: &ToolGrantIssueBody) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("the tool family {family} ({names})")
+        }
+        ToolGrantTarget::McpServer {
+            server,
+            tools: None,
+        } => format!("the MCP server {server}"),
+        ToolGrantTarget::McpServer {
+            server,
+            tools: Some(tools),
+        } => {
+            let tools = tools
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("the MCP server {server} ({tools})")
         }
     };
     let window = render_duration(body.duration_ms);

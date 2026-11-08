@@ -254,9 +254,9 @@ mod tests {
     use crate::approval::decision::{DecisionId, DecisionKind, DecisionPhase, DecisionSubjectKey};
     use crate::error::ToolError;
     use crate::tool_grant::{
-        GatedToolTable, REQUEST_TOOL_GRANT_TOOL, SessionToolGrants, ToolGrantAgentRequest,
-        ToolGrantAgentRequestRefusal, ToolGrantCall, ToolGrantGate, ToolGrantId, ToolGrantRefusal,
-        ToolGrantRequestReceipt, ToolGrantTarget,
+        GatedToolTable, GatedToolView, REQUEST_TOOL_GRANT_TOOL, SessionToolGrants,
+        ToolGrantAgentRequest, ToolGrantAgentRequestRefusal, ToolGrantCall, ToolGrantId,
+        ToolGrantRefusal, ToolGrantRequestReceipt, ToolGrantTarget,
     };
     use crate::types::{ToolCallView, ToolName, ToolNameSet};
 
@@ -286,17 +286,13 @@ mod tests {
     impl SessionToolGrants for RecordingGrants {
         async fn open_names(
             &self,
-            _gated: &GatedToolTable,
+            _view: &GatedToolView,
             _run_id: Option<&RunId>,
         ) -> Result<ToolNameSet, ToolGrantRefusal> {
             Ok(ToolNameSet::new())
         }
 
-        async fn admit_call(
-            &self,
-            _gated: &GatedToolTable,
-            _call: ToolGrantCall<'_>,
-        ) -> Result<(), ToolGrantRefusal> {
+        async fn admit_call(&self, _call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal> {
             Err(ToolGrantRefusal::Required)
         }
 
@@ -348,7 +344,7 @@ mod tests {
             BTreeMap::from([("shell".to_string(), shell_names())]),
             ["deploy"].into_iter().map(ToolName::from).collect(),
         );
-        ToolGrantRequestDispatcher::new(ToolGrantGate::new(
+        ToolGrantRequestDispatcher::new(crate::tool_grant::gate_over_table(
             Arc::clone(grants) as Arc<dyn SessionToolGrants>,
             table,
         ))
@@ -512,17 +508,13 @@ mod tests {
         impl SessionToolGrants for JoiningGrants {
             async fn open_names(
                 &self,
-                _gated: &GatedToolTable,
+                _view: &GatedToolView,
                 _run_id: Option<&RunId>,
             ) -> Result<ToolNameSet, ToolGrantRefusal> {
                 Ok(ToolNameSet::new())
             }
 
-            async fn admit_call(
-                &self,
-                _gated: &GatedToolTable,
-                _call: ToolGrantCall<'_>,
-            ) -> Result<(), ToolGrantRefusal> {
+            async fn admit_call(&self, _call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal> {
                 Err(ToolGrantRefusal::Required)
             }
 
@@ -553,7 +545,7 @@ mod tests {
             BTreeMap::new(),
             ["deploy"].into_iter().map(ToolName::from).collect(),
         );
-        let joining = ToolGrantRequestDispatcher::new(ToolGrantGate::new(
+        let joining = ToolGrantRequestDispatcher::new(crate::tool_grant::gate_over_table(
             Arc::new(JoiningGrants) as Arc<dyn SessionToolGrants>,
             table,
         ));
@@ -592,17 +584,13 @@ mod tests {
         impl SessionToolGrants for NoRequests {
             async fn open_names(
                 &self,
-                _gated: &GatedToolTable,
+                _view: &GatedToolView,
                 _run_id: Option<&RunId>,
             ) -> Result<ToolNameSet, ToolGrantRefusal> {
                 Ok(ToolNameSet::new())
             }
 
-            async fn admit_call(
-                &self,
-                _gated: &GatedToolTable,
-                _call: ToolGrantCall<'_>,
-            ) -> Result<(), ToolGrantRefusal> {
+            async fn admit_call(&self, _call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal> {
                 Err(ToolGrantRefusal::Required)
             }
 
@@ -627,7 +615,7 @@ mod tests {
             Err(ToolGrantAgentRequestRefusal::NotTaken),
             "the default takes no requests"
         );
-        let gate = ToolGrantGate::new(
+        let gate = crate::tool_grant::gate_over_table(
             grants,
             GatedToolTable::new(
                 BTreeMap::new(),

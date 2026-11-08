@@ -342,10 +342,12 @@ pub use tool_grant::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RequestToolGrantParams, RequestToolGrantResult, RevokeToolGrantParams, RevokeToolGrantResult,
     ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
-    ToolGrantTargetRequest, WireGrantGatedTools, WireToolGrant, WireToolGrantAuditEvent,
-    WireToolGrantAuditRow, WireToolGrantExpiryDriver, WireToolGrantIssuer,
-    WireToolGrantRefusalKind, WireToolGrantScope, WireToolGrantStatus, WireToolGrantSubject,
-    WireToolGrantTarget, WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
+    ToolGrantTargetRequest, WireGrantGatedTools, WireMemberToolGrantGate, WireToolGrant,
+    WireToolGrantApplies, WireToolGrantAuditEvent, WireToolGrantAuditRow,
+    WireToolGrantExpiryDriver, WireToolGrantGateEntries, WireToolGrantGateView,
+    WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantScope, WireToolGrantStatus,
+    WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrant,
+    WireUnreadableToolGrantAuditRow,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

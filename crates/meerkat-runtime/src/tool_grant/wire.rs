@@ -104,7 +104,7 @@ pub fn wire_tool_grant_subject(subject: &ToolGrantSubject) -> WireToolGrantSubje
 }
 
 /// A grant's target. A family target carries the names its grant took, in
-/// name order.
+/// name order; a server target its `tools` subset, in name order.
 #[must_use]
 pub fn wire_tool_grant_target(target: &ToolGrantTarget) -> WireToolGrantTarget {
     match target {
@@ -114,6 +114,12 @@ pub fn wire_tool_grant_target(target: &ToolGrantTarget) -> WireToolGrantTarget {
         ToolGrantTarget::Family { family, names } => WireToolGrantTarget::Family {
             family: family.clone(),
             names: names.iter().map(ToString::to_string).collect(),
+        },
+        ToolGrantTarget::McpServer { server, tools } => WireToolGrantTarget::McpServer {
+            server: server.clone(),
+            tools: tools
+                .as_ref()
+                .map(|tools| tools.iter().map(ToString::to_string).collect()),
         },
     }
 }
@@ -251,6 +257,7 @@ fn wire_tool_grant_expiry_driver(driver: ToolGrantExpiryDriver) -> WireToolGrant
         ToolGrantExpiryDriver::Revoke => WireToolGrantExpiryDriver::Revoke,
         ToolGrantExpiryDriver::Run => WireToolGrantExpiryDriver::Run,
         ToolGrantExpiryDriver::Recovery => WireToolGrantExpiryDriver::Recovery,
+        ToolGrantExpiryDriver::Build => WireToolGrantExpiryDriver::Build,
     }
 }
 

@@ -2,12 +2,13 @@
 //! as the agent's model-request boundary and its dispatch gate read them,
 //! and the seam its agent asks for a grant through.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use meerkat_core::service::LiveMobIncarnation;
 use meerkat_core::tool_grant::{
-    GatedToolTable, SessionToolGrants, ToolGrantAgentRequest, ToolGrantAgentRequestRefusal,
+    GatedToolView, SessionToolGrants, ToolGrantAgentRequest, ToolGrantAgentRequestRefusal,
     ToolGrantCall, ToolGrantId, ToolGrantRefusal, ToolGrantRequestReceipt, ToolGrantSubject,
     ToolGrantSubjectKey,
 };
@@ -112,12 +113,12 @@ impl std::fmt::Debug for RuntimeSessionToolGrants {
 impl SessionToolGrants for RuntimeSessionToolGrants {
     async fn open_names(
         &self,
-        gated: &GatedToolTable,
+        view: &GatedToolView,
         run_id: Option<&RunId>,
     ) -> Result<ToolNameSet, ToolGrantRefusal> {
         let adjudication = self
             .service
-            .adjudicate_boundary(&self.subjects, gated, run_id)
+            .adjudicate_boundary(&self.subjects, view, run_id)
             .await?;
         for (subject, deadline_ms) in &adjudication.next_deadlines {
             self.deadlines.arm(&self.session_id, subject, *deadline_ms);
@@ -125,15 +126,7 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
         Ok(adjudication.open)
     }
 
-    async fn admit_call(
-        &self,
-        gated: &GatedToolTable,
-        call: ToolGrantCall<'_>,
-    ) -> Result<(), ToolGrantRefusal> {
-        // An ungated name never needs a grant.
-        if !gated.is_gated(call.name) {
-            return Ok(());
-        }
+    async fn admit_call(&self, call: ToolGrantCall<'_>) -> Result<(), ToolGrantRefusal> {
         self.service.admit_call(&self.subjects, call).await
     }
 
@@ -205,6 +198,13 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             joined: answer.joined,
             decision_id: answer.decision.decision_id,
         })
+    }
+
+    async fn granted_servers(
+        &self,
+        servers: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, ToolGrantRefusal> {
+        self.service.granted_servers(&self.subjects, servers).await
     }
 
     fn for_member(

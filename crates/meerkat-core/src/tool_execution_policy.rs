@@ -431,9 +431,12 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         }
     }
 
-    /// The grant gate's admission of one call: `Ok` for an ungated name or
-    /// a gated name a live grant admits. The seam reads the clock after its
-    /// own awaits, so the caller hands the call on with no await in between.
+    /// The grant gate's admission of one call: `Ok` for an ungated call or
+    /// a gated call a live grant admits. A call is gated by its name or by
+    /// the MCP server its tool's provenance names, read from the dispatcher
+    /// that serves it, so a gated server's tool that appeared after the last
+    /// boundary is gated too. The seam reads the clock after its own awaits,
+    /// so the caller hands the call on with no await in between.
     async fn admit_grant_gated_call(
         &self,
         call: ToolCallView<'_>,
@@ -442,11 +445,22 @@ impl<T: AgentToolDispatcher + ?Sized> ExecutionPolicyGatedDispatcher<T> {
         let Some(gate) = self.tool_grant_gate.as_ref() else {
             return Ok(());
         };
-        if !gate.is_gated(call.name) {
+        let provenance = self
+            .inner
+            .tools()
+            .iter()
+            .find(|tool| tool.name == call.name)
+            .and_then(|tool| tool.provenance.clone());
+        if !gate.is_gated(call.name, provenance.as_ref()) {
             return Ok(());
         }
+        let server = provenance
+            .as_ref()
+            .filter(|provenance| provenance.kind == crate::types::ToolSourceKind::Mcp)
+            .map(|provenance| provenance.source_id.as_str());
         gate.admit_call(crate::tool_grant::ToolGrantCall {
             name: call.name,
+            server,
             call_id: call.id,
             run_id: context.and_then(ToolDispatchContext::run_id),
         })
@@ -2883,11 +2897,11 @@ pub(crate) mod tests {
     impl crate::tool_grant::SessionToolGrants for ClockedGrants {
         async fn open_names(
             &self,
-            gated: &crate::tool_grant::GatedToolTable,
+            view: &crate::tool_grant::GatedToolView,
             _run_id: Option<&crate::RunId>,
         ) -> Result<ToolNameSet, crate::tool_grant::ToolGrantRefusal> {
             Ok(if self.clock.load(Ordering::SeqCst) < self.deadline {
-                gated.gated_names().into_iter().collect()
+                view.gated().iter().cloned().collect()
             } else {
                 ToolNameSet::new()
             })
@@ -2895,7 +2909,6 @@ pub(crate) mod tests {
 
         async fn admit_call(
             &self,
-            _gated: &crate::tool_grant::GatedToolTable,
             call: crate::tool_grant::ToolGrantCall<'_>,
         ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
             self.asked.lock().unwrap().push(call.name.to_string());
@@ -2944,16 +2957,7 @@ pub(crate) mod tests {
         grants: Arc<ClockedGrants>,
         gated: &[&str],
     ) -> crate::tool_grant::ToolGrantGate {
-        crate::tool_grant::ToolGrantGate::new(
-            grants,
-            crate::tool_grant::GatedToolTable::new(
-                std::collections::BTreeMap::new(),
-                gated
-                    .iter()
-                    .map(|name| crate::types::ToolName::from(*name))
-                    .collect(),
-            ),
-        )
+        crate::tool_grant::gate_over_names(grants, gated)
     }
 
     fn assert_grant_refusal(error: &ToolError, code: &str) {
@@ -3041,6 +3045,115 @@ pub(crate) mod tests {
             .expect_err("the gated name is refused");
         assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_EXPIRED_CODE);
         assert_eq!(grants.asked(), ["shell"]);
+    }
+
+    /// Admits a gated call only when it comes from an MCP server the test
+    /// granted, and records each call it was asked to admit with its server.
+    #[derive(Default)]
+    struct ServerGrants {
+        granted: Mutex<Vec<String>>,
+        asked: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool_grant::SessionToolGrants for ServerGrants {
+        async fn open_names(
+            &self,
+            _view: &crate::tool_grant::GatedToolView,
+            _run_id: Option<&crate::RunId>,
+        ) -> Result<ToolNameSet, crate::tool_grant::ToolGrantRefusal> {
+            Ok(ToolNameSet::new())
+        }
+
+        async fn end_run(
+            &self,
+            _run_id: &crate::RunId,
+        ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+            Ok(())
+        }
+
+        async fn admit_call(
+            &self,
+            call: crate::tool_grant::ToolGrantCall<'_>,
+        ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((call.name.to_string(), call.server.map(str::to_owned)));
+            if call
+                .server
+                .is_some_and(|server| self.granted.lock().unwrap().iter().any(|g| g == server))
+            {
+                Ok(())
+            } else {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+    }
+
+    fn mcp_tool_def(name: &str, server: &str) -> Arc<ToolDef> {
+        Arc::new(
+            ToolDef::new(
+                name,
+                format!("{name} tool"),
+                serde_json::json!({"type": "object"}),
+            )
+            .with_provenance(crate::types::ToolProvenance {
+                kind: crate::types::ToolSourceKind::Mcp,
+                source_id: server.into(),
+                artifact: None,
+            }),
+        )
+    }
+
+    /// A tool of a gated MCP server is gated by its provenance at dispatch,
+    /// before any boundary has gated its name (a tool that appeared after
+    /// the last boundary): the call is adjudicated with its server and
+    /// refused without a grant that covers it, and the inner dispatcher,
+    /// where an MCP call's preparation runs, is never reached. A grant of the
+    /// server admits it; another server's tool never consults the grants.
+    #[tokio::test]
+    async fn the_server_gate_refuses_by_provenance_before_the_inner_dispatcher() {
+        let grants = Arc::new(ServerGrants::default());
+        let mut inner = SpyDispatcher::new(&[]);
+        inner.tools = vec![
+            mcp_tool_def("open_ticket", "tickets"),
+            mcp_tool_def("today", "calendar"),
+        ]
+        .into();
+        let inner = Arc::new(inner);
+        let gated = ExecutionPolicyGatedDispatcher::new(
+            Arc::clone(&inner),
+            ToolExecutionPolicy::unrestricted(),
+        )
+        .with_tool_grant_gate(crate::tool_grant::gate_over_install(
+            Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::InstalledToolGrantGate {
+                gated_servers: std::collections::BTreeSet::from(["tickets".to_string()]),
+                ..Default::default()
+            },
+        ));
+
+        let error = dispatch_named(&gated, "open_ticket")
+            .await
+            .expect_err("a gated server's tool needs a grant");
+        assert_grant_refusal(&error, crate::tool_grant::TOOL_GRANT_REQUIRED_CODE);
+        assert!(inner.dispatched().is_empty(), "nothing below the gate ran");
+        dispatch_named(&gated, "today")
+            .await
+            .expect("an ungated server's tool is handed on");
+        grants.granted.lock().unwrap().push("tickets".to_string());
+        dispatch_named(&gated, "open_ticket")
+            .await
+            .expect("a grant of the server admits it");
+        assert_eq!(inner.dispatched(), ["today", "open_ticket"]);
+        assert_eq!(
+            *grants.asked.lock().unwrap(),
+            [
+                ("open_ticket".to_string(), Some("tickets".to_string())),
+                ("open_ticket".to_string(), Some("tickets".to_string())),
+            ]
+        );
     }
 
     /// A tool leaf's waiting effect entry

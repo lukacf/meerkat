@@ -4,6 +4,11 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `ErrorEvent.from_dict`: the message of a `lifecycle_effect_failed` event
+  of the `compaction_harvest` effect (the harvest of the compactions a
+  retired session holds failed) does not say the effect is not run again:
+  its error says whether a fallback harvest follows.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

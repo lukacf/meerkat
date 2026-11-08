@@ -2002,19 +2002,21 @@ impl DistillerEngine {
         });
     }
 
-    /// A compaction-cause harvest of the compactions a session a retirement
-    /// ends holds. Its evidence is `discards`, the batch Core's cold settle
-    /// published and answered (`OwedCompactionSettlement::Settled`), or,
-    /// with none, the session's compaction discards read from its memory,
-    /// as the `CompactionCompleted` harvest reads them. It fires no
-    /// compaction follow-up: no life resumes the session. Bounded like the
-    /// pre-rotation distillation: answers the run's outcome, or the bound
-    /// it did not end within.
+    /// A compaction-cause harvest of the compactions a session holds,
+    /// bounded like the pre-rotation distillation. Its evidence is
+    /// `discards`, the batch Core's cold settle published and answered
+    /// (`OwedCompactionSettlement::Settled`), or, with none, the session's
+    /// compaction discards read from its memory, as the
+    /// `CompactionCompleted` harvest reads them. `follow_up` fires the
+    /// compaction follow-up for a session that goes on; a retirement's
+    /// harvest of a session it ends fires none (no life resumes it).
+    /// Answers the run's outcome, or the bound it did not end within.
     pub(crate) async fn harvest_compaction_within_bound(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         discards: Option<Vec<DiscardEntry>>,
+        follow_up: bool,
     ) -> Result<DistillOutcome, Duration> {
         let timeout = self.pre_rotation_timeout;
         let harvest = self.distill_now_with(
@@ -2022,7 +2024,7 @@ impl DistillerEngine {
             session_key,
             DistillCause::Compaction,
             discards,
-            false,
+            follow_up,
         );
         if let Ok(outcome) = tokio::time::timeout(timeout, harvest).await {
             return Ok(outcome);
@@ -2031,8 +2033,8 @@ impl DistillerEngine {
             identity,
             session_key,
             timeout_ms = timeout.as_millis() as u64,
-            "agent memory distiller: the retired session's compaction harvest timed out; the \
-             retirement proceeds without it"
+            "agent memory distiller: the compaction harvest timed out; the step proceeds \
+             without it"
         );
         if let Some(sink) = self
             .events
@@ -2054,9 +2056,9 @@ impl DistillerEngine {
     /// A compaction-cause harvest, detached and unbounded: of an answered
     /// batch, or, with none, of the session's compaction discards read from
     /// its memory, for a session that goes on (Core refused the step that
-    /// would have ended it), off every critical path. It fires the
-    /// compaction follow-up, as the session's live compaction's harvest
-    /// does.
+    /// would have ended it, or a roster pass took its unlisting back), off
+    /// every critical path. It fires the compaction follow-up, as the
+    /// session's live compaction's harvest does.
     pub(crate) fn spawn_compaction_harvest(
         self: &Arc<Self>,
         identity: &str,
@@ -3426,7 +3428,12 @@ mod tests {
         }];
 
         let outcome = engine
-            .harvest_compaction_within_bound("identity:a", "sess-retired", Some(discards.clone()))
+            .harvest_compaction_within_bound(
+                "identity:a",
+                "sess-retired",
+                Some(discards.clone()),
+                false,
+            )
             .await
             .expect("the harvest ends within its bound");
         assert!(

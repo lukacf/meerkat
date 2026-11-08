@@ -178,8 +178,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   effect `compaction_harvest`) and attempted again through that read,
   bounded like the other side effects; the record goes once that read
   harvested the discards. A step Core refuses before any of it reaches
-  Core harvests the discards it settled, or those the session's memory
-  already holds, as the session's live compaction's would be.
+  Core, and an unlisting a later roster pass takes back because Core never
+  started it, harvest the discards the step settled, or those the session's
+  memory already holds, as the session's live compaction's would be; a
+  refused delete does so before it answers the refusal, since the retry it
+  invites drops the session's memory scope.
 
 - The distiller's compaction harvest reads the newest 64 records of a
   session's memory scope, where the latest compaction's discards are. It

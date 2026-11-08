@@ -673,12 +673,13 @@ impl AgentMemoryRuntimeInjector {
         self.distiller.is_some()
     }
 
-    /// The Distiller's harvest of the compactions `session_key`, a session
-    /// a retirement ends, holds
+    /// The Distiller's harvest of the compactions `session_key` holds
     /// (`DistillerEngine::harvest_compaction_within_bound`), bounded like
     /// the pre-rotation distillation: of `discards`, the batch Core's cold
     /// settle answered, or, with none, of the session's compaction
-    /// discards read from its memory. `Ok` once the discards reached the
+    /// discards read from its memory. `follow_up` fires the compaction
+    /// follow-up, for a session that goes on; a retirement's harvest of a
+    /// session it ends passes `false`. `Ok` once the discards reached the
     /// distiller, or there was nothing to read; `Err` with why they did
     /// not (a timeout, a denial of the realm's budget, a failed read or
     /// extraction). Without a Distiller there is nothing to harvest.
@@ -687,12 +688,13 @@ impl AgentMemoryRuntimeInjector {
         identity: &AgentIdentity,
         session_key: &str,
         discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
+        follow_up: bool,
     ) -> Result<(), String> {
         let Some(distiller) = self.distiller.as_ref() else {
             return Ok(());
         };
         match distiller
-            .harvest_compaction_within_bound(identity.as_str(), session_key, discards)
+            .harvest_compaction_within_bound(identity.as_str(), session_key, discards, follow_up)
             .await
         {
             Ok(outcome) if outcome.compaction_harvest_satisfied() => Ok(()),

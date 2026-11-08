@@ -6777,6 +6777,14 @@ async fn dormant_identity_owing_a_compaction_with(
         Some(tracker.clone()),
         "default",
     ));
+    // Each compaction follow-up a harvest fires lands in the same order.
+    let follow_ups = events.clone();
+    engine.set_compaction_follow_up(Arc::new(move |_identity, session, _outcome| {
+        follow_ups
+            .lock()
+            .unwrap()
+            .push(format!("follow-up {session}"));
+    }));
     runtime
         .set_agent_memory(Some(
             AgentMemoryRuntimeInjector::new(memory_store.clone(), AgentMemoryConfig::default())
@@ -6882,6 +6890,10 @@ async fn a_reset_harvests_an_owed_compaction_before_its_transcript_distillation(
     assert!(
         harvest < transcript,
         "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| event.starts_with("follow-up")),
+        "the retirement's harvest of the settled batch fires no compaction follow-up: {events:?}"
     );
     let quarantined = memory_store
         .quarantined_records("default", 10)
@@ -7215,7 +7227,7 @@ async fn a_role_move_harvests_an_owed_compaction_before_its_transcript_distillat
 /// nothing of the retirement runs.
 #[tokio::test]
 async fn a_reset_core_refuses_hands_its_settled_batch_to_the_ordinary_harvest() {
-    let (runtime, bridge, _session, events, _memory_store, _context, _memory_dir) =
+    let (runtime, bridge, session, events, _memory_store, _context, _memory_dir) =
         dormant_identity_owing_a_compaction("triage:owed-refused").await;
     let id = make_identity("triage:owed-refused");
     bridge.fail_create.store(true, Ordering::SeqCst);
@@ -7225,7 +7237,13 @@ async fn a_reset_core_refuses_hands_its_settled_batch_to_the_ordinary_harvest() 
         .await
         .expect_err("Core refuses the reset's rotation");
 
-    let events = events_once(&events, |event| event == "harvest").await;
+    let follow_up = format!("follow-up {session}");
+    let events = events_once(&events, |event| event == follow_up).await;
+    assert!(
+        events.iter().any(|event| event == "harvest"),
+        "the settled batch is harvested, and its harvest fires the compaction follow-up: \
+         {events:?}"
+    );
     assert!(
         !events.iter().any(|event| event == "transcript"),
         "nothing of the retirement runs: {events:?}"
@@ -8009,6 +8027,10 @@ async fn a_delete_core_refuses_harvests_its_settled_batch_before_it_answers() {
         answered.iter().any(|event| event == "harvest"),
         "the settled batch is harvested before the refusal is answered: {answered:?}"
     );
+    assert!(
+        answered.contains(&format!("follow-up {session}")),
+        "the harvest of the session that goes on fires the compaction follow-up: {answered:?}"
+    );
     let events = events_once(&events, |event| event == "harvest").await;
     assert!(
         !events.contains(&format!("drop {session}")),
@@ -8260,6 +8282,10 @@ async fn a_reset_of_a_live_identity_harvests_its_session_s_compactions_before_it
     assert!(
         harvest < transcript,
         "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| event.starts_with("follow-up")),
+        "the retirement's read of the session's memory fires no compaction follow-up: {events:?}"
     );
     let quarantined = memory_store
         .quarantined_records("default", 10)

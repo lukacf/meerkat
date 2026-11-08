@@ -130,7 +130,8 @@
 //! until Core journals which request a rotation carried out. Once the
 //! cursor past the fact that consumed a record is recorded, the record goes.
 //! A roster pass that lists an identity again takes back an unlisting whose
-//! retirement Core's standing shows never started. Whether a member is the
+//! retirement Core's standing shows never started, and hands a batch the
+//! unlisting settled back to the session. Whether a member is the
 //! identity's is read from the marker or the label its binding carries, in
 //! one place ([`PageMembers`]), until membership is read from Core's
 //! identity entry fact.
@@ -795,6 +796,8 @@ impl LifecycleProjection {
 pub(super) struct PreparedRetirement {
     identity: AgentIdentity,
     generation: u64,
+    /// The verb whose step it is.
+    verb: LifecycleEffectVerb,
     /// Core had retired the incarnation before the step was asked: the step
     /// seats the fresh life after it.
     predecessor_retired: bool,
@@ -2259,6 +2262,7 @@ impl IdentityRuntime {
         Ok(Some(PreparedRetirement {
             identity: identity.clone(),
             generation,
+            verb,
             predecessor_retired,
             recorded,
             retiring,
@@ -2287,7 +2291,10 @@ impl IdentityRuntime {
     /// not asked of Core, or Core's journal holds no fact of the identity's
     /// member after the head the step read before it asked. Its record goes,
     /// the one an earlier step recorded for the same incarnation is put back,
-    /// and what this process kept of it goes.
+    /// and what this process kept of it goes: a batch it settled is handed
+    /// back to the session, which goes on ([`Self::hand_back_owed_compaction`];
+    /// a delete's within its bound, since the retry its refusal invites
+    /// drops the session's scope).
     pub(super) async fn abandon_lifecycle_retirement(&self, prepared: Option<PreparedRetirement>) {
         let Some(prepared) = prepared else {
             return;
@@ -2295,34 +2302,12 @@ impl IdentityRuntime {
         let _ = self
             .lifecycle_projection
             .take_retiring(&prepared.identity, prepared.generation);
-        // The session goes on: a batch the step settled for it, or one its
-        // memory already holds (Core's settle, or an earlier finalization,
-        // published it, so nothing is owed in Core any more), is harvested
-        // as its live compaction's would have been. A batch still owed in
-        // Core (the settle failed or answered busy) stays owed to the
-        // session's next settle or wake.
-        let harvest = match self
-            .lifecycle_projection
-            .take_owed_compaction(&prepared.identity, prepared.generation)
-        {
-            Some(OwedCompaction::Batch {
-                session_key,
-                discards,
-            }) => Some((session_key, Some(discards))),
-            Some(OwedCompaction::Fallback {
-                published: Some(session_key),
-                ..
-            }) => Some((session_key, None)),
-            Some(OwedCompaction::Fallback {
-                published: None, ..
-            })
-            | None => None,
-        };
-        if let Some((session_key, discards)) = harvest
-            && let Some(memory) = self.agent_memory.read().await.clone()
-        {
-            memory.spawn_compaction_harvest(&prepared.identity, &session_key, discards);
-        }
+        self.hand_back_owed_compaction(
+            &prepared.identity,
+            prepared.generation,
+            prepared.verb == LifecycleEffectVerb::Delete,
+        )
+        .await;
         // The key reads the whole step, so it is taken before `recorded`
         // moves out of it.
         let key = prepared.key();
@@ -2341,6 +2326,61 @@ impl IdentityRuntime {
                 %error,
                 "the lifecycle effect intent of a step Core refused could not be taken back; \
                  the next step that ends the same incarnation records its own in its place"
+            );
+        }
+    }
+
+    /// A step that would have ended `identity`'s incarnation `generation`
+    /// did not end it, so the session goes on: a batch the step settled for
+    /// it, or one its memory already holds (Core's settle, or an earlier
+    /// finalization, published it, so nothing is owed in Core any more), is
+    /// harvested as its live compaction's would have been. With `awaited`
+    /// the harvest ends, within its bound, before this answers; otherwise it
+    /// runs detached. A batch still owed in Core (the settle failed or
+    /// answered busy) stays owed to the session's next settle or wake.
+    async fn hand_back_owed_compaction(
+        &self,
+        identity: &AgentIdentity,
+        generation: u64,
+        awaited: bool,
+    ) {
+        let harvest = match self
+            .lifecycle_projection
+            .take_owed_compaction(identity, generation)
+        {
+            Some(OwedCompaction::Batch {
+                session_key,
+                discards,
+            }) => Some((session_key, Some(discards))),
+            Some(OwedCompaction::Fallback {
+                published: Some(session_key),
+                ..
+            }) => Some((session_key, None)),
+            Some(OwedCompaction::Fallback {
+                published: None, ..
+            })
+            | None => None,
+        };
+        let Some((session_key, discards)) = harvest else {
+            return;
+        };
+        let Some(memory) = self.agent_memory.read().await.clone() else {
+            return;
+        };
+        if !awaited {
+            memory.spawn_compaction_harvest(identity, &session_key, discards);
+            return;
+        }
+        if let Err(error) = memory
+            .harvest_compaction_within_bound(identity, &session_key, discards, true)
+            .await
+        {
+            tracing::warn!(
+                %identity,
+                session_key = %session_key,
+                %error,
+                "the compaction harvest of a session a refused step keeps failed; the \
+                 session's next compaction or retirement reads its memory again"
             );
         }
     }
@@ -2482,12 +2522,14 @@ impl IdentityRuntime {
         owed: Owed<'_>,
         limits: EffectLimits,
     ) -> Result<(), String> {
+        // No life resumes the retired session: its harvest fires no
+        // compaction follow-up.
         let earlier = match owed_compaction {
             OwedCompaction::Batch {
                 session_key: batch_session,
                 discards,
             } => match memory
-                .harvest_compaction_within_bound(identity, &batch_session, Some(discards))
+                .harvest_compaction_within_bound(identity, &batch_session, Some(discards), false)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -2521,7 +2563,7 @@ impl IdentityRuntime {
         };
         let fallback = bounded(limits, move || async move {
             memory
-                .harvest_compaction_within_bound(identity, session_key, None)
+                .harvest_compaction_within_bound(identity, session_key, None, false)
                 .await
         })
         .await;
@@ -2646,7 +2688,9 @@ impl IdentityRuntime {
 
     /// A roster pass lists `roster`: an unlisting whose retirement Core
     /// never started is taken back, so a later retirement of that
-    /// incarnation that no Meta verb asked for owes nothing. Core's standing
+    /// incarnation that no Meta verb asked for owes nothing, and a batch the
+    /// unlisting settled is handed back to the session, which goes on
+    /// ([`Self::hand_back_owed_compaction`]). Core's standing
     /// of the identity's member says so: it still holds the incarnation the
     /// unlisting named, seated and not retiring. An unlisting whose
     /// retirement Core started (it journaled the start, and the member reads
@@ -2737,17 +2781,25 @@ impl IdentityRuntime {
                 standing,
                 MemberStanding::Seated { generation } if generation == intent.generation
             );
-            if never_started
-                && let Err(error) = store
-                    .clear_lifecycle_effect_intent(&mob_id, &intent.key())
-                    .await
+            if !never_started {
+                continue;
+            }
+            match store
+                .clear_lifecycle_effect_intent(&mob_id, &intent.key())
+                .await
             {
-                tracing::warn!(
+                // The session goes on: a batch the unlisting settled for it
+                // is handed back, as a step Core refused hands its own.
+                Ok(()) => {
+                    self.hand_back_owed_compaction(&identity, intent.generation, false)
+                        .await;
+                }
+                Err(error) => tracing::warn!(
                     %identity,
                     generation = intent.generation,
                     %error,
                     "the unlisting of a relisted identity could not be taken back"
-                );
+                ),
             }
         }
     }

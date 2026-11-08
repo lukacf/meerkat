@@ -316,7 +316,9 @@ recorded (`lifecycle_effect_failed`, effect `compaction_harvest`) and
 attempted again through that read, bounded like the other side effects,
 and its record goes once that read harvested the discards. A step Core
 refuses keeps its session, and harvests what of the compaction is already
-published.
+published (a delete before it answers the refusal, since the retry drops
+the session's memory scope); so does a roster pass that takes back an
+unlisting Core never started.
 
 What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)

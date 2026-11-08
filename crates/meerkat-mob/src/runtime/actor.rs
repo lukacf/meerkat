@@ -7962,9 +7962,6 @@ struct RespawnSnapshot {
     /// Whether the definition's wiring rules apply to the member, carried to
     /// the replacement incarnation.
     definition_wiring: crate::DefinitionWiring,
-    /// Whether the member's lineage runs under a host's tool dispatch
-    /// admission: its replacement derives one or is refused.
-    dispatch_admission_lineage: bool,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -23144,8 +23141,8 @@ impl MobActor {
                 &entry,
                 &bridge_session_id,
                 &restore_spec,
-                |lineage, host_answer| {
-                    self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+                |identity, lineage, host_answer| {
+                    self.resolve_member_dispatch_admission_verdict(identity, lineage, host_answer)
                 },
             ) {
                 Ok(admission) => restore_spec.tool_dispatch_admission = admission,
@@ -36798,7 +36795,8 @@ impl MobActor {
             // seat's embodiment.
             created_custody,
             // Set only by a fork seat's resolution and a respawn of a member
-            // whose lineage carries an admission: the spawn row records it.
+            // whose lineage carries an admission: the seat's membership
+            // commit records it in MobMachine, and the spawn row persists it.
             dispatch_admission_lineage,
         } = spec;
         let dispatch_admission = super::fork_build::SpawnDispatchAdmissionFacts {
@@ -42194,7 +42192,9 @@ impl MobActor {
         spawned_event.fork_overlay = ctx.fork_overlay;
         // Durable: a member whose lineage runs under a host's tool dispatch
         // admission derives one at every later build, after a restart too,
-        // or is refused (see `fork_build`).
+        // or is refused (see `fork_build`). The row persists the record the
+        // membership commit's step makes in MobMachine below (both come from
+        // this seat's admission), and its replay records it there again.
         spawned_event.dispatch_admission_lineage = ctx.dispatch_admission.lineage;
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
@@ -42339,6 +42339,26 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit committed membership"
         );
+        // The seat of a member whose lineage runs under a host's tool
+        // dispatch admission records its incarnation in MobMachine here, in
+        // the same synchronous step as the membership commit above, before
+        // this command awaits anything: no other mob command (a fork of the
+        // member, a rebuild of it) can run between the seat and its record,
+        // so none can find the member seated without it. A record MobMachine
+        // refuses right after the commit it follows is a broken invariant,
+        // and the actor fail-stops: replay of the row records it again. The
+        // member is seated durably, so its provision belongs to the roster,
+        // never to a rollback.
+        if ctx.dispatch_admission.lineage
+            && let Err(error) =
+                self.record_member_dispatch_admission_lineage(&identity, &agent_runtime_id)
+        {
+            let failure = self.durable_uncertainty_fail_stop.record(MobError::Internal(format!(
+                "'{agent_identity}' was seated but MobMachine refused the record of its tool dispatch admission lineage; actor is fail-stopping for cold recovery: {error}"
+            )));
+            let _member_ref = provision.commit()?;
+            return Err(failure);
+        }
 
         // Commit the provision: the member is now owned by the roster.
         // From this point, rollback_failed_spawn handles cleanup via the
@@ -52163,7 +52183,6 @@ impl MobActor {
                 ),
                 fork_job: entry.fork_job,
                 definition_wiring: entry.definition_wiring,
-                dispatch_admission_lineage: entry.dispatch_admission_lineage,
                 cleanup_retry,
             }
         };
@@ -52243,31 +52262,37 @@ impl MobActor {
         )
         .map_err(MobRespawnError::from)?;
         // A member whose lineage runs under a host's tool dispatch admission
-        // passes that lineage to its successor: MobMachine decides from it
-        // and the admission the customizer's answer above carries, and a
-        // successor the host derives none for is refused here, before
-        // anything is retired.
-        if snapshot.dispatch_admission_lineage {
-            let answered = replacement_spec.tool_dispatch_admission.clone();
-            match super::fork_build::derive_member_dispatch_admission(
-                |lineage, host_answer| {
-                    self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
-                },
-                mob_dsl::MemberDispatchAdmissionLineage::Recorded,
-                || Ok(answered),
-            )
-            .map_err(MobRespawnError::from)?
-            {
-                super::fork_build::DerivedDispatchAdmission::Inherit(_) => {
-                    replacement_spec.dispatch_admission_lineage = true;
-                }
-                super::fork_build::DerivedDispatchAdmission::Refused => {
-                    return Err(MobRespawnError::from(MobError::DispatchAdmissionRequired {
-                        member_id: original_identity.clone(),
-                    }));
-                }
-                super::fork_build::DerivedDispatchAdmission::NoneRequired => {}
+        // passes that lineage to its successor. MobMachine decides from the
+        // lineage it records for the member's current incarnation (the one
+        // this respawn replaces, still seated here) and the admission the
+        // customizer's answer above carries: the successor's seat records
+        // its own incarnation when the lineage carries one, and a successor
+        // the host derives none for is refused here, before anything is
+        // retired. A member MobMachine records nothing for is respawned as a
+        // fresh spawn the customizer answers.
+        let answered = replacement_spec.tool_dispatch_admission.clone();
+        match super::fork_build::derive_member_dispatch_admission(
+            |lineage, host_answer| {
+                self.resolve_member_dispatch_admission_verdict(
+                    &original_identity,
+                    lineage,
+                    host_answer,
+                )
+            },
+            mob_dsl::MemberDispatchAdmissionLineage::NoneRecorded,
+            || Ok(answered),
+        )
+        .map_err(MobRespawnError::from)?
+        {
+            super::fork_build::DerivedDispatchAdmission::Inherit(_) => {
+                replacement_spec.dispatch_admission_lineage = true;
             }
+            super::fork_build::DerivedDispatchAdmission::Refused => {
+                return Err(MobRespawnError::from(MobError::DispatchAdmissionRequired {
+                    member_id: original_identity.clone(),
+                }));
+            }
+            super::fork_build::DerivedDispatchAdmission::NoneRequired => {}
         }
         // The member's standing belongs to the identity: this path respawns
         // only a worker (MobMachine's admission below refuses an identity

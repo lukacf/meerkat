@@ -164,8 +164,10 @@ pub struct RosterEntry {
     pub definition_wiring: crate::DefinitionWiring,
     /// Whether this member's lineage runs under a host's tool dispatch
     /// admission, from its `MemberSpawned` row
-    /// (`MemberSpawnedEvent::dispatch_admission_lineage`): every build of the
-    /// member derives one through the host's spawn customizer or is refused.
+    /// (`MemberSpawnedEvent::dispatch_admission_lineage`). A projection
+    /// only: MobMachine holds the record for the member's incarnation
+    /// (`member_dispatch_admission_lineage`), which every verdict on the
+    /// member's builds reads; nothing decides from this field.
     /// Internal: never on a public surface.
     #[serde(skip, default)]
     pub(crate) dispatch_admission_lineage: bool,

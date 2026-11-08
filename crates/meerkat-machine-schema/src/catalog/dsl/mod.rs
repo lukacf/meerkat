@@ -5290,6 +5290,11 @@ runtime_internal_inputs!(
         // seats or rebuilds the member (a fork seat, a respawn, a wake, a
         // restore, a reload, an explicit resume). Not a surface command.
         ResolveMemberDispatchAdmission,
+        // The record of a member incarnation whose lineage runs under a
+        // tool dispatch admission, applied by the seat that requires it and
+        // by the replay of a spawn row that carries it. Not a surface
+        // command.
+        RecordMemberDispatchAdmissionLineage,
     ]
 );
 

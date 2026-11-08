@@ -1228,8 +1228,8 @@ impl MobActor {
             entry,
             session_id,
             &spec,
-            |lineage, host_answer| {
-                self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+            |identity, lineage, host_answer| {
+                self.resolve_member_dispatch_admission_verdict(identity, lineage, host_answer)
             },
         )?;
         Ok(WarmRevivalHostBuild {

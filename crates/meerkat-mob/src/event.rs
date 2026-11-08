@@ -1268,7 +1268,10 @@ pub struct MemberSpawnedEvent {
     /// admission itself is process-local and never persisted: every build of
     /// the member, after a restart too, derives one through the host's spawn
     /// customizer, and a build for which it derives none is refused
-    /// (MobMachine's `ResolveMemberDispatchAdmission`). Stored only by the
+    /// (MobMachine's `ResolveMemberDispatchAdmission`). It persists the
+    /// record MobMachine makes for this incarnation at its seat
+    /// (`member_dispatch_admission_lineage`), and the replay of the row
+    /// records it there again. Stored only by the
     /// internal event codec; a reader that predates it ignores it, and
     /// journals written before it decode it as `false`.
     #[serde(skip, default)]

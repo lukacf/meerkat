@@ -44,9 +44,11 @@
 //! inherited and never persisted, so a fork child never copies its source's.
 //! Instead MobMachine decides each child's admission
 //! (`ResolveMemberDispatchAdmission`) from what the source's mob observes of
-//! the source's lineage: whether the source's build in this process runs
-//! under one, its lineage record, or, for a source this process has not
-//! built, whether the host's answer for its next build carries one. A lineage
+//! the source's lineage: whether that mob's MobMachine records that the
+//! source's incarnation runs under one (`member_dispatch_admission_lineage`),
+//! whether the source's build in this process runs under one, or, for a
+//! source this process has not built, whether the host's answer for its next
+//! build carries one. A lineage
 //! that carries one has the host's spawn customizer asked for the child
 //! ([`customizer_dispatch_admission`]), and the child runs under the admission
 //! it derives, after any admission its request carries itself (a live
@@ -61,14 +63,19 @@
 //! history, which asks the customizer as any spawn does), and for a respawn
 //! successor of such a member.
 //!
-//! The child's spawn row records that its lineage runs under an admission
-//! (`MemberSpawnedEvent::dispatch_admission_lineage`), so every later build of
+//! MobMachine records the child's incarnation as one whose lineage runs
+//! under an admission (`RecordMemberDispatchAdmissionLineage`) in the same
+//! step as its seat commit, and its spawn row persists that record
+//! (`MemberSpawnedEvent::dispatch_admission_lineage`), which the replay of the
+//! row records in MobMachine again after a restart. So every later build of
 //! it (a wake, a restore after a restart, a warm revival, an explicit resume)
 //! asks the host again ([`customizer_own_identity_dispatch_admission`] for a
 //! fork-derived member, the customizer's resume answer for any other) and is
 //! refused when the host derives none ([`rebuild_dispatch_admission`]): such a
-//! member never runs ungated. A fork-derived member whose spawn row records
-//! nothing (a row an earlier release wrote reads so) has an unknown lineage:
+//! member never runs ungated. A record names one incarnation: a later
+//! incarnation of the identity that no seat recorded does not match it. A
+//! fork-derived member MobMachine holds no record for (a row an earlier
+//! release wrote replays so) has an unknown lineage:
 //! each rebuild of it asks the host the same way and runs under what it
 //! derives, as a fresh spawn the customizer answers does, and under none when
 //! it derives none, so a host without a customizer rebuilds it as before. An
@@ -1342,14 +1349,16 @@ pub(crate) fn member_resume_spec(
 // host's spawn customizer. A member forked from a source whose build runs
 // under one (a `fork_off` child, a member fork, a local council branch, a
 // live-delegation fork) is never built without one: MobMachine decides each
-// such build's admission from the shell's raw observations
-// (`ResolveMemberDispatchAdmission`), and the member's spawn row records that
-// its lineage carries one, so each later build (a wake, a restore, a reload,
-// an explicit resume) derives an admission again or is refused.
+// such build's admission from the lineage it records for the member and the
+// shell's raw observations (`ResolveMemberDispatchAdmission`), and the
+// member's seat records its incarnation's lineage in MobMachine, which its
+// spawn row persists, so each later build (a wake, a restore, a reload, an
+// explicit resume) derives an admission again or is refused.
 
 /// The admission a fork seat resolved for its child: what the host's
 /// customizer derived (`None` when the lineage carries none), and whether the
-/// child's lineage carries an admission, which its spawn row records.
+/// child's lineage carries an admission, which the seat's membership commit
+/// records in MobMachine and its spawn row persists.
 #[derive(Clone, Default)]
 pub(crate) struct SeatDispatchAdmission {
     pub(crate) admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
@@ -1491,17 +1500,20 @@ pub(crate) fn dispatch_admission_verdict(
         })
 }
 
-/// MobMachine's verdict for `lineage` and `host_answer`, decided on
-/// `authority` (a member's own fork of the mob's authority, off the actor).
-/// The input is a pure classification: it changes no state.
+/// MobMachine's verdict for `agent_identity`, `lineage` and `host_answer`,
+/// decided on `authority` (a member's own fork of the mob's authority, off
+/// the actor), which reads the lineage it records for the identity's current
+/// incarnation. The input is a classification: it changes no state.
 pub(crate) fn resolve_dispatch_admission_on(
     authority: &mut mob_dsl::MobMachineAuthority,
+    agent_identity: &crate::ids::AgentIdentity,
     lineage: MemberDispatchAdmissionLineage,
     host_answer: MemberDispatchAdmissionHostAnswer,
 ) -> Result<MemberDispatchAdmissionVerdict, MobError> {
     let transition = mob_dsl::MobMachineMutator::apply(
         authority,
         mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
             lineage,
             host_answer,
         },
@@ -1612,47 +1624,51 @@ pub(crate) fn customizer_own_identity_dispatch_admission(
 
 /// The dispatch admission a rebuild of `entry` on `session_id` runs under,
 /// given `restore_spec`, its rebuild request ([`rebuild_resume_spec`]), with
-/// MobMachine's verdict decided by `classify`:
+/// MobMachine's verdict for the member's own identity decided by `classify`.
+/// MobMachine reads the lineage it records for the member's current
+/// incarnation; the shell observes only whether the member is fork-derived:
 ///
-/// - an ordinary member whose spawn row records no lineage that carries an
-///   admission keeps what its request carries (the customizer's answer to
-///   its resume request);
-/// - a member whose spawn row records a lineage that carries one runs under
-///   the admission the host derives for this build (an ordinary-roster
-///   member's resume request already asked the customizer; a fork-derived
-///   member's did not, so it is asked here, for the admission alone), or the
-///   rebuild is refused with [`MobError::DispatchAdmissionRequired`];
-/// - a fork-derived member whose spawn row records none (a row written
-///   before spawn rows recorded the lineage reads so: its lineage is not
-///   known) runs under the admission the host derives for this build, as a
-///   fresh spawn the customizer answers does, and under none when it derives
-///   none. It is never refused, so a host without a customizer rebuilds it
-///   as before.
+/// - a member whose incarnation MobMachine records runs under the admission
+///   the host derives for this build (an ordinary-roster member's resume
+///   request already asked the customizer; a fork-derived member's did not,
+///   so it is asked here, for the admission alone), or the rebuild is
+///   refused with [`MobError::DispatchAdmissionRequired`];
+/// - an ordinary member MobMachine holds no record for keeps what its
+///   request carries (the customizer's answer to its resume request);
+/// - a fork-derived member MobMachine holds no record for (a spawn row
+///   written before spawn rows recorded the lineage replays so: its lineage
+///   is not known) runs under the admission the host derives for this build,
+///   as a fresh spawn the customizer answers does, and under none when it
+///   derives none. It is never refused, so a host without a customizer
+///   rebuilds it as before.
 pub(crate) fn rebuild_dispatch_admission(
     mob_id: &MobId,
     customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
     entry: &RosterEntry,
     session_id: &SessionId,
     restore_spec: &super::handle::SpawnMemberSpec,
-    classify: impl FnMut(
+    mut classify: impl FnMut(
+        &crate::ids::AgentIdentity,
         MemberDispatchAdmissionLineage,
         MemberDispatchAdmissionHostAnswer,
     ) -> Result<MemberDispatchAdmissionVerdict, MobError>,
 ) -> Result<Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>, MobError> {
-    let lineage = if entry.dispatch_admission_lineage {
-        MemberDispatchAdmissionLineage::Recorded
-    } else if entry.fork_source.is_some() {
+    let lineage = if entry.fork_source.is_some() {
         MemberDispatchAdmissionLineage::Unknown
     } else {
         MemberDispatchAdmissionLineage::NoneRecorded
     };
-    let derived = derive_member_dispatch_admission(classify, lineage, || {
-        if entry.fork_source.is_some() {
-            customizer_own_identity_dispatch_admission(mob_id, customizer, entry, session_id)
-        } else {
-            Ok(restore_spec.tool_dispatch_admission.clone())
-        }
-    })?;
+    let derived = derive_member_dispatch_admission(
+        |lineage, host_answer| classify(&entry.agent_identity, lineage, host_answer),
+        lineage,
+        || {
+            if entry.fork_source.is_some() {
+                customizer_own_identity_dispatch_admission(mob_id, customizer, entry, session_id)
+            } else {
+                Ok(restore_spec.tool_dispatch_admission.clone())
+            }
+        },
+    )?;
     match derived {
         DerivedDispatchAdmission::NoneRequired => Ok(restore_spec.tool_dispatch_admission.clone()),
         DerivedDispatchAdmission::Inherit(admission) => Ok(Some(admission)),
@@ -2072,7 +2088,7 @@ mod tests {
     }
 
     impl LoggingAdmission {
-        fn new(
+        fn admission(
             name: &'static str,
             refuse: bool,
             log: &Arc<std::sync::Mutex<Vec<String>>>,
@@ -2129,8 +2145,8 @@ mod tests {
     async fn a_composed_admission_asks_the_request_first_then_the_host() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
         let composed = compose_dispatch_admissions(
-            Some(LoggingAdmission::new("live", false, &log)),
-            Some(LoggingAdmission::new("host", false, &log)),
+            Some(LoggingAdmission::admission("live", false, &log)),
+            Some(LoggingAdmission::admission("host", false, &log)),
         )
         .expect("both admissions compose");
         let args = call_args();
@@ -2170,8 +2186,8 @@ mod tests {
     async fn a_call_the_host_refuses_settles_the_requests_admission_as_failed() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
         let composed = compose_dispatch_admissions(
-            Some(LoggingAdmission::new("live", false, &log)),
-            Some(LoggingAdmission::new("host", true, &log)),
+            Some(LoggingAdmission::admission("live", false, &log)),
+            Some(LoggingAdmission::admission("host", true, &log)),
         )
         .expect("both admissions compose");
         let args = call_args();
@@ -2201,8 +2217,8 @@ mod tests {
     #[test]
     fn a_single_admission_is_the_builds_own() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let host = LoggingAdmission::new("host", false, &log);
-        let request = LoggingAdmission::new("live", false, &log);
+        let host = LoggingAdmission::admission("host", false, &log);
+        let request = LoggingAdmission::admission("live", false, &log);
         let only_host = compose_dispatch_admissions(None, Some(Arc::clone(&host)))
             .expect("the host's admission");
         assert!(Arc::ptr_eq(&only_host, &host));

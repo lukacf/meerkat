@@ -305,7 +305,7 @@ async fn a_local_council_branch_runs_its_tool_calls_under_the_host_admission() {
             participant(1, "critic", "skeptic"),
         ],
         "Should we ship the migration this week?",
-        TemporaryCouncilBounds::relative(Duration::from_secs(120), 1, 4096),
+        TemporaryCouncilBounds::relative(Duration::from_mins(2), 1, 4096),
         MergeBackPolicy::NoMerge,
     );
     let outcome = fixture

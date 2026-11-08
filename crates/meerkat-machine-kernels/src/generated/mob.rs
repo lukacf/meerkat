@@ -10322,6 +10322,8 @@ pub struct State {
     pub member_instruction_recorded: std::collections::BTreeMap<AgentIdentity, u64>,
     pub member_instruction_blocked:
         std::collections::BTreeMap<AgentIdentity, MemberInstructionBlock>,
+    pub member_dispatch_admission_lineage:
+        std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -11897,8 +11899,14 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveMemberDispatchAdmission {
+        pub agent_identity: AgentIdentity,
         pub lineage: MemberDispatchAdmissionLineage,
         pub host_answer: MemberDispatchAdmissionHostAnswer,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberDispatchAdmissionLineage {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
     }
 }
 
@@ -12159,6 +12167,7 @@ pub enum Input {
     EndPreparationConstruction(inputs::EndPreparationConstruction),
     UnlistIdentityEntry(inputs::UnlistIdentityEntry),
     ResolveMemberDispatchAdmission(inputs::ResolveMemberDispatchAdmission),
+    RecordMemberDispatchAdmissionLineage(inputs::RecordMemberDispatchAdmissionLineage),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12494,6 +12503,9 @@ impl Input {
             Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
             Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
             Self::ResolveMemberDispatchAdmission(_) => InputKind::ResolveMemberDispatchAdmission,
+            Self::RecordMemberDispatchAdmissionLineage(_) => {
+                InputKind::RecordMemberDispatchAdmissionLineage
+            }
         }
     }
 }
@@ -12746,6 +12758,7 @@ pub enum InputKind {
     EndPreparationConstruction,
     UnlistIdentityEntry,
     ResolveMemberDispatchAdmission,
+    RecordMemberDispatchAdmissionLineage,
 }
 
 pub mod signals {
@@ -17228,6 +17241,8 @@ pub enum TransitionId {
     ResolveMemberDispatchAdmissionNoneRequiredStopped,
     ResolveMemberDispatchAdmissionNoneRequiredCompleted,
     ResolveMemberDispatchAdmissionNoneRequiredDestroyed,
+    RecordMemberDispatchAdmissionLineageRunning,
+    RecordMemberDispatchAdmissionLineageStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17631,5 +17646,6 @@ pub fn initial_state() -> State {
         member_instruction_owed: Default::default(),
         member_instruction_recorded: Default::default(),
         member_instruction_blocked: Default::default(),
+        member_dispatch_admission_lineage: Default::default(),
     }
 }

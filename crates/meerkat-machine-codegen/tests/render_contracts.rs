@@ -895,7 +895,8 @@ fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
 /// late tail after every variant 0.9.10 published, so no published
 /// `TransitionId` discriminant moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
 /// the variant 0.9.10 published last, keeps index 1902. The arms are
-/// rendered as one block, each verdict in every phase, in this order.
+/// rendered as one block, each verdict in every phase, in this order, and
+/// the record of a member incarnation's lineage follows them.
 #[test]
 fn mob_dispatch_admission_arms_follow_every_published_variant() {
     let rendered = render_machine_kernel_module(&mob_machine());
@@ -915,6 +916,11 @@ fn mob_dispatch_admission_arms_follow_every_published_variant() {
                 .into_iter()
                 .map(move |phase| format!("ResolveMemberDispatchAdmission{verdict}{phase}"))
         })
+        .chain(
+            ["Running", "Stopped"]
+                .into_iter()
+                .map(|phase| format!("RecordMemberDispatchAdmissionLineage{phase}")),
+        )
         .collect::<Vec<_>>();
     let first = index(&arms[0]);
     assert!(

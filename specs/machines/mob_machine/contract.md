@@ -337,6 +337,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_instruction_owed`: `Map<AgentIdentity, u64>`
 - `member_instruction_recorded`: `Map<AgentIdentity, u64>`
 - `member_instruction_blocked`: `Map<AgentIdentity, MemberInstructionBlock>`
+- `member_dispatch_admission_lineage`: `Map<AgentIdentity, AgentRuntimeId>`
 
 ## Inputs
 - `RunFlow`(run_id: RunId, step_ids: Set<StepId>, ordered_steps: Seq<StepId>, step_status: Map<StepId, Option<StepRunStatus>>, output_recorded: Map<StepId, Bool>, step_condition_results: Map<StepId, Option<Bool>>, step_has_conditions: Map<StepId, Bool>, step_dependencies: Map<StepId, Seq<StepId>>, step_dependency_modes: Map<StepId, DependencyMode>, step_branches: Map<StepId, Option<BranchId>>, step_collection_policies: Map<StepId, CollectionPolicyKind>, step_quorum_thresholds: Map<StepId, u32>, step_target_counts: Map<StepId, u64>, step_target_success_counts: Map<StepId, u64>, step_target_terminal_failure_counts: Map<StepId, u64>, escalation_threshold: u64, max_step_retries: u32, max_active_nodes: u64, max_active_frames: u64, max_frame_depth: u64)
@@ -599,7 +600,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SettleHostPreparation`(agent_identity: AgentIdentity, attempt: Option<u64>, constructed: Bool, before_deadline: Bool, binding_matches: Bool)
 - `EndPreparationConstruction`(agent_identity: AgentIdentity, attempt: u64, end: ConstructionEndKind)
 - `UnlistIdentityEntry`(agent_identity: AgentIdentity)
-- `ResolveMemberDispatchAdmission`(lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer)
+- `ResolveMemberDispatchAdmission`(agent_identity: AgentIdentity, lineage: MemberDispatchAdmissionLineage, host_answer: MemberDispatchAdmissionHostAnswer)
+- `RecordMemberDispatchAdmissionLineage`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -20164,7 +20166,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionAskHostRunning`
 - From: `Running`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_not_asked`
@@ -20173,7 +20175,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionAskHostStopped`
 - From: `Stopped`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_not_asked`
@@ -20182,7 +20184,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionAskHostCompleted`
 - From: `Completed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_not_asked`
@@ -20191,7 +20193,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionAskHostDestroyed`
 - From: `Destroyed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_not_asked`
@@ -20200,7 +20202,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionInheritRunning`
 - From: `Running`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_derived_admission`
@@ -20209,7 +20211,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionInheritStopped`
 - From: `Stopped`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_derived_admission`
@@ -20218,7 +20220,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionInheritCompleted`
 - From: `Completed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_derived_admission`
@@ -20227,7 +20229,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionInheritDestroyed`
 - From: `Destroyed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_may_carry_admission`
   - `host_derived_admission`
@@ -20236,7 +20238,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionRefusedRunning`
 - From: `Running`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_carries_admission`
   - `host_derived_none`
@@ -20245,7 +20247,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionRefusedStopped`
 - From: `Stopped`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_carries_admission`
   - `host_derived_none`
@@ -20254,7 +20256,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionRefusedCompleted`
 - From: `Completed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_carries_admission`
   - `host_derived_none`
@@ -20263,7 +20265,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionRefusedDestroyed`
 - From: `Destroyed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
   - `lineage_carries_admission`
   - `host_derived_none`
@@ -20272,35 +20274,55 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveMemberDispatchAdmissionNoneRequiredRunning`
 - From: `Running`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
+  - `lineage_not_recorded`
   - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Running`
 
 ### `ResolveMemberDispatchAdmissionNoneRequiredStopped`
 - From: `Stopped`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
+  - `lineage_not_recorded`
   - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Stopped`
 
 ### `ResolveMemberDispatchAdmissionNoneRequiredCompleted`
 - From: `Completed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
+  - `lineage_not_recorded`
   - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Completed`
 
 ### `ResolveMemberDispatchAdmissionNoneRequiredDestroyed`
 - From: `Destroyed`
-- On: `ResolveMemberDispatchAdmission`(lineage, host_answer)
+- On: `ResolveMemberDispatchAdmission`(agent_identity, lineage, host_answer)
 - Guards:
+  - `lineage_not_recorded`
   - `lineage_needs_none`
 - Emits: `MemberDispatchAdmissionResolved`
 - To: `Destroyed`
+
+### `RecordMemberDispatchAdmissionLineageRunning`
+- From: `Running`
+- On: `RecordMemberDispatchAdmissionLineage`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_runtime_matches`
+  - `member_local`
+- To: `Running`
+
+### `RecordMemberDispatchAdmissionLineageStopped`
+- From: `Stopped`
+- On: `RecordMemberDispatchAdmissionLineage`(agent_identity, agent_runtime_id)
+- Guards:
+  - `identity_runtime_matches`
+  - `member_local`
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

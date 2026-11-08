@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
-# TLC audit of the generated MobMachine member dispatch admission verdict:
-# the four ResolveMemberDispatchAdmission* arms partition the observation
-# pairs (a build's lineage and the host's answer), each pair takes the
-# verdict the shell mirrors, a lineage that runs under a tool dispatch
-# admission is never built without one, and an Unknown lineage (a
-# fork-derived member whose spawn row records none) is built without one
-# only when the host was asked and derived none.
+# TLC audit of the generated MobMachine member dispatch admission verdict and
+# record: the four ResolveMemberDispatchAdmission* arms partition the
+# observations (the lineage MobMachine records for the member's current
+# incarnation, a build's observed lineage and the host's answer), each takes
+# the verdict the shell mirrors, a lineage that runs under a tool dispatch
+# admission is never built without one, a record of an earlier incarnation
+# never matches, an Unknown lineage (a fork-derived member MobMachine holds
+# no record for) is built without one only when the host was asked and
+# derived none, and RecordMemberDispatchAdmissionLineage records only the
+# identity's current incarnation of a local member.
 #
 # usage: member_dispatch_admission_audit.sh [--mutants] [extra tlc args...]
 #
 # Derives the TLC configs from the generated ci.cfg next to this script
-# (every generated constant and invariant, unchanged) and adds the audit's
+# (every generated constant and invariant, with the identity and runtime id
+# constants given the audit member's values) and adds the audit's
 # invariants. The audit checks the initial state alone, with ENABLED over
-# every observation pair; that stands for every reachable state of every
-# phase only while the arms are verdicts whose guards read no state but
-# phase, and while the arm's copies in the Stopped, Completed and Destroyed
-# phases have the guards of its Running copy, so this script checks that
-# premise on the generated model first and fails if it stops holding. Then:
+# every observation pair in every state the audit member can be in (the
+# variables the arms read substituted through a parameterized INSTANCE);
+# that stands for every reachable state of every phase only while the arms
+# read no state but phase and those variables, and while each arm's copies
+# in the other phases have the guards of its Running copy, so this script
+# checks that premise on the generated model first and fails if it stops
+# holding. Then:
 # - the safety run checks the invariants on the initial state;
 # - the step run takes one classification step over every pair with TLC
 #   coverage, and requires every arm of its covered list to fire;
@@ -37,7 +43,14 @@
 #       lineage whatever the host answered) by
 #       AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone;
 #     unknown_refused (Refused taken for an Unknown lineage the host derived
-#       none for) by AuditRefusedOnlyForGatedNoneDerived.
+#       none for) by AuditRefusedOnlyForGatedNoneDerived;
+#     record_matches_any_incarnation (the verdict's record match drops the
+#       incarnation) by AuditStaleRecordNeverMatches;
+#     recorded_lineage_needs_none (NoneRequired's record guard dropped) by
+#       AuditGatedLineageNeverBuiltUngated;
+#     record_any_incarnation (the record's incarnation guard dropped) and
+#       record_placed_member (its locality guard dropped) by
+#       AuditRecordOnlyTheCurrentLocalIncarnation.
 # Each TLC run is held to the canonical lane's per-run cap (tlc_run_cap.sh)
 # and fails closed as TLC INCOMPLETE. An anchor this script expects but
 # cannot find fails the run.
@@ -64,9 +77,12 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/member-dispatch-admission-audit.XXXXXX")"
 # An interrupted or killed run ends its TLC child too (tlc_run_cap.sh).
 trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -rf "${work_dir}"' EXIT
 
-# The premise: each arm keeps its phase, changes only the step count, and its
-# guard reads no state variable but phase; each arm's copies in the Stopped,
-# Completed and Destroyed phases have its Running copy's guards but for the
+# The premise: each verdict arm keeps its phase and changes only the step
+# count, each record arm keeps its phase and changes only the record and the
+# step count; their guards read no state variable but phase,
+# identity_to_runtime, member_dispatch_admission_lineage and (the record
+# arms) member_placement, the variables the audit substitutes; each arm's
+# copies in the other phases have its Running copy's guards but for the
 # phase.
 MODEL="${spec_dir}/model.tla" python3 - <<'PY'
 import os, re
@@ -74,21 +90,42 @@ text = open(os.environ["MODEL"]).read()
 declared = re.search(r"^VARIABLES (.*)$", text, re.M)
 assert declared, "VARIABLES line not found in model.tla"
 variables = {name.strip() for name in declared.group(1).split(",")}
-phases = ("Running", "Stopped", "Completed", "Destroyed")
-for verdict in ("AskHost", "Inherit", "Refused", "NoneRequired"):
+arms = [
+    (
+        "ResolveMemberDispatchAdmission" + verdict,
+        ("Running", "Stopped", "Completed", "Destroyed"),
+        "agent_identity, lineage, host_answer",
+        [],
+        {"phase", "identity_to_runtime", "member_dispatch_admission_lineage"},
+    )
+    for verdict in ("AskHost", "Inherit", "Refused", "NoneRequired")
+] + [
+    (
+        "RecordMemberDispatchAdmissionLineage",
+        ("Running", "Stopped"),
+        "agent_identity, agent_runtime_id",
+        ["member_dispatch_admission_lineage"],
+        {"phase", "identity_to_runtime", "member_placement"},
+    )
+]
+for name, phases, params, changed, readable in arms:
     guards_by_phase = {}
     for phase in phases:
-        arm = "ResolveMemberDispatchAdmission" + verdict + phase
+        arm = name + phase
         heads = re.findall(r"(?m)^" + arm + r"\(([^)]*)\) ==$", text)
-        assert heads == ["lineage, host_answer"], f"expected one {arm}(lineage, host_answer), found {heads}"
+        assert heads == [params], f"expected one {arm}({params}), found {heads}"
         start = text.index("\n" + arm + "(") + 1
         end = text.index("\n\n", start)
         lines = text[start:end].split("\n")[1:]
         primed = sorted(line for line in lines if "'" in line)
-        assert primed == sorted([
+        expected_primed = [
             "    /\\ phase' = \"" + phase + "\"",
             "    /\\ model_step_count' = model_step_count + 1",
-        ]), f"{arm} now changes state: {primed}"
+        ]
+        updates = [line for line in primed if line not in expected_primed]
+        assert all(line in primed for line in expected_primed), f"{arm} no longer keeps its phase and counts its step: {primed}"
+        updated = sorted({re.match(r"    /\\ ([a-z_]+)' = ", line).group(1) for line in updates if re.match(r"    /\\ ([a-z_]+)' = ", line)})
+        assert updated == sorted(changed) and len(updates) == len(changed), f"{arm} changes {updates}, expected only {changed}"
         frames = [line for line in lines if re.fullmatch(r"    /\\ UnchangedFrame_[0-9a-f]+", line)]
         assert len(frames) == 1, f"{arm} has no single UNCHANGED frame"
         phase_guard = "    /\\ phase = \"" + phase + "\""
@@ -99,13 +136,13 @@ for verdict in ("AskHost", "Inherit", "Refused", "NoneRequired"):
         for line in others:
             bare = re.sub(r'"[^"]*"', '""', line)
             read = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bare)) & variables
-            assert not read, f"{arm} now reads state {sorted(read)}: the initial state no longer stands for every state"
+            assert read <= readable, f"{arm} now reads state {sorted(read - readable)}: the audited states no longer stand for every state"
         guards_by_phase[phase] = others
     for phase in phases[1:]:
         assert guards_by_phase[phase] == guards_by_phase["Running"], (
-            f"ResolveMemberDispatchAdmission{verdict}{phase} guards differ from its Running copy"
+            f"{name}{phase} guards differ from its Running copy"
         )
-print("premise holds: the dispatch admission arms are verdicts that read no state but phase, alike in every phase")
+print("premise holds: the dispatch admission arms read no state but phase and the substituted variables, alike in every phase")
 PY
 
 replace_exact_line() {
@@ -124,19 +161,26 @@ replace_exact_line() {
 audit_invariants="  AuditVerdictIsTotalAndDisjoint
   AuditVerdictTable
   AuditGatedLineageNeverBuiltUngated
+  AuditStaleRecordNeverMatches
   AuditInheritNeedsDerived
   AuditRefusedOnlyForGatedNoneDerived
   AuditHostAskedOnlyForGatedOrUnknownLineage
-  AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone"
+  AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone
+  AuditRecordOnlyTheCurrentLocalIncarnation"
 
 # usage: write_cfg <file> <spec> <extra invariant lines>; the step run
-# (AuditStepSpec) takes the audit's one-step constraint.
+# (AuditStepSpec) takes the audit's one-step constraint. The identity and
+# runtime id constants take the audit member's values: the generated ci.cfg
+# leaves them empty.
 write_cfg() {
   local cfg="$1" spec="$2" extra="$3"
   cp "${ci_cfg}" "${cfg}"
   replace_exact_line "SPECIFICATION Spec" "SPECIFICATION ${spec}" "${cfg}"
   replace_exact_line "INVARIANTS" "INVARIANTS
 ${audit_invariants}${extra}" "${cfg}"
+  replace_exact_line "  AgentIdentityValues = {}" "  AgentIdentityValues = {\"audit-member\"}" "${cfg}"
+  replace_exact_line "  AgentRuntimeIdValues = {}" \
+    "  AgentRuntimeIdValues = {\"audit-runtime-1\", \"audit-runtime-2\"}" "${cfg}"
   if [[ "${spec}" == "AuditStepSpec" ]]; then
     replace_exact_line "  CiStateConstraint" "  AuditStepConstraint" "${cfg}"
   fi
@@ -267,7 +311,7 @@ PY
     gaps="$(LOG="${log}" python3 -c '
 import os, re
 text = open(os.environ["LOG"]).read()
-found = re.findall(r"<<\s*\"pairs with.*?(?:>>\s*>>|\"none\">>)", text, re.S)
+found = re.findall(r"<<\s*\"cases with.*?(?:>>\s*>>|\"none\">>)", text, re.S)
 print("; ".join(" ".join(item.split()) for item in found))
 ')"
     echo "mutant ${name} refused by ${target}; breaks: ${broken}; ${gaps}"
@@ -300,5 +344,29 @@ print("; ".join(" ".join(item.split()) for item in found))
   # host without a customizer could no longer rebuild it.
   mutate unknown_refused AuditRefusedOnlyForGatedNoneDerived \
     "${R}" '(lineage = "SourceRebuildGated")' '((lineage = "SourceRebuildGated") \/ (lineage = "Unknown"))'
+
+  # The record's lookups, as the generated guards render them.
+  L='(IF (agent_identity \in DOMAIN member_dispatch_admission_lineage) THEN Some((IF agent_identity \in DOMAIN member_dispatch_admission_lineage THEN member_dispatch_admission_lineage[agent_identity] ELSE "None")) ELSE None)'
+  C='(IF (agent_identity \in DOMAIN identity_to_runtime) THEN Some((IF agent_identity \in DOMAIN identity_to_runtime THEN identity_to_runtime[agent_identity] ELSE "None")) ELSE None)'
+  W='RecordMemberDispatchAdmissionLineageRunning'
+
+  # The verdict's record match: a record of any incarnation of the identity
+  # matches, a stale one included.
+  mutate record_matches_any_incarnation AuditStaleRecordNeverMatches \
+    "${A}" "(${L} = ${C})" 'TRUE' \
+    "${I}" "(${L} = ${C})" 'TRUE' \
+    "${R}" "(${L} = ${C})" 'TRUE' \
+    "${N}" "(${L} # ${C})" 'FALSE'
+  # NoneRequired's record guard: a member whose current incarnation is
+  # recorded builds with what its request carries.
+  mutate recorded_lineage_needs_none AuditGatedLineageNeverBuiltUngated \
+    "${N}" '((agent_identity \in DOMAIN member_dispatch_admission_lineage) = FALSE)' 'TRUE'
+  # The record's incarnation guard: any incarnation of the identity is
+  # recorded, not only its current one.
+  mutate record_any_incarnation AuditRecordOnlyTheCurrentLocalIncarnation \
+    "${W}" "(${C} = Some(agent_runtime_id))" 'TRUE'
+  # The record's locality guard: a placed member is recorded.
+  mutate record_placed_member AuditRecordOnlyTheCurrentLocalIncarnation \
+    "${W}" '((agent_identity \in DOMAIN member_placement) = FALSE)' 'TRUE'
 fi
 echo "member dispatch admission audit passed over every observation pair"

@@ -1507,6 +1507,14 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::ResolveMemberDispatchAdmission,
         reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
+    // The record of a member incarnation whose lineage runs under a tool
+    // dispatch admission (0.9.11): the seat that requires it applies it with
+    // its seat commit, and the replay of a spawn row that carries it applies
+    // it again; neither is a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordMemberDispatchAdmissionLineage,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
 ];
 
 #[doc(hidden)]

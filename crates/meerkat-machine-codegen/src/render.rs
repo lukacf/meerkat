@@ -1061,6 +1061,10 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ResolveMemberDispatchAdmissionNoneRequiredStopped",
             "ResolveMemberDispatchAdmissionNoneRequiredCompleted",
             "ResolveMemberDispatchAdmissionNoneRequiredDestroyed",
+            // The record of a member incarnation whose lineage runs under a
+            // tool dispatch admission (0.9.11).
+            "RecordMemberDispatchAdmissionLineageRunning",
+            "RecordMemberDispatchAdmissionLineageStopped",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

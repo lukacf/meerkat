@@ -4333,6 +4333,26 @@ fn seed_mob_authority_sync_from_events(
                         "recover_member_definition_wiring_exempt",
                     )?;
                 }
+                // A member whose lineage runs under a host's tool dispatch
+                // admission: its row persists the record its seat made, and
+                // the replay records this incarnation in MobMachine again
+                // before the boot plan is sealed, so every build of it after
+                // the restart reads the record. A row without it (an earlier
+                // release wrote none) records nothing.
+                if member_spawned.dispatch_admission_lineage() {
+                    apply_seeded_mob_input(
+                        authority,
+                        mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &member_spawned.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &member_spawned.agent_runtime_id,
+                            ),
+                        },
+                        "recover_member_dispatch_admission_lineage",
+                    )?;
+                }
                 // The member of an identity entry: its row records the
                 // entry's origin, and the replay records the entry again
                 // before the boot plan is sealed.
@@ -13199,8 +13219,13 @@ pub(super) async fn restore_resumed_member(
         entry,
         &bridge_session_id,
         &restore_spec,
-        |lineage, host_answer| {
-            super::fork_build::resolve_dispatch_admission_on(&mut verdicts, lineage, host_answer)
+        |identity, lineage, host_answer| {
+            super::fork_build::resolve_dispatch_admission_on(
+                &mut verdicts,
+                identity,
+                lineage,
+                host_answer,
+            )
         },
     ) {
         Ok(admission) => admission,

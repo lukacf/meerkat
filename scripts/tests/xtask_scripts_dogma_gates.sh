@@ -1089,6 +1089,8 @@ printf '%s\n' \
   'echo "Error: Invariant AuditGatedLineageNeverBuiltUngated is violated by the initial state:"' \
   'echo "Error: Invariant AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone is violated by the initial state:"' \
   'echo "Error: Invariant AuditRefusedOnlyForGatedNoneDerived is violated by the initial state:"' \
+  'echo "Error: Invariant AuditStaleRecordNeverMatches is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRecordOnlyTheCurrentLocalIncarnation is violated by the initial state:"' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

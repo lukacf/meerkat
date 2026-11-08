@@ -91431,6 +91431,11 @@ fn mob_runtime_parity_field_value(
         | "identity_entry_origins"
         | "identity_entry_unseated"
         | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        // The dispatch admission lineage record: the parity probes seat no
+        // member under a host's tool dispatch admission.
+        "member_dispatch_admission_lineage" => {
+            Some(MobRuntimeParityExprValue::Map(BTreeMap::new()))
+        }
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }

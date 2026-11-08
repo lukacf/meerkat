@@ -5802,6 +5802,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberDispatchAdmissionNoneRequiredDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordMemberDispatchAdmissionLineageRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberDispatchAdmissionLineageStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`

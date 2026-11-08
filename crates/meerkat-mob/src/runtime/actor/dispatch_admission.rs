@@ -5,7 +5,11 @@
 //! spawn customizer is asked for the child, and the child runs under what it
 //! derives or is not seated at all (see `fork_build`). The handle's fork
 //! paths drive both steps before anything is forked; a local temporary
-//! council branch is resolved where it is seated.
+//! council branch is resolved where it is seated. Whether a member's lineage
+//! runs under an admission is MobMachine's own record
+//! (`member_dispatch_admission_lineage`), which the verdict reads for the
+//! member's current incarnation; the shell only feeds what it observed
+//! besides.
 
 use super::*;
 use crate::runtime::fork_build::{
@@ -16,15 +20,19 @@ use crate::runtime::fork_build::{
 
 impl MobActor {
     /// MobMachine's verdict on one member build's tool dispatch admission,
-    /// from what the shell observed of the build's `lineage` and the host's
-    /// `host_answer`.
+    /// from the lineage MobMachine records for `agent_identity`'s current
+    /// incarnation (the member being rebuilt, or the fork source or
+    /// respawned member a seat answers to), what the shell observed of the
+    /// build's `lineage` besides, and the host's `host_answer`.
     pub(super) fn resolve_member_dispatch_admission_verdict(
         &mut self,
+        agent_identity: &AgentIdentity,
         lineage: mob_dsl::MemberDispatchAdmissionLineage,
         host_answer: mob_dsl::MemberDispatchAdmissionHostAnswer,
     ) -> Result<mob_dsl::MemberDispatchAdmissionVerdict, MobError> {
         let effects = self.apply_dsl_input_collect_effects(
             mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 lineage,
                 host_answer,
             },
@@ -33,23 +41,66 @@ impl MobActor {
         dispatch_admission_verdict(&effects, lineage, host_answer)
     }
 
+    /// Whether MobMachine records that `member`'s current incarnation runs
+    /// under a host's tool dispatch admission, read through the machine's
+    /// own verdict: with nothing else observed, it asks for the host exactly
+    /// when it records the lineage.
+    pub(super) fn member_dispatch_admission_recorded(
+        &mut self,
+        member: &AgentIdentity,
+    ) -> Result<bool, MobError> {
+        match self.resolve_member_dispatch_admission_verdict(
+            member,
+            mob_dsl::MemberDispatchAdmissionLineage::NoneRecorded,
+            mob_dsl::MemberDispatchAdmissionHostAnswer::NotAsked,
+        )? {
+            mob_dsl::MemberDispatchAdmissionVerdict::AskHost => Ok(true),
+            mob_dsl::MemberDispatchAdmissionVerdict::NoneRequired => Ok(false),
+            verdict => Err(MobError::Internal(format!(
+                "MobMachine answered a lineage read the host was not asked for with {verdict:?}"
+            ))),
+        }
+    }
+
+    /// Record in MobMachine that `member`'s incarnation `runtime_id` runs
+    /// under a host's tool dispatch admission. The seat that requires the
+    /// lineage applies it in the same synchronous step as its seat commit.
+    pub(super) fn record_member_dispatch_admission_lineage(
+        &mut self,
+        member: &AgentIdentity,
+        runtime_id: &AgentRuntimeId,
+    ) -> Result<(), MobError> {
+        self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(member),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(runtime_id),
+            },
+            "record_member_dispatch_admission_lineage",
+        )?;
+        Ok(())
+    }
+
     /// What this mob observes of `source`'s tool dispatch admission lineage
     /// for a fork of it taken from its session `source_session_id`: whether
-    /// its build in this process runs under an admission; for a source this
-    /// process has not built, its lineage record, or else whether the host's
-    /// answer for its next build would carry one, without waking it (an
-    /// ordinary source's rebuild request, made as its restore makes it; a
-    /// fork-derived source whose spawn row records no lineage asks the host
-    /// for its own identity, as its rebuild does: see
+    /// MobMachine records that the source's incarnation runs under one (read
+    /// first, so no other observation can stand for it), whether its build
+    /// in this process runs under one, or else, for a source this process has
+    /// not built, whether the host's answer for its next build would carry
+    /// one, without waking it (an ordinary source's rebuild request, made as
+    /// its restore makes it; a fork-derived source with no record asks the
+    /// host for its own identity, as its rebuild does: see
     /// `fork_build::rebuild_dispatch_admission`). A source with no session
     /// of this process (`None`: a placed member, whose admission cannot
     /// cross placement) has no build here that could run under one.
     pub(super) async fn observe_fork_source_dispatch_lineage(
-        &self,
+        &mut self,
         source: &AgentIdentity,
         source_session_id: Option<&SessionId>,
     ) -> Result<mob_dsl::MemberDispatchAdmissionLineage, MobError> {
         use mob_dsl::MemberDispatchAdmissionLineage as Lineage;
+        if self.member_dispatch_admission_recorded(source)? {
+            return Ok(Lineage::Recorded);
+        }
         if let Some(present) = self
             .per_spawn_external_tools
             .read()
@@ -70,9 +121,6 @@ impl MobActor {
                 .ok_or_else(|| MobError::MemberNotFound(source.clone()))?;
             (entry, roster.next_build(source))
         };
-        if entry.dispatch_admission_lineage {
-            return Ok(Lineage::Recorded);
-        }
         let Some(source_session_id) = source_session_id else {
             return Ok(Lineage::SourceRebuildUngated);
         };
@@ -130,9 +178,14 @@ impl MobActor {
             .observe_fork_source_dispatch_lineage(source, source_session.as_ref())
             .await?;
         let answered = child.tool_dispatch_admission.clone();
+        let child_identity = child.identity.clone();
         match derive_member_dispatch_admission(
             |lineage, host_answer| {
-                self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+                self.resolve_member_dispatch_admission_verdict(
+                    &child_identity,
+                    lineage,
+                    host_answer,
+                )
             },
             lineage,
             || Ok(answered),
@@ -176,9 +229,14 @@ impl MobActor {
             spawner_runtime_id,
             requested_profile: child.role_name.clone(),
         };
+        let child_identity = child.identity.clone();
         let derived = derive_member_dispatch_admission(
             |lineage, host_answer| {
-                self.resolve_member_dispatch_admission_verdict(lineage, host_answer)
+                self.resolve_member_dispatch_admission_verdict(
+                    &child_identity,
+                    lineage,
+                    host_answer,
+                )
             },
             lineage,
             || customizer_dispatch_admission(customizer.as_ref(), &ctx, child),

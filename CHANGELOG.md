@@ -75,6 +75,32 @@ them.
   existing variant's discriminant moves. Exhaustive matches must add the
   new variants.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides each member build's tool dispatch admission and
+  records the lineage that runs under one (see Security). `MobMachineInput`
+  (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob::Input` gain `ResolveMemberDispatchAdmission
+  { agent_identity, lineage, host_answer }` and
+  `RecordMemberDispatchAdmissionLineage { agent_identity, agent_runtime_id }`,
+  and `MobMachineInputVariant` (meerkat-machine-schema),
+  `MobMachineCatalogInput` (meerkat-mob) and the kernel `InputKind` gain
+  both names. `MobMachineEffect` and the kernel `Effect` gain
+  `MemberDispatchAdmissionResolved { lineage, host_answer, verdict }`, and
+  the kernel `EffectKind` its name. `MobMachineState` and the kernel `State`
+  gain the field `member_dispatch_admission_lineage` (a map from a member's
+  identity to the runtime id of the incarnation it records), so code that
+  builds the state literally must set it. The kernel
+  `generated::mob::TransitionId` gains
+  `ResolveMemberDispatchAdmission{AskHost,Inherit,Refused,NoneRequired}`
+  in each of the phases `Running`, `Stopped`, `Completed` and `Destroyed`,
+  and `RecordMemberDispatchAdmissionLineageRunning` and
+  `RecordMemberDispatchAdmissionLineageStopped`. The enums
+  `MemberDispatchAdmissionLineage`, `MemberDispatchAdmissionHostAnswer` and
+  `MemberDispatchAdmissionVerdict` are new. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
   MeerkatMachine gains the failure arm of an until-changed switch-turn
   reconfigure, the refusal of an until-changed switch-turn while another
@@ -1021,10 +1047,11 @@ them.
   with the new `MobError::DispatchAdmissionRequired` before the child is
   seated (a refused `fork_off` or handle fork forks nothing; a refused
   council branch is refused after the council forked its source for it, and
-  the council's cleanup removes that fork). The child's spawn row records
-  this, so each later build of it (a wake, a restore after a restart, a
-  reload, an explicit resume, a respawn) asks again and is refused when the
-  customizer installs none. A fork child seated by an earlier release, whose
+  the council's cleanup removes that fork). MobMachine records that the
+  child's incarnation runs under an admission, and the child's spawn row
+  persists the record, so each later build of it (a wake, a restore after a
+  restart, a reload, an explicit resume, a respawn) asks again and is
+  refused when the customizer installs none. A fork child seated by an earlier release, whose
   spawn row records nothing, is gated by the host's customizer when it is
   rebuilt: it runs under the admission the customizer installs for it, and
   as before when it installs none. A `fork_helper` child of such a member,
@@ -1096,11 +1123,11 @@ them.
   fork's child, `SpawnSource::AttachedForkedParticipant` for a council
   branch) to keep forking them.
 
-- A fork of a live-delegation worker, the worker's own `fork_off`
-  included, is refused on a host without a `SpawnMemberCustomizer`: the
+- A host without a `SpawnMemberCustomizer` that runs live delegation can
+  no longer fork the delegated worker, its own `fork_off` included: the
   worker runs under its delegation's gate, so a fork of it needs an
-  admission from the host's customizer, which runs after the delegation's
-  gate.
+  admission from the host's customizer, and with none the fork is refused
+  with `MobError::DispatchAdmissionRequired`.
 
 ### Known limitations
 

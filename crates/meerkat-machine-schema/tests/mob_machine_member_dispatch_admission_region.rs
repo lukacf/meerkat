@@ -10,19 +10,29 @@
 //! none; a lineage that is not known (a fork-derived member whose spawn row
 //! records none, as rows written before they recorded one read) asks the
 //! host first and takes what it derived, an admission or none, and is never
-//! refused; any other lineage needs none. The verdict is a pure
-//! classification: it changes no state, in any phase. These rows drive the
-//! schema crate's own instantiation of the machine through every phase.
+//! refused; any other lineage needs none. The lineage this machine records
+//! for the input's identity at its current incarnation
+//! (`member_dispatch_admission_lineage`, set by
+//! `RecordMemberDispatchAdmissionLineage`) carries an admission whatever the
+//! shell observed, and a record of an earlier incarnation never matches. The
+//! verdict changes no state, in any phase. These rows drive the schema
+//! crate's own instantiation of the machine through every phase.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use meerkat_machine_schema::catalog::dsl::dsl_mob_machine;
 use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    AgentIdentity, AgentRuntimeId, FenceToken, Generation,
     MemberDispatchAdmissionHostAnswer as HostAnswer, MemberDispatchAdmissionLineage as Lineage,
     MemberDispatchAdmissionVerdict as Verdict, MobMachineAuthority, MobMachineEffect,
-    MobMachineInput, MobMachineMutator, MobPhase, PlacedCompletionLifecycleIntentKind,
+    MobMachineInput, MobMachineMutator, MobMachineSignal, MobPhase,
+    PlacedCompletionLifecycleIntentKind, SpawnPolicyRuntimeMode,
 };
 
 type Authority = MobMachineAuthority;
+
+/// The identity the verdict rows ask about when no record is involved: no
+/// member is seated under it.
+const UNSEATED: &str = "unseated-member";
 
 const ARMS: [&str; 4] = [
     "ResolveMemberDispatchAdmissionAskHost",
@@ -109,16 +119,28 @@ fn enter(authority: &mut Authority, phase: MobPhase) {
     assert_eq!(authority.state().lifecycle_phase, phase);
 }
 
-/// The verdict the machine answers `lineage` and `host_answer` with, and
-/// the effects that answer it.
+/// The verdict the machine answers `lineage` and `host_answer` with for an
+/// identity no member holds, and the effects that answer it.
 fn resolve(
     authority: &mut Authority,
+    lineage: Lineage,
+    host_answer: HostAnswer,
+) -> (Verdict, Vec<MobMachineEffect>) {
+    resolve_for(authority, UNSEATED, lineage, host_answer)
+}
+
+/// The verdict the machine answers `lineage` and `host_answer` with for
+/// `member`, and the effects that answer it.
+fn resolve_for(
+    authority: &mut Authority,
+    member: &str,
     lineage: Lineage,
     host_answer: HostAnswer,
 ) -> (Verdict, Vec<MobMachineEffect>) {
     let transition = MobMachineMutator::apply(
         authority,
         MobMachineInput::ResolveMemberDispatchAdmission {
+            agent_identity: AgentIdentity::from(member),
             lineage,
             host_answer,
         },
@@ -272,4 +294,149 @@ fn the_dispatch_admission_region_declares_every_arm_in_every_phase() {
             );
         }
     }
+    for phase in ["Running", "Stopped"] {
+        let name = format!("RecordMemberDispatchAdmissionLineage{phase}");
+        assert!(
+            schema
+                .transitions
+                .iter()
+                .any(|transition| transition.name.as_str() == name),
+            "MobMachine must declare {name}"
+        );
+    }
+}
+
+fn runtime_of(member: &str, generation: u64) -> AgentRuntimeId {
+    AgentRuntimeId(format!("{member}-runtime-{generation}"))
+}
+
+/// Seat incarnation `generation` of `member` the way the epoch replay does.
+fn seat(authority: &mut Authority, member: &str, generation: u64) {
+    authority
+        .apply_signal(MobMachineSignal::RecoverRosterMember {
+            agent_identity: AgentIdentity::from(member),
+            agent_runtime_id: runtime_of(member, generation),
+            fence_token: FenceToken(generation),
+            generation: Generation(generation),
+            profile_name: "worker".to_string(),
+            runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+            external_addressable: false,
+        })
+        .expect("seat the member");
+}
+
+/// Retire incarnation `generation` of `member` the way the epoch replay does.
+fn retire(authority: &mut Authority, member: &str, generation: u64) {
+    authority
+        .apply_signal(MobMachineSignal::RecoverRosterMemberRetired {
+            agent_identity: AgentIdentity::from(member),
+            agent_runtime_id: runtime_of(member, generation),
+            generation: Generation(generation),
+            preserve_machine_topology: false,
+            preservation_started: false,
+            session_archived: true,
+            hosted_incarnation: false,
+        })
+        .expect("retire the member");
+}
+
+/// Record that incarnation `generation` of `member` runs under a tool
+/// dispatch admission.
+fn record(
+    authority: &mut Authority,
+    member: &str,
+    generation: u64,
+) -> Result<(), meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineTransitionError> {
+    MobMachineMutator::apply(
+        authority,
+        MobMachineInput::RecordMemberDispatchAdmissionLineage {
+            agent_identity: AgentIdentity::from(member),
+            agent_runtime_id: runtime_of(member, generation),
+        },
+    )
+    .map(|_| ())
+}
+
+/// The lineage this machine records for a member's current incarnation
+/// carries an admission whatever the shell observed: the host is asked, the
+/// build inherits only what it derived, and a build it derived none for is
+/// refused, an Unknown or ungated observation included.
+#[test]
+fn a_recorded_lineage_carries_an_admission_whatever_the_shell_observed() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "fork-child", 1);
+    record(&mut authority, "fork-child", 1).expect("record the seated incarnation");
+    for lineage in LINEAGES {
+        assert_eq!(
+            resolve_for(&mut authority, "fork-child", lineage, HostAnswer::NotAsked).0,
+            Verdict::AskHost,
+            "{lineage:?}: the host is asked"
+        );
+        assert_eq!(
+            resolve_for(&mut authority, "fork-child", lineage, HostAnswer::Derived).0,
+            Verdict::Inherit,
+            "{lineage:?}: the build runs under the derived admission"
+        );
+        assert_eq!(
+            resolve_for(
+                &mut authority,
+                "fork-child",
+                lineage,
+                HostAnswer::NoneDerived
+            )
+            .0,
+            Verdict::Refused,
+            "{lineage:?}: a build the host derived none for is refused"
+        );
+    }
+}
+
+/// A record names one incarnation: after the recorded incarnation is
+/// retired and a new one of the identity is seated, the record does not
+/// match, and the new incarnation takes the verdict of its observation
+/// alone.
+#[test]
+fn a_record_of_an_earlier_incarnation_never_matches() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "fork-child", 1);
+    record(&mut authority, "fork-child", 1).expect("record the seated incarnation");
+    retire(&mut authority, "fork-child", 1);
+    seat(&mut authority, "fork-child", 2);
+    for lineage in LINEAGES {
+        for host_answer in HOST_ANSWERS {
+            assert_eq!(
+                resolve_for(&mut authority, "fork-child", lineage, host_answer).0,
+                expected(lineage, host_answer),
+                "{lineage:?} with {host_answer:?} for the new incarnation"
+            );
+        }
+    }
+}
+
+/// Only the identity's current, local incarnation is recorded: a record
+/// that names another incarnation, or a member not seated, is refused and
+/// records nothing.
+#[test]
+fn only_the_current_incarnation_is_recorded() {
+    let mut authority = Authority::new();
+    assert!(
+        record(&mut authority, "fork-child", 1).is_err(),
+        "a member not seated is not recorded"
+    );
+    seat(&mut authority, "fork-child", 1);
+    assert!(
+        record(&mut authority, "fork-child", 2).is_err(),
+        "another incarnation is not recorded"
+    );
+    assert_eq!(
+        resolve_for(
+            &mut authority,
+            "fork-child",
+            Lineage::NoneRecorded,
+            HostAnswer::NotAsked
+        )
+        .0,
+        Verdict::NoneRequired,
+        "nothing was recorded"
+    );
 }

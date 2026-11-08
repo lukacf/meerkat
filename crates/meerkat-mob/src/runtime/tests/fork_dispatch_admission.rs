@@ -27,7 +27,10 @@ struct LoggingGate {
 }
 
 impl LoggingGate {
-    fn new(name: &'static str, log: &AdmissionLog) -> Arc<dyn meerkat_core::ToolDispatchAdmission> {
+    fn admission(
+        name: &'static str,
+        log: &AdmissionLog,
+    ) -> Arc<dyn meerkat_core::ToolDispatchAdmission> {
         Arc::new(Self {
             name,
             log: Arc::clone(log),
@@ -77,7 +80,7 @@ struct GatingCustomizer {
 impl GatingCustomizer {
     fn new(log: &AdmissionLog) -> Arc<Self> {
         Arc::new(Self {
-            gate: LoggingGate::new("host", log),
+            gate: LoggingGate::admission("host", log),
             ungated: std::sync::Mutex::new(BTreeSet::new()),
             asked: std::sync::Mutex::new(Vec::new()),
         })
@@ -499,7 +502,7 @@ async fn a_live_delegation_fork_runs_under_its_own_gate_and_the_hosts() {
     mob.spawn_member(&source).await;
     let child = AgentIdentity::from("live-worker");
     let mut spec = worker_spec(&child);
-    spec.tool_dispatch_admission = Some(LoggingGate::new("live", &mob.log));
+    spec.tool_dispatch_admission = Some(LoggingGate::admission("live", &mob.log));
     let outcome = mob
         .handle
         .fork_member_at_turn_boundary(&source, spec, None, Duration::from_secs(5))
@@ -1088,4 +1091,112 @@ async fn a_policy_auto_spawn_runs_under_the_hosts_admission_and_so_does_its_fork
     assert_built_under_the_host_gate(&mob.service, &fork.session_id, &mob.log, "policy-fork-call")
         .await;
     assert!(lineage(&mob.handle, &child).await);
+}
+
+/// Set the roster's projection of `member`'s dispatch admission lineage to
+/// `value`, as a stale or corrupted projection would read, leaving
+/// MobMachine's own record as it is.
+async fn set_lineage_projection(handle: &MobHandle, member: &AgentIdentity, value: bool) {
+    let mut snapshot = handle.roster.read().await.snapshot();
+    snapshot
+        .get_mut(member)
+        .unwrap_or_else(|| panic!("{member} is seated"))
+        .dispatch_admission_lineage = value;
+    *handle.roster.write().await = super::roster_authority::RosterAuthority::from_roster(snapshot);
+}
+
+/// After a restart the lineage of a gated fork child comes from MobMachine,
+/// which the replay of the child's spawn row records, never from the
+/// roster's projection of it: with the projection cleared, a restarted host
+/// that derives no admission for the child still has its wake refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_restart_the_replayed_record_not_the_roster_decides_a_fork_childs_lineage() {
+    let mob = GatedMob::new("fork-admission-replayed-record").await;
+    let source = AgentIdentity::from("gated-source");
+    let child = AgentIdentity::from("gated-child");
+    gated_source_and_child(&mob, &source, &child).await;
+    let builds = member_build_count(&mob.service, &child).await;
+    let restarted_host = GatingCustomizer::new(&AdmissionLog::default());
+    restarted_host.leave_ungated(&child);
+    let (resumed, service) = mob.crash_and_resume(false, restarted_host, None).await;
+    set_lineage_projection(&resumed, &child, false).await;
+    let woken = tokio::time::timeout(STEP, resumed.ensure_member_live(&child))
+        .await
+        .expect("the wake answers");
+    assert!(
+        woken.is_err(),
+        "the replayed record refuses the child's ungated wake: {woken:?}"
+    );
+    assert_eq!(
+        member_build_count(&service, &child).await,
+        builds,
+        "nothing is built without an admission"
+    );
+}
+
+/// The record MobMachine holds names one incarnation: after a gated fork
+/// child is retired, a fresh member seated under the same identity is a new
+/// incarnation the record does not match, so its rebuild takes the
+/// customizer's answer like any ordinary member's and is not refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_of_an_earlier_incarnation_does_not_match_a_new_member_of_the_identity() {
+    let mob = GatedMob::new("fork-admission-stale-record").await;
+    let source = AgentIdentity::from("gated-source");
+    let child = AgentIdentity::from("gated-child");
+    gated_source_and_child(&mob, &source, &child).await;
+    mob.handle
+        .retire(child.clone())
+        .await
+        .expect("retire the fork child");
+    mob.customizer.leave_ungated(&child);
+    let session = mob.spawn_member(&child).await;
+    assert!(
+        last_admission(&mob.service, &session).await.is_none(),
+        "the new member is seated ungated"
+    );
+    let builds = member_build_count(&mob.service, &child).await;
+    MobSessionService::discard_live_session(mob.service.as_ref(), &session)
+        .await
+        .expect("discard the member's live session");
+    mob.handle
+        .member(&child)
+        .await
+        .expect("the member's handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("the warm revival rebuilds the new member");
+    assert_eq!(member_build_count(&mob.service, &child).await, builds + 1);
+    assert!(
+        last_admission(&mob.service, &session).await.is_none(),
+        "the earlier incarnation's record does not gate the new member"
+    );
+}
+
+/// The verdict takes no lineage MobMachine has not recorded: an ordinary
+/// member whose roster projection claims a gated lineage, which MobMachine
+/// never recorded, is rebuilt as an ordinary member under the customizer's
+/// answer, here none, and is not refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lineage_mobmachine_never_recorded_does_not_gate_a_rebuild() {
+    let mob = GatedMob::new("fork-admission-unrecorded-projection").await;
+    let member = AgentIdentity::from("ordinary-member");
+    mob.customizer.leave_ungated(&member);
+    let session = mob.spawn_member(&member).await;
+    set_lineage_projection(&mob.handle, &member, true).await;
+    let builds = member_build_count(&mob.service, &member).await;
+    MobSessionService::discard_live_session(mob.service.as_ref(), &session)
+        .await
+        .expect("discard the member's live session");
+    mob.handle
+        .member(&member)
+        .await
+        .expect("the member's handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect("the warm revival rebuilds the member");
+    assert_eq!(member_build_count(&mob.service, &member).await, builds + 1);
+    assert!(
+        last_admission(&mob.service, &session).await.is_none(),
+        "the member is rebuilt under the customizer's answer"
+    );
 }

@@ -589,6 +589,15 @@ def stage_b_checks(f, actions):
             and ['1', '1', 'EntryRefused'] in refused and keys3 == [['inc1', 'k1', '2']]
             and proc(kind='core', out='Admitted') and 'B_LifeBeginClose' in actions and 'B_Stop' in actions
             and before_last('B_Life2Open', 'B_CoreReoffer'),
+        # The fail-stop on a poisoned publication during the close (the first lifetime stays
+        # Closing: the process did not wait for it), the next process in a new lifetime, where
+        # Core's re-offer admits the durable delivery once.
+        'row-poisoned-fail-stop-recovered': b and f.get('door') == '"Peer"' and f.get('fatal') == '"PublicationPoisoned"'
+            and f.get('life_phase') == '"Closing"' and f.get('life_cur') == '2' and len(native) == 1
+            and any(admitted(i) and num(i, 'receipt_epoch') == 2 for i in (1, 2))
+            and proc(kind='core', out='Admitted') and 'B_FailStop' in actions and 'B_Crash' not in actions
+            and 'B_LifeBeginClose' in actions
+            and (before_last('B_Life2Open', 'B_CoreReoffer') or before_last('B_Life2Open', 'B_CoreReofferFresh')),
         # The re-offer of an admitted record refused at the entry fence after the source closed.
         'readmitted-fence': b and last == 'B_Entry' and f.get('door') == '"Peer"' and admitted(1)
             and f.get('src_readiness') == '"ClosedToOffers"' and proc(kind='core', ans='EntryRefused'),

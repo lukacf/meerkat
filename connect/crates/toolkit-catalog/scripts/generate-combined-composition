@@ -28,7 +28,9 @@ an admission write still in flight; with late landings also its durable read, wh
 counts a lost dispatch of this process); one crash and restart;
 admission closure with the close's join, the close's unresolved record scoped to the closing
 process, and in the stop profiles the process's end after its close and the restart into a new
-component lifetime, whose re-drive and Core's re-offer dispatch the records the close recorded.
+component lifetime, whose re-drive and Core's re-offer dispatch the records the close recorded;
+in the poison profiles the fail-stop on a poisoned publication (the typed fatal diagnostic, the
+process's end by the crash's path without waiting for the close, the next process recovering).
 The owner module headers are renamed for INSTANCE,
 their bodies stay exact (an owner mutant composes a copy with one guard conjunct removed). The
 rank table is read from the canonical export (lock_order/ranks.json). A bounded contract model,
@@ -53,11 +55,12 @@ OWN_INITIAL = ['First', 'Partial', 'Bound']
 BOTH = ['A', 'B']
 HELD_DOORS = ['Find', 'Launch']
 # Stage B environment dimensions a profile may enable. The full-environment bases take ALL_ENV;
-# the stop (the process ends after its close and restarts into a new component lifetime) and the
+# the stop (the process ends after its close and restarts into a new component lifetime), the
 # late landing (Core's admission write still in flight after its call returned, and the driver's
-# durable read beside the live one) run in profiles of their own.
+# durable read beside the live one) and the poisoned publication (the fail-stop) run in profiles
+# of their own.
 ALL_ENV = ['hold', 'revoke', 'session', 'srcclose', 'close', 'crash', 'drop', 'lost', 'corerefuse']
-ENV_TOKENS = ALL_ENV + ['stop', 'late']
+ENV_TOKENS = ALL_ENV + ['stop', 'late', 'poison']
 
 # The attempt model's own variables (stage A), renamed a_*; the rest are shared with B.
 A_OWN = ['attempt', 'effect', 'decided', 'wrote', 'nested', 'pc', 'step', 'after_store', 'bw', 'answer',
@@ -69,7 +72,7 @@ B_VARS = ['mode', 'sp', 'prep', 'jr', 'begun', 'native', 'core_refusals', 'lost_
           'read_slot', 'raw_read', 'published_read', 'unavail_reads', 'dup_arts', 'prep_refused', 'drop_partial',
           'held_site', 'entered_after_close', 'claimed', 'lost_reply_seen', 'crashed_offered', 'admitted_stale',
           'cas_lost', 'replayed', 'close_waited_prep', 'dead_prep', 'a_held', 'refusals', 'life_cur', 'orphan_claim',
-          'read_kind', 'landing', 'absence_epoch']
+          'read_kind', 'landing', 'absence_epoch', 'fatal']
 ATTEMPT_FAULTS = ['drop-controller-mark', 'silent-blocking-writer', 'drop-callback-mark', 'drop-callback-leaf-mark',
                   'drop-class-input-mark', 'drop-service-setup-mark', 'drop-service-observation-mark',
                   'drop-first-binding-mark', 'drop-configured-setup-mark', 'drop-configured-setup-grant-mark',
@@ -798,30 +801,47 @@ def build_model(root, output):
     # its outcome is unknown, and no later refusal settles the record over it (the
     # crash-clears-ambiguity mutant answers it as not submitted at the scan). An admission write
     # still in flight (env late) ends with the process, landed or not.
+    process_end = [
+        "sp' = [q \\in Procs |-> IF Live(q) THEN [FreshProc EXCEPT !.out = \"Crashed\", !.slot = sp[q].slot,\n"
+        '                                                         !.kind = sp[q].kind]\n'
+        '                           ELSE sp[q]]',
+        "prep' = [n \\in Preparers |-> IF prep[n].st = \"Running\" THEN [prep[n] EXCEPT !.st = \"Dead\"] ELSE prep[n]]",
+        "dead_prep' = (dead_prep \\/ (RecordRows /\\ \\E n \\in Preparers : prep[n].st = \"Running\"))",
+        "pub_holder' = \"none\"", "conn_holder' = \"none\"", "meta_holder' = 0",
+        "store_pc' = IF store_pc \\in {\"hook\", \"write\"} THEN \"done\" ELSE store_pc",
+        "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\"", "read_kind' = \"\"",
+        "jr' = [i \\in Slots |-> [jr[i] EXCEPT !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n"
+        '                              !.held = FALSE,\n'
+        '                              !.fifo = @ \\/ (ClaimedPeer /\\ OPhase(i) # "Absent"\n'
+        '                                             /\\ \\E q \\in Procs : Live(q) /\\ sp[q].slot = i\n'
+        '                                                /\\ (sp[q].pc # "Settle" \\/ KeepClaim(sp[q]) \\/ EntryKeep(sp[q])))]]',
+        "orphan_claim' = (orphan_claim \\/ (ClaimedPeer /\\ \\E q \\in Procs : Live(q)\n"
+        '                                    /\\ (sp[q].slot = 0 \\/ OPhase(sp[q].slot) = "Absent")))',
+        "crashed_offered' = (crashed_offered \\/ (RecordRows /\\ \\E i \\in Slots : OPhase(i) = \"Offered\"))",
+        "\\E landed \\in SUBSET landing : native' = native \\cup landed", "landing' = {}"]
+    process_end_changed = {'sp', 'prep', 'dead_prep', 'pub_holder', 'conn_holder', 'meta_holder', 'store_pc',
+                           'read_slot', 'raw_read', 'published_read', 'read_kind', 'jr', 'crashed_offered',
+                           'orphan_claim', 'native', 'landing'}
     action('B_Crash', ['"crash" \\in Env', 'alive', 'epoch = 1', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
-                       "alive' = FALSE",
-                       "sp' = [q \\in Procs |-> IF Live(q) THEN [FreshProc EXCEPT !.out = \"Crashed\", !.slot = sp[q].slot,\n"
-                       '                                                         !.kind = sp[q].kind]\n'
-                       '                           ELSE sp[q]]',
-                       "prep' = [n \\in Preparers |-> IF prep[n].st = \"Running\" THEN [prep[n] EXCEPT !.st = \"Dead\"] ELSE prep[n]]",
-                       "dead_prep' = (dead_prep \\/ (RecordRows /\\ \\E n \\in Preparers : prep[n].st = \"Running\"))",
-                       "pub_holder' = \"none\"", "conn_holder' = \"none\"", "meta_holder' = 0",
-                       "store_pc' = IF store_pc \\in {\"hook\", \"write\"} THEN \"done\" ELSE store_pc",
-                       "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\"", "read_kind' = \"\"",
-                       "jr' = [i \\in Slots |-> [jr[i] EXCEPT !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n"
-                       '                              !.held = FALSE,\n'
-                       '                              !.fifo = @ \\/ (ClaimedPeer /\\ OPhase(i) # "Absent"\n'
-                       '                                             /\\ \\E q \\in Procs : Live(q) /\\ sp[q].slot = i\n'
-                       '                                                /\\ (sp[q].pc # "Settle" \\/ KeepClaim(sp[q]) \\/ EntryKeep(sp[q])))]]',
-                       "orphan_claim' = (orphan_claim \\/ (ClaimedPeer /\\ \\E q \\in Procs : Live(q)\n"
-                       '                                    /\\ (sp[q].slot = 0 \\/ OPhase(sp[q].slot) = "Absent")))',
-                       "crashed_offered' = (crashed_offered \\/ (RecordRows /\\ \\E i \\in Slots : OPhase(i) = \"Offered\"))",
-                       "\\E landed \\in SUBSET landing : native' = native \\cup landed", "landing' = {}"],
-           {'alive', 'sp', 'prep', 'dead_prep', 'pub_holder', 'conn_holder', 'meta_holder', 'store_pc', 'read_slot',
-            'raw_read', 'published_read', 'read_kind', 'jr', 'crashed_offered', 'orphan_claim', 'native', 'landing'})
+                       "alive' = FALSE", *process_end],
+           {'alive'} | process_end_changed)
+    # The fail-stop on a poisoned publication (env poison). A holder of the authorization
+    # publication the ingress shares with every authorization owner of the process panicked:
+    # from then on every observation and owner change through it answers Unavailable (the
+    # lifetime's close too: it takes an owner change), and nothing recovers it in place. The
+    # binder's first observation that answers so raises the typed fatal diagnostic
+    # (PublicationPoisoned) and the process ends through the driver's error path at once, during
+    # its close too, never waiting for it. What the process loses and keeps is the crash's; the
+    # next process is in a new lifetime when the ended one had begun its close, and its scan,
+    # reads, re-drives and Core's re-offers recover the records.
+    action('B_FailStop', ['"poison" \\in Env', 'alive', 'epoch = 1',
+                          'Busy \\/ (\\E i \\in Slots : NonTerminal(i)) \\/ QueuedClaim',
+                          "fatal' = \"PublicationPoisoned\"", "alive' = FALSE", *process_end],
+           {'alive', 'fatal'} | process_end_changed)
     # The restart: a new process (epoch 2) scans before anything else. After a stop (the stop
-    # profiles), its component is a new lifetime (staged and opened above) with no join of its
-    # own yet; otherwise the model keeps the one lifetime across the crash.
+    # profiles), or a fail-stop once the close had begun (the poison profiles), its component is
+    # a new lifetime (staged and opened above) with no join of its own yet; otherwise the model
+    # keeps the one lifetime across the crash.
     action('B_Restart', ['~alive', 'epoch = 1', "alive' = TRUE", "epoch' = 2", "scanned' = FALSE",
                          "life_cur' = IF NewLifetime THEN 2 ELSE life_cur",
                          "joined' = IF NewLifetime THEN FALSE ELSE joined"],
@@ -877,7 +897,8 @@ def build_model(root, output):
             'drop_partial = FALSE', 'held_site = ""', 'entered_after_close = FALSE', 'claimed = FALSE',
             'lost_reply_seen = FALSE', 'crashed_offered = FALSE', 'admitted_stale = FALSE', 'cas_lost = FALSE',
             'replayed = FALSE', 'close_waited_prep = FALSE', 'dead_prep = FALSE', 'a_held = ""', 'refusals = {}',
-            'life_cur = 1', 'orphan_claim = FALSE', 'read_kind = ""', 'landing = {}', 'absence_epoch = 0']
+            'life_cur = 1', 'orphan_claim = FALSE', 'read_kind = ""', 'landing = {}', 'absence_epoch = 0',
+            'fatal = ""']
     initialized = {re.match(r'(\w+)', e)[1] for e in init[7:]}
     if initialized != set(B_VARS):
         raise ValueError(f'B init mismatch: {sorted(initialized ^ set(B_VARS))}')
@@ -916,9 +937,10 @@ def build_model(root, output):
         'MinSlot(s) == IF 1 \\in s THEN 1 ELSE 2',
         'MaxOf(s) == CHOOSE x \\in s : \\A y \\in s : y <= x',
         '\\* The current process\'s component lifetime: the first, or the next process\'s new one (a\n'
-        '\\* restart after a stop, the stop profiles).',
+        '\\* restart after a stop, or after a fail-stop once the close had begun).',
         'LPhase == IF life_cur = 2 THEN life2_phase ELSE life_phase',
-        'NewLifetime == "stop" \\in Env /\\ life_phase = "Closed"',
+        'NewLifetime == \\/ "stop" \\in Env /\\ life_phase = "Closed"\n'
+        '               \\/ fatal # "" /\\ life_phase # "Open"',
         'Admission == LPhase = "Open" \\/ (Fault = "admit-after-close" /\\ LPhase = "Closing")',
         'SourceOpen == src_phase = "Open" /\\ src_readiness = "Ready"',
         'Offer1Vars == <<' + ', '.join(offer_vars) + '>>',
@@ -1173,6 +1195,7 @@ def build_model(root, output):
                    '    /\\ native \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
                    '    /\\ landing \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
                    '    /\\ read_kind \\in {"", "Live", "Durable"} /\\ absence_epoch \\in 0..2\n'
+                   '    /\\ fatal \\in {"", "PublicationPoisoned"}\n'
                    '    /\\ refusals \\subseteq (Slots \\X (0..9) \\X {"CoreRefused", "EntryRefused"})'),
         'OwnerCanonical': ' /\\ '.join(['src!' + i for i in src_invs] + ['offer!' + i for i in offer_invs]
                                         + ['offer2!' + i for i in offer_invs] + ['life!' + i for i in life_invs]
@@ -1409,6 +1432,15 @@ def build_model(root, output):
         'NotRowEntryClosedClaimKept': ('~(stage = "B" /\\ door = "Peer" /\\ life_cur = 2 /\\ ObservedAdmitted(1)\n'
                                        '    /\\ <<1, 1, "EntryRefused">> \\in refusals /\\ NativeKeys = {<<"inc1", "k1", 2>>}\n'
                                        '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
+        # The poisoned publication: a holder's panic poisons it, the binder's next observation
+        # raises the typed fatal diagnostic and the process ends through the driver's error path
+        # during its close, not waiting for it (the close needs an owner change); the next process,
+        # in a new lifetime, recovers the durable delivery: Core re-offers its claim (with or
+        # without its record) and the delivery is admitted once there.
+        'NotRowPoisonedFailStopRecovered': ('~(stage = "B" /\\ door = "Peer" /\\ fatal = "PublicationPoisoned"\n'
+                                            '    /\\ life_phase = "Closing" /\\ life_cur = 2 /\\ Cardinality(native) = 1\n'
+                                            '    /\\ \\E i \\in Slots : ObservedAdmitted(i) /\\ OReceiptEpoch(i) = 2\n'
+                                            '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
         # Never Denied over ambiguity: a re-offered claim whose record has an unresolved dispatch
         # meets a revoked authority in the section; it answers NotReady and Core keeps the claim
         # (the denied-over-ambiguity mutant denies it).
@@ -1556,9 +1588,10 @@ def build_model(root, output):
         '\\* read, ordered after an admission write still in flight; with late landings also its\n'
         '\\* durable read), one crash and restart with its scan, admission closure with the close\'s\n'
         '\\* join (its unresolved records scoped to the closing process), a stop after the close and\n'
-        '\\* the restart into the next lifetime, the declared composition mode. Core\'s commit and\n'
-        '\\* dedup by qualified key are assumptions. Liveness: LiveSpec, under the declared fairness\n'
-        '\\* and environment assumptions (below).',
+        '\\* the restart into the next lifetime, the fail-stop on a poisoned publication (the crash\'s\n'
+        '\\* path, during the close too), the declared composition mode. Core\'s commit and dedup by\n'
+        '\\* qualified key are assumptions. Liveness: LiveSpec, under the declared fairness and\n'
+        '\\* environment assumptions (below).',
         'CONSTANTS ' + ', '.join(constants) + ',\n    Fault, StageValues, DoorValues, InitialValues, MaxAttempts, '
                                               'Interrupts, ModeValues,\n    ProcBound, SendBound, UnavailBound, '
                                               'LostBound, CoreRefuseBound, GateBound, Env, RecordRows, PeerClaims',
@@ -1829,7 +1862,7 @@ def main():
                  'Core\'s results (with late landings a lost answer whose admission write is still in flight), the '
                  'driver by key with Core\'s live read and its durable read, one crash and restart, admission closure '
                  'with the close\'s record scoped to the closing process, a stop and the restart into the next '
-                 'lifetime, declared mode)',
+                 'lifetime, the fail-stop on a poisoned publication, declared mode)',
         'full_b1_acceptance': False,
         **info,
         'actions': actions,
@@ -1910,6 +1943,8 @@ PROFILES = {
     # Core's live read ordered after it, the driver's durable read not; a verdict over the lost
     # dispatch, a same-key replay, Core's re-offer, a crash.
     'none-b-late': profile('base', door=['Find', 'Peer'], procs=2, sends=2, env=['lost', 'late', 'revoke', 'crash']),
+    # The fail-stop on a poisoned publication, at any point of a process, during its close too.
+    'none-b-poison': profile('base', door=['Find', 'Peer'], procs=2, sends=2, env=['poison', 'close', 'lost']),
     # ---- Liveness (the Helper door included; the peer door as Core's drain runs it,
     # one bind per session at a time, with and without Core's claim). ----
     'live-find-waits': lb('LiveSpec', door=['Find'], env=['hold', 'session', 'crash'], **LIVE2),
@@ -2158,6 +2193,7 @@ PROFILES = {
     'row-peer-verdict-withdrawal-refused': r('NotRowPeerVerdictWithdrawalRefused', door=['Peer'], env=['revoke']),
     'row-lookup-closed-claim-kept': r('NotRowLookupClosedClaimKept', door=['Peer'], env=['close', 'stop']),
     'row-entry-closed-claim-kept': r('NotRowEntryClosedClaimKept', door=['Peer'], env=['close', 'stop']),
+    'row-poisoned-fail-stop-recovered': r('NotRowPoisonedFailStopRecovered', door=['Peer'], env=['poison', 'close']),
     'row-no-denial-over-ambiguity': r('NotRowNoDenialOverAmbiguity', door=['Peer'], env=['lost', 'revoke']),
     'row-held-claim-denied-after-restart': r('NotRowHeldClaimDeniedAfterRestart', door=['Peer'],
                                              env=['lost', 'revoke', 'crash']),

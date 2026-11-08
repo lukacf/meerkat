@@ -246,6 +246,7 @@ RemoveIdentityEntryMobNotRunning* a removal in the Completed and Destroyed phase
 ArchiveIdentityEntryMobNotRunning* an archive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnarchiveIdentityEntryMobNotRunning* an unarchive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnlistIdentityEntryMobNotRunning* a one-entry unlist in the Completed and Destroyed phases; created_identity_audit's unlist run drives the Stopped arm
+TakeOverIdentityEntryMobNotRunningCompleted a host adoption's takeover in a completed mob, refused as in every phase but Running; identity_entry_audit's lifecycle run drives the Stopped and Destroyed arms
 BeginPreparationConstructionMobNotRunning* a held construction's start in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
 SettleHostPreparationMobNotRunning* a settle in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
 EndPreparationConstructionEndedCompleted an attempt's end in a completed mob; created_identity_audit's preparation and prepverdicts runs drive its Running and Stopped arms

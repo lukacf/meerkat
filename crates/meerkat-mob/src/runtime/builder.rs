@@ -1535,6 +1535,7 @@ async fn record_seeded_member_endpoint_broken(
             bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     );
@@ -4108,6 +4109,50 @@ fn hosted_incarnations(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u
         .collect()
 }
 
+/// The retirements a host's adoption took its identity's declared entry
+/// over for, as their start rows record
+/// ([`crate::MemberRetirementCause::HostAdopted`]), by identity and
+/// generation.
+fn host_adopted_retirement_starts(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                generation,
+                ..
+            } if event.kind.retirement_cause()
+                == Some(crate::MemberRetirementCause::HostAdopted) =>
+            {
+                Some((agent_identity.as_str().to_string(), generation.get()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Mark again, at replay, the Declared entry a host's adoption took over
+/// while its member retired (`RecoverIdentityEntryAdopting`): the end of the
+/// retirement then ends the entry, as it did live. Every such start row is
+/// passed; MobMachine marks only the identity's seated incarnation of a
+/// Declared entry.
+fn recover_host_adopted_retirement_mark(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &AgentIdentity,
+    agent_runtime_id: &AgentRuntimeId,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    apply_seeded_mob_signal(
+        authority,
+        mob_dsl::MobMachineSignal::RecoverIdentityEntryAdopting {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+        },
+        "recover_identity_entry_adopting",
+    )
+}
+
 /// Mark again, at replay, the Declared entry whose member's retirement the
 /// declared apply's seal started (`RecoverIdentityEntryRetiring`): the end of
 /// the retirement then ends the entry, as it did live. Every unlisted start
@@ -4142,6 +4187,7 @@ fn seed_mob_authority_sync_from_events(
 
     let respawn_topology_ledger = respawn_topology_ledger(events)?;
     let unlisted_starts = unlisted_retirement_starts(events);
+    let host_adopted_starts = host_adopted_retirement_starts(events);
     let hosted_incarnations = hosted_incarnations(events);
 
     for event in events {
@@ -4566,6 +4612,15 @@ fn seed_mob_authority_sync_from_events(
                 // start row's cause marks the entry before the end replays.
                 if unlisted_starts.contains(&key) {
                     recover_unlisted_retirement_mark(authority, agent_identity, &agent_runtime_id)?;
+                }
+                // So does the end of a retirement a host's adoption took the
+                // entry over for.
+                if host_adopted_starts.contains(&key) {
+                    recover_host_adopted_retirement_mark(
+                        authority,
+                        agent_identity,
+                        &agent_runtime_id,
+                    )?;
                 }
                 apply_seeded_mob_signal(
                     authority,
@@ -5426,6 +5481,16 @@ fn recover_pending_member_retirements(
                 // finishes it, ends the entry.
                 if event.kind.retirement_cause() == Some(crate::MemberRetirementCause::Unlisted) {
                     recover_unlisted_retirement_mark(authority, agent_identity, agent_runtime_id)?;
+                }
+                // A retirement a host's adoption took the entry over for
+                // marks it again too.
+                if event.kind.retirement_cause() == Some(crate::MemberRetirementCause::HostAdopted)
+                {
+                    recover_host_adopted_retirement_mark(
+                        authority,
+                        agent_identity,
+                        agent_runtime_id,
+                    )?;
                 }
                 // The rotation the start row records, recorded again on the
                 // Retiring incarnation the row restored: the restarted mob's
@@ -8419,10 +8484,20 @@ impl MobBuilder {
 
     /// Backoff of the retry that wakes a member whose boot work is still
     /// owed after its boot wake was refused retryably (an unavailable resume
-    /// gate, a host that asked to retry its build preparation, the wake
-    /// bound): the mob wakes it again after `initial`, doubling up to `max`,
-    /// until it is live, its restore fails for good, or its obligation is
-    /// gone. A delivery to the member meanwhile wakes it at once.
+    /// gate, the wake bound): the mob wakes it again after `initial`,
+    /// doubling up to `max`, until it is live, its restore fails for good,
+    /// or its obligation is gone. A delivery to the member meanwhile wakes
+    /// it at once.
+    ///
+    /// A build preparation the host asked to retry
+    /// ([`super::MemberBuildPreparationRefusal::Retryable`]) has a retry
+    /// timer of its own on the same backoff, armed by the step that records
+    /// it: until it fires (or the host retries,
+    /// [`super::MobHandle::resolve_member_build_preparation`]) every wake of
+    /// the member, a delivery's included, is refused
+    /// ([`crate::MemberWakeRefusal::BuildPreparationRetry`]); when it fires,
+    /// work the member still owes wakes it, and a member that owes none
+    /// stays dormant until its next delivery.
     pub fn with_member_wake_retry_backoff(
         mut self,
         initial: std::time::Duration,
@@ -12410,7 +12485,7 @@ impl RetryableRestoreCause {
     /// The typed refusal a caller waiting on the wake gets.
     pub(super) fn wake_refusal(self) -> crate::MemberWakeRefusal {
         match self {
-            Self::BuildPreparation => crate::MemberWakeRefusal::HostPreparationPending,
+            Self::BuildPreparation => crate::MemberWakeRefusal::BuildPreparationRetry,
             Self::SeatCreateUnavailable | Self::RestoreUnavailable => {
                 crate::MemberWakeRefusal::ResumeGateUnavailable
             }
@@ -12534,6 +12609,7 @@ pub(super) fn member_restore_failure(
         bridge_session_id: Some(bridge_session_id.clone()),
         reason,
         hold: None,
+        cause_data: None,
         registration_refusal: None,
     }
 }
@@ -13851,6 +13927,7 @@ pub(super) async fn provision_durable_member_restore(
                     bridge_session_id: Some(bridge_session_id.clone()),
                     reason,
                     hold: None,
+                    cause_data: error.structured_data(),
                     registration_refusal,
                 })
             }
@@ -13974,10 +14051,10 @@ async fn provision_fresh_member_restore(
                     cause: RetryableRestoreCause::SeatCreateUnavailable,
                 }
             } else {
-                MemberRestoreProvisionOutcome::Failed(member_restore_failure(
-                    bridge_session_id,
-                    reason,
-                ))
+                MemberRestoreProvisionOutcome::Failed(super::handle::RestoreFailureDiagnostic {
+                    cause_data: error.structured_data(),
+                    ..member_restore_failure(bridge_session_id, reason)
+                })
             }
         }
         Err(error) => return Err(error),
@@ -14177,6 +14254,7 @@ async fn provision_fresh_member_session(
                         entry.agent_identity
                     ),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: Some(registration_refusal),
                 },
             ));

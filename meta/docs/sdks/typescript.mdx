@@ -188,6 +188,69 @@ leaves `deliveryScope` `null` and the rest usable. An unknown recovery state
 reads as `unresolved`, never `absent`. See
 [Scope-bound dispatch](/api/rpc#scope-bound-dispatch).
 
+## Scoped tool grants
+
+A profile's `tools.grant_gated` mounts tools closed on every build of its
+members; a grant to an identity opens one for a fixed window, across the
+member's respawns and the gateway's restarts. The grant wakes nothing and
+applies at the member's next model request.
+
+```typescript
+import { ToolGrantRequestRefusedError } from "@rkat/meta-sdk";
+
+const granted = await runtime.grantTool("agent-a", {
+  tool: "datetime",
+  durationMs: 600_000,
+  decisionRef: "approval-7", // your own record of the decision
+});
+const grantId = (granted.grant as { grant_id: string }).grant_id;
+await runtime.listToolGrants("agent-a", { includeEnded: true });
+await runtime.toolGrantAudit("agent-a", { limit: 50 });
+await runtime.revokeToolGrant(grantId, { reason: "done" });
+
+try {
+  await runtime.grantTool("agent-a", { family: "shell", durationMs: 600_000 });
+} catch (error) {
+  if (error instanceof ToolGrantRequestRefusedError) {
+    error.refusalKind; // "target_not_gated", ...
+  }
+}
+```
+
+Name exactly one of `tool` and `family`, and exactly one of `durationMs` and
+`expiresAtMs`. Every refusal rejects with `ToolGrantRequestRefusedError`; its
+kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+[Scoped tool grants](/api/rpc#scoped-tool-grants).
+
+## Realm MCP administration
+
+The stdio gateway lets its host administer the installation realm's own MCP
+servers and the secret values of their stdio servers' `secret_env` slots,
+kept in the launch's provider credential store:
+
+```typescript
+import { RealmMcpRefusedError } from "@rkat/meta-sdk";
+
+const listed = await runtime.realmMcpServers(); // {servers, generation}
+const server = { name: "search", command: "search-mcp", secret_env: ["SEARCH_API_KEY"] };
+await runtime.realmMcpInstall(server, { expectedGeneration: listed.generation as number });
+await runtime.realmMcpSetSecret(server, "SEARCH_API_KEY", apiKey);
+try {
+  await runtime.realmMcpInstall(server, { expectedGeneration: listed.generation as number });
+} catch (error) {
+  if (error instanceof RealmMcpRefusedError) {
+    error.refusalKind; // "generation_conflict"
+  }
+}
+await runtime.realmMcpRemoveSecret(server, "SEARCH_API_KEY");
+```
+
+The value is sent once, in the `set_secret` request, and never appears in an
+answer or an error. A launch whose credential store did not open rejects the
+secret methods with `RealmMcpUnavailableError`; a write whose result is
+unknown rejects with `RealmMcpOutcomeUnknownError`. See
+[Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).
+
 ## Durable detached tools
 
 Long-running host work must declare detached execution rather than keeping a

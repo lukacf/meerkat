@@ -218,10 +218,13 @@ impl MobActor {
                     agent_identity,
                     verdict,
                     archived_session,
-                } if agent_identity == &dsl_identity => Some((*verdict, archived_session.clone())),
+                    would_be,
+                } if agent_identity == &dsl_identity => {
+                    Some((*verdict, archived_session.clone(), *would_be))
+                }
                 _ => None,
             });
-            let Some((verdict, archived_session)) = decided else {
+            let Some((verdict, archived_session, would_be)) = decided else {
                 return Err(MobError::Internal(format!(
                     "MobMachine answered no declared apply verdict for '{agent_identity}'"
                 )));
@@ -244,6 +247,7 @@ impl MobActor {
                     verdict,
                     runtime_mode,
                     archived_session,
+                    would_be,
                 }),
             });
         }
@@ -478,15 +482,48 @@ impl MobActor {
         Ok(verdict)
     }
 
+    /// Take `identity`'s declared entry over for a host's adoption
+    /// (`TakeOverIdentityEntry`) in one MobMachine step, decided on that
+    /// identity alone: a seated Declared entry is marked adopting (the end of
+    /// its member's retirement ends it), an unseated one ends at once, one
+    /// with a member step in flight is deferred, and any other name is left
+    /// as it is. A mob that is not running answers an invalid transition.
+    pub(super) fn take_over_identity_entry(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<mob_dsl::HostAdoptionEntryVerdict, MobError> {
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::TakeOverIdentityEntry {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+            },
+            "take_over_identity_entry",
+        )?;
+        let verdict = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::IdentityEntryTakenOver { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("MobMachine answered no takeover verdict".to_string())
+            })?;
+        if verdict == mob_dsl::HostAdoptionEntryVerdict::MobNotRunning {
+            return Err(self.invalid_transition_to(MobState::Running));
+        }
+        Ok(verdict)
+    }
+
     /// Seal a complete declared roster (`SealDeclaredRoster`) in one
     /// MobMachine step, and answer the Declared entries it marked (whose
     /// members the handle retires) and the ones the step ended at once. The
     /// seal ends no entry itself: on the step's own prepared authority, each
-    /// unseated entry the roster does not list is unlisted first
-    /// (`UnlistIdentityEntry`, which ends a Declared one, naming the end,
-    /// defers it while a member step of it is in flight, and leaves any
-    /// other entry as it is), and only then is the roster sealed; MobMachine
-    /// refuses a seal while an unseated Declared entry it would end remains.
+    /// unseated entry the roster does not list and no host's intent row
+    /// names (`intent_named`, entries the seal leaves as they are) is
+    /// unlisted first (`UnlistIdentityEntry`, which ends a Declared one,
+    /// naming the end, defers it while a member step of it is in flight, and
+    /// leaves any other entry as it is), and only then is the roster sealed;
+    /// MobMachine refuses a seal while an unseated Declared entry it would
+    /// end remains.
     /// The identities the step ends have their scoped tool grants, and those
     /// of their archived sessions, ended before the step commits. Ending
     /// grants for several identities in one step is not atomic: when one
@@ -496,16 +533,22 @@ impl MobActor {
     pub(super) async fn seal_declared_roster(
         &mut self,
         desired: BTreeSet<AgentIdentity>,
+        intent_named: BTreeSet<AgentIdentity>,
     ) -> Result<SealAnswer, MobError> {
         let before = self.dsl_authority.state().identity_entry_origins.clone();
         let desired: BTreeSet<mob_dsl::AgentIdentity> = desired
             .iter()
             .map(mob_dsl::AgentIdentity::from_domain)
             .collect();
+        let intent_named: BTreeSet<mob_dsl::AgentIdentity> = intent_named
+            .iter()
+            .map(mob_dsl::AgentIdentity::from_domain)
+            .collect();
         let mut authority = self.dsl_authority.prepare_authority();
         // The unseated entries the roster leaves out, whatever their
-        // custody: MobMachine decides each one's unlist (a store-owned
-        // entry's answers NotADeclaredEntry and changes nothing).
+        // custody, but for those a host's intent row names, which the seal
+        // leaves as they are: MobMachine decides each one's unlist (a
+        // store-owned entry's answers NotADeclaredEntry and changes nothing).
         let unlisted: Vec<mob_dsl::AgentIdentity> = {
             let state = authority.state();
             state
@@ -513,6 +556,7 @@ impl MobActor {
                 .keys()
                 .filter(|dsl_identity| {
                     !desired.contains(*dsl_identity)
+                        && !intent_named.contains(*dsl_identity)
                         && !state.identity_to_runtime.contains_key(*dsl_identity)
                 })
                 .cloned()
@@ -532,7 +576,10 @@ impl MobActor {
             phase_changed |= transition.from_phase != transition.to_phase;
             effects.extend(transition.into_effects());
         }
-        let input = mob_dsl::MobMachineInput::SealDeclaredRoster { desired };
+        let input = mob_dsl::MobMachineInput::SealDeclaredRoster {
+            desired,
+            intent_named,
+        };
         let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input.clone())
             .map_err(|error| rejected(&input, &error))?;
         if transition

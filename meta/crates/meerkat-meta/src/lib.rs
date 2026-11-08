@@ -105,6 +105,7 @@ mod test_wait;
 mod tool_application_test_support;
 pub mod tool_artifacts;
 pub mod tool_compose;
+pub mod tool_grant_options;
 pub mod topology_control;
 pub mod types;
 pub mod unified_runtime;
@@ -173,8 +174,8 @@ pub use console_config::{
     ConsoleAgentSectionConfig, ConsoleAppearanceConfig, ConsoleAttentionSourceConfig,
     ConsoleAttentionUiConfig, ConsoleBrandingConfig, ConsoleConfigError, ConsoleEnvironmentConfig,
     ConsoleLayoutConfig, ConsoleRailFilterPresetConfig, ConsoleRailUiConfig,
-    ConsoleSidebarButtonConfig, ConsoleSidebarUiConfig, ConsoleUiConfig,
-    load_console_ui_config_from_path_for_realm, load_console_ui_config_from_toml,
+    ConsoleSidebarButtonConfig, ConsoleSidebarUiConfig, ConsoleSignOutConfig, ConsoleSignOutMethod,
+    ConsoleUiConfig, load_console_ui_config_from_path_for_realm, load_console_ui_config_from_toml,
     load_console_ui_config_from_toml_for_realm,
 };
 pub use console_contracts::{

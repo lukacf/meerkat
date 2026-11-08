@@ -68,12 +68,13 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason
 // The declared apply: unseated causes, host preparation causes, declared
 // placements, verdicts, the seal's verdict, why an archived session record
 // is let go, the kind of a host's first-boot request, the verdict of an
-// apply's opening and of a one-entry unlist. The schema's own types, one
-// definition for both instantiations of the machine.
+// apply's opening, of a one-entry unlist and of a host's adoption over an
+// entry. The schema's own types, one definition for both instantiations of
+// the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     ArchivedSessionForgetReason, DeclaredApplyOpenVerdict, DeclaredRosterSealVerdict,
-    EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
-    UnlistEntryVerdict, UnseatedEntryCause,
+    EntryPlacementKind, FirstBootRequestKind, HostAdoptionEntryVerdict, HostPreparationCause,
+    IdentityEntryVerdict, UnlistEntryVerdict, UnseatedEntryCause,
 };
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
@@ -14544,6 +14545,12 @@ mod tests {
         /// Whether the host's rule requires the identity's preparation
         /// before its first seat.
         preparation_required: bool,
+        /// The listed legacy member's observation the apply's adoption
+        /// decided on: the marks on its spawn row and the generation of its
+        /// incarnation. Neither mark by default.
+        legacy_marker: bool,
+        legacy_label: bool,
+        legacy_generation: Generation,
     }
 
     impl Default for Declaration<'_> {
@@ -14560,6 +14567,9 @@ mod tests {
                 first_boot: FirstBootRequestKind::None,
                 created_custody: false,
                 preparation_required: false,
+                legacy_marker: false,
+                legacy_label: false,
+                legacy_generation: Generation(0),
             }
         }
     }
@@ -14578,6 +14588,9 @@ mod tests {
             first_boot: declaration.first_boot,
             created_custody: declaration.created_custody,
             preparation_required: declaration.preparation_required,
+            legacy_marker: declaration.legacy_marker,
+            legacy_label: declaration.legacy_label,
+            legacy_generation: declaration.legacy_generation,
         }
     }
 
@@ -14726,14 +14739,20 @@ mod tests {
         );
     }
 
-    /// The seal of a complete roster listing `desired`.
+    /// The seal of a complete roster listing `desired`, no host's intent row
+    /// naming any entry.
     fn seal(
         authority: &mut MobMachineAuthority,
         desired: std::collections::BTreeSet<AgentIdentity>,
     ) -> DeclaredRosterSealVerdict {
-        let transition =
-            MobMachineMutator::apply(authority, MobMachineInput::SealDeclaredRoster { desired })
-                .expect("the seal answers");
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::SealDeclaredRoster {
+                desired,
+                intent_named: std::collections::BTreeSet::new(),
+            },
+        )
+        .expect("the seal answers");
         transition
             .effects()
             .iter()
@@ -14745,16 +14764,22 @@ mod tests {
     }
 
     /// Whether MobMachine refused the seal of a complete roster listing
-    /// `desired` (`SealDeclaredRosterRefused`: an unseated Declared entry it
-    /// leaves out remains, which the one-entry unlist ends first). A refused
-    /// seal answers its refusal only.
+    /// `desired`, no host's intent row naming any entry
+    /// (`SealDeclaredRosterRefused`: an unseated Declared entry it leaves out
+    /// remains, which the one-entry unlist ends first). A refused seal
+    /// answers its refusal only.
     fn seal_refused(
         authority: &mut MobMachineAuthority,
         desired: std::collections::BTreeSet<AgentIdentity>,
     ) -> bool {
-        let transition =
-            MobMachineMutator::apply(authority, MobMachineInput::SealDeclaredRoster { desired })
-                .expect("the seal answers");
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::SealDeclaredRoster {
+                desired,
+                intent_named: std::collections::BTreeSet::new(),
+            },
+        )
+        .expect("the seal answers");
         let refused = transition
             .effects()
             .iter()
@@ -15069,6 +15094,559 @@ mod tests {
             DeclaredRosterSealVerdict::NonAuthoritative
         );
         assert_eq!(authority.state(), &before, "a candidate writes nothing");
+    }
+
+    /// The declared apply's verdict for one identity and the verdict its
+    /// effect reports an authoritative composition would give
+    /// (`would_be`).
+    fn declare_reported(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        declaration: Declaration<'_>,
+    ) -> (IdentityEntryVerdict, Option<IdentityEntryVerdict>) {
+        let transition = MobMachineMutator::apply(authority, declare_input(identity, declaration))
+            .expect("the declared apply answers every declaration");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::IdentityEntryDeclared {
+                    agent_identity,
+                    verdict,
+                    would_be,
+                    ..
+                } if agent_identity == identity => Some((*verdict, *would_be)),
+                _ => None,
+            })
+            .expect("the declaration emits its verdict")
+    }
+
+    /// Why the declared apply's verdict rule (`identity_entry_verdict`) never
+    /// gives `verdict` to an authoritative composition; `None` when it does.
+    /// Exhaustive: a new verdict is classified here, and the candidate
+    /// comparison covers every one the rule gives.
+    fn not_given_by_the_verdict_rule(verdict: IdentityEntryVerdict) -> Option<&'static str> {
+        match verdict {
+            IdentityEntryVerdict::Kept
+            | IdentityEntryVerdict::SeatOwed
+            | IdentityEntryVerdict::HostedOnFirstUse
+            | IdentityEntryVerdict::AwaitHeldCreation
+            | IdentityEntryVerdict::PreparationPending
+            | IdentityEntryVerdict::RuntimeModeRestamp
+            | IdentityEntryVerdict::RoleMigrate
+            | IdentityEntryVerdict::RoleRotate
+            | IdentityEntryVerdict::RoleMigrationHeld
+            | IdentityEntryVerdict::LifecycleInFlight
+            | IdentityEntryVerdict::RefusedNameHeldByWorker
+            | IdentityEntryVerdict::RefusedHostAdopted
+            | IdentityEntryVerdict::RecordOnly => None,
+            IdentityEntryVerdict::RefusedNonAuthoritative => Some("a candidate's own refusal"),
+            IdentityEntryVerdict::MobNotRunning => Some("a stopped mob is answered first"),
+            IdentityEntryVerdict::RefusedNameOwnedByCreated
+            | IdentityEntryVerdict::RefusedNameTombstoned
+            | IdentityEntryVerdict::RefusedNameUnreadable => {
+                Some("a reserved or store-owned name is answered first")
+            }
+        }
+    }
+
+    /// The number of verdicts the declared apply's rule gives an
+    /// authoritative composition (`not_given_by_the_verdict_rule` answers
+    /// `None`).
+    const AUTHORITATIVE_VERDICTS: usize = 13;
+
+    /// A candidate composition's refusal reports, as `would_be`, the verdict
+    /// an authoritative composition gives the same declaration over the
+    /// same state, for every verdict the declared apply's rule gives an
+    /// authoritative composition: each shape is declared to an authoritative
+    /// mob and to a candidate mob whose state differs only in its
+    /// composition authority. The candidate writes nothing, and an
+    /// authoritative declaration reports no would-be verdict.
+    ///
+    /// RED: pass `false` for `intent_managed` in the candidate arm's would-be
+    /// call: the host-adopted shape reports `SeatOwed`, not
+    /// `RefusedHostAdopted`.
+    #[test]
+    fn a_candidate_refusal_reports_the_authoritative_verdict_of_every_shape() {
+        let mut base = MobMachineAuthority::new();
+        let seated = seat_live_entry_member(&mut base, "would-be-seated", 81);
+        let worker = seat_live_member_with_endpoint(&mut base, "would-be-worker", 82);
+        let archived = AgentIdentity::from("would-be-archived");
+        recover_created(&mut base, &archived, RecoveredPresence::Archived, None);
+        let in_flight = SeatedMember {
+            identity: AgentIdentity::from("would-be-ladder"),
+            runtime_id: AgentRuntimeId::from("would-be-ladder:0"),
+            session_id: SessionId::from("would-be-ladder-session"),
+            fence_token: FenceToken(19),
+        };
+        open_seat_ladder(&mut base, &in_flight, Generation(0));
+        let fresh = AgentIdentity::from("would-be-fresh");
+        let state = base.state().clone();
+
+        type Shape<'a> = (
+            &'a AgentIdentity,
+            fn() -> Declaration<'static>,
+            IdentityEntryVerdict,
+        );
+        let shapes: [Shape<'_>; AUTHORITATIVE_VERDICTS] = [
+            (
+                &seated.identity,
+                Declaration::default,
+                IdentityEntryVerdict::Kept,
+            ),
+            (&fresh, Declaration::default, IdentityEntryVerdict::SeatOwed),
+            (
+                &fresh,
+                || Declaration {
+                    placement: EntryPlacementKind::Placed,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::HostedOnFirstUse,
+            ),
+            (
+                &fresh,
+                || Declaration {
+                    held_creation: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::AwaitHeldCreation,
+            ),
+            (
+                &fresh,
+                || Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::PreparationPending,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RuntimeModeRestamp,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    profile: "lead",
+                    migration_from: Some("test"),
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RoleMigrate,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    profile: "lead",
+                    session_memory_only: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RoleRotate,
+            ),
+            (
+                &seated.identity,
+                || Declaration {
+                    profile: "lead",
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RoleMigrationHeld,
+            ),
+            (
+                &in_flight.identity,
+                Declaration::default,
+                IdentityEntryVerdict::LifecycleInFlight,
+            ),
+            (
+                &worker.identity,
+                Declaration::default,
+                IdentityEntryVerdict::RefusedNameHeldByWorker,
+            ),
+            (
+                &fresh,
+                || Declaration {
+                    intent_managed: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RefusedHostAdopted,
+            ),
+            (
+                &archived,
+                || Declaration {
+                    created_custody: true,
+                    ..Declaration::default()
+                },
+                IdentityEntryVerdict::RecordOnly,
+            ),
+        ];
+
+        let mut covered = std::collections::BTreeSet::new();
+        for (identity, declaration, expected) in shapes {
+            let mut authoritative = MobMachineAuthority::recover_from_state(state.clone())
+                .expect("the authoritative composition recovers");
+            let (verdict, would_be) = declare_reported(&mut authoritative, identity, declaration());
+            assert_eq!(
+                verdict, expected,
+                "{identity:?}: the shape's authoritative verdict"
+            );
+            assert_eq!(
+                would_be, None,
+                "{identity:?}: an authoritative declaration reports no would-be verdict"
+            );
+
+            let mut candidate_state = state.clone();
+            candidate_state.composition_authority = CompositionAuthorityKind::NonAuthoritative;
+            let mut candidate = MobMachineAuthority::recover_from_state(candidate_state.clone())
+                .expect("the candidate composition recovers");
+            let (refusal, would_be) = declare_reported(&mut candidate, identity, declaration());
+            assert_eq!(
+                refusal,
+                IdentityEntryVerdict::RefusedNonAuthoritative,
+                "{identity:?}: a candidate declares nothing"
+            );
+            assert_eq!(
+                would_be,
+                Some(verdict),
+                "{identity:?}: the candidate reports the authoritative verdict"
+            );
+            assert_eq!(
+                candidate.state(),
+                &candidate_state,
+                "{identity:?}: a candidate writes nothing"
+            );
+            assert_eq!(
+                not_given_by_the_verdict_rule(verdict),
+                None,
+                "{identity:?}: {verdict:?}"
+            );
+            covered.insert(verdict);
+        }
+        assert_eq!(
+            covered.len(),
+            AUTHORITATIVE_VERDICTS,
+            "every verdict the rule gives an authoritative composition is compared once: \
+             {covered:?}"
+        );
+    }
+
+    /// Why the declared apply's verdict rule never gives `verdict` to an
+    /// authoritative composition for a listed legacy member (a member a host
+    /// seated before identity entries existed, which the apply's adoption makes
+    /// the identity's entry or leaves a worker's); `None` when it does.
+    /// Exhaustive: a new verdict is classified here, and the legacy comparison
+    /// covers every one the rule gives such a member.
+    fn not_given_for_a_legacy_member(verdict: IdentityEntryVerdict) -> Option<&'static str> {
+        match verdict {
+            IdentityEntryVerdict::Kept
+            | IdentityEntryVerdict::RuntimeModeRestamp
+            | IdentityEntryVerdict::RoleMigrate
+            | IdentityEntryVerdict::RoleRotate
+            | IdentityEntryVerdict::RoleMigrationHeld
+            | IdentityEntryVerdict::LifecycleInFlight
+            | IdentityEntryVerdict::RefusedNameHeldByWorker
+            | IdentityEntryVerdict::RefusedHostAdopted => None,
+            IdentityEntryVerdict::SeatOwed
+            | IdentityEntryVerdict::HostedOnFirstUse
+            | IdentityEntryVerdict::AwaitHeldCreation
+            | IdentityEntryVerdict::PreparationPending => {
+                Some("an unseated identity's: a legacy member is seated")
+            }
+            IdentityEntryVerdict::RecordOnly => Some("a store-owned update's"),
+            IdentityEntryVerdict::RefusedNonAuthoritative
+            | IdentityEntryVerdict::MobNotRunning
+            | IdentityEntryVerdict::RefusedNameOwnedByCreated
+            | IdentityEntryVerdict::RefusedNameTombstoned
+            | IdentityEntryVerdict::RefusedNameUnreadable => not_given_by_the_verdict_rule(verdict),
+        }
+    }
+
+    /// The number of verdicts the declared apply's rule gives an
+    /// authoritative composition for a listed legacy member
+    /// (`not_given_for_a_legacy_member` answers `None`).
+    const LEGACY_MEMBER_VERDICTS: usize = 8;
+
+    /// A listed legacy member, for the legacy comparison.
+    #[derive(Debug, Clone, Copy)]
+    enum LegacyMember {
+        /// One of the member shapes the legacy adoption tells apart.
+        Shape(AdoptionShape),
+        /// A worker member whose spawn committed its membership and whose
+        /// activation is in flight (a candidate composition never holds a
+        /// wake attempt, `candidate_composition_never_wakes`).
+        Activating,
+    }
+
+    /// An authority holding `member` under `name`, seated as a host seated
+    /// it before identity entries existed: no entry holds the name.
+    fn legacy_member(member: LegacyMember, name: &str) -> (MobMachineAuthority, AgentIdentity) {
+        match member {
+            LegacyMember::Shape(shape) => adoption_member(shape, name),
+            LegacyMember::Activating => {
+                let mut authority = MobMachineAuthority::new();
+                let identity = AgentIdentity::from(name);
+                seed_membership_committed_member_with(
+                    &mut authority,
+                    &identity,
+                    &AgentRuntimeId(format!("{name}:0")),
+                    false,
+                    false,
+                );
+                (authority, identity)
+            }
+        }
+    }
+
+    /// One shape of the legacy comparison: the member, the adoption's
+    /// observation of it (both marks, `stale` when it names an incarnation
+    /// after the current one), the declaration, and the verdict the
+    /// authoritative apply gives it.
+    struct LegacyShape {
+        member: LegacyMember,
+        marker: bool,
+        label: bool,
+        stale: bool,
+        declaration: fn() -> Declaration<'static>,
+        expected: IdentityEntryVerdict,
+    }
+
+    /// A candidate composition's refusal reports, as `would_be`, the verdict
+    /// an authoritative composition gives a listed legacy member (a member a
+    /// host seated before identity entries existed), for every verdict the
+    /// declared apply's rule gives such a member. Each shape runs the declared
+    /// apply's own steps against an authoritative mob and against a candidate
+    /// mob whose state differs only in its composition authority: the
+    /// adoption of the member from the shell's observation
+    /// (`AdoptLegacyIdentityEntry`, which the apply offers unless the
+    /// identity store manages the identity), then the declaration, which
+    /// carries the observation the adoption decided on. The authoritative
+    /// adoption makes the member the identity's entry, or leaves it a
+    /// worker's; the candidate's adopts nothing, and MobMachine decides its
+    /// `would_be` on the basis the authoritative adoption gives
+    /// (`legacy_adoption_verdict`). The candidate writes nothing.
+    ///
+    /// RED (`RED-B-candidate-skips-helper.patch`): the candidate arm's
+    /// would-be call passes the raw `worker_holds_name` (a seated member that
+    /// is no entry): the adopted local member reports
+    /// `RefusedNameHeldByWorker`, not `Kept`.
+    #[test]
+    fn a_candidate_refusal_reports_the_authoritative_verdict_of_every_legacy_shape() {
+        use AdoptionShape::{BoundToNoSession, Local, Placed, Retiring};
+        let shapes = [
+            // The adoption makes the member the identity's entry.
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::Kept,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: true,
+                label: false,
+                stale: false,
+                declaration: || Declaration {
+                    runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                    ..Declaration::default()
+                },
+                expected: IdentityEntryVerdict::RuntimeModeRestamp,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: false,
+                label: true,
+                stale: false,
+                declaration: || Declaration {
+                    profile: "lead",
+                    migration_from: Some("test"),
+                    ..Declaration::default()
+                },
+                expected: IdentityEntryVerdict::RoleMigrate,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: || Declaration {
+                    profile: "lead",
+                    session_memory_only: true,
+                    ..Declaration::default()
+                },
+                expected: IdentityEntryVerdict::RoleRotate,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: || Declaration {
+                    profile: "lead",
+                    ..Declaration::default()
+                },
+                expected: IdentityEntryVerdict::RoleMigrationHeld,
+            },
+            LegacyShape {
+                member: LegacyMember::Activating,
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::LifecycleInFlight,
+            },
+            // The adoption leaves the name a worker's.
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: false,
+                label: false,
+                stale: false,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::RefusedNameHeldByWorker,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: true,
+                label: true,
+                stale: true,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::RefusedNameHeldByWorker,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Placed),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::RefusedNameHeldByWorker,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(BoundToNoSession),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::RefusedNameHeldByWorker,
+            },
+            LegacyShape {
+                member: LegacyMember::Shape(Retiring),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: Declaration::default,
+                expected: IdentityEntryVerdict::RefusedNameHeldByWorker,
+            },
+            // The identity store manages the identity: no adoption is offered.
+            LegacyShape {
+                member: LegacyMember::Shape(Local),
+                marker: true,
+                label: true,
+                stale: false,
+                declaration: || Declaration {
+                    intent_managed: true,
+                    ..Declaration::default()
+                },
+                expected: IdentityEntryVerdict::RefusedHostAdopted,
+            },
+        ];
+
+        let mut covered = std::collections::BTreeSet::new();
+        for shape in shapes {
+            let (base, identity) = legacy_member(shape.member, "legacy-would-be");
+            let state = base.state().clone();
+            let current = state
+                .identity_runtime_generations
+                .get(&identity)
+                .copied()
+                .expect("a seated member has an incarnation");
+            let generation = if shape.stale {
+                Generation(current.0 + 1)
+            } else {
+                current
+            };
+            let observed = Observed {
+                marker: shape.marker,
+                label: shape.label,
+                listed: true,
+                intent_row: false,
+            };
+            // The apply offers the adoption, and its declaration carries the
+            // observation, unless the identity store manages the identity.
+            let offered = !(shape.declaration)().intent_managed;
+            let declaration = || {
+                let declaration = (shape.declaration)();
+                if offered {
+                    Declaration {
+                        legacy_marker: shape.marker,
+                        legacy_label: shape.label,
+                        legacy_generation: generation,
+                        ..declaration
+                    }
+                } else {
+                    declaration
+                }
+            };
+            let label = format!(
+                "{:?} {observed:?} stale {}: {:?}",
+                shape.member, shape.stale, shape.expected
+            );
+
+            let mut authoritative = MobMachineAuthority::recover_from_state(state.clone())
+                .expect("the authoritative composition recovers");
+            if offered {
+                adopt_legacy(&mut authoritative, &identity, generation, observed);
+            }
+            let (verdict, would_be) =
+                declare_reported(&mut authoritative, &identity, declaration());
+            assert_eq!(
+                verdict, shape.expected,
+                "{label}: the authoritative adoption, then its verdict"
+            );
+            assert_eq!(
+                would_be, None,
+                "{label}: an authoritative declaration reports no would-be verdict"
+            );
+
+            let mut candidate_state = state.clone();
+            candidate_state.composition_authority = CompositionAuthorityKind::NonAuthoritative;
+            let mut candidate = MobMachineAuthority::recover_from_state(candidate_state.clone())
+                .expect("the candidate composition recovers");
+            if offered {
+                assert_eq!(
+                    adopt_legacy(&mut candidate, &identity, generation, observed),
+                    LegacyIdentityEntryAdoptionKind::NonAuthoritative,
+                    "{label}: a candidate adopts nothing"
+                );
+            }
+            let (refusal, would_be) = declare_reported(&mut candidate, &identity, declaration());
+            assert_eq!(
+                refusal,
+                IdentityEntryVerdict::RefusedNonAuthoritative,
+                "{label}: a candidate declares nothing"
+            );
+            assert_eq!(
+                would_be,
+                Some(verdict),
+                "{label}: the candidate reports the authoritative verdict"
+            );
+            assert_eq!(
+                candidate.state(),
+                &candidate_state,
+                "{label}: a candidate writes nothing"
+            );
+            assert_eq!(
+                not_given_for_a_legacy_member(verdict),
+                None,
+                "{label}: {verdict:?}"
+            );
+            covered.insert(verdict);
+        }
+        assert_eq!(
+            covered.len(),
+            LEGACY_MEMBER_VERDICTS,
+            "every verdict the rule gives a listed legacy member is compared: {covered:?}"
+        );
     }
 
     /// The seal of a complete roster unlists Declared entries only: a seated

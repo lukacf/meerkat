@@ -1378,6 +1378,11 @@ meerkat_machine_runtime_internal_inputs!(
     LiveTopologyReconfiguration => [
         AbortUntilChangedSwitchTurnReconfigure,
     ],
+    // A host's settle of the run its session retained, applied directly by
+    // `MeerkatMachine::settle_retained_run`.
+    RunExecutionLifecycle => [
+        SettleRetainedRun,
+    ],
     // The scoped tool grant gate's server gate: each model-request
     // boundary's extension of the gate by the names a gated MCP server
     // provides, applied by the visibility owner.

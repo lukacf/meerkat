@@ -237,6 +237,10 @@ pub(crate) struct PreparedControllerGraph {
     /// The set-once run channel slot shared by every retained adapter.
     pub(crate) late_event: meerkat_llm_core::LateEventChannel,
     pub(crate) account_output_token_limit: Option<u32>,
+    /// The selected account's client as the provider built it, which states
+    /// the account's prompt limit for the consuming build's output budget.
+    #[cfg(feature = "session-compaction")]
+    pub(crate) account_limit_client: Arc<dyn meerkat_llm_core::LlmClient>,
     pub(crate) credential_identity: Option<meerkat_core::AuthCredentialIdentity>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) auto_image_generation_executor:

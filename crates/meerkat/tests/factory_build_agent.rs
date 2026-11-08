@@ -3653,6 +3653,109 @@ async fn explicit_mob_override_generates_create_only_operator_capabilities() {
     assert_generated_create_only_authority(observed[0].as_ref());
 }
 
+/// The owning agent's model and the provider route its build resolved for
+/// it, as a mob tools factory receives them.
+type RecordedModelRoute = (String, Provider, Option<String>);
+
+struct RecordingModelRouteFactory {
+    observed: Arc<std::sync::Mutex<Vec<RecordedModelRoute>>>,
+}
+
+#[async_trait]
+impl meerkat_core::service::MobToolsFactory for RecordingModelRouteFactory {
+    async fn build_mob_tools(
+        &self,
+        args: meerkat_core::service::MobToolsBuildArgs,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
+        self.observed.lock().expect("recording mutex").push((
+            args.model,
+            args.provider,
+            args.self_hosted_server_id,
+        ));
+        Ok(Arc::new(EmptyDispatcher))
+    }
+}
+
+/// The mob tools get the provider route the agent's build resolved for its
+/// model, which implicit mob helpers inherit with the model: a realm
+/// `[models.<id>]` entry's provider, and a self-hosted alias's provider and
+/// server.
+#[tokio::test]
+async fn explicit_mob_override_passes_the_resolved_provider_route_to_the_mob_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let factory =
+        temp_factory(&temp)
+            .mob(false)
+            .mob_tools_factory(Arc::new(RecordingModelRouteFactory {
+                observed: Arc::clone(&observed),
+            }));
+    let mut config = Config::default();
+    config.models.custom.insert(
+        "realm-gateway-model".to_string(),
+        meerkat_core::config::CustomModelConfig {
+            provider: Provider::OpenAI,
+            display_name: None,
+            context_window: Some(200_000),
+            max_input_tokens: None,
+            max_output_tokens: Some(8_192),
+            vision: None,
+            web_search: None,
+            call_timeout_secs: None,
+        },
+    );
+    config.self_hosted.servers.insert(
+        "local".to_string(),
+        SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::Responses,
+        },
+    );
+    config.self_hosted.models.insert(
+        "gemma-4-31b".to_string(),
+        SelfHostedModelConfig {
+            server: "local".to_string(),
+            remote_model: "gemma4:31b".to_string(),
+            display_name: "Gemma 4 31B".into(),
+            family: "gemma-4".to_string(),
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
+            context_window: Some(256_000),
+            max_input_tokens: None,
+            max_output_tokens: Some(8_192),
+            vision: true,
+            image_tool_results: true,
+            inline_video: false,
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            supports_web_search: false,
+            call_timeout_secs: Some(600),
+            stream_inactivity_timeout_secs: None,
+        },
+    );
+
+    for model in ["realm-gateway-model", "gemma-4-31b"] {
+        let build_config = AgentBuildConfig {
+            override_mob: ToolCategoryOverride::Enable,
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            ..AgentBuildConfig::new(model)
+        };
+        let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    }
+    assert_eq!(
+        *observed.lock().expect("recording mutex"),
+        [
+            ("realm-gateway-model".to_string(), Provider::OpenAI, None),
+            (
+                "gemma-4-31b".to_string(),
+                Provider::SelfHosted,
+                Some("local".to_string())
+            ),
+        ]
+    );
+}
+
 #[cfg(feature = "comms")]
 #[tokio::test]
 async fn explicit_mob_override_builds_parent_comms_identity_for_delegate_wiring() {

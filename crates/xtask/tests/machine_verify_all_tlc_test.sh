@@ -29,8 +29,9 @@ set -euo pipefail
 #   audits-w        hand-written audit shard W
 #   audits-x        hand-written audit shard X
 #   audits-y        hand-written audit shard Y
-#   all             every part (the default: `make machine-verify`, the
-#                   nightly bounded TLC job and the release gate)
+#   all             every part (the default: `make machine-verify` without
+#                   MACHINE_VERIFY_PART, and the release gate); the nightly
+#                   bounded TLC job runs the machine-verify part only
 # Bazel runs the twenty-five parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
@@ -309,8 +310,9 @@ fi
 # negation (refused while held, released then runs, a run that finishes while
 # held then a refusal, the retired drain refused). It explores the MobStop
 # and ToolsNotPublished reasons, and a second run registers, holds and
-# releases every reason (a mob member's HostPreparation among them) with no
-# input and no run, the reasons being alike in every other arm. 12 steps
+# releases every reason (a mob member's HostPreparation and a host's
+# HostRecovery among them) with no input and no run, the reasons being alike
+# in every other arm. 12 steps
 # reach every witness; deeper bounds run by hand.
 run_start_hold_audit="${workspace_root}/specs/machines/meerkat_machine/run_start_hold_audit.sh"
 if [[ ! -x "${run_start_hold_audit}" ]]; then
@@ -320,6 +322,41 @@ fi
 if run_part audits-q; then
   echo "running bounded run-start hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
+fi
+
+# A host's settle of the run its session retained (SettleRetainedRun: the run
+# a restart left open and the registration marked resumable, settled without
+# resuming it and without a model request) is model-checked by a hand-written
+# audit over the same generated model: one session restarted with every
+# subset of the host's HostRecovery and a mob Stop's MobStop held, its kept
+# run marked, an input staged and bound to it and an input queued behind it,
+# then every settle arm with the observation of no run, the kept run or
+# another run, the attachment, the start and resume of the kept run or the
+# start of a new one, the runtime's settlement of the kept run as cancelled or
+# as a refused resume, a stop of it, the abandonment of an input, the holds
+# and releases, the start of an unregister, a retire, an executor exit and a
+# destroy (and a run marked before the runtime initializes), under every
+# generated invariant plus six action properties (a settle changes nothing
+# but the stop it records; an accepted settle records the stop of exactly the
+# marked run, only with no run current; no settle is accepted while the
+# registration drains; a refused settle records nothing; a run whose settle
+# was accepted never resumes, and is never settled as a refused resume) and
+# one invariant (Running always has a run current). It requires eleven
+# witnesses reached and refuses eight seeded defects (--mutants): an accept
+# of a run other than the marked one, an accept with no run marked, an accept
+# with a run current, an accept while the registration drains, an accept that
+# records no stop, a busy settle that records the stop, a resume that ignores
+# the stop, and a settlement of a stopped run as a refused resume. 10 steps
+# reach every witness and mutant. It runs in shard audits-r, the lightest;
+# not yet measured on a hosted runner.
+retained_run_settle_audit="${workspace_root}/specs/machines/meerkat_machine/retained_run_settle_audit.sh"
+if [[ ! -x "${retained_run_settle_audit}" ]]; then
+  echo "error: retained-run settle audit runner is missing from workspace runfiles: ${retained_run_settle_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded retained-run settle TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${retained_run_settle_audit}" "${RETAINED_RUN_SETTLE_AUDIT_MAX_STEPS:-10}" --mutants
 fi
 
 # Keeping queued inputs across a graceful stop: an unregister records the
@@ -829,9 +866,9 @@ fi
 # finish, and a replay that keeps the edges a same-session terminal records
 # again, with the ASSUME over the wake refusal helper. It runs with TLC
 # coverage and requires every listed arm to fire and a floor of distinct
-# states per run, and requires its forty-four witnesses reached. Its
+# states per run, and requires its forty-eight witnesses reached. Its
 # --mutants mode (run by hand, outside the shards' budget) refuses
-# sixty-eight seeded defects, one per residency invariant and property (a
+# seventy-two seeded defects, one per residency invariant and property (a
 # same-session start or replay that records no started role, and a terminal
 # that keeps it, among them). The lane runs it
 # in two parts: its whole-space runs in shard audits-g (--part spaces) and
@@ -1412,27 +1449,33 @@ run_machine_verify() {
 # audits-l = the identity entry audit's entry part with --mutants (--part
 # entry), alone: the audit 404-715, the shard 588-741 s while the part also
 # held the single entry run (101 s of main's 0.9.10 release run
-# 41976604006); now the lifecycle run with its 14 witnesses and 8 mutants
-# (203 s on that run, 157 s locally with 4 TLC workers) and the two entry
-# runs' 11 witnesses and 6 mutants (148 s locally): not yet measured on a
-# hosted runner, about 545 s with the entry runs' at 2.3x their local time
-# (700 s with every run at 2.3x);
+# 41976604006); now the lifecycle run with its witnesses and mutants and
+# the two entry runs' 11 witnesses and 6 mutants: 685 s on a pull
+# request's run 42096156511 and 418 s on run 42271560144 before the
+# identity entry takeover, which grew the lifecycle run from 12024 to
+# 17964 states (54 s to 109 s of TLC locally) and added 4 witnesses and 2
+# mutants to it: about 911 s on the first of those runners and 556 s on
+# the second, past the 720 s target below (to be rebalanced);
 # audits-w = the identity entry audit's listed run (--part listed), alone:
-# not yet measured on a hosted runner, 277 s locally, about 640 s at 2.3x;
-# audits-x = its unlisted run (--part unlisted), alone: 270 s locally,
-# about 620 s at 2.3x. The single entry run they split took 544 s locally
-# and reached the 900 s per-run cap on a pull request's run 42057238243, a
-# hosted factor above 1.65x for that run class (1.29x on main), hence the
-# 2.3x;
+# 726 s on run 42096156511 (2.61x its 278 s local TLC time, this run
+# class's hosted factor there) and 525 s on run 42271560144 before the
+# takeover: about 816 s and 590 s with it, past the 720 s target (to be
+# rebalanced), and its one run about 10 percent under the 900 s per-run
+# cap on the first runner;
+# audits-x = its unlisted run (--part unlisted), alone: 652 s and 497 s on
+# those runs before the takeover, about 702 s and 535 s with it. The
+# single entry run they split took 544 s locally and reached the 900 s
+# per-run cap on a pull request's run 42057238243 (1.29x on main);
 # audits-q = the created identity audit's scan and placed runs 170-272 (the
 # shard 183-277 s) and the run-start hold audit, from audits-c: about
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s (200 s locally with 4 TLC workers); with the scoped tool grant
-# gate audit with --mutants (its runs 144 s locally, not yet measured on a
-# hosted runner; the lightest shard then), about 430-650 s at that shard's
-# 1.24-1.88x;
+# 248-375 s (200 s locally with 4 TLC workers), plus the retained-run settle
+# audit with --mutants (0.9.11, not yet measured on a hosted runner) and the
+# scoped tool grant gate audit with --mutants (its runs 144 s locally, not
+# yet measured on a hosted runner): with the gate audit alone, about
+# 430-650 s at that shard's 1.24-1.88x;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;

@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated semantic machine model for MeerkatMachine.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CommsRuntimeIdValues, ContentShapeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MobIdValues, MobIncarnationIdValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerTerminalDispositionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, ProviderValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfRunStartHoldReasonValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, StagedSessionPhaseValues, StopInputDispositionValues, StringValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, UnregisterQueuedInputsDispositionValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WorkIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdmissionContinuationKindValues, AdmissionExistingQueuedActionKindValues, AdmissionIdempotencyResultKindValues, AdmissionInputKindValues, AdmissionInputOriginKindValues, AdmissionPeerResponseTerminalApplyIntentValues, AdmissionPlanKindValues, AdmissionPolicyApplyModeValues, AdmissionPolicyConsumePointValues, AdmissionPolicyDrainPolicyValues, AdmissionPolicyQueueModeValues, AdmissionPolicyWakeModeValues, AdmissionQueueActionKindValues, AdmissionRejectReasonKindValues, AdmissionRoutingDispositionValues, AdmissionRunApplyBoundaryValues, AdmissionRuntimeExecutionKindValues, AdmissionTurnAppendShapeValues, AdmissionValidationResultKindValues, AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, CallTimeoutSourceValues, CallTimeoutVerdictValues, CommsRuntimeIdValues, ContentShapeValues, DrainExitReasonValues, DrainModeValues, DrainPhaseValues, DurableRecoveryInputEvidenceValues, DurableRecoveryObservedLifecycleValues, DurableRecoveryObservedRunValues, DurableRecoveryOwnershipValues, DurableRecoveryPriorCommitValues, DurableTailRecoveryClassValues, DurableTailRecoveryDispositionValues, EmptyResumeRetirementVerdictValues, ExternalToolSurfaceBaseStateValues, ExternalToolSurfaceDeltaOperationValues, ExternalToolSurfaceDeltaPhaseValues, ExternalToolSurfaceFailureCauseValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputAbandonReasonValues, InputDurabilityKindValues, InputIdValues, InputLaneValues, InputPhaseValues, InputPublicLifecycleStateValues, InputPublicTerminalOutcomeValues, InputTerminalKindValues, InteractionStreamAbandonReasonValues, InteractionStreamStateValues, LiveAssistantTurnOriginValues, LiveBoundaryDeliveryValues, LiveBoundaryJoinObservationValues, LiveBoundaryJoinPhaseValues, LiveBridgeCancellationReasonValues, LiveBridgeEffectKindValues, LiveBridgeEffectOutcomeValues, LiveBridgeOperationPhaseValues, LiveBridgeOutputKindValues, LiveBridgeSubmissionObservationValues, LiveBridgeSubmissionStateValues, LiveChannelDegradationReasonValues, LiveChannelPublicStatusValues, LiveChannelRequestPublicKindValues, LiveChannelRequestRejectionPublicErrorClassValues, LiveChannelRequestRejectionReasonValues, LiveClosePublicStatusValues, LiveCommandPublicKindValues, LiveCommandRejectionPublicErrorClassValues, LiveCommandRejectionReasonValues, LiveContextAppendObservationValues, LiveContextDeliveryReadinessValues, LiveContextPayloadAvailabilityValues, LiveContextPreparationFailureValues, LiveContextPreparationPhaseValues, LiveContextRowAuthorValues, LiveContextRowDispositionValues, LiveContextRowSourceValues, LiveConversationStartCauseValues, LiveDelegationCancellationOutcomeValues, LiveDelegationCancellationReasonValues, LiveDelegationNarrationKindValues, LiveDelegationReconciliationValues, LiveDelegationResultDeliveryObservationValues, LiveDelegationResultDispositionValues, LiveDelegationResultSpeechDispositionValues, LiveDelegationScheduleStateValues, LiveDelegationWorkerOwnershipValues, LiveDelegationWorkerPhaseValues, LiveDelegationWorkerTerminalKindValues, LiveExecutionChannelPhaseValues, LiveExecutionModeValues, LiveMemberTurnReasoningValues, LiveOpenAdmissionRejectionValues, LiveRefreshPublicStatusValues, LiveWebrtcAnswerAdmissionRejectionValues, LiveWebrtcAnswerPublicStatusValues, LiveWebsocketTokenAdmissionPublicErrorClassValues, LiveWebsocketTokenAdmissionRejectionValues, LlmFailureRecoveryKindValues, LlmRetryFailureKindValues, McpServerIdValues, McpServerStateValues, MeerkatExecutionTerminalValues, MobIdValues, MobIncarnationIdValues, MobOperatorAccessRequestKindValues, MobPeerOverlayCommandKindValues, MobToolCallerProvenanceValues, ModelRoutingHandoffRecordValues, NatValues, OpLifecycleActionKindValues, OpLifecycleRejectReasonKindValues, OpRegistrationAdmissionResultKindValues, OpRegistrationRejectReasonKindValues, OpTerminalPayloadValues, OpaquePrincipalTokenValues, OperationCompletionFeedClassValues, OperationCompletionWakeClassValues, OperationDurabilityClassValues, OperationIdValues, OperationKindValues, OperationPublicResultClassValues, OperationSourceValues, OperationStatusValues, OperationTerminalOutcomeKindValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerEndpointValues, PeerIdValues, PeerIngressAdmissionDiagnosticClassValues, PeerIngressAdmittedKindValues, PeerIngressAuthClassValues, PeerIngressAuthorityPhaseClassValues, PeerIngressEnvelopeClassValues, PeerIngressInputClassValues, PeerIngressLifecycleClassValues, PeerIngressOwnerKindValues, PeerIngressReceiveOutcomeClassValues, PeerIngressRequestClassValues, PeerIngressResponseStatusValues, PeerIngressResponseTerminalityValues, PeerResponseAddresseeVerdictValues, PeerResponseSenderVerdictValues, PeerResponseTerminalObservedStatusValues, PeerTerminalDispositionValues, PostAdmissionSignalKindValues, PreRunPhaseValues, ProviderValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptRoleKindValues, RecoveredInputKindValues, RecoveredInputNormalizationReasonKindValues, RecoveredInputObservedPhaseValues, RecoveredInputRecoveryDispositionValues, RecoveredPeerResponseTerminalApplyIntentValues, RecoveredRunApplyBoundaryValues, RecoveredRuntimeExecutionKindValues, RecoveredTerminalCompletionDispositionValues, RecoveredTerminalCompletionUnrecoverableReasonKindValues, RegistrationPhaseValues, RetainedRunSettleVerdictValues, RoutingApprovalParentKindValues, RoutingApprovalPhaseValues, RoutingDenialReasonValues, RoutingImageApprovalReasonValues, RoutingImageOperationPhaseValues, RoutingImagePlanDenialReasonValues, RoutingImageProviderErrorCodeValues, RoutingImageTerminalObservationValues, RoutingImageTerminalValues, RoutingProviderTextDispositionValues, RoutingSwitchApprovalReasonValues, RoutingSwitchTurnPhaseValues, RoutingSwitchTurnTerminalValues, RpcEventStreamTerminalErrorCodeValues, RpcEventStreamTerminalObservationKindValues, RpcEventStreamTerminalReasonValues, RunFailureSourceKindValues, RunIdValues, RunStartHoldReasonValues, RunSuspensionCauseValues, RuntimeApplyFailureCauseValues, RuntimeAuthorityObservationKindValues, RuntimeAuthorityReconcileDecisionValues, RuntimeCompletionCleanupActionValues, RuntimeCompletionFinalizationObservationValues, RuntimeCompletionLiveSessionObservationValues, RuntimeCompletionObservedOutcomeValues, RuntimeCompletionPreAdmissionActionValues, RuntimeCompletionResultClassValues, RuntimeCompletionTerminalObservationValues, RuntimeCompletionWaitFailureObservationValues, RuntimeCompletionWaitFailurePublicErrorClassValues, RuntimeCompletionWaitFailurePublicReasonValues, RuntimeEffectKindValues, RuntimeEpochIdValues, RuntimeEventKindValues, RuntimeIngressAdmissionValues, RuntimeInputAdmissionValues, RuntimeLifecycleObservedStateValues, RuntimeLifecycleTerminalityValues, RuntimeLoopRunBindingValues, RuntimeNoticeKindValues, RuntimeOpsLifecycleDurabilityActionValues, RuntimePrepareAdmissionValues, RuntimeQueueAdmissionValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionRegistrationRejectReasonKindValues, SessionResidencyOwnerValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfOperationIdValues, SetOfPeerCorrelationIdValues, SetOfPeerEndpointValues, SetOfRunStartHoldReasonValues, SetOfStringValues, SetOfToolNameValues, SetOfU64Values, StagedSessionPhaseValues, StopInputDispositionValues, StringValues, SupervisorAuthorizeAdmissionResultKindValues, SupervisorAuthorizeRejectionKindValues, SupervisorBindAdmissionResultKindValues, SupervisorBindMaterialAdmissionKindValues, SupervisorBindRejectionKindValues, SupervisorBindingKindValues, SupervisorBridgeCommandAdmissionResultKindValues, SupervisorBridgeCommandRejectionKindValues, SupervisorCleanupCommandKindValues, SupervisorRotationObservationStatusKindValues, SupervisorRotationPhaseValues, SupervisorRotationRejectionKindValues, SupervisorRotationSubmissionResultKindValues, SurfacePendingOpValues, SurfacePhaseValues, SurfaceRequestPhaseValues, SurfaceRequestTerminalPolicyValues, SurfaceResultClassValues, SurfaceStagedOpValues, TerminalCauseClassValues, TerminalCompletionCorrelationValues, ToolFilterValues, ToolNameValues, ToolVisibilityWitnessValues, TranscriptEditAdmissionKindValues, TurnCancellationReasonValues, TurnPhaseValues, TurnPrimitiveKindValues, TurnTerminalCauseKindValues, TurnTerminalOutcomeValues, UnregisterQueuedInputsDispositionValues, UserInterruptObservationKindValues, UserInterruptPublicResultKindValues, WaitAllAdmissionResultKindValues, WaitAllRejectReasonKindValues, WaitRequestIdValues, WorkIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -1800,7 +1800,7 @@ RegisterSessionIdle(arg_session_id, runtime_epoch_id, initial_run_start_holds) =
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_4433c51d833ff896
 
 
@@ -1825,7 +1825,7 @@ RegisterSessionAttached(arg_session_id, runtime_epoch_id, initial_run_start_hold
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_4433c51d833ff896
 
 
@@ -1850,7 +1850,7 @@ RegisterSessionRunning(arg_session_id, runtime_epoch_id, initial_run_start_holds
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_4433c51d833ff896
 
 
@@ -1875,7 +1875,7 @@ RegisterSessionRetired(arg_session_id, runtime_epoch_id, initial_run_start_holds
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ UnchangedFrame_4433c51d833ff896
 
 
@@ -1886,7 +1886,7 @@ RegisterSessionIdempotentIdle(arg_session_id, runtime_epoch_id, initial_run_star
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_a8fa2f0d146dd995
 
 
@@ -1897,7 +1897,7 @@ RegisterSessionIdempotentAttached(arg_session_id, runtime_epoch_id, initial_run_
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_a8fa2f0d146dd995
 
 
@@ -1908,7 +1908,7 @@ RegisterSessionIdempotentRunning(arg_session_id, runtime_epoch_id, initial_run_s
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_a8fa2f0d146dd995
 
 
@@ -1919,7 +1919,7 @@ RegisterSessionIdempotentRetired(arg_session_id, runtime_epoch_id, initial_run_s
     /\ (active_runtime_epoch_id = runtime_epoch_id)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ UnchangedFrame_a8fa2f0d146dd995
 
 
@@ -2015,7 +2015,7 @@ RegisterSessionResumesStopped(arg_session_id, runtime_epoch_id, initial_run_star
     /\ active_runtime_epoch_id' = runtime_epoch_id
     /\ runtime_stop_deferred' = FALSE
     /\ registration_phase' = "Queuing"
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (run_start_holds \cup {"MobStop"}) ELSE run_start_holds
     /\ live_media_health_requested_output_by_channel' = [x \in {} |-> None]
     /\ live_media_health_judged_channels' = {}
     /\ live_media_fault_reopen_recommended_by_channel' = [x \in {} |-> None]
@@ -2049,7 +2049,7 @@ RegisterSessionNewBindingFromStopped(arg_session_id, runtime_epoch_id, initial_r
     /\ session_llm_reconfigure_committed_visible_set_changed' = FALSE
     /\ session_llm_reconfigure_revision_bumped' = FALSE
     /\ session_llm_reconfigure_active_visibility_revision' = 0
-    /\ run_start_holds' = IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
+    /\ run_start_holds' = IF ("HostRecovery" \in initial_run_start_holds) THEN ((IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostRecovery"}) ELSE IF ("HostPreparation" \in initial_run_start_holds) THEN ((IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"HostPreparation"}) ELSE IF ("ToolsNotPublished" \in initial_run_start_holds) THEN ((IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}) \cup {"ToolsNotPublished"}) ELSE IF ("MobStop" \in initial_run_start_holds) THEN (({}) \cup {"MobStop"}) ELSE {}
     /\ live_media_health_requested_output_by_channel' = [x \in {} |-> None]
     /\ live_media_health_judged_channels' = {}
     /\ live_media_fault_reopen_recommended_by_channel' = [x \in {} |-> None]
@@ -38731,6 +38731,217 @@ ReleaseInputControllerStopped(input_id) ==
     /\ UnchangedFrame_b024d434aebc6722
 
 
+SettleRetainedRunAcceptedIdle(run_id) ==
+    /\ phase = "Idle"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ (resumable_run_id = run_id)
+    /\ (registration_phase # "Draining")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_stop_requested' = run_id
+    /\ UnchangedFrame_ae06dd4dbcba4b7d
+
+
+SettleRetainedRunAcceptedAttached(run_id) ==
+    /\ phase = "Attached"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ (resumable_run_id = run_id)
+    /\ (registration_phase # "Draining")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ run_stop_requested' = run_id
+    /\ UnchangedFrame_ae06dd4dbcba4b7d
+
+
+SettleRetainedRunBusyRunCurrentInitializing(run_id) ==
+    /\ phase = "Initializing"
+    /\ (current_run_id # None)
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyRunCurrentIdle(run_id) ==
+    /\ phase = "Idle"
+    /\ (current_run_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyRunCurrentAttached(run_id) ==
+    /\ phase = "Attached"
+    /\ (current_run_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyRunCurrentRunning(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyRunCurrentRetired(run_id) ==
+    /\ phase = "Retired"
+    /\ (current_run_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyRunCurrentStopped(run_id) ==
+    /\ phase = "Stopped"
+    /\ (current_run_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyDrainingIdle(run_id) ==
+    /\ phase = "Idle"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ (resumable_run_id = run_id)
+    /\ (registration_phase = "Draining")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyDrainingAttached(run_id) ==
+    /\ phase = "Attached"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ (resumable_run_id = run_id)
+    /\ (registration_phase = "Draining")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyStaleRunIdle(run_id) ==
+    /\ phase = "Idle"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ (resumable_run_id # run_id)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyStaleRunAttached(run_id) ==
+    /\ phase = "Attached"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ (resumable_run_id # run_id)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyNotServingInitializing(run_id) ==
+    /\ phase = "Initializing"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyNotServingRunning(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyNotServingRetired(run_id) ==
+    /\ phase = "Retired"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunBusyNotServingStopped(run_id) ==
+    /\ phase = "Stopped"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunNotRetainedInitializing(run_id) ==
+    /\ phase = "Initializing"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id = None)
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunNotRetainedIdle(run_id) ==
+    /\ phase = "Idle"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id = None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunNotRetainedAttached(run_id) ==
+    /\ phase = "Attached"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id = None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunNotRetainedRunning(run_id) ==
+    /\ phase = "Running"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id = None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunNotRetainedRetired(run_id) ==
+    /\ phase = "Retired"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id = None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunNotRetainedStopped(run_id) ==
+    /\ phase = "Stopped"
+    /\ (current_run_id = None)
+    /\ (resumable_run_id = None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
+SettleRetainedRunInertDestroyed(run_id) ==
+    /\ phase = "Destroyed"
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_687c4e58170154ce
+
+
 Next ==
     \/ Initialize
     \/ (phase = "Idle") /\ \E arg_session_id \in SessionIdValues : \E candidate_id \in StringValues : \E candidate_run_id \in RunIdValues : \E class \in DurableTailRecoveryClassValues : \E observed_lifecycle \in DurableRecoveryObservedLifecycleValues : \E observed_current_run \in DurableRecoveryObservedRunValues : \E last_committed_sequence \in 0..2 : \E prior_commit \in DurableRecoveryPriorCommitValues : \E input_evidence \in DurableRecoveryInputEvidenceValues : \E ownership \in DurableRecoveryOwnershipValues : AuthorizeDurableTailRecoveryCommitIdle(arg_session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence, ownership)
@@ -41498,6 +41709,29 @@ Next ==
     \/ (phase = "Running") /\ \E input_id \in StringValues : ReleaseInputControllerRunning(input_id)
     \/ (phase = "Retired") /\ \E input_id \in StringValues : ReleaseInputControllerRetired(input_id)
     \/ (phase = "Stopped") /\ \E input_id \in StringValues : ReleaseInputControllerStopped(input_id)
+    \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunAcceptedIdle(run_id)
+    \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunAcceptedAttached(run_id)
+    \/ (phase = "Initializing") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyRunCurrentInitializing(run_id)
+    \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyRunCurrentIdle(run_id)
+    \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyRunCurrentAttached(run_id)
+    \/ (phase = "Running") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyRunCurrentRunning(run_id)
+    \/ (phase = "Retired") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyRunCurrentRetired(run_id)
+    \/ (phase = "Stopped") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyRunCurrentStopped(run_id)
+    \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyDrainingIdle(run_id)
+    \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyDrainingAttached(run_id)
+    \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyStaleRunIdle(run_id)
+    \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyStaleRunAttached(run_id)
+    \/ (phase = "Initializing") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyNotServingInitializing(run_id)
+    \/ (phase = "Running") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyNotServingRunning(run_id)
+    \/ (phase = "Retired") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyNotServingRetired(run_id)
+    \/ (phase = "Stopped") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunBusyNotServingStopped(run_id)
+    \/ (phase = "Initializing") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunNotRetainedInitializing(run_id)
+    \/ (phase = "Idle") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunNotRetainedIdle(run_id)
+    \/ (phase = "Attached") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunNotRetainedAttached(run_id)
+    \/ (phase = "Running") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunNotRetainedRunning(run_id)
+    \/ (phase = "Retired") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunNotRetainedRetired(run_id)
+    \/ (phase = "Stopped") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunNotRetainedStopped(run_id)
+    \/ (phase = "Destroyed") /\ \E run_id \in OptionRunIdValues : SettleRetainedRunInertDestroyed(run_id)
     \/ TerminalStutter
 
 live_delegation_steer_records_are_authorized_and_single == ((DOMAIN live_delegation_steer_digest_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (DOMAIN live_delegation_steer_reconciliation_by_continuation = DOMAIN live_delegation_steer_operation_by_continuation) /\ (\A continuation_id \in DOMAIN live_delegation_steer_delivered_by_continuation : (continuation_id \in DOMAIN live_delegation_steer_operation_by_continuation)))

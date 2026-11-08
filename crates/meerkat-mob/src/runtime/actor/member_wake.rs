@@ -54,6 +54,9 @@ pub(in crate::runtime) enum MemberWakeFailure {
         session_id: Option<SessionId>,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+        /// The structured data of the failure that broke the member's
+        /// restore, when it had some.
+        cause_data: Option<serde_json::Value>,
         registration_refusal: Option<crate::MemberRegistrationHookCall>,
     },
     /// A peer send from a member that is itself waking, to a member that is
@@ -85,12 +88,14 @@ impl MemberWakeFailure {
                 session_id,
                 reason,
                 hold,
+                cause_data,
                 registration_refusal: None,
             } => MobError::MemberRestoreFailed {
                 member_id: member_id.clone(),
                 session_id,
                 reason,
                 hold,
+                cause_data,
             },
             // Only a peer send carries a sender residency; a host delivery
             // never gets this answer.
@@ -498,6 +503,10 @@ pub(in crate::runtime) struct MemberWakes {
     /// Owed edge repair state per edge, with the same backoff and one armed
     /// timer per edge.
     edge_repairs: BTreeMap<MemberWiringEdge, OwedMemberWakeRetry>,
+    /// Build preparation retry state per member that owes its host a build
+    /// preparation it asked to retry (BuildPreparationRetry), with the same
+    /// backoff and one armed timer per member.
+    build_preparation_retries: BTreeMap<AgentIdentity, OwedMemberWakeRetry>,
 }
 
 /// One member's owed-boot retry: consecutive retries (the backoff step) and
@@ -552,6 +561,7 @@ impl MemberWakes {
             host_read_handle,
             owed_retries: BTreeMap::new(),
             edge_repairs: BTreeMap::new(),
+            build_preparation_retries: BTreeMap::new(),
         })
     }
 
@@ -711,6 +721,13 @@ impl MobActor {
                 // its timer is armed below.
                 mob_dsl::MobMachineEffect::OwedEdgeRepairsRecorded => {
                     owed_edge_repairs_recorded = true;
+                }
+                // The step that recorded a build preparation the host asked
+                // to retry arms its retry timer, at the next backoff step.
+                mob_dsl::MobMachineEffect::MemberBuildPreparationRetryArmed { agent_identity } => {
+                    self.arm_member_build_preparation_retry(&AgentIdentity::from(
+                        agent_identity.0.as_str(),
+                    ));
                 }
                 mob_dsl::MobMachineEffect::CloseMemberPeerIngress { .. } => {
                     self.member_wakes
@@ -1186,8 +1203,22 @@ impl MobActor {
             mob_dsl::MemberWakeRefusalKind::NonAuthoritativeComposition => {
                 MemberWakeFailure::Refused(Refusal::NonAuthoritativeComposition)
             }
+            // The machine's one host preparation refusal names its cause in
+            // the state it refused from: a build preparation the host asked
+            // to retry is told apart from a first-boot or role preparation.
             mob_dsl::MemberWakeRefusalKind::HostPreparationPending => {
-                MemberWakeFailure::Refused(Refusal::HostPreparationPending)
+                let cause = self
+                    .dsl_authority
+                    .state()
+                    .member_host_preparation_causes
+                    .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                    .copied();
+                MemberWakeFailure::Refused(match cause {
+                    Some(mob_dsl::HostPreparationCause::BuildPreparationRetry) => {
+                        Refusal::BuildPreparationRetry
+                    }
+                    _ => Refusal::HostPreparationPending,
+                })
             }
             mob_dsl::MemberWakeRefusalKind::ResumeGateUnavailable => {
                 MemberWakeFailure::Refused(Refusal::ResumeGateUnavailable)
@@ -1201,7 +1232,8 @@ impl MobActor {
     }
 
     /// The Broken answer for `identity`: the machine's recorded reason, with
-    /// the restore diagnostic's session, durable hold and host refusal.
+    /// the restore diagnostic's session, durable hold, cause data and host
+    /// refusal.
     pub(in crate::runtime) async fn member_wake_broken(
         &self,
         identity: &AgentIdentity,
@@ -1231,6 +1263,7 @@ impl MobActor {
                 })
                 .unwrap_or_else(|| "member restore failed".to_string()),
             hold: diagnostic.as_ref().and_then(|diagnostic| diagnostic.hold),
+            cause_data: diagnostic.and_then(|diagnostic| diagnostic.cause_data),
             registration_refusal,
         }
     }
@@ -1563,6 +1596,15 @@ impl MobActor {
             }
             return;
         }
+        // A member that owes its host a build preparation it asked to retry
+        // is woken for its owed work by that preparation's own retry timer,
+        // once the retry ends the cause: an owed retry before it would only
+        // be refused for the cause.
+        if state.member_host_preparation_causes.get(&dsl_identity)
+            == Some(&mob_dsl::HostPreparationCause::BuildPreparationRetry)
+        {
+            return;
+        }
         let backoff = self.member_residency.owed_wake_retry;
         let retry = self
             .member_wakes
@@ -1604,6 +1646,139 @@ impl MobActor {
         }
     }
 
+    /// Arm `identity`'s build preparation retry timer: the step that
+    /// recorded a build preparation the host asked to retry
+    /// (`MemberBuildPreparationRetryArmed`) asks for it. A member has at most
+    /// one armed timer; its delay doubles with each arming, from the
+    /// owed-wake backoff's initial delay up to its cap, and a wake that
+    /// leaves the member live starts it over.
+    pub(in crate::runtime) fn arm_member_build_preparation_retry(
+        &mut self,
+        identity: &AgentIdentity,
+    ) {
+        let backoff = self.member_residency.owed_wake_retry;
+        let retry = self
+            .member_wakes
+            .build_preparation_retries
+            .entry(identity.clone())
+            .or_default();
+        if retry.armed {
+            return;
+        }
+        let delay = backoff.delay(retry.retries);
+        retry.retries = retry.retries.saturating_add(1);
+        retry.armed = true;
+        let command_tx = self.command_tx.clone();
+        let agent_identity = identity.clone();
+        self.actor_io_tasks.spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::RetryMemberBuildPreparation { agent_identity },
+                ))
+                .await;
+        });
+    }
+
+    /// Actor start: arm the retry timer of every member whose build
+    /// preparation retry a transition recorded before the actor existed (a
+    /// resume at the mob's build). The machine's recorded cause decides.
+    fn arm_recorded_member_build_preparation_retries(&mut self) {
+        let recorded: Vec<AgentIdentity> = self
+            .dsl_authority
+            .state()
+            .member_host_preparation_causes
+            .iter()
+            .filter(|(_, cause)| **cause == mob_dsl::HostPreparationCause::BuildPreparationRetry)
+            .map(|(identity, _)| AgentIdentity::from(identity.0.as_str()))
+            .collect();
+        for identity in recorded {
+            self.arm_member_build_preparation_retry(&identity);
+        }
+    }
+
+    /// A member's build preparation retry is due: MobMachine ends the cause
+    /// (`ResolveMemberBuildPreparation`, a no-op once the host's door ended
+    /// it), and a member whose boot work is still owed is woken for it, which
+    /// asks the host's build preparer again. A member with no owed work stays
+    /// Dormant until a real wake asks.
+    pub(in crate::runtime) async fn retry_member_build_preparation(
+        &mut self,
+        identity: AgentIdentity,
+    ) {
+        // This is the member's armed timer firing.
+        if let Some(retry) = self
+            .member_wakes
+            .build_preparation_retries
+            .get_mut(&identity)
+        {
+            retry.armed = false;
+        }
+        if let Err(error) = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::ResolveMemberBuildPreparation {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+            },
+            "retry_member_build_preparation",
+        ) {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                agent_identity = %identity,
+                %error,
+                "MobMachine refused the build preparation retry"
+            );
+            return;
+        }
+        self.wake_owed_member(identity).await;
+    }
+
+    /// A wake left `identity` live: its build preparation retry backoff, if
+    /// any, starts over.
+    pub(in crate::runtime) fn reset_member_build_preparation_retry(
+        &mut self,
+        identity: &AgentIdentity,
+    ) {
+        if let std::collections::btree_map::Entry::Occupied(mut entry) = self
+            .member_wakes
+            .build_preparation_retries
+            .entry(identity.clone())
+        {
+            if entry.get().armed {
+                entry.get_mut().retries = 0;
+            } else {
+                entry.remove();
+            }
+        }
+    }
+
+    /// The host retries the build preparation it asked to retry for
+    /// `identity` (its door, after a wake refused for it): MobMachine ends
+    /// the cause, so the member's next wake asks the host's build preparer
+    /// again. A member with no such cause is a no-op.
+    pub(in crate::runtime) fn resolve_member_build_preparation(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::ResolveMemberBuildPreparation {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+            },
+            "resolve_member_build_preparation",
+        )
+    }
+
+    /// Whether `identity`'s owed-boot wake retry timer is armed now (rows
+    /// read it through `MobCommand::OwedMemberWakeRetryArmedForTest`).
+    #[cfg(test)]
+    pub(in crate::runtime) fn owed_member_wake_retry_armed(
+        &self,
+        identity: &AgentIdentity,
+    ) -> bool {
+        self.member_wakes
+            .owed_retries
+            .get(identity)
+            .is_some_and(|retry| retry.armed)
+    }
+
     /// An owed-boot retry is due: wake the member for its boot work again,
     /// unless its obligation is gone or a delivery already woke it.
     pub(in crate::runtime) async fn retry_owed_member_wake(&mut self, identity: AgentIdentity) {
@@ -1611,6 +1786,12 @@ impl MobActor {
         if let Some(retry) = self.member_wakes.owed_retries.get_mut(&identity) {
             retry.armed = false;
         }
+        self.wake_owed_member(identity).await;
+    }
+
+    /// Wake `identity` for its boot work while it is owed and the member is
+    /// Dormant; a member with no owed work stays Dormant until a real wake.
+    async fn wake_owed_member(&mut self, identity: AgentIdentity) {
         let state = self.dsl_authority.state();
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
         let owed_cause = state
@@ -1918,11 +2099,14 @@ impl MobActor {
     }
 
     /// Actor start: publish every seated member's wake route from machine
-    /// state (`RebuildWakeRoutes` at actor start), and schedule the retry of
-    /// every boot wake that ended retryably while its obligation is owed.
+    /// state (`RebuildWakeRoutes` at actor start), schedule the retry of
+    /// every boot wake that ended retryably while its obligation is owed, and
+    /// arm the build preparation retry of every member whose cause a
+    /// transition before the actor existed recorded.
     pub(in crate::runtime) fn start_member_wakes(&mut self) {
         self.rebuild_member_wake_routes();
         self.schedule_owed_member_wake_retries();
+        self.arm_recorded_member_build_preparation_retries();
     }
 
     /// A missing-live revival request (a host's liveness probe, a reload's

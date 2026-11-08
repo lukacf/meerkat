@@ -294,6 +294,19 @@ AuditResolve(id, rid, fence, g, sessions) ==
         \/ AbandonMemberWakeBrokenRunning(id, a, "ReadinessFailed", AuditReason)
         \/ \E s \in sessions : ResolveRecreatedMemberSessionSucceededRunningLocal(id, rid, fence, g, s, a)
 
+\* A wake's build preparation the host asked to retry: its retryable
+\* feedback records the cause (BuildPreparationRetry), and the retry ends
+\* it (ResolveMemberBuildPreparation, in each phase a run reaches).
+AuditBuildPreparationRefused(id) ==
+    \E a \in AuditAttempts :
+        ResolveMemberRevivalRetryableBuildPreparationRunning(id, a, "BuildPreparationRefused")
+AuditBuildPreparationRetried(id) ==
+    \/ ResolveMemberBuildPreparationRunning(id)
+    \/ ResolveMemberBuildPreparationStopped(id)
+AuditBuildPreparationRetriedAnyPhase(id) ==
+    \/ AuditBuildPreparationRetried(id)
+    \/ ResolveMemberBuildPreparationCompleted(id)
+
 \* The success path of one wake (the fresh create for an unborn seat) and
 \* its plain abandon.
 AuditWakePath(id) ==
@@ -464,6 +477,7 @@ AuditSeedNext ==
     \/ WSeatSession
     \/ AuditSeed({{}, {Id1}})
     \/ AuditHostPrepared(Id1)
+    \/ AuditBuildPreparationRetriedAnyPhase(Id1)
     \/ AuditPlan(Id1)
     \/ SealBootMaterializationPlan
     \/ AuditOperatorWake(Id1)
@@ -499,6 +513,8 @@ AuditWakeNext ==
     \/ SealBootMaterializationPlan
     \/ AuditWakeShaped(Id1)
     \/ AuditResolve(Id1, Rid1, 1, 0, {Sess1})
+    \/ AuditBuildPreparationRefused(Id1)
+    \/ AuditBuildPreparationRetried(Id1)
     \/ AuditStaleFeedback(Id1, Rid1, 1, 0, Sess1)
     \/ WReady
     \/ WRelease
@@ -641,6 +657,8 @@ AuditRetireNext ==
     \/ ResolveMemberHostPreparationRunning(Id1)
     \/ AuditOperatorWake(Id1)
     \/ AuditWakePath(Id1)
+    \/ AuditBuildPreparationRefused(Id1)
+    \/ ResolveMemberBuildPreparationRunning(Id1)
     \/ WReadyEpoch1
     \/ WReleaseEpoch1
     \/ RetireArms
@@ -1314,6 +1332,26 @@ AuditLifecycleNeverWakes ==
               /\ member_materialization' = member_materialization
       ]_vars
 
+\* A member that owes its host the build preparation it asked to retry
+\* (BuildPreparationRetry) opens no wake attempt: like every host
+\* preparation cause it refuses the member's wakes, whatever their cause,
+\* until the retry ends it.
+Id1HoldsBuildPreparationRetry ==
+    /\ Id1 \in DOMAIN member_host_preparation_causes
+    /\ member_host_preparation_causes[Id1] = "BuildPreparationRetry"
+AuditBuildPreparationRetryRefusesWakes ==
+    [][(Id1HoldsBuildPreparationRetry /\ Id1 \notin DOMAIN member_wake_attempts)
+           => Id1 \notin DOMAIN member_wake_attempts'
+      ]_vars
+
+\* The retry of a build preparation ends that cause only: a first-boot
+\* preparation stays owed until its host carries it out.
+AuditBuildPreparationRetryEndsOnlyItsCause ==
+    [][(/\ AuditBuildPreparationRetriedAnyPhase(Id1)
+         /\ ~Id1HoldsBuildPreparationRetry)
+           => member_host_preparation_causes' = member_host_preparation_causes
+      ]_vars
+
 \* A WakeMember input never moves a Dormant member straight to Live: it is
 \* Waking (an attempt) or stays Dormant (refused).
 AuditWakeNeverSkipsWaking ==
@@ -1686,6 +1724,27 @@ AuditWitnessCommsLessWokeLiveStep ==
     /\ Phase1Next = Some("Live")
     /\ Id1 \notin DOMAIN member_peer_endpoints'
 
+\* Wake run: the host's build preparer asks to retry, and the cause is
+\* recorded as the attempt ends Dormant.
+AuditWitnessBuildPreparationRetryRecordedStep ==
+    /\ Phase1 = Some("Waking")
+    /\ Phase1Next = Some("Dormant")
+    /\ Id1 \in DOMAIN member_host_preparation_causes'
+    /\ member_host_preparation_causes'[Id1] = "BuildPreparationRetry"
+\* Wake run: a wake is refused while the cause stands.
+AuditWitnessBuildPreparationRetryRefusedWakeStep ==
+    /\ Id1HoldsBuildPreparationRetry
+    /\ \E s \in AuditWakeShapes : WakeMemberRefusedRunning(Id1, s[1], s[2], s[3], s[4])
+\* Wake run: the retry ends the cause.
+AuditWitnessBuildPreparationRetryResolvedStep ==
+    /\ Id1HoldsBuildPreparationRetry
+    /\ Id1 \notin DOMAIN member_host_preparation_causes'
+\* Retire run: a member holding the cause is retired, and the cause goes
+\* with it.
+AuditWitnessBuildPreparationRetryRetiredStep ==
+    /\ Id1HoldsBuildPreparationRetry
+    /\ Id1 \notin DOMAIN identity_to_runtime'
+
 \* Retire run: a retirement start closes an open attempt (archive-only).
 AuditWitnessRetireClosesStep ==
     /\ Phase1 = Some("Waking")
@@ -1917,4 +1976,8 @@ NotAuditWitnessReplayedKeptTopology == ~AuditWitnessReplayedKeptTopology
 NotAuditWitnessHostMarkKept == [][~AuditWitnessHostMarkKeptStep]_vars
 NotAuditWitnessHeldSuccessorRefused == [][~AuditWitnessHeldSuccessorRefusedStep]_vars
 NotAuditWitnessReplayedSuccessorWokeLive == [][~AuditWitnessReplayedSuccessorWokeLiveStep]_vars
+NotAuditWitnessBuildPreparationRetryRecorded == [][~AuditWitnessBuildPreparationRetryRecordedStep]_vars
+NotAuditWitnessBuildPreparationRetryRefusedWake == [][~AuditWitnessBuildPreparationRetryRefusedWakeStep]_vars
+NotAuditWitnessBuildPreparationRetryResolved == [][~AuditWitnessBuildPreparationRetryResolvedStep]_vars
+NotAuditWitnessBuildPreparationRetryRetired == [][~AuditWitnessBuildPreparationRetryRetiredStep]_vars
 ====

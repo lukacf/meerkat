@@ -25731,6 +25731,7 @@ function latestRoutableFrameIsTerminal(frames) {
 // ../packages/console-core/src/contract.ts
 var CONSOLE_RPC_METHODS = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -25995,11 +25996,12 @@ function createTimelineSubscription(input) {
           if (!stopped) state("stopped", { error: error48 });
           break;
         }
-        if (fault?.httpStatus === 401 || fault?.httpStatus === 403) {
-          state(fault.httpStatus === 401 ? "authentication-required" : "forbidden", {
-            error: error48,
-            httpStatus: fault.httpStatus
-          });
+        if (fault?.httpStatus === 401 || fault?.transportFailure === "sign_in_redirect") {
+          state("authentication-required", { error: error48, ...fault.httpStatus === 401 ? { httpStatus: 401 } : {} });
+          break;
+        }
+        if (fault?.httpStatus === 403) {
+          state("forbidden", { error: error48, httpStatus: 403 });
           break;
         }
         if (fault?.httpStatus && fault.httpStatus < 500 && fault.httpStatus !== 408 && fault.httpStatus !== 429) {
@@ -26753,6 +26755,10 @@ function isNamespacedKind(kind) {
 
 // ../packages/console-core/src/pending-approvals.ts
 var APPROVAL_ACTIONS = ["approve", "reject", "escalate"];
+function approvalAudience(request, viewer) {
+  const approver = request.requestedApprover;
+  return !approver || viewer.approverIds.includes(approver) ? { kind: "you" } : { kind: "other", approver };
+}
 var POLL_MS = 15e3;
 var STALE_MS = 2 * POLL_MS;
 var text2 = (value) => typeof value === "string" && value.trim() ? value : void 0;
@@ -26816,6 +26822,7 @@ var REFUSAL_WORDS = {
   approver_mismatch: "This request is waiting for another approver.",
   unknown_pending_id: "This request was already decided or has expired.",
   empty_principal: "Sign in to decide approvals.",
+  approver_unauthenticated: "Only a signed-in person can decide approvals. Sign in as yourself; nothing was decided.",
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again."
 };
 function approvalRefusal(error48) {
@@ -26835,8 +26842,30 @@ function unavailableCapability(error48) {
 }
 var isDenied = (error48) => {
   const record10 = error48;
-  return record10?.httpStatus === 401 || record10?.httpStatus === 403 || record10?.rpcError?.code === -32030 || record10?.rpcError?.data?.kind === "access_denied";
+  return record10?.httpStatus === 403 || record10?.rpcError?.code === -32030 || record10?.rpcError?.data?.kind === "access_denied";
 };
+var DEPARTED_LIMIT = 20;
+var DECIDED_EVENTS = {
+  approval_decided: "approve",
+  rejection_decided: "reject",
+  escalation_decided: "escalate",
+  timeout_fallback: "expired"
+};
+function recordedDecisions(value) {
+  const payload = value && typeof value === "object" ? value : void 0;
+  const entries = Array.isArray(value) ? value : Array.isArray(payload?.entries) ? payload.entries : [];
+  const found = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    const record10 = entry && typeof entry === "object" ? entry : null;
+    const pendingId = text2(record10?.pending_id);
+    const action = typeof record10?.event_type === "string" ? DECIDED_EVENTS[record10.event_type] : void 0;
+    if (!pendingId || !action || found.has(pendingId)) continue;
+    const detail = record10?.detail && typeof record10.detail === "object" ? record10.detail : {};
+    const by = action === "expired" ? void 0 : text2(detail.deciding_principal) || text2(detail.approver_id);
+    found.set(pendingId, { action, ...by ? { by } : {} });
+  }
+  return found;
+}
 function createPendingApprovalResource(input) {
   const env2 = input.environment || browserEnvironment();
   let snapshot = {
@@ -26844,7 +26873,9 @@ function createPendingApprovalResource(input) {
     status: "loading",
     requests: [],
     decisions: {},
-    readOnly: input.readOnly === true
+    departed: [],
+    readOnly: input.readOnly === true,
+    ...input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}
   };
   const listeners2 = /* @__PURE__ */ new Set();
   const lifetime = new AbortController();
@@ -26863,6 +26894,14 @@ function createPendingApprovalResource(input) {
   };
   const stale = () => {
     if (snapshot.status === "ready" && snapshot.updatedAtMs !== void 0 && env2.now() - snapshot.updatedAtMs >= STALE_MS) publish({ status: "stale" });
+  };
+  const readDecisions = async () => {
+    try {
+      const found = recordedDecisions(await input.loadDecisions(lifetime.signal));
+      if (disposed || denied || !found.size) return;
+      publish({ departed: (snapshot.departed ?? []).map((item) => item.decided || !found.has(item.request.pendingId) ? item : { ...item, decided: found.get(item.request.pendingId) }) });
+    } catch {
+    }
   };
   const schedule = () => {
     if (timer3 !== void 0) env2.clearTimeout(timer3);
@@ -26903,13 +26942,19 @@ function createPendingApprovalResource(input) {
             requests.push(request);
           }
         }
-        publish({ requests, status: "ready", updatedAtMs: env2.now(), error: void 0 });
+        const left = snapshot.status === "loading" ? [] : snapshot.requests.filter((old) => old.status === "pending" && !ids.has(old.pendingId) && snapshot.decisions[old.pendingId]?.phase !== "settled" && snapshot.decisions[old.pendingId]?.phase !== "submitting");
+        const departed = [
+          ...left.map((request) => ({ request, departedAtMs: env2.now() })),
+          ...(snapshot.departed ?? []).filter((old) => !ids.has(old.request.pendingId) && !left.some((request) => request.pendingId === old.request.pendingId))
+        ].slice(0, DEPARTED_LIMIT);
+        publish({ requests, departed, status: "ready", updatedAtMs: env2.now(), error: void 0 });
+        if (left.length && input.loadDecisions) void readDecisions();
       } catch (error48) {
         if (disposed || denied) return;
         const unsupported = unavailableCapability(error48)?.method === CONSOLE_RPC_METHODS.gatingPending;
         if (isDenied(error48) || unsupported) {
           denied = true;
-          publish({ requests: [], decisions: {}, status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
+          publish({ requests: [], decisions: {}, departed: [], status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
           lifetime.abort();
         } else if (generation === decisionGeneration) {
           publish({ status: snapshot.updatedAtMs === void 0 ? "unavailable" : "stale", error: errorText(error48) });
@@ -26988,7 +27033,7 @@ function createPendingApprovalResource(input) {
             });
           } else if (isDenied(error48) || capability?.method === CONSOLE_RPC_METHODS.gatingDecide) {
             denied = true;
-            publish({ requests: [], decisions: {}, status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
+            publish({ requests: [], decisions: {}, departed: [], status: isDenied(error48) ? "forbidden" : "unsupported", readOnly: true, error: errorText(error48) });
             lifetime.abort();
           } else {
             const refusal = approvalRefusal(error48);
@@ -27010,7 +27055,7 @@ function createPendingApprovalResource(input) {
       if (timer3 !== void 0) env2.clearTimeout(timer3);
       unsubscribeVisibility();
       listeners2.clear();
-      snapshot = { scopeKey: input.scopeKey, status: "unavailable", requests: [], decisions: {}, readOnly: true };
+      snapshot = { scopeKey: input.scopeKey, status: "unavailable", requests: [], decisions: {}, departed: [], readOnly: true };
     }
   };
   schedule();
@@ -27301,6 +27346,34 @@ function classifyConsoleSendFailure(error48) {
   const rpcMessage = typeof rpc2?.message === "string" && rpc2.message.trim() ? rpc2.message.trim() : void 0;
   const status = typeof typed.httpStatus === "number" ? typed.httpStatus : void 0;
   const detail = error48 instanceof Error && error48.message.trim() ? error48.message.trim() : typeof typed.message === "string" && typed.message.trim() ? typed.message.trim() : void 0;
+  if (rpcKind2 === "caller_changed") {
+    return {
+      state: "definitely-rejected",
+      kind: "caller_changed",
+      message: "Not sent: this browser is now signed in as someone else. Nothing was sent."
+    };
+  }
+  if (typed.transportFailure === "caller_unknown") {
+    return {
+      state: "definitely-rejected",
+      kind: "caller_unknown",
+      message: "Not sent: the console could not confirm whom this browser is signed in as. Nothing was sent."
+    };
+  }
+  if (typed.transportFailure === "sign_in_redirect") {
+    return {
+      state: "definitely-rejected",
+      kind: "unauthenticated",
+      message: "Sign-in required: a sign-in page answered instead of the gateway. Nothing was sent. Sign in again, then review the saved message before resending."
+    };
+  }
+  if (rpcKind2 === "caller_not_current") {
+    return {
+      state: "definitely-rejected",
+      kind: "unauthenticated",
+      message: "Sign-in required: your console login ended before this message was sent. Nothing was sent. Sign in again, then review the saved message before resending."
+    };
+  }
   if (rpcKind2 === "unauthenticated" || status === 401) {
     return {
       state: "definitely-rejected",
@@ -27427,6 +27500,10 @@ function describeConsolePendingRow(attempt, names) {
       switch (attempt.failureKind) {
         case "unauthenticated":
           return "Sign in again or check this connection's authentication. Then review your saved message before choosing Send again.";
+        case "caller_changed":
+          return "This browser is now signed in as someone else, so the console did not send it.";
+        case "caller_unknown":
+          return "The console couldn't confirm whom you're signed in as, so it didn't send it. Try again in a moment.";
         case "access_denied":
           return "You don't have permission to message ".concat(names.agent, ".");
         case "read_only":
@@ -32019,6 +32096,15 @@ var HostDecideSourcesProvider = HostDecideSourcesContext.Provider;
 function useHostDecideSources() {
   return React3.useContext(HostDecideSourcesContext);
 }
+var ApprovalViewerContext = React3.createContext(void 0);
+var ApprovalViewerProvider = ApprovalViewerContext.Provider;
+function useApprovalViewer() {
+  return React3.useContext(ApprovalViewerContext);
+}
+function useApprovalAudience(request) {
+  const viewer = useApprovalViewer();
+  return viewer ? approvalAudience(request, viewer) : null;
+}
 var STATE_WORDS = {
   pending: { text: "Approval needed", tone: "warn" },
   submitting: { text: "Submitting decision", tone: "info" },
@@ -32111,11 +32197,15 @@ function AskedLine({ request, waiting, testId }) {
     waiting ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__waiting", children: "Waiting ".concat(waiting) }) : null
   ] });
 }
-function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }) {
+function ApprovalCard({ request, resourceStatus, decision, readOnly = false, readOnlyReason, decideLinks, onDecide }) {
   const now3 = useApprovalClock([request.deadlineAtMs]);
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
   const stale = resourceStatus !== "ready";
+  const viewer = useApprovalViewer();
+  const audience = useApprovalAudience(request);
+  const waitingFor = pending && audience?.kind === "other" ? audience.approver : null;
+  const forYou = pending && audience?.kind === "you" && viewer?.decides === true;
   const hostDecide = readOnly && pending && decideLinks?.length ? decideLinks : null;
   const state = submitting ? "submitting" : decision?.phase === "failed" ? "failed" : request.status === "expired" ? "expired" : !pending ? "settled" : stale ? "stale" : decision?.phase === "refused" ? "refused" : decision?.phase === "unavailable" ? "unavailable" : "pending";
   const words2 = STATE_WORDS[state];
@@ -32139,7 +32229,8 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, dec
         /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("header", { className: "cc-approval__header", children: [
           /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__heading", children: [
             /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: title }),
-            risk ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: riskTone(request.riskTier), mark: true, title: risk.title, className: "cc-approval__risk", children: risk.text }) : null
+            risk ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: riskTone(request.riskTier), mark: true, title: risk.title, className: "cc-approval__risk", children: risk.text }) : null,
+            forYou ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: "info", className: "cc-approval__audience", testId: "gating-for-you:".concat(request.pendingId), children: "For you" }) : waitingFor ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { className: "cc-approval__audience", title: "This request asks ".concat(waitingFor, " to decide it"), testId: "gating-waiting-for:".concat(request.pendingId), children: "Waiting for ".concat(waitingFor) }) : null
           ] }),
           deadline !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(DeadlineChip, { deadlineAtMs: deadline, now: now3, testId: "gating-countdown:".concat(request.pendingId) }) : null
         ] }),
@@ -32175,7 +32266,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, dec
           "Escalated to a new request ",
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(TechnicalId, { value: decision.result.next_pending_id, label: "Request ID" })
         ] }) : null,
-        readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: "Read-only access" }) : null,
+        readOnly && !hostDecide ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: readOnlyReason === "sign_in" ? "Sign in as yourself to decide" : "Read-only access" }) : null,
         resourceStatus === "forbidden" ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Notice, { tone: "locked", children: "Approval access denied" }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("footer", { className: "cc-approval__footer", children: [
           /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: words2.tone, mark: true, variant: state === "pending" ? "quiet" : void 0, children: words2.text }) }),
@@ -32193,7 +32284,7 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, dec
               ]
             },
             link3.sourceId
-          )) }) : pending ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
+          )) }) : pending && !waitingFor ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
             shownActions.map((action) => {
               const noRoute = action === "escalate" && noEscalationRoute;
               return /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
@@ -32239,6 +32330,23 @@ function ApprovalCard({ request, resourceStatus, decision, readOnly = false, dec
     }
   );
 }
+var DECIDED_WORDS = {
+  approve: { text: "Approved", tone: "ok" },
+  reject: { text: "Rejected", tone: "warn" },
+  escalate: { text: "Escalated", tone: "info" },
+  expired: { text: "Expired before anyone decided", tone: "neutral" }
+};
+function DepartedApprovalCard({ departed }) {
+  const { request, decided } = departed;
+  const titleIsId = request.action === request.actionId;
+  const title = titleIsId ? humanizeEnum(request.actionId) || request.action : request.action;
+  const words2 = decided ? DECIDED_WORDS[decided.action] : { text: "Decided elsewhere", tone: "neutral" };
+  const text14 = decided && decided.action !== "expired" ? "".concat(words2.text, " ").concat(decided.by ? "by ".concat(decided.by) : "elsewhere") : words2.text;
+  return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("article", { className: "cc-approval cc-approval--departed", "data-state": "departed", "data-testid": "gating-departed:".concat(request.pendingId), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("header", { className: "cc-approval__header", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: title }) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("footer", { className: "cc-approval__footer", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: words2.tone, mark: true, children: text14 }) }) })
+  ] });
+}
 function HostAttentionCard({ item }) {
   const source = item.sourceLabel ? "From ".concat(item.sourceLabel) : "";
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
@@ -32277,8 +32385,9 @@ function HostAttentionCard({ item }) {
 }
 function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }) {
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
+  const viewer = useApprovalViewer();
   if (!approvalsShown && hostItems === 0) return null;
-  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled") : [];
+  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled" && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? "".concat(requests.length, " pending approval").concat(requests.length === 1 ? "" : "s") : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
   const hostStatus = hostItems ? "".concat(hostItems, " item").concat(hostItems === 1 ? "" : "s", " from the host") : "";
@@ -32324,6 +32433,7 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
   if (!approvalSnapshot || !approvalIdentity) return null;
   const requests = approvalSnapshot.requests.filter((request) => Boolean(request.origin?.interactionId) === Boolean(interactionIds) && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
   const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  const readOnlyReason = approvalSnapshot.readOnly ? approvalSnapshot.readOnlyReason : void 0;
   return /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(import_jsx_runtime49.Fragment, { children: requests.map((request) => /* @__PURE__ */ (0, import_jsx_runtime49.jsx)(
     ApprovalCard,
     {
@@ -32331,6 +32441,7 @@ function ConversationApprovals({ approvalSnapshot, approvalIdentity, onApprovalD
       resourceStatus: approvalSnapshot.status,
       decision: approvalSnapshot.decisions[request.pendingId],
       readOnly,
+      readOnlyReason,
       decideLinks: readOnly ? hostDecideLinks(decideSources, request.pendingId) : void 0,
       onDecide: onApprovalDecision ?? (() => {
       })
@@ -54598,6 +54709,7 @@ var CONSOLE_RPC_PATHS2 = {
 };
 var CONSOLE_RPC_METHODS2 = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -54692,7 +54804,14 @@ function createNativeMcpAppsHost(options) {
         body: JSON.stringify({ ...locator, ...params })
       });
       controller.signal.throwIfAborted();
-      if (!response.ok) throw new Error("MCP App request failed (HTTP ".concat(response.status, ")"));
+      if (!response.ok) {
+        const failure = Object.assign(new Error("MCP App request failed (HTTP ".concat(response.status, ")")), { httpStatus: response.status });
+        const body = await response.json().catch(() => null);
+        const kind = body && typeof body === "object" ? body.error : void 0;
+        if (typeof kind === "string") failure.kind = kind;
+        options.reportFailure?.(failure);
+        throw failure;
+      }
       const result = await response.json();
       controller.signal.throwIfAborted();
       return result;
@@ -54742,7 +54861,13 @@ function createNativeMcpAppsHost(options) {
         ...resolved.canCallTools === true && !options.readOnly ? {
           async callTool(name2, toolArgs, requestSignal) {
             current(requestSignal);
-            return CallToolResultSchema.parse(await request(CONSOLE_REST_PATHS2.mcpAppsCallTool, original, { name: name2, arguments: toolArgs }, requestSignal));
+            const expectedCallerScope = await options.callerScope?.();
+            current(requestSignal);
+            return CallToolResultSchema.parse(await request(CONSOLE_REST_PATHS2.mcpAppsCallTool, original, {
+              name: name2,
+              arguments: toolArgs,
+              ...expectedCallerScope ? { expectedCallerScope } : {}
+            }, requestSignal));
           }
         } : {}
       };
@@ -54863,9 +54988,17 @@ async function withConsoleSendStorageLock(key, update) {
       reject(new Error("Queue coordination is blocked by another tab."));
     };
   });
+  const stored = () => {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return void 0;
+    }
+  };
   try {
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction("locks", "readwrite");
+      const store = transaction.objectStore("locks");
       let result;
       let failure;
       transaction.oncomplete = () => resolve(result);
@@ -54873,14 +55006,31 @@ async function withConsoleSendStorageLock(key, update) {
       transaction.onerror = () => {
         failure ?? (failure = transaction.error);
       };
-      const request = transaction.objectStore("locks").get(key);
+      const request = store.get(key);
       request.onsuccess = () => {
-        try {
-          result = update();
-        } catch (error48) {
-          failure = error48;
-          transaction.abort();
-        }
+        const record10 = request.result;
+        const last = record10 && typeof record10 === "object" && "after" in record10 ? record10.after : void 0;
+        const deadline = Date.now() + 250;
+        const visible = () => {
+          if (last === void 0 || Date.now() >= deadline) return true;
+          const seen = stored();
+          return seen === void 0 || seen === last;
+        };
+        const proceed = () => {
+          if (!visible()) {
+            store.get(key).onsuccess = proceed;
+            return;
+          }
+          try {
+            result = update();
+            const after = stored();
+            if (after !== void 0) store.put({ after }, key);
+          } catch (error48) {
+            failure = error48;
+            transaction.abort();
+          }
+        };
+        proceed();
       };
     });
   } finally {
@@ -59300,7 +59450,7 @@ function framesAfterIdleWatermark(frames, watermark) {
 }
 
 // src/ConsoleApp.tsx
-var import_react102 = __toESM(require("react"));
+var import_react103 = __toESM(require("react"));
 
 // src/lib/panel-runtime.ts
 var SHARED_CONSOLE_RUNTIME_ID = "console-aggregator";
@@ -59888,6 +60038,10 @@ async function fetchWithConsoleTimeout(input, init, label2, timeoutMs = DEFAULT_
     let response;
     try {
       response = await fetch(input, {
+        // A front that wants the browser to sign in answers with a redirect
+        // to its login page; following it would read that page as the
+        // gateway's answer. Kept unfollowed, it is an opaque redirect.
+        redirect: "manual",
         ...init,
         signal: fetchSignal
       });
@@ -59899,6 +60053,7 @@ async function fetchWithConsoleTimeout(input, init, label2, timeoutMs = DEFAULT_
       }
       throw error48;
     }
+    if (response.type === "opaqueredirect") throw signInRedirectFailure(label2);
     if (!consume) return response;
     try {
       return await consume(response);
@@ -59908,6 +60063,16 @@ async function fetchWithConsoleTimeout(input, init, label2, timeoutMs = DEFAULT_
   } finally {
     globalThis.clearTimeout(timer3);
   }
+}
+function signInRedirectFailure(label2) {
+  const failure = new Error("".concat(label2, ": a sign-in page answered instead of the gateway"));
+  failure.transportFailure = "sign_in_redirect";
+  return failure;
+}
+function consoleCallerUnknownFailure2() {
+  const failure = new Error("The console does not know who it acts for yet, so it sent nothing");
+  failure.transportFailure = "caller_unknown";
+  return failure;
 }
 function jsonRpcErrorFromText(text14) {
   try {
@@ -59978,9 +60143,14 @@ async function fetchJson2(baseUrl, path2, timeoutMs = DEFAULT_CONSOLE_FETCH_TIME
   );
   if (!response.ok) {
     const preview = await responseErrorPreview(response);
-    throw new Error("Request failed ".concat(response.status, " for ").concat(path2).concat(preview ? ": ".concat(preview) : ""));
+    const failure = new Error("Request failed ".concat(response.status, " for ").concat(path2).concat(preview ? ": ".concat(preview) : ""));
+    failure.httpStatus = response.status;
+    throw failure;
   }
   return response.json();
+}
+function callerScopeParam2(callerScope) {
+  return callerScope ? { expected_caller_scope: callerScope } : {};
 }
 async function rpc(baseUrl, method, params, timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2, signal) {
   const response = await fetchWithConsoleTimeout(
@@ -60031,7 +60201,7 @@ async function rpc(baseUrl, method, params, timeoutMs = DEFAULT_CONSOLE_FETCH_TI
   }
   return result.result;
 }
-async function sendConsoleMultipart2(baseUrl, identity, contentInput, attachments, origin, idempotencyKey, handlingMode = "queue", timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2) {
+async function sendConsoleMultipart2(baseUrl, identity, contentInput, attachments, origin, idempotencyKey, handlingMode = "queue", timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2, callerScope) {
   const content3 = typeof contentInput === "string" ? contentInput.trim() ? [{ type: "text", text: contentInput }] : [] : [...contentInput];
   const form = new FormData();
   attachments.forEach((file2, index3) => {
@@ -60055,7 +60225,8 @@ async function sendConsoleMultipart2(baseUrl, identity, contentInput, attachment
       // Typed caller kind: this console's composer is a human operator.
       origin_kind: "operator",
       idempotency_key: idempotencyKey,
-      handling_mode: handlingMode
+      handling_mode: handlingMode,
+      ...callerScopeParam2(callerScope)
     }
   }));
   const response = await fetchWithConsoleTimeout(
@@ -60081,7 +60252,7 @@ async function sendConsoleMultipart2(baseUrl, identity, contentInput, attachment
   }
   return normalizeConsoleTimelineAccepted(result.result);
 }
-async function uploadConsoleBlobMultipart2(baseUrl, input, timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2) {
+async function uploadConsoleBlobMultipart2(baseUrl, input, timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2, callerScope) {
   const file2 = input.file;
   if (!file2) {
     throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " requires a file"));
@@ -60101,7 +60272,8 @@ async function uploadConsoleBlobMultipart2(baseUrl, input, timeoutMs = DEFAULT_C
         upload_id: uploadId,
         media_type: mediaType,
         alt: file2.name || "upload"
-      }
+      },
+      ...callerScopeParam2(callerScope)
     }
   }));
   const response = await fetchWithConsoleTimeout(
@@ -60114,12 +60286,13 @@ async function uploadConsoleBlobMultipart2(baseUrl, input, timeoutMs = DEFAULT_C
     timeoutMs
   );
   if (!response.ok) {
-    const preview = await responseErrorPreview(response);
-    throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " multipart failed ").concat(response.status).concat(preview ? ": ".concat(preview) : ""));
+    throw await consoleResponseFailure("".concat(CONSOLE_RPC_METHODS2.blobUpload, " multipart failed"), response);
   }
-  const result = await response.json();
+  const result = await consoleResponseJson("".concat(CONSOLE_RPC_METHODS2.blobUpload, " multipart"), response);
   if (result.error) {
-    throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " RPC error: ").concat(result.error.message || JSON.stringify(result.error)));
+    const error48 = new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " RPC error: ").concat(result.error.message || JSON.stringify(result.error)));
+    error48.rpcError = result.error;
+    throw error48;
   }
   const record10 = result.result && typeof result.result === "object" ? result.result : {};
   const blobId = typeof record10.blob_id === "string" ? record10.blob_id : "";
@@ -60247,7 +60420,7 @@ async function queryTimeline2(baseUrl, target, limit = 400, timeoutMs = DEFAULT_
     available: record10.available !== false
   };
 }
-async function sendConsole2(baseUrl, identity, content3, origin, idempotencyKey, handlingMode = "queue", timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2) {
+async function sendConsole2(baseUrl, identity, content3, origin, idempotencyKey, handlingMode = "queue", timeoutMs = DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2, callerScope) {
   const accepted = await rpc(baseUrl, CONSOLE_RPC_METHODS2.send, {
     identity,
     content: content3,
@@ -60255,7 +60428,8 @@ async function sendConsole2(baseUrl, identity, content3, origin, idempotencyKey,
     // Typed caller kind: this console's composer is a human operator.
     origin_kind: "operator",
     idempotency_key: idempotencyKey,
-    handling_mode: handlingMode
+    handling_mode: handlingMode,
+    ...callerScopeParam2(callerScope)
   }, timeoutMs);
   if (!accepted || typeof accepted !== "object") {
     throw new Error("".concat(CONSOLE_RPC_METHODS2.send, " returned an invalid acceptance payload"));
@@ -60299,8 +60473,14 @@ function subscribeTimelineEvents2(baseUrl, target, onFrame, options = {}) {
       const response = await fetchImpl("".concat(baseUrl).concat(timelineStreamPath(target)), {
         method: "GET",
         headers,
-        signal
+        signal,
+        redirect: "manual"
       });
+      if (response.type === "opaqueredirect") {
+        const failure = new Error("interaction stream: a sign-in page answered instead of the gateway");
+        failure.transportFailure = "sign_in_redirect";
+        throw failure;
+      }
       if (response.ok) connected();
       await streamFramesFromResponse(response, {
         signal,
@@ -60644,20 +60824,47 @@ function createHttpConsoleTransport2({
   fetchTimeoutMs
 }) {
   const timeout2 = () => typeof fetchTimeoutMs === "function" ? fetchTimeoutMs() : fetchTimeoutMs;
+  let bound;
+  let reading;
+  let unsupported = false;
+  const whoami = () => {
+    const read = callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.whoami, {}, timeout2()).then(normalizeWhoami2);
+    reading = read;
+    void read.then(
+      (value) => {
+        bound ?? (bound = value);
+      },
+      (error48) => {
+        if (isJsonRpcMethodNotFoundError(error48)) unsupported = true;
+      }
+    ).finally(() => {
+      if (reading === read) reading = void 0;
+    });
+    return read;
+  };
+  const callerScope = async (named) => {
+    if (named !== void 0) return named ?? void 0;
+    if (!bound && !unsupported) await (reading ?? whoami()).catch(() => void 0);
+    if (bound) return bound.callerScope;
+    if (unsupported) return void 0;
+    throw consoleCallerUnknownFailure2();
+  };
   return {
     loadExperience: () => fetchJson2(baseUrl, CONSOLE_REST_PATHS2.experience, timeout2()),
     loadModules: () => fetchJson2(baseUrl, CONSOLE_REST_PATHS2.modules, timeout2()),
     capabilities: async () => normalizeCapabilities(
       await callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.capabilities, {}, timeout2())
     ),
+    whoami,
     queryTimeline: (input) => queryTimeline2(baseUrl, input, input.limit, timeout2(), input.signal),
     subscribeTimeline: (input, onFrame, options) => subscribeTimelineEvents2(baseUrl, input, onFrame, {
       signal: input.signal,
       onTransportState: input.onTransportState,
       ...options
     }),
-    send: (input) => {
+    send: async (input) => {
       const handlingMode = input.handlingMode ?? "queue";
+      const scope = await callerScope(input.expectedCallerScope);
       if (input.attachments?.length) {
         return sendConsoleMultipart2(
           baseUrl,
@@ -60667,7 +60874,8 @@ function createHttpConsoleTransport2({
           input.origin,
           input.idempotencyKey,
           handlingMode,
-          timeout2()
+          timeout2(),
+          scope
         );
       }
       return sendConsole2(
@@ -60677,7 +60885,8 @@ function createHttpConsoleTransport2({
         input.origin,
         input.idempotencyKey,
         handlingMode,
-        timeout2()
+        timeout2(),
+        scope
       );
     },
     executeCommand: async (input) => {
@@ -60690,6 +60899,8 @@ function createHttpConsoleTransport2({
         }
         params.identity = identity;
       }
+      Object.assign(params, callerScopeParam2(await callerScope(input.expectedCallerScope)));
+      input.signal?.throwIfAborted();
       let result;
       try {
         result = await callConsoleRpc2(baseUrl, spec.method, params, timeout2(), input.signal);
@@ -60705,7 +60916,7 @@ function createHttpConsoleTransport2({
         result
       };
     },
-    upload: (input) => uploadConsoleBlobMultipart2(baseUrl, input, timeout2()),
+    upload: async (input) => uploadConsoleBlobMultipart2(baseUrl, input, timeout2(), await callerScope(input.expectedCallerScope)),
     readBlob: (input) => readConsoleBlob2(baseUrl, input.blobId, timeout2(), input.signal),
     blobUrl: (blobId) => "".concat(baseUrl).concat(CONSOLE_BLOB_PATH_PREFIX2).concat(encodeURIComponent(blobId))
   };
@@ -60848,6 +61059,20 @@ function normalizeCapabilities(value) {
     ...record10.topology_control && typeof record10.topology_control === "object" ? { topologyControl: record10.topology_control } : {}
   };
 }
+function normalizeWhoami2(value) {
+  const record10 = value && typeof value === "object" ? value : {};
+  const actor = record10.actor && typeof record10.actor === "object" ? record10.actor : {};
+  const text14 = (field) => typeof field === "string" && field.trim() ? field : void 0;
+  const expiresAt = record10.login_expires_at_ms;
+  return {
+    actorKind: text14(actor.kind) ?? "anonymous",
+    ...text14(actor.principal) ? { principal: text14(actor.principal) } : {},
+    approverIds: Array.isArray(record10.approver_ids) ? record10.approver_ids.filter((id) => typeof id === "string" && id.trim().length > 0) : [],
+    canAdminister: record10.can_administer === true,
+    ...text14(record10.caller_scope) ? { callerScope: text14(record10.caller_scope) } : {},
+    ...typeof expiresAt === "number" && Number.isFinite(expiresAt) ? { loginExpiresAtMs: expiresAt } : {}
+  };
+}
 var ConsoleCapabilityUnavailableError2 = class extends Error {
   constructor(method, capabilities) {
     super("Meta capability missing for ".concat(method));
@@ -60903,7 +61128,184 @@ function isMetaTarget(target) {
   return target.kind.startsWith("meta/");
 }
 
+// src/lib/console-caller.ts
+var CONSOLE_CALLER_KEY_PREFIX = "meta-console-caller:v1:";
+function consoleCallerKey(baseUrl) {
+  return "".concat(CONSOLE_CALLER_KEY_PREFIX).concat(encodeURIComponent(baseUrl));
+}
+function parseConsoleCallerAnnouncement(raw) {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw);
+    const caller = value.caller === null ? null : typeof value.caller === "string" && value.caller.trim() ? value.caller : void 0;
+    if (caller === void 0 || typeof value.at !== "number" || !Number.isFinite(value.at)) return null;
+    return { caller, at: value.at };
+  } catch {
+    return null;
+  }
+}
+function announceConsoleCaller(storage2, baseUrl, caller, now3 = Date.now()) {
+  try {
+    storage2?.setItem(consoleCallerKey(baseUrl), JSON.stringify({ caller, at: now3 }));
+  } catch {
+  }
+}
+function subscribeConsoleCaller(baseUrl, onAnnouncement) {
+  if (typeof window === "undefined") return () => {
+  };
+  const key = consoleCallerKey(baseUrl);
+  const listener = (event) => {
+    if (event.key !== key) return;
+    const announcement = parseConsoleCallerAnnouncement(event.newValue);
+    if (announcement) onAnnouncement(announcement);
+  };
+  window.addEventListener("storage", listener);
+  return () => window.removeEventListener("storage", listener);
+}
+function consoleCallerFailure(error48) {
+  if (!error48 || typeof error48 !== "object") return null;
+  const typed = error48;
+  const kind = typed.rpcError?.data?.kind ?? typed.responseRpcError?.data?.kind ?? typed.kind;
+  if (kind === "caller_changed") return "caller_changed";
+  if (typed.httpStatus === 401 || typed.transportFailure === "sign_in_redirect" || kind === "unauthenticated" || kind === "caller_not_current") {
+    return "sign_in";
+  }
+  return null;
+}
+function createConsoleInstanceCaller(whoami) {
+  let bound;
+  let first;
+  let firstFailed = false;
+  let again;
+  const readOnce = async () => {
+    if (!whoami) return null;
+    try {
+      return await whoami();
+    } catch (error48) {
+      if (error48?.rpcError?.code === -32601) return null;
+      throw error48;
+    }
+  };
+  const caller = {
+    read() {
+      if (!first) {
+        first = readOnce();
+        void first.then((answer) => caller.bind(answer), () => {
+          firstFailed = true;
+        });
+      }
+      return first;
+    },
+    async forChange() {
+      if (!bound) await caller.read().catch(() => void 0);
+      if (!bound) throw consoleCallerUnknownFailure2();
+      return bound.answer?.callerScope ?? null;
+    },
+    readAgain() {
+      if (bound || !firstFailed) return void 0;
+      if (!again) {
+        const read = readOnce();
+        again = read;
+        void read.then(() => void 0, () => void 0).finally(() => {
+          if (again === read) again = void 0;
+        });
+      }
+      return again;
+    },
+    bind(answer) {
+      bound ?? (bound = { answer });
+    },
+    known: () => bound !== void 0
+  };
+  return caller;
+}
+
+// src/lib/preference-scope.ts
+var import_react56 = __toESM(require("react"));
+var LAST_PREFERENCE_SCOPE_KEY = "meta-console-preference-scope:v1";
+var scopedPreferenceKey = (name2, scope) => "".concat(name2, ":").concat(scope);
+function lastPreferenceScope(storage2) {
+  try {
+    return storage2?.getItem(LAST_PREFERENCE_SCOPE_KEY)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+function rememberPreferenceScope(storage2, scope) {
+  try {
+    if (storage2?.getItem(LAST_PREFERENCE_SCOPE_KEY) !== scope) storage2?.setItem(LAST_PREFERENCE_SCOPE_KEY, scope);
+  } catch {
+  }
+}
+function adoptShared(storage2, sharedKey, scopedKey) {
+  const shared = storage2.getItem(sharedKey);
+  if (shared === null) return;
+  if (storage2.getItem(scopedKey) === null) storage2.setItem(scopedKey, shared);
+  storage2.removeItem(sharedKey);
+}
+function readPreference(storage2, name2, scope) {
+  if (!storage2) return null;
+  try {
+    if (scope !== null) {
+      adoptShared(storage2, name2, scopedPreferenceKey(name2, scope));
+      return storage2.getItem(scopedPreferenceKey(name2, scope));
+    }
+    const last = lastPreferenceScope(storage2);
+    return storage2.getItem(last ? scopedPreferenceKey(name2, last) : name2);
+  } catch {
+    return null;
+  }
+}
+function preferenceWriteKey(storage2, name2, scope) {
+  const effective = scope ?? lastPreferenceScope(storage2);
+  return effective ? scopedPreferenceKey(name2, effective) : null;
+}
+function writePreference(storage2, name2, scope, value) {
+  const key = preferenceWriteKey(storage2, name2, scope);
+  if (!storage2 || !key) return;
+  try {
+    storage2.setItem(key, value);
+  } catch {
+  }
+}
+function browserPreferenceStorage() {
+  try {
+    return typeof window !== "undefined" ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+function useBrowserPreference(name2, scope) {
+  const [state, setState] = import_react56.default.useState(() => ({ scope, value: readPreference(browserPreferenceStorage(), name2, scope) }));
+  let value = state.value;
+  if (state.scope !== scope) {
+    value = readPreference(browserPreferenceStorage(), name2, scope);
+    setState({ scope, value });
+  }
+  const choose = import_react56.default.useCallback((next) => {
+    writePreference(browserPreferenceStorage(), name2, scope, next);
+    setState({ scope, value: next });
+  }, [name2, scope]);
+  return [value, choose];
+}
+var SECTION_PREFERENCE_PREFIXES = [
+  SIDEBAR_SECTION_ORDER_STORAGE_PREFIX,
+  SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX,
+  SECTION_COLLAPSE_STORAGE_PREFIX,
+  SUBGROUP_COLLAPSE_STORAGE_PREFIX
+];
+function adoptSharedSectionPreferences(storage2, sharedNamespace, ownNamespace) {
+  if (!storage2 || sharedNamespace === ownNamespace) return;
+  try {
+    for (const prefix of SECTION_PREFERENCE_PREFIXES) {
+      adoptShared(storage2, "".concat(prefix, ":").concat(sharedNamespace), "".concat(prefix, ":").concat(ownNamespace));
+    }
+  } catch {
+  }
+}
+
 // src/lib/workgraph-actions.ts
+var WORKGRAPH_UNOBSERVED_REVISION_MESSAGE = "The console did not show the version this would change, so nothing was changed. It has been read again: check it, then try again.";
 var WORKGRAPH_CONFLICT_CODE = -32042;
 function workGraphConflictRefreshRequest(params) {
   const itemId2 = typeof params.id === "string" && params.id.trim() ? params.id : null;
@@ -60916,41 +61318,13 @@ function workGraphConflictRefreshRequest(params) {
   }
   return null;
 }
-function asRecord2(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+function workGraphClaimOwnedBy(item, principal) {
+  const key = item.claim?.owner?.key;
+  return Boolean(principal) && key?.kind === "principal" && key.id === principal;
 }
-function revisionOfItem(result) {
-  const item = asRecord2(asRecord2(result)?.item);
-  return typeof item?.revision === "number" ? item.revision : void 0;
-}
-async function resolveWorkGraphItemRevision(run, itemId2) {
-  const result = await run(CONSOLE_COMMAND_NAMES2.workgraphGet, { id: itemId2 });
-  const revision = revisionOfItem(result);
-  if (revision === void 0) {
-    throw new Error("could not resolve the current revision of work item ".concat(itemId2));
-  }
-  return revision;
-}
-async function resolveWorkGraphGoalItemRevision(run, bindingId) {
-  const result = await run(CONSOLE_COMMAND_NAMES2.workgraphGoalStatus, { binding_id: bindingId });
-  const revision = revisionOfItem(result);
-  if (revision === void 0) {
-    throw new Error("could not resolve the goal item revision for binding ".concat(bindingId));
-  }
-  return revision;
-}
-async function resolveWorkGraphBindingRevision(run, bindingId) {
-  const result = await run(CONSOLE_COMMAND_NAMES2.workgraphGoalStatus, { binding_id: bindingId });
-  const machineState = asRecord2(asRecord2(asRecord2(result)?.attention)?.machine_state);
-  const revision = typeof machineState?.revision === "number" ? machineState.revision : void 0;
-  if (revision === void 0) {
-    throw new Error("could not resolve the machine revision of attention binding ".concat(bindingId));
-  }
-  return revision;
-}
-function workGraphClaimOwnerId(subject, fallback) {
-  const trimmed = typeof subject === "string" ? subject.trim() : "";
-  return trimmed || fallback;
+function workGraphMayRelease(item, caller) {
+  if (!item.claim) return false;
+  return workGraphClaimOwnedBy(item, caller.principal) || Boolean(caller.principal) && caller.canAdminister === true;
 }
 
 // src/lib/topology.ts
@@ -62203,6 +62577,9 @@ function consoleScheduleEditing(input) {
       note: input.accessEnforcing ? "You may view this agent but not message it, so you cannot change its schedules." : "This agent takes no console messages, so it cannot be scheduled."
     };
   }
+  if (input.agent?.affordances?.can_manage_schedules === false) {
+    return { canChange: false, note: "You may message this agent but not change its schedules." };
+  }
   return { canChange: true, note: null };
 }
 function record7(value) {
@@ -62260,11 +62637,24 @@ function parseScheduleTrigger(value) {
   }
   return null;
 }
+function parseFormerSenders(value, hidden) {
+  if (hidden || !Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const former = record7(entry);
+    if (!former) return [];
+    return [{
+      sender: nonEmptyString3(former.sender),
+      definedAt: nonEmptyString3(former.defined_at_utc),
+      replacedAt: nonEmptyString3(former.replaced_at_utc)
+    }];
+  });
+}
 function parseConsoleSchedule(value) {
   const item = record7(value);
   const scheduleId = nonEmptyString3(item?.schedule_id);
   const identity = nonEmptyString3(item?.identity);
   if (!item || !scheduleId || !identity || typeof item.content !== "string") return null;
+  const senderHidden = item.sender_hidden === true;
   return {
     scheduleId,
     identity,
@@ -62273,8 +62663,9 @@ function parseConsoleSchedule(value) {
     trigger: parseScheduleTrigger(item.trigger),
     phase: nonEmptyString3(item.phase) ?? "unknown",
     revision: wholeNumber(item.revision),
-    sender: item.sender_hidden === true ? null : nonEmptyString3(item.sender),
-    senderHidden: item.sender_hidden === true,
+    sender: senderHidden ? null : nonEmptyString3(item.sender),
+    senderHidden,
+    senderHistory: parseFormerSenders(item.sender_history, senderHidden),
     definedAt: nonEmptyString3(item.defined_at_utc),
     createdAt: nonEmptyString3(item.created_at_utc),
     updatedAt: nonEmptyString3(item.updated_at_utc),
@@ -62351,6 +62742,19 @@ function describeScheduleSender(sender, agentName = () => void 0) {
     if (words2) return "the ".concat(words2, " console identity");
   }
   return raw;
+}
+function describeLatestTakeover(history, agentName = () => void 0, format2 = formatScheduleTime) {
+  const latest = history[history.length - 1];
+  if (!latest) return null;
+  const when = latest.replacedAt ? " on ".concat(format2(latest.replacedAt)) : "";
+  return "Taken over from ".concat(describeScheduleSender(latest.sender, agentName)).concat(when);
+}
+function describeFormerSender(former, agentName = () => void 0, format2 = formatScheduleTime) {
+  const until = former.replacedAt ? " until ".concat(format2(former.replacedAt)) : "";
+  return "Sent as ".concat(describeScheduleSender(former.sender, agentName)).concat(until);
+}
+function describeScheduleSenderHistory(history, agentName = () => void 0, format2 = formatScheduleTime) {
+  return history.map((former) => describeFormerSender(former, agentName, format2)).join("\n");
 }
 var UNIT_SECONDS = {
   minutes: 60,
@@ -62481,12 +62885,36 @@ function scheduleUpdateParams(schedule, draft, now3) {
     if ("error" in timing2) return timing2;
     params.trigger = timing2.trigger;
   }
-  return { params };
+  return { params: { ...params, ...observedRevision(schedule) } };
+}
+function scheduleResumeParams(schedule) {
+  return { schedule_id: schedule.scheduleId, ...observedRevision(schedule) };
+}
+function observedRevision(schedule) {
+  return schedule.revision === null ? {} : { expected_revision: schedule.revision };
+}
+function scheduleTakeover(error48) {
+  const rpc2 = rpcErrorOf(error48);
+  if (rpc2?.kind !== "sender_takeover_required") return null;
+  const data = record7(error48.rpcError?.data);
+  return { sender: nonEmptyString3(data?.sender) };
+}
+function scheduleTakeoverParams(params) {
+  return { ...params, take_over_sender: true };
+}
+function describeScheduleTakeover(takeover, command, agentName = () => void 0) {
+  const who = describeScheduleSender(takeover.sender, agentName);
+  const change = command === CONSOLE_SCHEDULE_COMMANDS.resume ? "Resuming it" : "Saving your change";
+  return "This schedule sends as ".concat(who, ". ").concat(change, " makes you its sender: it sends as you from then on.");
+}
+function scheduleTakeoverConfirmLabel(command) {
+  return command === CONSOLE_SCHEDULE_COMMANDS.resume ? "Take over and resume" : "Take over and save";
 }
 function rpcErrorOf(error48) {
   const rpc2 = record7(error48?.rpcError);
   if (!rpc2) return null;
-  return { code: rpc2.code, message: rpc2.message, kind: nonEmptyString3(record7(rpc2.data)?.kind) };
+  const data = record7(rpc2.data);
+  return { code: rpc2.code, message: rpc2.message, kind: nonEmptyString3(data?.kind), action: nonEmptyString3(data?.action) };
 }
 function scheduleErrorMessage(error48, command) {
   const rpc2 = rpcErrorOf(error48);
@@ -62494,13 +62922,16 @@ function scheduleErrorMessage(error48, command) {
     case "read_only":
       return "This console is read-only, so schedules cannot be changed.";
     case "access_denied":
-      return command === CONSOLE_SCHEDULE_COMMANDS.list ? "You may not view this agent's schedules." : "You may not message this agent, so you cannot change its schedules.";
+      if (command === CONSOLE_SCHEDULE_COMMANDS.list) return "You may not view this agent's schedules.";
+      return rpc2.action === "schedule.manage" ? "You may not change this agent's schedules." : "You may not message this agent, so you cannot change its schedules.";
     case "candidate_launch":
       return "This console runs a candidate launch, which changes no schedules.";
     case "schedule_not_found":
       return "This schedule no longer exists.";
     case "schedule_revision_conflict":
       return "This schedule changed meanwhile, so nothing was changed. Check it and try again.";
+    case "sender_takeover_required":
+      return "This schedule sends as someone else, so nothing was changed. Take it over to change it.";
     case "unknown_identity":
       return "The console does not know this agent.";
     case "not_addressable":
@@ -62937,7 +63368,7 @@ function resetIdentityLogCore(log) {
 }
 
 // src/panels/TimelinePanel.tsx
-var import_react60 = __toESM(require("react"));
+var import_react61 = __toESM(require("react"));
 
 // src/lib/memory-event-words.ts
 function text12(data, key) {
@@ -64064,7 +64495,7 @@ function frameSentence(classified, nameOf) {
 }
 
 // src/lib/activity-ledger.ts
-var import_react56 = __toESM(require("react"));
+var import_react57 = __toESM(require("react"));
 var LEDGER_WINDOW_MS = 24 * 60 * 60 * 1e3;
 var LEDGER_BUCKET_MS = 6e4;
 var MAX_BUCKETS = LEDGER_WINDOW_MS / LEDGER_BUCKET_MS;
@@ -64866,21 +65297,21 @@ function createActivityLedger(options = {}) {
   return new Ledger(options);
 }
 var EMPTY_LEDGER = createActivityLedger({ notifyMs: 0 });
-var ActivityLedgerContext = import_react56.default.createContext(EMPTY_LEDGER);
+var ActivityLedgerContext = import_react57.default.createContext(EMPTY_LEDGER);
 function ActivityLedgerProvider({ ledger, children }) {
-  return import_react56.default.createElement(ActivityLedgerContext.Provider, { value: ledger }, children);
+  return import_react57.default.createElement(ActivityLedgerContext.Provider, { value: ledger }, children);
 }
 function useActivityLedger(options = {}) {
-  const ledger = import_react56.default.useContext(ActivityLedgerContext);
-  const version2 = import_react56.default.useSyncExternalStore(ledger.subscribe, ledger.getVersion, ledger.getVersion);
-  const [nowMs, setNowMs] = import_react56.default.useState(() => Date.now());
+  const ledger = import_react57.default.useContext(ActivityLedgerContext);
+  const version2 = import_react57.default.useSyncExternalStore(ledger.subscribe, ledger.getVersion, ledger.getVersion);
+  const [nowMs, setNowMs] = import_react57.default.useState(() => Date.now());
   const tickMs = options.tickMs;
-  import_react56.default.useEffect(() => {
+  import_react57.default.useEffect(() => {
     if (!tickMs || tickMs <= 0) return void 0;
     const timer3 = setInterval(() => setNowMs(Date.now()), tickMs);
     return () => clearInterval(timer3);
   }, [tickMs]);
-  return import_react56.default.useMemo(() => ({
+  return import_react57.default.useMemo(() => ({
     version: version2,
     nowMs: Math.max(nowMs, Date.now()),
     identities: () => ledger.identities(),
@@ -64895,16 +65326,16 @@ function useActivityLedger(options = {}) {
 }
 
 // ../packages/console-components/src/viz/charts/swimlanes.tsx
-var import_react57 = require("react");
+var import_react58 = require("react");
 var import_jsx_runtime87 = require("react/jsx-runtime");
 var PROBLEMS = "__problems";
 var AXIS_H = 20;
 var HIT_PX2 = 6;
 var MIN_SPAN_W = 3;
 function useElementWidth(fallback) {
-  const ref = (0, import_react57.useRef)(null);
-  const [width, setWidth] = (0, import_react57.useState)(fallback);
-  (0, import_react57.useEffect)(() => {
+  const ref = (0, import_react58.useRef)(null);
+  const [width, setWidth] = (0, import_react58.useState)(fallback);
+  (0, import_react58.useEffect)(() => {
     const element3 = ref.current;
     if (!element3) return void 0;
     const read = () => {
@@ -64954,19 +65385,19 @@ function Swimlanes({
   testId
 }) {
   const [rootRef, measured2] = useElementWidth(defaultWidth);
-  const svgRef = (0, import_react57.useRef)(null);
-  const [active, setActive] = (0, import_react57.useState)(null);
-  const [focusId, setFocusId] = (0, import_react57.useState)(null);
+  const svgRef = (0, import_react58.useRef)(null);
+  const [active, setActive] = (0, import_react58.useState)(null);
+  const [focusId, setFocusId] = (0, import_react58.useState)(null);
   const tid = (part, id) => testIdPrefix ? "".concat(testIdPrefix, "-").concat(part).concat(id === void 0 ? "" : ":".concat(id)) : void 0;
   const showProblems = Boolean(problems && problems.length > 0);
-  const rows = (0, import_react57.useMemo)(() => {
+  const rows = (0, import_react58.useMemo)(() => {
     const list5 = [];
     if (showProblems) list5.push({ id: PROBLEMS, lane: null });
     for (const lane of lanes) list5.push({ id: lane.id, lane });
     return list5;
   }, [lanes, showProblems]);
   const problemsH = Math.round(laneHeight * 0.8);
-  const rowTop = (0, import_react57.useMemo)(() => {
+  const rowTop = (0, import_react58.useMemo)(() => {
     const tops = /* @__PURE__ */ new Map();
     let y4 = AXIS_H;
     for (const row of rows) {
@@ -64982,9 +65413,9 @@ function Swimlanes({
   const nowMs = now3 ?? end;
   const marker = nowMarker(scale, nowMs);
   const ticks = scale.ticks({ count: Math.max(2, Math.floor(plotW / 96)) }).filter((tick) => tick.x > 14 && tick.x < plotW - (marker ? 34 : 14));
-  const laneIds = (0, import_react57.useMemo)(() => new Set(lanes.map((lane) => lane.id)), [lanes]);
-  const folded = (0, import_react57.useMemo)(() => new Set(lanes.filter((lane) => lane.folded).map((lane) => lane.id)), [lanes]);
-  const placed = (0, import_react57.useMemo)(() => {
+  const laneIds = (0, import_react58.useMemo)(() => new Set(lanes.map((lane) => lane.id)), [lanes]);
+  const folded = (0, import_react58.useMemo)(() => new Set(lanes.filter((lane) => lane.folded).map((lane) => lane.id)), [lanes]);
+  const placed = (0, import_react58.useMemo)(() => {
     const out = [];
     for (const span2 of spans) {
       if (!laneIds.has(span2.lane)) continue;
@@ -65013,7 +65444,7 @@ function Swimlanes({
     const order2 = new Map(rows.map((row, index3) => [row.id, index3]));
     return out.sort((a2, b2) => order2.get(a2.lane) - order2.get(b2.lane) || a2.t - b2.t || (a2.item.id < b2.item.id ? -1 : 1));
   }, [spans, links, marks, problems, showProblems, laneIds, rows, start2, end, plotW, laneHeight]);
-  const byId = (0, import_react57.useMemo)(() => new Map(placed.map((entry) => [entry.item.id, entry])), [placed]);
+  const byId = (0, import_react58.useMemo)(() => new Map(placed.map((entry) => [entry.item.id, entry])), [placed]);
   const tabStop = focusId && byId.has(focusId) ? focusId : placed[0]?.item.id ?? null;
   const spanEnd = (span2) => scale.x(span2.end ?? Math.min(nowMs, end));
   const itemLabel = (item) => item.kind === "span" ? item.span.label : item.kind === "link" ? item.count > 1 ? "".concat(item.count, " messages. ").concat(item.link.label) : item.link.label : item.mark.label;
@@ -65851,7 +66282,7 @@ function buildLaneModel(input) {
 }
 
 // src/panels/activity/use-history-backfill.ts
-var import_react58 = __toESM(require("react"));
+var import_react59 = __toESM(require("react"));
 
 // src/panels/activity/history-frames.ts
 var CACHE = /* @__PURE__ */ new WeakMap();
@@ -65905,13 +66336,13 @@ var BACKFILL_AGENTS = 24;
 var BACKFILL_CONCURRENCY = 4;
 var LOADED = /* @__PURE__ */ new WeakMap();
 function useHistoryBackfill(agents, loadHistory) {
-  const [loading, setLoading] = import_react58.default.useState(false);
-  const [loaded2, setLoaded] = import_react58.default.useState(false);
-  const agentKeys2 = import_react58.default.useMemo(
+  const [loading, setLoading] = import_react59.default.useState(false);
+  const [loaded2, setLoaded] = import_react59.default.useState(false);
+  const agentKeys2 = import_react59.default.useMemo(
     () => (agents ?? []).map((agent) => ({ identity: (agent.identity || agent.member_id || "").trim(), lastActivityMs: agent.last_activity_ms })),
     [agents]
   );
-  const run = import_react58.default.useCallback((force) => {
+  const run = import_react59.default.useCallback((force) => {
     if (!loadHistory) return;
     let done = LOADED.get(loadHistory);
     if (!done) {
@@ -65931,15 +66362,15 @@ function useHistoryBackfill(agents, loadHistory) {
       setLoaded(true);
     });
   }, [agentKeys2, loadHistory]);
-  import_react58.default.useEffect(() => {
+  import_react59.default.useEffect(() => {
     run(false);
   }, [run]);
-  const refresh = import_react58.default.useCallback(() => run(true), [run]);
+  const refresh = import_react59.default.useCallback(() => run(true), [run]);
   return { loading, loaded: loaded2, refresh };
 }
 
 // src/panels/activity/use-virtual-rows.ts
-var import_react59 = __toESM(require("react"));
+var import_react60 = __toESM(require("react"));
 var UNMEASURED_ROWS = 300;
 function firstAfter(offsets, y4) {
   let lo = 0;
@@ -65952,14 +66383,14 @@ function firstAfter(offsets, y4) {
   return lo;
 }
 function useVirtualRows({ count: count2, keyAt, estimate, scrollRef, listRef, overscanPx = 600 }) {
-  const heights = import_react59.default.useRef(/* @__PURE__ */ new Map());
-  const elements = import_react59.default.useRef(/* @__PURE__ */ new Map());
-  const observer = import_react59.default.useRef(null);
-  const callbacks = import_react59.default.useRef(/* @__PURE__ */ new Map());
-  const [, setVersion] = import_react59.default.useState(0);
-  const [viewport, setViewport] = import_react59.default.useState({ top: 0, height: 0 });
-  const pending = import_react59.default.useRef(null);
-  const bump = import_react59.default.useCallback(() => {
+  const heights = import_react60.default.useRef(/* @__PURE__ */ new Map());
+  const elements = import_react60.default.useRef(/* @__PURE__ */ new Map());
+  const observer = import_react60.default.useRef(null);
+  const callbacks = import_react60.default.useRef(/* @__PURE__ */ new Map());
+  const [, setVersion] = import_react60.default.useState(0);
+  const [viewport, setViewport] = import_react60.default.useState({ top: 0, height: 0 });
+  const pending = import_react60.default.useRef(null);
+  const bump = import_react60.default.useCallback(() => {
     if (pending.current !== null) return;
     const run = () => {
       pending.current = null;
@@ -65967,7 +66398,7 @@ function useVirtualRows({ count: count2, keyAt, estimate, scrollRef, listRef, ov
     };
     pending.current = typeof requestAnimationFrame === "function" ? requestAnimationFrame(run) : setTimeout(run, 16);
   }, []);
-  import_react59.default.useEffect(() => {
+  import_react60.default.useEffect(() => {
     const element3 = scrollRef.current;
     if (!element3) return void 0;
     let frame2 = null;
@@ -65992,7 +66423,7 @@ function useVirtualRows({ count: count2, keyAt, estimate, scrollRef, listRef, ov
       if (frame2 !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame2);
     };
   }, [scrollRef, listRef]);
-  import_react59.default.useEffect(() => {
+  import_react60.default.useEffect(() => {
     if (typeof ResizeObserver !== "function") return void 0;
     const rows = new ResizeObserver((entries) => {
       let changed = false;
@@ -66015,10 +66446,10 @@ function useVirtualRows({ count: count2, keyAt, estimate, scrollRef, listRef, ov
       observer.current = null;
     };
   }, [bump]);
-  import_react59.default.useEffect(() => () => {
+  import_react60.default.useEffect(() => () => {
     if (pending.current !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(pending.current);
   }, []);
-  const measureRef = import_react59.default.useCallback((key) => {
+  const measureRef = import_react60.default.useCallback((key) => {
     let callback = callbacks.current.get(key);
     if (callback) return callback;
     callback = (element3) => {
@@ -66055,7 +66486,7 @@ function useVirtualRows({ count: count2, keyAt, estimate, scrollRef, listRef, ov
   }
   const padTop = offsets[start2] ?? 0;
   const padBottom = Math.max(0, total - (offsets[end] ?? total));
-  const scrollToIndex = import_react59.default.useCallback((index3, align = "start") => {
+  const scrollToIndex = import_react60.default.useCallback((index3, align = "start") => {
     const element3 = scrollRef.current;
     if (!element3) return;
     const clamped = Math.max(0, Math.min(count2 - 1, index3));
@@ -66100,7 +66531,7 @@ function joinWords2(parts) {
 }
 function Sentence({ entry, link: link3 }) {
   return /* @__PURE__ */ (0, import_jsx_runtime88.jsx)(import_jsx_runtime88.Fragment, { children: entry.segments.map(
-    (segment, index3) => typeof segment === "string" ? /* @__PURE__ */ (0, import_jsx_runtime88.jsx)(import_react60.default.Fragment, { children: segment }, index3) : segment.agent === null ? /* @__PURE__ */ (0, import_jsx_runtime88.jsx)("span", { className: "today__who", children: "System" }, index3) : /* @__PURE__ */ (0, import_jsx_runtime88.jsx)(AgentName, { id: segment.agent, link: link3, className: "today__who" }, index3)
+    (segment, index3) => typeof segment === "string" ? /* @__PURE__ */ (0, import_jsx_runtime88.jsx)(import_react61.default.Fragment, { children: segment }, index3) : segment.agent === null ? /* @__PURE__ */ (0, import_jsx_runtime88.jsx)("span", { className: "today__who", children: "System" }, index3) : /* @__PURE__ */ (0, import_jsx_runtime88.jsx)(AgentName, { id: segment.agent, link: link3, className: "today__who" }, index3)
   ) });
 }
 function TimelinePanel({
@@ -66115,64 +66546,64 @@ function TimelinePanel({
   const directory = useAgentDirectory();
   const navigation = useConsoleNavigation();
   const ledger = useActivityLedger({ tickMs: 3e4 });
-  const [view, setView] = import_react60.default.useState("day");
-  const [filter, setFilter] = import_react60.default.useState("all");
-  const [query, setQuery] = import_react60.default.useState("");
+  const [view, setView] = import_react61.default.useState("day");
+  const [filter, setFilter] = import_react61.default.useState("all");
+  const [query, setQuery] = import_react61.default.useState("");
   const [density, setDensity] = usePanelDensity("timeline");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("timeline");
-  const [selection, setSelection] = import_react60.default.useState(null);
-  const [open, setOpen] = import_react60.default.useState(() => /* @__PURE__ */ new Set());
-  const storyRef = import_react60.default.useRef(null);
-  const scrollRef = import_react60.default.useRef(null);
-  const nameOf = import_react60.default.useCallback((key) => agentDisplayName(key, directory) || key, [directory]);
+  const [selection, setSelection] = import_react61.default.useState(null);
+  const [open, setOpen] = import_react61.default.useState(() => /* @__PURE__ */ new Set());
+  const storyRef = import_react61.default.useRef(null);
+  const scrollRef = import_react61.default.useRef(null);
+  const nameOf = import_react61.default.useCallback((key) => agentDisplayName(key, directory) || key, [directory]);
   const canLink = Boolean(navigation?.openAgent);
   const nowMs = ledger.nowMs;
   const history = useHistoryBackfill(agents, loadHistory);
   const loading = history.loading;
   const loadedOnce = history.loaded;
-  const merged = import_react60.default.useMemo(() => mergeFrameSources(frames, historyFrames), [frames, historyFrames]);
-  const allEntries = import_react60.default.useMemo(() => {
+  const merged = import_react61.default.useMemo(() => mergeFrameSources(frames, historyFrames), [frames, historyFrames]);
+  const allEntries = import_react61.default.useMemo(() => {
     const entries2 = buildActivityEntries(merged, { directory });
     const approvalEntries = (approvals ?? []).flatMap((approval) => approvalEntry(approval, nowMs));
     return approvalEntries.length ? [...approvalEntries, ...entries2].sort((a2, b2) => b2.atMs - a2.atMs) : entries2;
   }, [merged, directory, approvals, nowMs]);
   const newestMs = allEntries[0]?.atMs;
-  const range = import_react60.default.useMemo(() => {
+  const range = import_react61.default.useMemo(() => {
     const base = todayWindow(view, nowMs);
     if (view === "day" && newestMs !== void 0 && newestMs > base.end && newestMs < base.start + 24 * 36e5) {
       return { start: base.start, end: newestMs };
     }
     return base;
   }, [view, nowMs, newestMs]);
-  const entries = import_react60.default.useMemo(() => allEntries.filter((entry) => inWindow(entry.atMs, range)), [allEntries, range]);
-  const updatedAt = import_react60.default.useRef(null);
+  const entries = import_react61.default.useMemo(() => allEntries.filter((entry) => inWindow(entry.atMs, range)), [allEntries, range]);
+  const updatedAt = import_react61.default.useRef(null);
   if (updatedAt.current?.entries !== allEntries) updatedAt.current = { entries: allEntries, at: Date.now() };
-  const runs = import_react60.default.useMemo(() => ledger.runSpans(null, { sinceMs: range.start, untilMs: range.end }), [ledger, range]);
-  const tools = import_react60.default.useMemo(() => ledger.toolSpans(null, { sinceMs: range.start, untilMs: range.end }), [ledger, range]);
-  const agentsByKey = import_react60.default.useMemo(() => {
+  const runs = import_react61.default.useMemo(() => ledger.runSpans(null, { sinceMs: range.start, untilMs: range.end }), [ledger, range]);
+  const tools = import_react61.default.useMemo(() => ledger.toolSpans(null, { sinceMs: range.start, untilMs: range.end }), [ledger, range]);
+  const agentsByKey = import_react61.default.useMemo(() => {
     const map4 = /* @__PURE__ */ new Map();
     for (const agent of agents ?? []) {
       for (const key of [agent.identity, agent.member_id]) if (key) map4.set(key, agent);
     }
     return map4;
   }, [agents]);
-  const isLive = import_react60.default.useCallback((identity) => {
+  const isLive = import_react61.default.useCallback((identity) => {
     const known = directory.lookup(identity);
     const agent = agentsByKey.get(identity) ?? (known ? agentsByKey.get(known.id) : void 0);
     const openRun = ledger.hasOpenRun(identity);
     return agent ? isAgentWorking(agent, { openRun }) : openRun;
   }, [agentsByKey, directory, ledger]);
-  const lanes = import_react60.default.useMemo(
+  const lanes = import_react61.default.useMemo(
     () => buildLaneModel({ entries, runs, tools, window: range, nameOf, isLive }),
     [entries, runs, tools, range, nameOf, isLive]
   );
-  const totals = import_react60.default.useMemo(() => ledger.totals(null, { sinceMs: range.start, untilMs: range.end }), [ledger, range]);
+  const totals = import_react61.default.useMemo(() => ledger.totals(null, { sinceMs: range.start, untilMs: range.end }), [ledger, range]);
   const bins = todayBins(view, range);
-  const turnTrend = import_react60.default.useMemo(
+  const turnTrend = import_react61.default.useMemo(
     () => ledger.series(null, "turnsStarted", { bins: Math.min(bins.bins, 48), binMs: bins.binMs, endMs: range.end }),
     [ledger, bins.bins, bins.binMs, range.end]
   );
-  const traffic = import_react60.default.useMemo(() => ledger.traffic({ sinceMs: range.start, untilMs: range.end }), [ledger, range]);
+  const traffic = import_react61.default.useMemo(() => ledger.traffic({ sinceMs: range.start, untilMs: range.end }), [ledger, range]);
   const messageCount = traffic.reduce((sum, pair) => sum + pair.count, 0);
   const crit = entries.filter((entry) => entry.severity === "crit");
   const warn = entries.filter((entry) => entry.severity === "warn");
@@ -66180,9 +66611,9 @@ function TimelinePanel({
   const activeAgents = new Set(entries.map((entry) => entry.actor).filter(Boolean)).size;
   const workingNow = lanes.lanes.filter((lane) => lane.live).length;
   const toolProblems = entries.filter((entry) => (entry.family === "tool" || entry.family === "workgraph") && isProblem(entry)).length;
-  const counts = import_react60.default.useMemo(() => filterCounts(entries), [entries]);
-  const story = import_react60.default.useMemo(() => buildStory(entries, { filter, query, nameOf }), [entries, filter, query, nameOf]);
-  const items = import_react60.default.useMemo(() => {
+  const counts = import_react61.default.useMemo(() => filterCounts(entries), [entries]);
+  const story = import_react61.default.useMemo(() => buildStory(entries, { filter, query, nameOf }), [entries, filter, query, nameOf]);
+  const items = import_react61.default.useMemo(() => {
     const list5 = [];
     for (const hour of story) {
       list5.push({ kind: "hour", key: hour.key, startMs: hour.startMs, count: hour.count });
@@ -66195,7 +66626,7 @@ function TimelinePanel({
     }
     return list5;
   }, [story, open]);
-  import_react60.default.useLayoutEffect(() => {
+  import_react61.default.useLayoutEffect(() => {
     scrollRef.current = storyRef.current?.closest(".cc-drawer-layout__main") ?? null;
   });
   const virtual = useVirtualRows({
@@ -66219,7 +66650,7 @@ function TimelinePanel({
   };
   const canOpenAgent = Boolean(navigation?.openAgent || onOpenAgent);
   const canOpenApproval = Boolean(navigation?.openApproval || onOpenApproval);
-  const rowByKey = import_react60.default.useMemo(() => {
+  const rowByKey = import_react61.default.useMemo(() => {
     const map4 = /* @__PURE__ */ new Map();
     for (const hour of story) {
       for (const row of hour.rows) {
@@ -66229,7 +66660,7 @@ function TimelinePanel({
     }
     return map4;
   }, [story]);
-  const entryByKey = import_react60.default.useMemo(() => new Map(allEntries.map((entry) => [entry.key, entry])), [allEntries]);
+  const entryByKey = import_react61.default.useMemo(() => new Map(allEntries.map((entry) => [entry.key, entry])), [allEntries]);
   const onLaneSelect = (item) => {
     if (item.kind === "span") {
       const span2 = lanes.spans.find((candidate) => candidate.id === item.id);
@@ -66745,13 +67176,13 @@ function TodayDrawer({
 }
 
 // src/panels/OperatorPanel.tsx
-var import_react61 = __toESM(require("react"));
+var import_react62 = __toESM(require("react"));
 var import_jsx_runtime89 = require("react/jsx-runtime");
 function OperatorPanel({ buttonId, buttons }) {
   const button = (buttons || []).find((candidate) => candidate.id === buttonId);
   const path2 = operatorPanelPath(button?.panel);
   const title = button?.label?.trim() || "Operator panel";
-  const [generation, setGeneration] = import_react61.default.useState(0);
+  const [generation, setGeneration] = import_react62.default.useState(0);
   if (!button || !path2) {
     return /* @__PURE__ */ (0, import_jsx_runtime89.jsxs)(PanelShell, { className: "console-operator-panel", testId: "operator-panel-missing:".concat(buttonId), children: [
       /* @__PURE__ */ (0, import_jsx_runtime89.jsx)(PanelHeader, { title, summary: [{ text: "Operator panel", announce: false }] }),
@@ -66806,7 +67237,7 @@ function OperatorPanel({ buttonId, buttons }) {
 }
 
 // src/panels/GatingInboxPanel.tsx
-var import_react62 = __toESM(require("react"));
+var import_react63 = __toESM(require("react"));
 
 // src/panels/gating-model.ts
 var RISK_TIERS = ["r0", "r1", "r2", "r3"];
@@ -67082,9 +67513,9 @@ var DECISION_MARK = {
   timeout: { shape: "hollow", tone: "neutral", word: "Timed out", plural: "timed out" }
 };
 function useWidth(fallback) {
-  const [width, setWidth] = import_react62.default.useState(fallback);
-  const observer = import_react62.default.useRef(null);
-  const ref = import_react62.default.useCallback((element3) => {
+  const [width, setWidth] = import_react63.default.useState(fallback);
+  const observer = import_react63.default.useRef(null);
+  const ref = import_react63.default.useCallback((element3) => {
     observer.current?.disconnect();
     observer.current = null;
     if (!element3 || typeof ResizeObserver === "undefined") return;
@@ -67096,7 +67527,7 @@ function useWidth(fallback) {
     observer.current.observe(element3);
     measure();
   }, []);
-  import_react62.default.useEffect(() => () => observer.current?.disconnect(), []);
+  import_react63.default.useEffect(() => () => observer.current?.disconnect(), []);
   return [ref, width];
 }
 function DecisionsStrip({
@@ -67183,45 +67614,46 @@ function GatingInboxPanel({
   hostDecideSources,
   showPending
 }) {
-  const [tab2, setTab] = import_react62.default.useState("pending");
-  const tabIds = import_react62.default.useId();
-  const [selectedId, setSelectedId] = import_react62.default.useState(null);
-  const [expandedId, setExpandedId] = import_react62.default.useState(null);
+  const [tab2, setTab] = import_react63.default.useState("pending");
+  const viewer = useApprovalViewer();
+  const tabIds = import_react63.default.useId();
+  const [selectedId, setSelectedId] = import_react63.default.useState(null);
+  const [expandedId, setExpandedId] = import_react63.default.useState(null);
   const [density, setDensity] = usePanelDensity("gating");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("gating");
-  const listRef = import_react62.default.useRef(null);
+  const listRef = import_react63.default.useRef(null);
   const pendingRequests = resource?.requests.filter((request) => request.status === "pending" && resource.decisions[request.pendingId]?.phase !== "settled");
   const pendingKnown = !resource || resource.status === "ready";
   const approvalsUnsupported = resource?.status === "unsupported";
   const pendingCount = pendingRequests ? pendingRequests.length : pending.length;
   const selectedRequestAvailable = resource?.requests.some((request) => request.pendingId === selectedPendingId) === true;
-  import_react62.default.useEffect(() => {
+  import_react63.default.useEffect(() => {
     if (selectedPendingId) {
       setSelectedId(selectedPendingId);
       setTab("pending");
     }
   }, [selectedPendingId]);
-  import_react62.default.useEffect(() => {
+  import_react63.default.useEffect(() => {
     if (showPending) setTab("pending");
   }, [showPending]);
-  import_react62.default.useEffect(() => {
+  import_react63.default.useEffect(() => {
     if (tab2 !== "pending" || !selectedPendingId || !selectedRequestAvailable) return;
     const selected = Array.from(listRef.current?.querySelectorAll("[data-approval-id]") || []).find((element3) => element3.dataset.approvalId === selectedPendingId);
     selected?.scrollIntoView?.({ block: "nearest" });
     selected?.focus({ preventScroll: true });
   }, [selectedPendingId, selectedRequestAvailable, tab2]);
-  const auditEntries = import_react62.default.useMemo(() => auditRows(audit), [audit]);
+  const auditEntries = import_react63.default.useMemo(() => auditRows(audit), [audit]);
   const automaticallyAllowed = auditEntries.filter((entry) => entry.record.automaticAllowance);
   const automaticCount = automaticallyAllowed.length;
   const auditCapped = auditLimit !== void 0 && audit.length >= auditLimit;
-  const titleMemory = import_react62.default.useRef(/* @__PURE__ */ new Map());
-  const titles = import_react62.default.useMemo(() => {
+  const titleMemory = import_react63.default.useRef(/* @__PURE__ */ new Map());
+  const titles = import_react63.default.useMemo(() => {
     const read = actionTitles(auditEntries, resource?.requests ?? []);
     for (const [action, title] of read) titleMemory.current.set(action, title);
     return new Map(titleMemory.current);
   }, [auditEntries, resource?.requests]);
-  const decisions = import_react62.default.useMemo(() => decisionEvents(auditEntries, titles), [auditEntries, titles]);
-  const queue = import_react62.default.useMemo(() => pendingRequests ? byDeadline(pendingRequests) : [], [pendingRequests]);
+  const decisions = import_react63.default.useMemo(() => decisionEvents(auditEntries, titles), [auditEntries, titles]);
+  const queue = import_react63.default.useMemo(() => pendingRequests ? byDeadline(pendingRequests) : [], [pendingRequests]);
   const deadlines = queue.map((request) => request.deadlineAtMs).filter((deadline) => deadline !== void 0);
   const now3 = useApprovalClock(deadlines);
   const next = queue.find((request) => request.deadlineAtMs !== void 0);
@@ -67242,6 +67674,7 @@ function GatingInboxPanel({
   if (tab2 === "pending" && resource) {
     const state = resource.status === "ready" ? null : RESOURCE_STATE[resource.status];
     const cards = byDeadline(resource.requests);
+    const departed = (resource.departed ?? []).filter((item) => !viewer || approvalAudience(item.request, viewer).kind === "you");
     content3 = /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)(import_jsx_runtime90.Fragment, { children: [
       state && resource.requests.length === 0 ? resource.status === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(LoadingState, { variant: "cards", rows: 2, label: state.text }) : /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(EmptyState, { kind: state.empty, role: "status", title: state.text, inline: hostShown }) : state ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(Notice, { tone: state.tone, role: "status", children: state.text }) : null,
       resource.status === "ready" && pendingRequests?.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(
@@ -67267,6 +67700,7 @@ function GatingInboxPanel({
               resourceStatus: resource.status,
               decision: resource.decisions[request.pendingId],
               readOnly: readOnly || resource.readOnly,
+              readOnlyReason: readOnly ? void 0 : resource.readOnlyReason,
               decideLinks: readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : void 0,
               onDecide
             }
@@ -67274,6 +67708,7 @@ function GatingInboxPanel({
         },
         request.pendingId
       )) }) : null,
+      departed.length ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("div", { className: "gating-inbox__cards gating-inbox__departed", "data-testid": "gating-departed-list", children: departed.map((item) => /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(DepartedApprovalCard, { departed: item }, item.request.pendingId)) }) : null,
       hostList
     ] });
   } else if (tab2 === "policies") {
@@ -67459,12 +67894,13 @@ function GatingInboxPanel({
 }
 
 // src/panels/AccessPanel.tsx
-var import_react63 = __toESM(require("react"));
+var import_react64 = __toESM(require("react"));
 
 // src/lib/access-actions.ts
 var ACCESS_ACTION_WORDS = {
   "agent.view": "View agents",
   "agent.send": "Message agents",
+  "schedule.manage": "Change agents' schedules",
   "agent.memory.read": "Read agent memory",
   "agent.memory.write": "Write agent memory",
   "agent.memory.delete": "Delete agent memory",
@@ -67478,6 +67914,7 @@ var ACCESS_ACTION_WORDS = {
   "agent.respawn": "Restart agents",
   "agent.retire": "Retire agents",
   "agent.reset": "Reset agents",
+  "agent.tool_grants.manage": "Grant tools to agents",
   "gating.view": "View approvals",
   "gating.decide": "Decide approvals",
   "workgraph.view": "View work items",
@@ -67501,12 +67938,14 @@ var ACCESS_ACTION_WORDS = {
 var FAMILY_WORDS = {
   agent: "agent",
   "agent.memory": "agent memory",
+  "agent.tool_grants": "agent tool grant",
   operator: "operator",
   "operator.memory": "operator memory",
   mob: "team",
   "mob.memory": "team memory",
   memory: "memory",
   "memory.quarantine": "quarantine",
+  schedule: "schedule",
   gating: "approval",
   workgraph: "work item",
   runtime: "routing and wiring",
@@ -67534,8 +67973,9 @@ function isKnownAccessAction(action) {
 // src/panels/access-model.ts
 var ACCESS_FAMILIES = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
-  { id: "message", label: "Message", actions: ["agent.send"] },
+  { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
+  { id: "tools", label: "Tools", actions: ["agent.tool_grants.manage"] },
   { id: "approvals", label: "Approvals", actions: ["gating.view", "gating.decide"] },
   {
     id: "memory",
@@ -67792,7 +68232,7 @@ function TextField({
   inputRef,
   wide
 }) {
-  const id = import_react63.default.useId();
+  const id = import_react64.default.useId();
   const hintId = "".concat(id, "-hint");
   return /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: cx("cc-field", "access-panel__field", wide && "access-panel__field--wide"), children: [
     /* @__PURE__ */ (0, import_jsx_runtime91.jsx)("label", { htmlFor: id, className: "cc-field__label", children: label2 }),
@@ -67943,12 +68383,12 @@ function AccessMatrix({
   selected,
   onCheck
 }) {
-  const families = import_react63.default.useMemo(() => familiesFor(catalog), [catalog]);
-  const rules = import_react63.default.useMemo(() => effectiveRules(config2.rules ?? []), [config2.rules]);
-  const rows = import_react63.default.useMemo(() => matrixRows(config2), [config2]);
-  const [focus, setFocus] = import_react63.default.useState([0, 0]);
-  const tableRef = import_react63.default.useRef(null);
-  const noteId = import_react63.default.useId();
+  const families = import_react64.default.useMemo(() => familiesFor(catalog), [catalog]);
+  const rules = import_react64.default.useMemo(() => effectiveRules(config2.rules ?? []), [config2.rules]);
+  const rows = import_react64.default.useMemo(() => matrixRows(config2), [config2]);
+  const [focus, setFocus] = import_react64.default.useState([0, 0]);
+  const tableRef = import_react64.default.useRef(null);
+  const noteId = import_react64.default.useId();
   const groups = config2.groups ?? {};
   const move = (row, column) => {
     const next = [Math.min(rows.length - 1, Math.max(0, row)), Math.min(families.length - 1, Math.max(0, column))];
@@ -68030,15 +68470,15 @@ function AccessCheckDrawer({
   onPreview,
   onClose
 }) {
-  const rules = import_react63.default.useMemo(() => effectiveRules(config2.rules ?? []), [config2.rules]);
+  const rules = import_react64.default.useMemo(() => effectiveRules(config2.rules ?? []), [config2.rules]);
   const verdict = cellVerdict(rules, row, family);
   const as = checkSubject(row, config2);
   const firstNamedAgent = verdict.actions.find((action) => action.state === "some")?.rule?.agents?.find((agent) => agent !== "*") ?? "";
-  const [identity, setIdentity] = import_react63.default.useState(firstNamedAgent && agents.some((agent) => agent.identity === firstNamedAgent) ? firstNamedAgent : "");
-  const [answers, setAnswers] = import_react63.default.useState(null);
-  const [checking, setChecking] = import_react63.default.useState(false);
-  const version2 = import_react63.default.useRef(0);
-  const run = import_react63.default.useCallback(async () => {
+  const [identity, setIdentity] = import_react64.default.useState(firstNamedAgent && agents.some((agent) => agent.identity === firstNamedAgent) ? firstNamedAgent : "");
+  const [answers, setAnswers] = import_react64.default.useState(null);
+  const [checking, setChecking] = import_react64.default.useState(false);
+  const version2 = import_react64.default.useRef(0);
+  const run = import_react64.default.useCallback(async () => {
     if (!as || !current) return;
     const mine = ++version2.current;
     setChecking(true);
@@ -68056,7 +68496,7 @@ function AccessCheckDrawer({
     setAnswers(results);
     setChecking(false);
   }, [as?.subject, current, family.actions, identity, onPreview]);
-  import_react63.default.useEffect(() => {
+  import_react64.default.useEffect(() => {
     void run();
     return () => {
       version2.current += 1;
@@ -68156,39 +68596,39 @@ function AccessPanel({
   onDeleteGroup,
   onPreview
 }) {
-  const [tab2, setTab] = import_react63.default.useState("overview");
-  const tabIds = import_react63.default.useId();
-  const [ruleDraft, setRuleDraft] = import_react63.default.useState(null);
-  const [editingRuleId, setEditingRuleId] = import_react63.default.useState(null);
-  const [adminsDraft, setAdminsDraft] = import_react63.default.useState(null);
-  const [groupNameDraft, setGroupNameDraft] = import_react63.default.useState("");
-  const [groupMembersDraft, setGroupMembersDraft] = import_react63.default.useState("");
-  const [editingGroup, setEditingGroup] = import_react63.default.useState(null);
-  const [previewSubject, setPreviewSubject] = import_react63.default.useState("");
-  const [previewAction, setPreviewAction] = import_react63.default.useState("agent.view");
-  const [previewIdentity, setPreviewIdentity] = import_react63.default.useState("");
-  const [previewFeedback, setPreviewFeedback] = import_react63.default.useState(null);
-  const [check2, setCheck] = import_react63.default.useState(null);
+  const [tab2, setTab] = import_react64.default.useState("overview");
+  const tabIds = import_react64.default.useId();
+  const [ruleDraft, setRuleDraft] = import_react64.default.useState(null);
+  const [editingRuleId, setEditingRuleId] = import_react64.default.useState(null);
+  const [adminsDraft, setAdminsDraft] = import_react64.default.useState(null);
+  const [groupNameDraft, setGroupNameDraft] = import_react64.default.useState("");
+  const [groupMembersDraft, setGroupMembersDraft] = import_react64.default.useState("");
+  const [editingGroup, setEditingGroup] = import_react64.default.useState(null);
+  const [previewSubject, setPreviewSubject] = import_react64.default.useState("");
+  const [previewAction, setPreviewAction] = import_react64.default.useState("agent.view");
+  const [previewIdentity, setPreviewIdentity] = import_react64.default.useState("");
+  const [previewFeedback, setPreviewFeedback] = import_react64.default.useState(null);
+  const [check2, setCheck] = import_react64.default.useState(null);
   const [density, setDensity] = usePanelDensity("access");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("access");
-  const previewSubjectInput = import_react63.default.useRef(null);
-  const inspectFocusPending = import_react63.default.useRef(false);
-  const actionsLabelId = import_react63.default.useId();
+  const previewSubjectInput = import_react64.default.useRef(null);
+  const inspectFocusPending = import_react64.default.useRef(false);
+  const actionsLabelId = import_react64.default.useId();
   const actions = status?.actions ?? [];
-  const [saving, setSaving] = import_react63.default.useState(false);
-  const [saveFailure, setSaveFailure] = import_react63.default.useState(null);
-  const [adminsBase, setAdminsBase] = import_react63.default.useState(null);
-  const [ruleBase, setRuleBase] = import_react63.default.useState(null);
-  const [groupBase, setGroupBase] = import_react63.default.useState(null);
-  const [previewPending, setPreviewPending] = import_react63.default.useState(false);
-  const previewVersion = import_react63.default.useRef(0);
+  const [saving, setSaving] = import_react64.default.useState(false);
+  const [saveFailure, setSaveFailure] = import_react64.default.useState(null);
+  const [adminsBase, setAdminsBase] = import_react64.default.useState(null);
+  const [ruleBase, setRuleBase] = import_react64.default.useState(null);
+  const [groupBase, setGroupBase] = import_react64.default.useState(null);
+  const [previewPending, setPreviewPending] = import_react64.default.useState(false);
+  const previewVersion = import_react64.default.useRef(0);
   const mayView = status?.available === true && status.can_administer === true;
   const current = mayView && !loading && !error48 && Boolean(config2);
   const actionCatalogKey = JSON.stringify(actions);
   const scope = JSON.stringify([status?.subject, status?.available, status?.can_administer]);
-  const mutationScope = import_react63.default.useRef(scope);
+  const mutationScope = import_react64.default.useRef(scope);
   mutationScope.current = scope;
-  const [editScope, setEditScope] = import_react63.default.useState(scope);
+  const [editScope, setEditScope] = import_react64.default.useState(scope);
   if (editScope !== scope) {
     setEditScope(scope);
     setRuleDraft(null);
@@ -68203,8 +68643,8 @@ function AccessPanel({
     setGroupBase(null);
     setCheck(null);
   }
-  const [loadedAt, setLoadedAt] = import_react63.default.useState(null);
-  import_react63.default.useEffect(() => {
+  const [loadedAt, setLoadedAt] = import_react64.default.useState(null);
+  import_react64.default.useEffect(() => {
     if (!loading && !error48 && config2 && status) setLoadedAt(Date.now());
   }, [loading, error48, config2, status]);
   const previewScope = JSON.stringify([
@@ -68223,20 +68663,20 @@ function AccessPanel({
   const currentPreview = current && previewFeedback?.scope === previewScope ? previewFeedback : null;
   const previewResult = currentPreview?.result;
   const previewError = currentPreview?.error;
-  const latestPreviewScope = import_react63.default.useRef(previewScope);
+  const latestPreviewScope = import_react64.default.useRef(previewScope);
   latestPreviewScope.current = previewScope;
-  import_react63.default.useEffect(() => {
+  import_react64.default.useEffect(() => {
     previewVersion.current += 1;
     setPreviewFeedback(null);
     setPreviewPending(false);
   }, [previewScope]);
-  import_react63.default.useEffect(() => {
+  import_react64.default.useEffect(() => {
     setPreviewAction((value) => actions.includes(value) ? value : actions[0] ?? "");
   }, [actionCatalogKey]);
-  import_react63.default.useEffect(() => () => {
+  import_react64.default.useEffect(() => () => {
     previewVersion.current += 1;
   }, []);
-  import_react63.default.useEffect(() => {
+  import_react64.default.useEffect(() => {
     if (tab2 === "preview" && inspectFocusPending.current) {
       previewSubjectInput.current?.focus();
       inspectFocusPending.current = false;
@@ -68696,7 +69136,7 @@ function AccessPanel({
           }
         ) : null,
         groups.map(
-          ([name2, group]) => editingGroup === name2 ? groupFormShown ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(import_react63.default.Fragment, { children: groupForm }, name2) : null : /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("section", { className: "access-group", "data-testid": "access-group:".concat(name2), children: [
+          ([name2, group]) => editingGroup === name2 ? groupFormShown ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(import_react64.default.Fragment, { children: groupForm }, name2) : null : /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("section", { className: "access-group", "data-testid": "access-group:".concat(name2), children: [
             /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: "access-panel__group-head", children: [
               /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: "access-panel__group-text", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime91.jsx)("h3", { className: "access-panel__group-name", title: name2, children: name2 }),
@@ -68776,7 +69216,7 @@ function AccessPanel({
         ruleDraft || rules.length ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: "access-panel__rules", children: [
           ruleEditedInPlace ? null : ruleEditor,
           rules.map(
-            (rule) => ruleEditedInPlace && rule.id === editingRuleId ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(import_react63.default.Fragment, { children: ruleEditor }, rule.id) : /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(
+            (rule) => ruleEditedInPlace && rule.id === editingRuleId ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(import_react64.default.Fragment, { children: ruleEditor }, rule.id) : /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(
               RuleCard,
               {
                 rule,
@@ -70556,18 +70996,18 @@ function refineRecords(records, refinement) {
 }
 
 // src/panels/memory/panel.tsx
-var import_react76 = __toESM(require("react"));
+var import_react77 = __toESM(require("react"));
 
 // src/panels/memory/biography.tsx
-var import_react66 = __toESM(require("react"));
+var import_react67 = __toESM(require("react"));
 
 // src/panels/memory/parts.tsx
-var import_react64 = __toESM(require("react"));
+var import_react65 = __toESM(require("react"));
 var import_jsx_runtime92 = require("react/jsx-runtime");
 function useMeasuredWidth(fallback) {
-  const [width, setWidth] = import_react64.default.useState(fallback);
-  const observer = import_react64.default.useRef(null);
-  const ref = import_react64.default.useCallback((element3) => {
+  const [width, setWidth] = import_react65.default.useState(fallback);
+  const observer = import_react65.default.useRef(null);
+  const ref = import_react65.default.useCallback((element3) => {
     observer.current?.disconnect();
     observer.current = null;
     if (!element3) return;
@@ -70580,7 +71020,7 @@ function useMeasuredWidth(fallback) {
     observer.current = new ResizeObserver(() => measure());
     observer.current.observe(element3);
   }, []);
-  import_react64.default.useEffect(() => () => observer.current?.disconnect(), []);
+  import_react65.default.useEffect(() => () => observer.current?.disconnect(), []);
   return [ref, width];
 }
 function FluidSparkline({
@@ -70594,13 +71034,13 @@ function FluidSparkline({
 }
 function useNameOf() {
   const directory = useAgentDirectory();
-  return import_react64.default.useCallback((key) => agentDisplayName(key, directory), [directory]);
+  return import_react65.default.useCallback((key) => agentDisplayName(key, directory), [directory]);
 }
 function MetaLine({ parts }) {
   const shown = parts.filter(
     (part) => part !== null && part !== void 0 && part !== false && part !== ""
   );
-  return /* @__PURE__ */ (0, import_jsx_runtime92.jsx)(import_jsx_runtime92.Fragment, { children: shown.map((part, index3) => /* @__PURE__ */ (0, import_jsx_runtime92.jsxs)(import_react64.default.Fragment, { children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime92.jsx)(import_jsx_runtime92.Fragment, { children: shown.map((part, index3) => /* @__PURE__ */ (0, import_jsx_runtime92.jsxs)(import_react65.default.Fragment, { children: [
     index3 > 0 ? " \xB7 " : null,
     part
   ] }, index3)) });
@@ -70756,7 +71196,7 @@ function MemoryRecordRow({
 }
 
 // src/panels/memory/versions.tsx
-var import_react65 = __toESM(require("react"));
+var import_react66 = __toESM(require("react"));
 var import_jsx_runtime93 = require("react/jsx-runtime");
 var SOURCE_LABEL_MAX = 22;
 function shortTitle(title) {
@@ -70843,14 +71283,14 @@ function VersionsGraph({
   onOpen,
   testId
 }) {
-  const realms = import_react65.default.useMemo(
+  const realms = import_react66.default.useMemo(
     () => new Map(model.nodes.map((node2) => [node2.id, node2.data?.realm ?? ""])),
     [model.nodes]
   );
   const open = (id) => {
     if (id && id !== openId && realms.has(id)) onOpen(realms.get(id) ?? "", id);
   };
-  const selection = import_react65.default.useMemo(() => [openId], [openId]);
+  const selection = import_react66.default.useMemo(() => [openId], [openId]);
   const summary = joinMeta(
     plural(model.versions, "version"),
     model.sources > 0 ? "".concat(plural(model.sources, "record"), " merged in") : null
@@ -70890,10 +71330,10 @@ function QuarantineDecisionBlock({
   onDecide
 }) {
   const nameOf = useNameOf();
-  const rationaleId = import_react66.default.useId();
-  const [rationale, setRationale] = import_react66.default.useState("");
-  const [pending, setPending] = import_react66.default.useState(null);
-  const [failure, setFailure] = import_react66.default.useState(null);
+  const rationaleId = import_react67.default.useId();
+  const [rationale, setRationale] = import_react67.default.useState("");
+  const [pending, setPending] = import_react67.default.useState(null);
+  const [failure, setFailure] = import_react67.default.useState(null);
   const rationaleProblem = quarantineRationaleProblem(rationale);
   const blocked = pending !== null || rationaleProblem !== null;
   const notice = rationaleProblem ? { text: rationaleProblem, ids: [] } : failure;
@@ -70992,18 +71432,18 @@ function Biography({
   const lane = lineageLane(chain, record10.id);
   const touchingRuns = dreamRunsTouching(dreams, record10.id);
   const verdicts = auditVerdicts.filter((verdict) => verdict.record_id === record10.id);
-  const [evidenceState, setEvidenceState] = import_react66.default.useState(null);
-  const evidenceSeqRef = import_react66.default.useRef(0);
+  const [evidenceState, setEvidenceState] = import_react67.default.useState(null);
+  const evidenceSeqRef = import_react67.default.useRef(0);
   const recordIdentity = record10.scope.scope === "identity" ? record10.scope.identity : author?.author === "agent" ? author.identity : void 0;
   const conversationWith = recordIdentity ? nameOf(recordIdentity) || recordIdentity : void 0;
   const supersededBy = record10.status?.status === "superseded" ? record10.status.by : void 0;
   const authorRun = author && (author.author === "steward" || author.author === "distiller") ? author.run_id : void 0;
   const scopeKey = scopeKeyOf(record10.scope);
-  const versions = import_react66.default.useMemo(
+  const versions = import_react67.default.useMemo(
     () => versionsModel(lane.map((entry) => entry.record), record10.id, record10.derived_from ?? [], recordTitles, now3),
     [lane, record10.id, record10.derived_from, recordTitles, now3]
   );
-  const useBins = import_react66.default.useMemo(
+  const useBins = import_react67.default.useMemo(
     () => binCounts2(injections.map((injection) => injection.at_ms), now3, USE_DAYS, DAY_MS3),
     [injections, now3]
   );
@@ -71324,7 +71764,7 @@ function Biography({
 }
 
 // src/panels/memory/dreams.tsx
-var import_react67 = __toESM(require("react"));
+var import_react68 = __toESM(require("react"));
 var import_jsx_runtime95 = require("react/jsx-runtime");
 var WEEK2 = 7;
 var DAY_LABEL_PX = 44;
@@ -71368,9 +71808,9 @@ function DreamsTimeline({
   onOpenRun
 }) {
   const nameOf = useNameOf();
-  const timeline = import_react67.default.useMemo(() => dreamTimeline(sheets, runs, now3, WEEK2), [sheets, runs, now3]);
+  const timeline = import_react68.default.useMemo(() => dreamTimeline(sheets, runs, now3, WEEK2), [sheets, runs, now3]);
   const [axisRef, axisWidth] = useMeasuredWidth(640);
-  const ticks = import_react67.default.useMemo(() => dayTicks(timeline.start, timeline.end, axisWidth), [timeline.start, timeline.end, axisWidth]);
+  const ticks = import_react68.default.useMemo(() => dayTicks(timeline.start, timeline.end, axisWidth), [timeline.start, timeline.end, axisWidth]);
   const count2 = timeline.rows.reduce((sum, row) => sum + row.bars.length, 0);
   return /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)("section", { className: "memory-block memory-dreams-timeline", "data-testid": "memory-dreams-timeline", "aria-labelledby": "memory-dreams-week-head", children: [
     /* @__PURE__ */ (0, import_jsx_runtime95.jsx)(
@@ -71434,7 +71874,7 @@ function DreamsTimeline({
 }
 function PhaseStrip({ phases }) {
   if (phases.length === 0) return null;
-  return /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-phase-strip", "aria-label": "Phases: ".concat(phases.map(([name2]) => humanizeEnum(name2).toLowerCase()).join(", ")), role: "img", children: phases.map(([name2], index3) => /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)(import_react67.default.Fragment, { children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-phase-strip", "aria-label": "Phases: ".concat(phases.map(([name2]) => humanizeEnum(name2).toLowerCase()).join(", ")), role: "img", children: phases.map(([name2], index3) => /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)(import_react68.default.Fragment, { children: [
     index3 > 0 ? /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-phase-strip__line" }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-phase-strip__dot", title: humanizeEnum(name2) })
   ] }, "".concat(name2, ":").concat(index3))) });
@@ -71577,8 +72017,8 @@ function DreamsTab({
   now: now3,
   onSelectRecord
 }) {
-  const [expandedRuns, setExpandedRuns] = import_react67.default.useState({});
-  const rootRef = import_react67.default.useRef(null);
+  const [expandedRuns, setExpandedRuns] = import_react68.default.useState({});
+  const rootRef = import_react68.default.useRef(null);
   const openRun = (bar) => {
     if (bar.sheet) setExpandedRuns((current) => ({ ...current, [bar.runId]: true }));
     const target = rootRef.current?.querySelector(
@@ -71641,7 +72081,7 @@ function DreamsTab({
 }
 
 // src/panels/memory/glance.tsx
-var import_react68 = __toESM(require("react"));
+var import_react69 = __toESM(require("react"));
 var import_jsx_runtime96 = require("react/jsx-runtime");
 function memorySummaryFacts(inputs) {
   if (!inputs.loaded) return [{ key: "loading", text: "Loading records", announce: false }];
@@ -71678,8 +72118,8 @@ function MemoryGlance({
   onOpenChecks
 }) {
   const { totals, now: now3 } = inputs;
-  const perDay = import_react68.default.useMemo(() => recordsPerDay(inputs.readRecords, now3), [inputs.readRecords, now3]);
-  const writtenThisWeek = import_react68.default.useMemo(
+  const perDay = import_react69.default.useMemo(() => recordsPerDay(inputs.readRecords, now3), [inputs.readRecords, now3]);
+  const writtenThisWeek = import_react69.default.useMemo(
     () => countSince(
       inputs.readRecords.map(recordWrittenAt).filter((at) => at !== null),
       now3,
@@ -71687,7 +72127,7 @@ function MemoryGlance({
     ),
     [inputs.readRecords, now3]
   );
-  const perHour = import_react68.default.useMemo(() => injectionsPerHour(inputs.injections, now3), [inputs.injections, now3]);
+  const perHour = import_react69.default.useMemo(() => injectionsPerHour(inputs.injections, now3), [inputs.injections, now3]);
   const givenToday = perHour.reduce((sum, count2) => sum + count2, 0);
   const givenAgents = new Set(
     inputs.injections.filter((entry) => entry.at_ms >= now3 - 24 * HOUR_MS).map((entry) => entry.identity)
@@ -71773,7 +72213,7 @@ function MemoryGlance({
 }
 
 // src/panels/memory/holdings.tsx
-var import_react69 = __toESM(require("react"));
+var import_react70 = __toESM(require("react"));
 var import_jsx_runtime97 = require("react/jsx-runtime");
 var MUTED_TILES = /* @__PURE__ */ new Set(["echo-safety", "taint-wall"]);
 function CheckCell({
@@ -72059,10 +72499,10 @@ function Landscape({
   onOpenScope,
   onOpenRecord
 }) {
-  const window2 = import_react69.default.useMemo(() => landscapeWindow(now3), [now3]);
+  const window2 = import_react70.default.useMemo(() => landscapeWindow(now3), [now3]);
   const [trackRef, trackWidth] = useMeasuredWidth(480);
-  const lanes = import_react69.default.useMemo(() => landscapeLanes(records, window2), [records, window2]);
-  const weeks = import_react69.default.useMemo(() => axisWeeks(window2), [window2]);
+  const lanes = import_react70.default.useMemo(() => landscapeLanes(records, window2), [records, window2]);
+  const weeks = import_react70.default.useMemo(() => axisWeeks(window2), [window2]);
   const totalBytes = rows.reduce((sum, row) => sum + row.bytes, 0);
   const maxBytes = Math.max(1, ...rows.map((row) => row.bytes));
   const maxRecords = Math.max(1, ...rows.map((row) => row.active + row.quarantined + row.superseded + row.tombstoned));
@@ -72218,7 +72658,7 @@ function HoldingsLoading() {
 }
 
 // src/panels/memory/knowledge.tsx
-var import_react70 = __toESM(require("react"));
+var import_react71 = __toESM(require("react"));
 var import_jsx_runtime98 = require("react/jsx-runtime");
 var WEEK_DAYS = 7;
 var SEGMENT_STEP = { identity: "own", mob: "team", operator: "operator", realm: "shared" };
@@ -72311,7 +72751,7 @@ function KnowledgeTab({
   const total = segments.reduce((sum, segment) => sum + segment.count, 0);
   const weekStart = now3 - WEEK_DAYS * DAY_MS3;
   const [axisRef, axisWidth] = useMeasuredWidth(420);
-  const givenAgents = import_react70.default.useMemo(() => {
+  const givenAgents = import_react71.default.useMemo(() => {
     const recent = /* @__PURE__ */ new Set();
     for (const { entry } of annotatedInjections) if (entry.at_ms >= weekStart) recent.add(entry.identity);
     const rest = Array.from(recent).filter((identity) => identity !== selectedIdentity).sort((a2, b2) => a2.localeCompare(b2));
@@ -72443,10 +72883,10 @@ function KnowledgeTab({
 }
 
 // src/panels/memory/pipeline.tsx
-var import_react72 = __toESM(require("react"));
+var import_react73 = __toESM(require("react"));
 
 // src/panels/memory/live-strip.tsx
-var import_react71 = __toESM(require("react"));
+var import_react72 = __toESM(require("react"));
 var import_jsx_runtime99 = require("react/jsx-runtime");
 function MemoryLiveStrip({
   frames,
@@ -72454,9 +72894,9 @@ function MemoryLiveStrip({
   onPivot
 }) {
   const directory = useAgentDirectory();
-  const deduped = import_react71.default.useMemo(() => dedupeFramesById(frames), [frames]);
-  const [frozen, setFrozen] = import_react71.default.useState(null);
-  const listRef = import_react71.default.useRef(null);
+  const deduped = import_react72.default.useMemo(() => dedupeFramesById(frames), [frames]);
+  const [frozen, setFrozen] = import_react72.default.useState(null);
+  const listRef = import_react72.default.useRef(null);
   const shown = frozen ?? deduped;
   const behind = frozen ? countFramesBehind(deduped, frozen) : 0;
   function handleScroll() {
@@ -72550,7 +72990,7 @@ function PipelineFlow({
 }) {
   return /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("figure", { className: "memory-flow", "data-testid": "memory-pipeline-flow", "aria-label": "How memory moves", children: /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("ol", { className: "memory-flow__stages", "data-testid": "memory-pipeline-stages", "aria-label": "Pipeline stages", children: lanes.map((lane) => /* @__PURE__ */ (0, import_jsx_runtime100.jsxs)("li", { className: "memory-flow__lane", "data-lane": lane.key, children: [
     /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("span", { className: "memory-flow__lane-label", children: lane.label }),
-    /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("ol", { className: "memory-flow__lane-stages", children: lane.stages.map((stage, index3) => /* @__PURE__ */ (0, import_jsx_runtime100.jsxs)(import_react72.default.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("ol", { className: "memory-flow__lane-stages", children: lane.stages.map((stage, index3) => /* @__PURE__ */ (0, import_jsx_runtime100.jsxs)(import_react73.default.Fragment, { children: [
       index3 > 0 ? lane.split && index3 === 2 ? /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("li", { className: "memory-flow__or", "aria-hidden": "true", children: "or" }) : /* @__PURE__ */ (0, import_jsx_runtime100.jsx)("li", { className: "memory-flow__link", "aria-hidden": "true", children: /* @__PURE__ */ (0, import_jsx_runtime100.jsx)(Arrow, {}) }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime100.jsx)(Stage, { stage })
     ] }, stage.key)) })
@@ -72741,10 +73181,10 @@ function PipelineTab({
 }
 
 // src/panels/memory/records.tsx
-var import_react75 = __toESM(require("react"));
+var import_react76 = __toESM(require("react"));
 
 // src/panels/memory/records-clusters.tsx
-var import_react73 = __toESM(require("react"));
+var import_react74 = __toESM(require("react"));
 var import_jsx_runtime101 = require("react/jsx-runtime");
 var TRUST_WORDS2 = ["untrusted", "observed", "verified", "application", "operator"];
 function TrustSpread({ cluster }) {
@@ -72758,7 +73198,7 @@ function RecordsClusters({
   onPick,
   onOpenRecord
 }) {
-  const clusters = import_react73.default.useMemo(() => kindClusters(records), [records]);
+  const clusters = import_react74.default.useMemo(() => kindClusters(records), [records]);
   const total = Math.max(1, records.length);
   return /* @__PURE__ */ (0, import_jsx_runtime101.jsx)("div", { className: "memory-clusters", "data-testid": "memory-records-clusters", children: clusters.map((cluster) => /* @__PURE__ */ (0, import_jsx_runtime101.jsxs)(
     "section",
@@ -72801,7 +73241,7 @@ function RecordsClusters({
 }
 
 // src/panels/memory/records-timeline.tsx
-var import_react74 = __toESM(require("react"));
+var import_react75 = __toESM(require("react"));
 var import_jsx_runtime102 = require("react/jsx-runtime");
 var SPINE_X = 30;
 function RecordsTimeline({
@@ -72812,11 +73252,11 @@ function RecordsTimeline({
   onSelectRecord
 }) {
   const nameOf = useNameOf();
-  const groups = import_react74.default.useMemo(() => recordsByDay(records, now3), [records, now3]);
-  const links = import_react74.default.useMemo(() => supersedeLinks(records), [records]);
-  const rootRef = import_react74.default.useRef(null);
-  const [arcs, setArcs] = import_react74.default.useState([]);
-  import_react74.default.useLayoutEffect(() => {
+  const groups = import_react75.default.useMemo(() => recordsByDay(records, now3), [records, now3]);
+  const links = import_react75.default.useMemo(() => supersedeLinks(records), [records]);
+  const rootRef = import_react75.default.useRef(null);
+  const [arcs, setArcs] = import_react75.default.useState([]);
+  import_react75.default.useLayoutEffect(() => {
     const root4 = rootRef.current;
     if (!root4 || links.length === 0) {
       setArcs([]);
@@ -72953,23 +73393,23 @@ function RecordsTab(props) {
   const multiRealm = realms.length > 1;
   const filtered = hasActiveFilter(filter);
   const refined = hasRefinement(refinement);
-  const [shown, setShown] = import_react75.default.useState(REFINED_PAGE);
-  import_react75.default.useEffect(() => setShown(REFINED_PAGE), [refinement, filter, sortMode]);
-  const corpus = import_react75.default.useMemo(
+  const [shown, setShown] = import_react76.default.useState(REFINED_PAGE);
+  import_react76.default.useEffect(() => setShown(REFINED_PAGE), [refinement, filter, sortMode]);
+  const corpus = import_react76.default.useMemo(
     () => filtered ? listView.records : mergeReadRecords(listView.records, readRecords),
     [filtered, listView.records, readRecords]
   );
-  const refinedRecords = import_react75.default.useMemo(() => {
+  const refinedRecords = import_react76.default.useMemo(() => {
     const matches = refineRecords(corpus, refinement);
     return sortMode === "utility" ? sortRecordsByUtility(matches) : [...matches].sort((a2, b2) => (recordChangedAt(b2) ?? 0) - (recordChangedAt(a2) ?? 0));
   }, [corpus, refinement, sortMode]);
-  const kindCounts = import_react75.default.useMemo(() => {
+  const kindCounts = import_react76.default.useMemo(() => {
     const base = refineRecords(corpus, { ...refinement, kinds: [] });
     const counts = /* @__PURE__ */ new Map();
     for (const record10 of base) counts.set(record10.kind, (counts.get(record10.kind) ?? 0) + 1);
     return counts;
   }, [corpus, refinement]);
-  const trustCounts = import_react75.default.useMemo(() => {
+  const trustCounts = import_react76.default.useMemo(() => {
     const base = refineRecords(corpus, { ...refinement, trust: [] });
     const counts = /* @__PURE__ */ new Map();
     for (const record10 of base) counts.set(trustLevel(record10.trust), (counts.get(trustLevel(record10.trust)) ?? 0) + 1);
@@ -73303,11 +73743,11 @@ function MemoryPanel({
   const deniedKinds = { operatorScopeDenied, mobScopeDenied };
   const proposals = visibleForScopeKinds(allProposals, deniedKinds);
   const pendingPromotions = visibleForScopeKinds(allPendingPromotions, deniedKinds);
-  const [tab2, setTab] = import_react76.default.useState("holdings");
-  const tabIds = import_react76.default.useId();
+  const [tab2, setTab] = import_react77.default.useState("holdings");
+  const tabIds = import_react77.default.useId();
   const [density, setDensity] = usePanelDensity("memory");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("memory");
-  const [decisionNotice, setDecisionNotice] = import_react76.default.useState(null);
+  const [decisionNotice, setDecisionNotice] = import_react77.default.useState(null);
   const decideQuarantine = onDecideQuarantine ? async (record10, verdict, rationale) => {
     if (!detail) return;
     const realm = detail.realm;
@@ -73315,17 +73755,17 @@ function MemoryPanel({
     setDecisionNotice(quarantineDecisionSummary(result));
     onSelectRecord(realm, result.successor?.memory_id ?? record10.id);
   } : void 0;
-  const [filter, setFilter] = import_react76.default.useState({});
-  const [sortMode, setSortMode] = import_react76.default.useState("recency");
-  const [recordsView, setRecordsView] = import_react76.default.useState("list");
-  const [refinement, setRefinement] = import_react76.default.useState(NO_REFINEMENT);
-  const [paged, setPaged] = import_react76.default.useState(null);
-  const [pageLoading, setPageLoading] = import_react76.default.useState(false);
-  const queryRecordsRef = import_react76.default.useRef(onQueryRecords);
+  const [filter, setFilter] = import_react77.default.useState({});
+  const [sortMode, setSortMode] = import_react77.default.useState("recency");
+  const [recordsView, setRecordsView] = import_react77.default.useState("list");
+  const [refinement, setRefinement] = import_react77.default.useState(NO_REFINEMENT);
+  const [paged, setPaged] = import_react77.default.useState(null);
+  const [pageLoading, setPageLoading] = import_react77.default.useState(false);
+  const queryRecordsRef = import_react77.default.useRef(onQueryRecords);
   queryRecordsRef.current = onQueryRecords;
   const searchDirectory = useAgentDirectory();
-  const searchCandidatesRef = import_react76.default.useRef([]);
-  searchCandidatesRef.current = import_react76.default.useMemo(() => {
+  const searchCandidatesRef = import_react77.default.useRef([]);
+  searchCandidatesRef.current = import_react77.default.useMemo(() => {
     const keys2 = /* @__PURE__ */ new Set();
     const teams = /* @__PURE__ */ new Set();
     for (const record10 of records) {
@@ -73341,7 +73781,7 @@ function MemoryPanel({
       ...Array.from(teams, (key) => ({ key, name: teamName(key) }))
     ];
   }, [records, overview, searchDirectory]);
-  const pagerRef = import_react76.default.useRef(null);
+  const pagerRef = import_react77.default.useRef(null);
   if (!pagerRef.current) {
     pagerRef.current = createMemoryRecordsPager({
       query: (params) => queryRecordsRef.current ? queryRecordsRef.current(params) : Promise.resolve(null),
@@ -73351,11 +73791,11 @@ function MemoryPanel({
     });
   }
   const pager = pagerRef.current;
-  const [lattice, setLattice] = import_react76.default.useState(null);
-  const [latticeRunning, setLatticeRunning] = import_react76.default.useState(false);
-  const [knowledgeIdentity, setKnowledgeIdentity] = import_react76.default.useState("");
-  const latticeRanForRef = import_react76.default.useRef(null);
-  import_react76.default.useEffect(() => {
+  const [lattice, setLattice] = import_react77.default.useState(null);
+  const [latticeRunning, setLatticeRunning] = import_react77.default.useState(false);
+  const [knowledgeIdentity, setKnowledgeIdentity] = import_react77.default.useState("");
+  const latticeRanForRef = import_react77.default.useRef(null);
+  import_react77.default.useEffect(() => {
     if (tab2 !== "holdings" || !onQueryRecords || recordsDenied || !loaded2 || unavailable) return;
     const fingerprint = latticeFingerprint(records, realms, nextCursor);
     if (latticeRanForRef.current === fingerprint) return;
@@ -73382,12 +73822,12 @@ function MemoryPanel({
       }
     };
   }, [tab2, records, recordsDenied, realms, nextCursor, loaded2, unavailable]);
-  const updatedAt = import_react76.default.useMemo(() => loaded2 ? Date.now() : null, [records, loaded2]);
-  const overviewScopes = import_react76.default.useMemo(
+  const updatedAt = import_react77.default.useMemo(() => loaded2 ? Date.now() : null, [records, loaded2]);
+  const overviewScopes = import_react77.default.useMemo(
     () => overview ? sortOverviewScopes(visibleOverviewScopes(overview.scopes || [], { operatorScopeDenied, mobScopeDenied })) : null,
     [overview, operatorScopeDenied, mobScopeDenied]
   );
-  const tiles = import_react76.default.useMemo(
+  const tiles = import_react77.default.useMemo(
     () => computeVerdictTiles({
       records,
       recordsDenied,
@@ -73402,11 +73842,11 @@ function MemoryPanel({
     }),
     [records, recordsDenied, dreams, dreamsDenied, dreamsWithheld, lattice, latticeRunning, overview, overviewScopes, overviewDenied, nameOf]
   );
-  const readRecords = import_react76.default.useMemo(
+  const readRecords = import_react77.default.useMemo(
     () => mergeReadRecords(records, paged?.records, lattice?.records, quarantineRecords),
     [records, paged, lattice, quarantineRecords]
   );
-  const recordTitles = import_react76.default.useMemo(() => {
+  const recordTitles = import_react77.default.useMemo(() => {
     const titles = /* @__PURE__ */ new Map();
     const add2 = (list5) => {
       for (const entry of list5 ?? []) {
@@ -73417,14 +73857,14 @@ function MemoryPanel({
     if (detail) add2([detail.record, ...detail.chain]);
     return titles;
   }, [readRecords, detail]);
-  const annotatedInjections = import_react76.default.useMemo(() => annotateInjectionDups(injections), [injections]);
-  const dreamSheets = import_react76.default.useMemo(() => dreamRunsNewestFirst(dreamRuns), [dreamRuns]);
-  const sheetPartitions = import_react76.default.useMemo(() => new Map(dreamRuns.map((run) => [run.run_id, run.partition])), [dreamRuns]);
-  const dedupedVerdicts = import_react76.default.useMemo(() => dedupeAuditVerdicts(auditVerdicts), [auditVerdicts]);
-  const identities = import_react76.default.useMemo(() => identityOptions(records), [records]);
+  const annotatedInjections = import_react77.default.useMemo(() => annotateInjectionDups(injections), [injections]);
+  const dreamSheets = import_react77.default.useMemo(() => dreamRunsNewestFirst(dreamRuns), [dreamRuns]);
+  const sheetPartitions = import_react77.default.useMemo(() => new Map(dreamRuns.map((run) => [run.run_id, run.partition])), [dreamRuns]);
+  const dedupedVerdicts = import_react77.default.useMemo(() => dedupeAuditVerdicts(auditVerdicts), [auditVerdicts]);
+  const identities = import_react77.default.useMemo(() => identityOptions(records), [records]);
   const selectedIdentity = identities.includes(knowledgeIdentity) ? knowledgeIdentity : identities[0] || "";
-  const memoryFrames = import_react76.default.useMemo(() => liveFrames.filter((frame2) => frame2.event.startsWith("memory.")), [liveFrames]);
-  const totals = import_react76.default.useMemo(
+  const memoryFrames = import_react77.default.useMemo(() => liveFrames.filter((frame2) => frame2.event.startsWith("memory.")), [liveFrames]);
+  const totals = import_react77.default.useMemo(
     () => overviewScopes ? storeTotals(overviewScopes) : loadedTotals(records),
     [overviewScopes, records]
   );
@@ -73725,7 +74165,7 @@ function MemoryPanel({
 }
 
 // src/panels/RosterPanel.tsx
-var import_react79 = __toESM(require("react"));
+var import_react80 = __toESM(require("react"));
 
 // src/lib/agent-activity.ts
 var MINUTE_MS = 6e4;
@@ -73883,11 +74323,11 @@ function healthReason(health, input) {
 }
 
 // src/lib/use-element-width.ts
-var import_react77 = __toESM(require("react"));
+var import_react78 = __toESM(require("react"));
 function useMeasuredWidth2() {
-  const [element3, setElement] = import_react77.default.useState(null);
-  const [width, setWidth] = import_react77.default.useState(0);
-  import_react77.default.useLayoutEffect(() => {
+  const [element3, setElement] = import_react78.default.useState(null);
+  const [width, setWidth] = import_react78.default.useState(0);
+  import_react78.default.useLayoutEffect(() => {
     if (!element3) return void 0;
     const read = () => {
       const next = Math.round(element3.getBoundingClientRect().width);
@@ -73903,7 +74343,7 @@ function useMeasuredWidth2() {
 }
 
 // src/panels/LifecycleConfirm.tsx
-var import_react78 = __toESM(require("react"));
+var import_react79 = __toESM(require("react"));
 var import_jsx_runtime105 = require("react/jsx-runtime");
 function lifecycleConfirmWords(action, name2) {
   if (action === "retire") {
@@ -73931,14 +74371,14 @@ function LifecycleConfirm({
   cancelTestId
 }) {
   const words2 = lifecycleConfirmWords(action, name2);
-  const rootRef = import_react78.default.useRef(null);
-  const cancelRef = import_react78.default.useRef(null);
-  const opener = import_react78.default.useRef(null);
-  const questionId = import_react78.default.useId();
-  const consequenceId = import_react78.default.useId();
-  const cancelRefLatest = import_react78.default.useRef(onCancel);
+  const rootRef = import_react79.default.useRef(null);
+  const cancelRef = import_react79.default.useRef(null);
+  const opener = import_react79.default.useRef(null);
+  const questionId = import_react79.default.useId();
+  const consequenceId = import_react79.default.useId();
+  const cancelRefLatest = import_react79.default.useRef(onCancel);
   cancelRefLatest.current = onCancel;
-  import_react78.default.useLayoutEffect(() => {
+  import_react79.default.useLayoutEffect(() => {
     const doc = rootRef.current?.ownerDocument;
     const active = doc?.activeElement;
     opener.current = active && active !== doc?.body && !rootRef.current?.contains(active) ? active : null;
@@ -73948,7 +74388,7 @@ function LifecycleConfirm({
       if (back?.isConnected) back.focus({ preventScroll: true });
     };
   }, []);
-  import_react78.default.useEffect(() => {
+  import_react79.default.useEffect(() => {
     const doc = rootRef.current?.ownerDocument;
     if (!doc) return void 0;
     const onPointerDown = (event) => {
@@ -74146,26 +74586,26 @@ function RosterPanel({
   const [viewChoice, setViewChoice] = usePanelPreference("meta-console-roster-view", "auto", ROSTER_VIEW_CHOICES);
   const [measureRef, width] = useMeasuredWidth2();
   const view = viewChoice === "auto" ? width >= ROSTER_CARDS_MIN_WIDTH ? "cards" : "list" : viewChoice;
-  const [query, setQuery] = import_react79.default.useState("");
-  const [filter, setFilter] = import_react79.default.useState("all");
-  const [stateFilter, setStateFilter] = import_react79.default.useState(null);
-  const [sel, setSel] = import_react79.default.useState(defaultOpenMemberId || selectedMemberId || "");
-  const [detailOpen, setDetailOpen] = import_react79.default.useState(Boolean(defaultOpenMemberId));
-  const [expanded, setExpanded] = import_react79.default.useState(() => /* @__PURE__ */ new Set());
-  import_react79.default.useEffect(() => {
+  const [query, setQuery] = import_react80.default.useState("");
+  const [filter, setFilter] = import_react80.default.useState("all");
+  const [stateFilter, setStateFilter] = import_react80.default.useState(null);
+  const [sel, setSel] = import_react80.default.useState(defaultOpenMemberId || selectedMemberId || "");
+  const [detailOpen, setDetailOpen] = import_react80.default.useState(Boolean(defaultOpenMemberId));
+  const [expanded, setExpanded] = import_react80.default.useState(() => /* @__PURE__ */ new Set());
+  import_react80.default.useEffect(() => {
     if (selectedMemberId) setSel(selectedMemberId);
   }, [selectedMemberId]);
-  const entries = import_react79.default.useMemo(
+  const entries = import_react80.default.useMemo(
     () => agents.map((agent) => rosterEntry(agent, ledger, nowMs, lineage)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [agents, ledger.version, nowMs, lineage]
   );
-  const buckets = import_react79.default.useMemo(() => {
+  const buckets = import_react80.default.useMemo(() => {
     const counts = /* @__PURE__ */ new Map();
     for (const entry of entries) counts.set(entry.bucket, (counts.get(entry.bucket) || 0) + 1);
     return AGENT_BUCKET_ORDER.filter((bucket) => counts.has(bucket)).map((bucket) => ({ bucket, count: counts.get(bucket) || 0 }));
   }, [entries]);
-  const rows = import_react79.default.useMemo(() => {
+  const rows = import_react80.default.useMemo(() => {
     const needle = query.trim().toLowerCase();
     return entries.filter((entry) => {
       if (filter !== "all" && entry.bucket !== filter) return false;
@@ -74191,12 +74631,12 @@ function RosterPanel({
   const longLived = members.length - helpers;
   const workingLongLived = working.filter((entry) => !entry.helper).length;
   const teamEnd = hourCeiling(nowMs);
-  const teamTurnsToday = import_react79.default.useMemo(
+  const teamTurnsToday = import_react80.default.useMemo(
     () => ledger.totals(null, { sinceMs: localDayStart(nowMs), untilMs: nowMs }).turnsStarted,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ledger.version, Math.floor(nowMs / 6e4)]
   );
-  const teamTurns = import_react79.default.useMemo(
+  const teamTurns = import_react80.default.useMemo(
     () => ledger.series(null, "turnsStarted", { bins: 24, binMs: HOUR_MS2, endMs: teamEnd }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ledger.version, teamEnd]
@@ -74556,11 +74996,11 @@ function RosterList({
   onSelect,
   showIds
 }) {
-  const scrollRef = import_react79.default.useRef(null);
+  const scrollRef = import_react80.default.useRef(null);
   const windowed = rows.length > LIST_WINDOW_THRESHOLD2;
   const rowHeight = 48;
-  const [range, setRange] = import_react79.default.useState({ start: 0, end: Math.min(rows.length, 60) });
-  import_react79.default.useLayoutEffect(() => {
+  const [range, setRange] = import_react80.default.useState({ start: 0, end: Math.min(rows.length, 60) });
+  import_react80.default.useLayoutEffect(() => {
     if (!windowed) return void 0;
     const element3 = scrollRef.current;
     if (!element3) return void 0;
@@ -74634,7 +75074,7 @@ function RosterDrawer({
   const ledger = useActivityLedger();
   const { agent, activity } = entry;
   const identity = agent.identity || agent.member_id;
-  const [confirming, setConfirming] = import_react79.default.useState(null);
+  const [confirming, setConfirming] = import_react80.default.useState(null);
   const change = lastChange(agent);
   const inFlight = agent.progress?.in_flight_work ?? 0;
   const showRespawn = actionVisibility?.respawn !== false && agent.affordances?.can_respawn && restartOffered(agent);
@@ -74642,7 +75082,7 @@ function RosterDrawer({
   const showRetire = actionVisibility?.retire !== false && agent.affordances?.can_retire;
   const sideChatOf = agent.side_chat_of || agent.labels?.side_chat_of;
   const spawnedBy = entry.spawnedBy;
-  const heatRows = import_react79.default.useMemo(
+  const heatRows = import_react80.default.useMemo(
     () => HEAT_ROWS.map((row) => ({
       key: row.key,
       label: row.label,
@@ -74651,7 +75091,7 @@ function RosterDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ledger.version, entry.key, activity.endMs]
   );
-  const heatColumns = import_react79.default.useMemo(
+  const heatColumns = import_react80.default.useMemo(
     () => Array.from({ length: 24 }, (_2, index3) => hourLabel(activity.endMs - (24 - index3) * HOUR_MS2)),
     [activity.endMs]
   );
@@ -74808,7 +75248,7 @@ function RosterDrawer({
 }
 
 // src/panels/AgentDetailsPanel.tsx
-var import_react80 = __toESM(require("react"));
+var import_react81 = __toESM(require("react"));
 var import_jsx_runtime107 = require("react/jsx-runtime");
 function agentStatusChip(stateLabel, health, working = false) {
   const state = stateLabel.trim().toLowerCase();
@@ -74896,7 +75336,7 @@ function AgentDetailsPanel({
   const ledger = useActivityLedger({ tickMs: 3e4 });
   const nowMs = now3 ? now3() : ledger.nowMs;
   const [showIds, setShowIds] = useShowTechnicalIds("agent-details");
-  const [confirming, setConfirming] = import_react80.default.useState(null);
+  const [confirming, setConfirming] = import_react81.default.useState(null);
   const view = inspect;
   const name2 = agent ? agentDisplayTitle({ ...agent, label: agent.label || view?.display_name || "" }) : view?.display_name || agentDisplayName(identity, directory) || identity;
   const role = view?.role || agent?.role;
@@ -74921,7 +75361,7 @@ function AgentDetailsPanel({
   const status = stateLabel !== null ? agentStatusChip(stateLabel, health, working) : null;
   const nowLine = agent ? agentNowLine({ ...agent, progress, response_phase: statusFields2.response_phase }, activity, nowMs) : working ? { text: "Working", live: true } : { text: fullHealth.word, live: false };
   const repair = view?.session_repair;
-  const peers = import_react80.default.useMemo(() => {
+  const peers = import_react81.default.useMemo(() => {
     const keys2 = /* @__PURE__ */ new Set();
     for (const peer of view?.topology_peers || []) if (peer) keys2.add(peer);
     for (const peer of agent?.wired_to || []) {
@@ -74955,7 +75395,7 @@ function AgentDetailsPanel({
     ] }), words: "last active", announce: false } : null
   ];
   const turnsToday = activity.today.turnsStarted;
-  const runs = import_react80.default.useMemo(
+  const runs = import_react81.default.useMemo(
     () => ledger.runSpans(activity.key, { sinceMs: nowMs - DAY_MS4, untilMs: nowMs }).slice(-6).reverse(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ledger.version, activity.key, Math.floor(nowMs / 3e4)]
@@ -75178,11 +75618,11 @@ function EgoGraph({
   onOpenPeer
 }) {
   const directory = useAgentDirectory();
-  const peers = import_react80.default.useMemo(
+  const peers = import_react81.default.useMemo(
     () => parent && !wiredPeers.includes(parent) ? [...wiredPeers, parent] : wiredPeers,
     [wiredPeers, parent]
   );
-  const { nodes, edges } = import_react80.default.useMemo(() => {
+  const { nodes, edges } = import_react81.default.useMemo(() => {
     const centre = {
       id: identity,
       kind: "agent",
@@ -75239,7 +75679,7 @@ function EgoGraph({
 }
 
 // src/panels/HealthPanel.tsx
-var import_react81 = __toESM(require("react"));
+var import_react82 = __toESM(require("react"));
 var import_jsx_runtime108 = require("react/jsx-runtime");
 var KIND_ORDER = {
   broken: 0,
@@ -75312,10 +75752,10 @@ function HealthPanel({
   const nowMs = now3 ? now3() : ledger.nowMs;
   const [density, setDensity] = usePanelDensity("health");
   const [showIds, setShowIds] = useShowTechnicalIds("health");
-  const [filter, setFilter] = import_react81.default.useState(null);
-  const [showAllHealthy, setShowAllHealthy] = import_react81.default.useState(false);
+  const [filter, setFilter] = import_react82.default.useState(null);
+  const [showAllHealthy, setShowAllHealthy] = import_react82.default.useState(false);
   const titleOf = (row) => directory.lookup(row.identity)?.label || agentDisplayTitle({ label: row.display_name || "", identity: row.identity, role: row.role });
-  const entries = import_react81.default.useMemo(() => {
+  const entries = import_react82.default.useMemo(() => {
     const byKey = /* @__PURE__ */ new Map();
     for (const agent of agents || []) {
       for (const key of [agent.identity, agent.member_id, agent.agent_id]) if (key) byKey.set(key, agent);
@@ -75379,7 +75819,7 @@ function HealthPanel({
   const [heatRef, heatWidth] = useMeasuredWidth2();
   const heatCell = heatWidth > 0 ? Math.max(8, Math.min(16, Math.floor((heatWidth - HEAT_LABEL_WIDTH) / 24) - 3)) : 10;
   const endMs = hourCeiling(nowMs);
-  const heat = import_react81.default.useMemo(() => {
+  const heat = import_react82.default.useMemo(() => {
     const ranked = entries.filter((entry) => entry.health.kind !== "retired").map((entry) => ({ entry, total: entry.activity.hourly.reduce((sum, value) => sum + value, 0) })).sort((left, right) => right.total - left.total || left.entry.name.localeCompare(right.entry.name));
     return {
       rows: ranked.slice(0, HEAT_ROWS_SHOWN).map(({ entry }) => ({ key: entry.identity, label: entry.name, values: entry.activity.hourly })),
@@ -75387,7 +75827,7 @@ function HealthPanel({
       busiest: ranked[0]
     };
   }, [entries]);
-  const heatColumns = import_react81.default.useMemo(
+  const heatColumns = import_react82.default.useMemo(
     () => Array.from({ length: 24 }, (_2, index3) => hourLabel(endMs - (24 - index3) * HOUR_MS2)),
     [endMs]
   );
@@ -75535,7 +75975,7 @@ function HealthPanel({
 }
 
 // src/panels/SchedulesSection.tsx
-var import_react82 = __toESM(require("react"));
+var import_react83 = __toESM(require("react"));
 
 // src/lib/schedule-runs.ts
 var MINUTE7 = 6e4;
@@ -75888,6 +76328,7 @@ function ScheduleForm({
   onCancel,
   formatTime: formatTime2 = formatScheduleTime,
   lead,
+  notice,
   className
 }) {
   return /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(
@@ -76057,6 +76498,7 @@ function ScheduleForm({
           agentName || identity,
           " as you, through the same checks as a message you send now."
         ] }),
+        notice,
         error48 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "crit", role: "alert", className: "console-schedules__error", testId: "schedule-form-error", children: error48 }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("div", { className: "cc-btn-row console-schedules__actions", children: [
           /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("button", { type: "submit", className: "cc-btn cc-btn--primary", "data-testid": "schedule-form-save", disabled: busy, children: saving ? "Saving..." : schedule ? "Save" : "Create schedule" }),
@@ -76075,10 +76517,45 @@ function ScheduleForm({
     }
   );
 }
+function ScheduleTakeoverNotice({
+  pending,
+  busy,
+  onConfirm,
+  onCancel,
+  agentName,
+  testId,
+  confirmTestId,
+  cancelTestId
+}) {
+  return /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+    Notice,
+    {
+      tone: "warn",
+      role: "alert",
+      className: "console-schedules__takeover",
+      testId,
+      action: /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("span", { className: "cc-btn-row", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+          "button",
+          {
+            type: "button",
+            className: "cc-btn cc-btn--sm cc-btn--primary",
+            "data-testid": confirmTestId,
+            disabled: busy,
+            onClick: onConfirm,
+            children: scheduleTakeoverConfirmLabel(pending.command)
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("button", { type: "button", className: "cc-btn cc-btn--sm cc-btn--ghost", "data-testid": cancelTestId, onClick: onCancel, children: "Keep its sender" })
+      ] }),
+      children: describeScheduleTakeover(pending.takeover, pending.command, agentName)
+    }
+  );
+}
 function useMeasuredWidth3(fallback) {
-  const [node2, setNode] = import_react82.default.useState(null);
-  const [width, setWidth] = import_react82.default.useState(fallback);
-  import_react82.default.useEffect(() => {
+  const [node2, setNode] = import_react83.default.useState(null);
+  const [width, setWidth] = import_react83.default.useState(fallback);
+  import_react83.default.useEffect(() => {
     if (!node2) return void 0;
     const measure = () => {
       const next = Math.round(node2.getBoundingClientRect().width);
@@ -76119,30 +76596,31 @@ function SchedulesSection({
   timezone,
   formatTime: formatTime2 = formatScheduleTime
 }) {
-  const [schedules, setSchedules] = import_react82.default.useState([]);
-  const [status, setStatus] = import_react82.default.useState("loading");
-  const [loadError, setLoadError] = import_react82.default.useState(null);
-  const [actionError, setActionError] = import_react82.default.useState(null);
-  const [busy, setBusy] = import_react82.default.useState(null);
+  const [schedules, setSchedules] = import_react83.default.useState([]);
+  const [status, setStatus] = import_react83.default.useState("loading");
+  const [loadError, setLoadError] = import_react83.default.useState(null);
+  const [actionError, setActionError] = import_react83.default.useState(null);
+  const [busy, setBusy] = import_react83.default.useState(null);
   const directory = useAgentDirectory();
   const senderLabel = (sender) => directory.lookup(sender)?.label;
-  const [confirmingDelete, setConfirmingDelete] = import_react82.default.useState(null);
-  const [form, setForm] = import_react82.default.useState(null);
+  const [confirmingDelete, setConfirmingDelete] = import_react83.default.useState(null);
+  const [form, setForm] = import_react83.default.useState(null);
+  const [takeover, setTakeover] = import_react83.default.useState(null);
   const [stripRef, stripWidth] = useMeasuredWidth3(480);
-  const runRef = import_react82.default.useRef(run);
+  const runRef = import_react83.default.useRef(run);
   runRef.current = run;
-  const nowRef = import_react82.default.useRef(now3);
+  const nowRef = import_react83.default.useRef(now3);
   nowRef.current = now3;
-  const alive = import_react82.default.useRef(true);
-  const loadSeq = import_react82.default.useRef(0);
-  const lastLoadAt = import_react82.default.useRef(null);
-  import_react82.default.useEffect(() => {
+  const alive = import_react83.default.useRef(true);
+  const loadSeq = import_react83.default.useRef(0);
+  const lastLoadAt = import_react83.default.useRef(null);
+  import_react83.default.useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
     };
   }, []);
-  const load = import_react82.default.useCallback(async () => {
+  const load = import_react83.default.useCallback(async () => {
     const seq = ++loadSeq.current;
     lastLoadAt.current = nowRef.current().getTime();
     try {
@@ -76158,38 +76636,45 @@ function SchedulesSection({
       setLoadError(scheduleErrorMessage(error48, CONSOLE_SCHEDULE_COMMANDS.list));
     }
   }, []);
-  import_react82.default.useEffect(() => {
+  import_react83.default.useEffect(() => {
     void load();
   }, [identity, load]);
-  import_react82.default.useEffect(() => {
+  import_react83.default.useEffect(() => {
     const last = lastLoadAt.current;
     if (last !== null && nowRef.current().getTime() - last < AUTO_REFRESH_INTERVAL_MS) return;
     void load();
   }, [refreshToken, load]);
-  import_react82.default.useEffect(() => {
+  import_react83.default.useEffect(() => {
     if (!editing.canChange) {
       setForm(null);
       setConfirmingDelete(null);
+      setTakeover(null);
     }
   }, [editing.canChange]);
   const nowMs = now3().getTime();
   const nowMinute = Math.floor(nowMs / 6e4) * 6e4;
-  const plans = import_react82.default.useMemo(
+  const plans = import_react83.default.useMemo(
     () => schedules.map((schedule) => planScheduleRuns(schedule, nowMinute, SCHEDULE_RUN_WINDOW_MS)),
     [schedules, nowMinute]
   );
   const next = nextPlannedRun(plans);
-  const stripItems2 = import_react82.default.useMemo(() => scheduleStripItems(plans), [plans]);
+  const stripItems2 = import_react83.default.useMemo(() => scheduleStripItems(plans), [plans]);
   async function write(command, params, key) {
     setBusy(key);
     setActionError(null);
+    setTakeover(null);
     let done = false;
     try {
       await runRef.current(command, params);
       done = true;
     } catch (error48) {
       if (alive.current) {
-        setActionError(scheduleErrorMessage(error48, command));
+        const asked = scheduleTakeover(error48);
+        if (asked) {
+          setTakeover({ identity, command, params, key, takeover: asked });
+        } else {
+          setActionError(scheduleErrorMessage(error48, command));
+        }
         if (scheduleIsGone(error48)) {
           setForm(null);
           setConfirmingDelete(null);
@@ -76200,14 +76685,23 @@ function SchedulesSection({
     await load();
     return done;
   }
+  function confirmTakeover() {
+    if (!takeover || busy) return;
+    const { command, params, key } = takeover;
+    void write(command, scheduleTakeoverParams(params), key).then((done) => {
+      if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.update) setForm(null);
+    });
+  }
   function openNew() {
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setForm({ schedule: null, draft: emptyScheduleDraft(now3(), timezone ?? viewerTimeZone()), error: null });
   }
   function openEdit(schedule) {
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setForm({
       schedule,
       draft: scheduleDraftFromSchedule(schedule, now3(), timezone ?? viewerTimeZone()),
@@ -76215,9 +76709,11 @@ function SchedulesSection({
     });
   }
   function change(patch2) {
+    setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
     setForm((current) => current ? { ...current, draft: { ...current.draft, ...patch2 }, error: null } : current);
   }
   function toggleWeekday(day) {
+    setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
     setForm((current) => current ? { ...current, draft: toggleDraftWeekday(current.draft, day), error: null } : current);
   }
   function submit(event) {
@@ -76235,7 +76731,8 @@ function SchedulesSection({
   }
   function runAction(schedule, command) {
     if (busy) return;
-    void write(command, { schedule_id: schedule.scheduleId }, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
+    const params = command === CONSOLE_SCHEDULE_COMMANDS.resume ? scheduleResumeParams(schedule) : { schedule_id: schedule.scheduleId };
+    void write(command, params, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
       if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.delete) {
         setConfirmingDelete(null);
         setForm((current) => current?.schedule?.scheduleId === schedule.scheduleId ? null : current);
@@ -76244,6 +76741,20 @@ function SchedulesSection({
   }
   const headingId = "schedules-heading:".concat(identity);
   const agentName = directory.lookup(identity)?.label;
+  const takeoverInForm = Boolean(form && editing.canChange && takeover?.command === CONSOLE_SCHEDULE_COMMANDS.update);
+  const takeoverNotice = takeover ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+    ScheduleTakeoverNotice,
+    {
+      pending: takeover,
+      busy: busy !== null,
+      onConfirm: confirmTakeover,
+      onCancel: () => setTakeover(null),
+      agentName: senderLabel,
+      testId: "schedules-takeover:".concat(identity),
+      confirmTestId: "schedules-takeover-confirm:".concat(identity),
+      cancelTestId: "schedules-takeover-cancel:".concat(identity)
+    }
+  ) : null;
   return /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(
     "section",
     {
@@ -76279,6 +76790,7 @@ function SchedulesSection({
         editing.note ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("p", { className: "console-schedules__note", "data-testid": "schedules-note:".concat(identity), children: editing.note }) : null,
         loadError ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "crit", role: "alert", className: "console-schedules__error", testId: "schedules-load-error:".concat(identity), children: loadError }) : null,
         actionError ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "crit", role: "alert", className: "console-schedules__error", testId: "schedules-error:".concat(identity), children: actionError }) : null,
+        takeover && !takeoverInForm ? takeoverNotice : null,
         schedules.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("div", { className: "console-schedules__glance", ref: stripRef, children: [
           /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("p", { className: "console-schedules__next", "data-testid": "schedules-next:".concat(identity), children: next ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(import_jsx_runtime109.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("span", { className: "console-schedules__next-label", children: "Next" }),
@@ -76316,8 +76828,12 @@ function SchedulesSection({
             onChange: change,
             onToggleWeekday: toggleWeekday,
             onSubmit: submit,
-            onCancel: () => setForm(null),
-            formatTime: formatTime2
+            onCancel: () => {
+              setForm(null);
+              setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
+            },
+            formatTime: formatTime2,
+            notice: takeoverInForm ? takeoverNotice : null
           }
         ) : null,
         status === "loading" && schedules.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(LoadingState, { label: "Loading schedules", rows: 2 }) : null,
@@ -76356,6 +76872,15 @@ function SchedulesSection({
           children: "Sends as ".concat(describeScheduleSender(schedule.sender, senderLabel))
         }
       ),
+      schedule.senderHistory.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+        "p",
+        {
+          className: "console-schedules__meta",
+          "data-testid": "schedule-sender-history:".concat(id),
+          title: describeScheduleSenderHistory(schedule.senderHistory, senderLabel, formatTime2),
+          children: describeLatestTakeover(schedule.senderHistory, senderLabel, formatTime2)
+        }
+      ) : null,
       editing.canChange ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("div", { className: "cc-btn-row console-schedules__actions", children: [
         /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
           "button",
@@ -76435,10 +76960,10 @@ function SchedulesSection({
 }
 
 // src/panels/SchedulesPanel.tsx
-var import_react84 = __toESM(require("react"));
+var import_react85 = __toESM(require("react"));
 
 // ../packages/console-components/src/viz/charts/agenda.tsx
-var import_react83 = require("react");
+var import_react84 = require("react");
 var import_jsx_runtime110 = require("react/jsx-runtime");
 var MINUTE8 = 6e4;
 var HOUR7 = 60 * MINUTE8;
@@ -76462,9 +76987,9 @@ function stackRuns(items, rowHeight) {
   });
 }
 function useLaneWidth(fallback) {
-  const ref = (0, import_react83.useRef)(null);
-  const [width, setWidth] = (0, import_react83.useState)(fallback);
-  (0, import_react83.useEffect)(() => {
+  const ref = (0, import_react84.useRef)(null);
+  const [width, setWidth] = (0, import_react84.useState)(fallback);
+  (0, import_react84.useEffect)(() => {
     const element3 = ref.current;
     if (!element3) return void 0;
     const measure = () => {
@@ -76509,9 +77034,9 @@ function Agenda({
 }) {
   const [laneRef, laneWidth] = useLaneWidth(640);
   const width = Math.max(120, laneWidth);
-  const scale = (0, import_react83.useMemo)(() => createTimeScale({ start: start2, end, range: [EDGE_PX, width - EDGE_PX] }), [start2, end, width]);
-  const ticks = (0, import_react83.useMemo)(() => axisTicks(start2, end), [start2, end]);
-  const lanes = (0, import_react83.useMemo)(
+  const scale = (0, import_react84.useMemo)(() => createTimeScale({ start: start2, end, range: [EDGE_PX, width - EDGE_PX] }), [start2, end, width]);
+  const ticks = (0, import_react84.useMemo)(() => axisTicks(start2, end), [start2, end]);
+  const lanes = (0, import_react84.useMemo)(
     () => rows.map((row) => {
       const items = [
         ...row.runs.filter((run) => run.t >= start2 && run.t <= end).map((run) => ({ kind: "run", key: "".concat(row.key, ":").concat(run.id), t: run.t, x: scale.x(run.t), dy: 0, run })),
@@ -76525,10 +77050,10 @@ function Agenda({
     [rows, scale, start2, end, rowHeight]
   );
   const firstKey = lanes.find((lane) => lane.items.length)?.items[0]?.key ?? null;
-  const [focusKey, setFocusKey] = (0, import_react83.useState)(null);
-  const [active, setActive] = (0, import_react83.useState)(null);
+  const [focusKey, setFocusKey] = (0, import_react84.useState)(null);
+  const [active, setActive] = (0, import_react84.useState)(null);
   const tabKey = focusKey && lanes.some((lane) => lane.items.some((item) => item.key === focusKey)) ? focusKey : firstKey;
-  const rootRef = (0, import_react83.useRef)(null);
+  const rootRef = (0, import_react84.useRef)(null);
   const cy = rowHeight / 2;
   const locate = (key) => {
     if (!key) return null;
@@ -76816,36 +77341,37 @@ function SchedulesPanel({
   const [range, setRange] = usePanelPreference("meta-console-schedules-range", "day", RANGES);
   const [density, setDensity] = usePanelDensity("schedules");
   const [showIds, setShowIds] = useShowTechnicalIds("schedules");
-  const [entries, setEntries] = import_react84.default.useState({});
-  const [inFlight, setInFlight] = import_react84.default.useState(0);
-  const [drawer, setDrawer] = import_react84.default.useState(null);
-  const [busy, setBusy] = import_react84.default.useState(null);
-  const [actionError, setActionError] = import_react84.default.useState(null);
-  const [confirmingDelete, setConfirmingDelete] = import_react84.default.useState(null);
-  const [phaseFilter, setPhaseFilter] = import_react84.default.useState("all");
-  const [drawerFocus, setDrawerFocus] = import_react84.default.useState(true);
+  const [entries, setEntries] = import_react85.default.useState({});
+  const [inFlight, setInFlight] = import_react85.default.useState(0);
+  const [drawer, setDrawer] = import_react85.default.useState(null);
+  const [busy, setBusy] = import_react85.default.useState(null);
+  const [actionError, setActionError] = import_react85.default.useState(null);
+  const [takeover, setTakeover] = import_react85.default.useState(null);
+  const [confirmingDelete, setConfirmingDelete] = import_react85.default.useState(null);
+  const [phaseFilter, setPhaseFilter] = import_react85.default.useState("all");
+  const [drawerFocus, setDrawerFocus] = import_react85.default.useState(true);
   const [weekRef, weekWidth] = useMeasuredWidth3(640);
-  const runRef = import_react84.default.useRef(run);
+  const runRef = import_react85.default.useRef(run);
   runRef.current = run;
-  const nowRef = import_react84.default.useRef(now3);
+  const nowRef = import_react85.default.useRef(now3);
   nowRef.current = now3;
-  const entriesRef = import_react84.default.useRef(entries);
+  const entriesRef = import_react85.default.useRef(entries);
   entriesRef.current = entries;
-  const loading = import_react84.default.useRef(/* @__PURE__ */ new Set());
-  const alive = import_react84.default.useRef(true);
-  import_react84.default.useEffect(() => {
+  const loading = import_react85.default.useRef(/* @__PURE__ */ new Set());
+  const alive = import_react85.default.useRef(true);
+  import_react85.default.useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
     };
   }, []);
-  const visible = import_react84.default.useMemo(
+  const visible = import_react85.default.useMemo(
     () => agents.filter((agent) => !isAgentRetired(agent) && Boolean(agent.identity || agent.member_id)),
     [agents]
   );
-  const identities = import_react84.default.useMemo(() => visible.map((agent) => agent.identity || agent.member_id), [visible]);
+  const identities = import_react85.default.useMemo(() => visible.map((agent) => agent.identity || agent.member_id), [visible]);
   const identitiesKey = identities.join("\n");
-  const agentOf = import_react84.default.useCallback(
+  const agentOf = import_react85.default.useCallback(
     (identity) => visible.find((agent) => (agent.identity || agent.member_id) === identity),
     [visible]
   );
@@ -76855,7 +77381,7 @@ function SchedulesPanel({
   };
   const editingOf = (identity) => consoleScheduleEditing({ offer, readOnly, accessEnforcing, agent: agentOf(identity) });
   const clock3 = () => nowRef.current ? nowRef.current().getTime() : Date.now();
-  const load = import_react84.default.useCallback(async (targets, force) => {
+  const load = import_react85.default.useCallback(async (targets, force) => {
     const started = clock3();
     const due = targets.filter((identity) => {
       if (loading.current.has(identity)) return false;
@@ -76895,7 +77421,7 @@ function SchedulesPanel({
     };
     await Promise.all(Array.from({ length: Math.min(LIST_CONCURRENCY, due.length) }, worker));
   }, []);
-  import_react84.default.useEffect(() => {
+  import_react85.default.useEffect(() => {
     if (!offer.list) return;
     void load(identities, false);
   }, [offer.list, identitiesKey, refreshToken, load]);
@@ -76904,13 +77430,13 @@ function SchedulesPanel({
     void load(identities, true);
   };
   const shown = identities.filter((identity) => entries[identity]);
-  const schedules = import_react84.default.useMemo(
+  const schedules = import_react85.default.useMemo(
     () => identities.flatMap((identity) => entries[identity]?.schedules ?? []),
     // identitiesKey stands for identities.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [entries, identitiesKey]
   );
-  const plans = import_react84.default.useMemo(
+  const plans = import_react85.default.useMemo(
     () => schedules.map((schedule) => planScheduleRuns(schedule, nowMinute, SCHEDULE_RUN_WINDOW_MS)),
     [schedules, nowMinute]
   );
@@ -76936,15 +77462,21 @@ function SchedulesPanel({
   async function write(identity, command, params, key) {
     setBusy(key);
     setActionError(null);
+    setTakeover(null);
     let done = false;
     try {
       await runRef.current(identity, command, params);
       done = true;
     } catch (error48) {
       if (alive.current) {
-        const message = scheduleErrorMessage(error48, command);
-        setActionError(message);
-        setDrawer((current) => current?.kind === "form" ? { ...current, error: message } : current);
+        const asked = scheduleTakeover(error48);
+        if (asked) {
+          setTakeover({ identity, command, params, key, takeover: asked });
+        } else {
+          const message = scheduleErrorMessage(error48, command);
+          setActionError(message);
+          setDrawer((current) => current?.kind === "form" ? { ...current, error: message } : current);
+        }
         if (scheduleIsGone(error48)) {
           setConfirmingDelete(null);
           setDrawer(null);
@@ -76955,10 +77487,18 @@ function SchedulesPanel({
     await load([identity], true);
     return done;
   }
+  function confirmTakeover() {
+    if (!takeover || busy) return;
+    const { identity, command, params, key } = takeover;
+    void write(identity, command, scheduleTakeoverParams(params), key).then((done) => {
+      if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.update) setDrawer(null);
+    });
+  }
   function openNew(preferred, takeFocus = true) {
     setDrawerFocus(takeFocus);
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     const identity = preferred && changeable.includes(preferred) ? preferred : changeable[0];
     if (!identity) return;
     setDrawer({
@@ -76973,6 +77513,7 @@ function SchedulesPanel({
     setDrawerFocus(true);
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setDrawer({
       kind: "form",
       identity: schedule.identity,
@@ -76987,6 +77528,7 @@ function SchedulesPanel({
     setDrawer({ kind: "detail", identity: schedule.identity, scheduleId: schedule.scheduleId });
   }
   function patchForm(patch2) {
+    if (patch2.draft) setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
     setDrawer((current) => current?.kind === "form" ? { ...current, ...patch2 } : current);
   }
   function submit(event) {
@@ -77006,7 +77548,8 @@ function SchedulesPanel({
   }
   function runAction(schedule, command) {
     if (busy) return;
-    void write(schedule.identity, command, { schedule_id: schedule.scheduleId }, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
+    const params = command === CONSOLE_SCHEDULE_COMMANDS.resume ? scheduleResumeParams(schedule) : { schedule_id: schedule.scheduleId };
+    void write(schedule.identity, command, params, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
       if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.delete) {
         setConfirmingDelete(null);
         setDrawer(
@@ -77015,9 +77558,9 @@ function SchedulesPanel({
       }
     });
   }
-  const openedOnLoad = import_react84.default.useRef(false);
+  const openedOnLoad = import_react85.default.useRef(false);
   const listsRead = offer.list && identities.length > 0 && shown.length === identities.length && inFlight === 0;
-  import_react84.default.useEffect(() => {
+  import_react85.default.useEffect(() => {
     if (!openNewOnLoad || openedOnLoad.current || !listsRead) return;
     openedOnLoad.current = true;
     openNew(typeof openNewOnLoad === "string" ? openNewOnLoad : void 0, false);
@@ -77341,6 +77884,24 @@ function SchedulesPanel({
       id
     );
   }
+  const takeoverInForm = drawer?.kind === "form" && takeover?.command === CONSOLE_SCHEDULE_COMMANDS.update;
+  const takeoverNotice = takeover ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(
+    ScheduleTakeoverNotice,
+    {
+      pending: takeover,
+      busy: busy !== null,
+      onConfirm: confirmTakeover,
+      onCancel: () => setTakeover(null),
+      agentName: (raw) => directory.lookup(raw)?.label,
+      testId: "schedules-takeover",
+      confirmTestId: "schedules-takeover-confirm",
+      cancelTestId: "schedules-takeover-cancel"
+    }
+  ) : null;
+  const closeForm = () => {
+    setDrawer(null);
+    setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
+  };
   let drawerNode = null;
   if (drawer?.kind === "form") {
     const form = drawer;
@@ -77368,7 +77929,7 @@ function SchedulesPanel({
           "For ",
           /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(AgentName, { id: form.identity })
         ] }),
-        onClose: () => setDrawer(null),
+        onClose: closeForm,
         autoFocus: drawerFocus,
         testId: "schedules-drawer",
         closeTestId: "schedules-drawer-close",
@@ -77385,9 +77946,10 @@ function SchedulesPanel({
             onChange: (patch2) => patchForm({ draft: { ...form.draft, ...patch2 }, error: null }),
             onToggleWeekday: (day) => patchForm({ draft: toggleDraftWeekday(form.draft, day), error: null }),
             onSubmit: submit,
-            onCancel: () => setDrawer(null),
+            onCancel: closeForm,
             formatTime: formatTime2,
             lead: agentChoice,
+            notice: takeoverInForm ? takeoverNotice : null,
             className: "schedules__form"
           }
         )
@@ -77435,7 +77997,8 @@ function SchedulesPanel({
               index3 === 0 && !isPaused ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(Countdown, { to: t, now: now3 ? nowMs : void 0 }) : null
             ] }, t)) }) : /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("p", { className: "schedules__caption", children: isPaused ? "Paused: nothing runs until it is resumed." : "No run in the next 7 days." }) }),
             /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Message", children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("blockquote", { className: "schedules__message", children: schedule.content }) }),
-            schedule.senderHidden ? null : /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Sends as", children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("p", { className: "schedules__detail-text", title: schedule.sender || void 0, children: describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label) }) })
+            schedule.senderHidden ? null : /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Sends as", children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("p", { className: "schedules__detail-text", title: schedule.sender || void 0, children: describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label) }) }),
+            schedule.senderHistory.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Earlier senders", count: schedule.senderHistory.length, children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("ol", { className: "schedules__runs", "data-testid": "schedules-sender-history:".concat(schedule.scheduleId), children: schedule.senderHistory.map((former, index3) => /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("li", { title: former.sender || void 0, children: describeFormerSender(former, (raw) => directory.lookup(raw)?.label, formatTime2) }, "".concat(index3, ":").concat(former.replacedAt ?? ""))) }) }) : null
           ]
         }
       );
@@ -77485,6 +78048,7 @@ function SchedulesPanel({
         }
       ),
       actionError && drawer?.kind !== "form" ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(Notice, { tone: "crit", className: "schedules__notice", testId: "schedules-action-error", children: actionError }) : null,
+      takeover && !takeoverInForm ? takeoverNotice : null,
       /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(
         DrawerLayout,
         {
@@ -77529,7 +78093,7 @@ function topologyLineage(result) {
 }
 
 // src/panels/WorkGraphPanel.tsx
-var import_react87 = __toESM(require("react"));
+var import_react88 = __toESM(require("react"));
 
 // src/lib/workgraph-layout.ts
 var WORKGRAPH_SNAPSHOT_LIMIT = 1e3;
@@ -78425,31 +78989,31 @@ function workGraphEventSentence(event, context) {
 }
 
 // src/lib/navigation-focus.ts
-var import_react85 = __toESM(require("react"));
-var NavigationFocusContext = import_react85.default.createContext(null);
+var import_react86 = __toESM(require("react"));
+var NavigationFocusContext = import_react86.default.createContext(null);
 function useNavigationFocusSource() {
-  const [request, setRequest] = import_react85.default.useState(null);
-  const serial = import_react85.default.useRef(0);
-  const focus = import_react85.default.useCallback((kind, id) => {
+  const [request, setRequest] = import_react86.default.useState(null);
+  const serial = import_react86.default.useRef(0);
+  const focus = import_react86.default.useCallback((kind, id) => {
     serial.current += 1;
     setRequest({ kind, id, serial: serial.current });
   }, []);
-  const done = import_react85.default.useCallback((handled) => {
+  const done = import_react86.default.useCallback((handled) => {
     setRequest((current) => current && current.serial === handled ? null : current);
   }, []);
-  const value = import_react85.default.useMemo(() => ({ request, done }), [request, done]);
+  const value = import_react86.default.useMemo(() => ({ request, done }), [request, done]);
   return { value, focus };
 }
 function NavigationFocusProvider({ value, children }) {
-  return import_react85.default.createElement(NavigationFocusContext.Provider, { value }, children);
+  return import_react86.default.createElement(NavigationFocusContext.Provider, { value }, children);
 }
 function useNavigationFocus(kind, onFocus) {
-  const context = import_react85.default.useContext(NavigationFocusContext);
-  const onFocusRef = import_react85.default.useRef(onFocus);
+  const context = import_react86.default.useContext(NavigationFocusContext);
+  const onFocusRef = import_react86.default.useRef(onFocus);
   onFocusRef.current = onFocus;
   const request = context?.request ?? null;
   const done = context?.done;
-  import_react85.default.useEffect(() => {
+  import_react86.default.useEffect(() => {
     if (!request || request.kind !== kind || !done) return;
     onFocusRef.current(request.id);
     done(request.serial);
@@ -78457,7 +79021,7 @@ function useNavigationFocus(kind, onFocus) {
 }
 
 // src/panels/WorkGraphGraphView.tsx
-var import_react86 = __toESM(require("react"));
+var import_react87 = __toESM(require("react"));
 var import_jsx_runtime112 = require("react/jsx-runtime");
 function WorkGraphPerson({
   person,
@@ -78469,13 +79033,13 @@ function WorkGraphPerson({
     /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("span", { className: "cc-agent__name", children: person.name })
   ] });
 }
-function workGraphItemActions(item, itemId2, canManage, { onClaim, onClose, onRelease }, options = {}) {
+function workGraphItemActions(item, itemId2, canManage, { onClaim, onClose, onRelease, canRelease }, options = {}) {
   const status = item.status || "open";
   const revision = typeof item.revision === "number" ? item.revision : void 0;
   const title = item.title || "this work item";
   const claim = canManage && onClaim && status === "open" && !workGraphItemOwner(item);
   const close = canManage && onClose && !isWorkGraphTerminal(status) && status !== "blocked";
-  const release = options.release && canManage && onRelease && status === "in_progress";
+  const release = options.release && canManage && onRelease && status === "in_progress" && (canRelease?.(item) ?? true);
   if (!claim && !close && !release) return null;
   const variant = options.variant ?? "ghost";
   return /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(import_jsx_runtime112.Fragment, { children: [
@@ -78523,9 +79087,9 @@ function WorkGraphAttentionRow({
 }) {
   const directory = useAgentDirectory();
   const now3 = useNow();
-  const inputId = import_react86.default.useId();
-  const [reassignOpen, setReassignOpen] = import_react86.default.useState(false);
-  const [reassignIdentity, setReassignIdentity] = import_react86.default.useState("");
+  const inputId = import_react87.default.useId();
+  const [reassignOpen, setReassignOpen] = import_react87.default.useState(false);
+  const [reassignIdentity, setReassignIdentity] = import_react87.default.useState("");
   const bindingId = binding.binding_id || "";
   const revision = binding.machine_state?.revision;
   const statusLabel2 = workGraphBindingStatusLabel(binding);
@@ -78694,7 +79258,7 @@ function ItemDetails({ itemId: itemId2, item, bindings }) {
   return /* @__PURE__ */ (0, import_jsx_runtime112.jsx)(TechnicalDetails, { className: "workgraph-graph__metadata", summary: "Item details", items: technical });
 }
 function ItemActivity({ events, itemId: itemId2, titleOf }) {
-  const [all2, setAll] = import_react86.default.useState(false);
+  const [all2, setAll] = import_react87.default.useState(false);
   const own5 = events.filter((event) => workGraphEventItemId(event) === itemId2);
   if (own5.length === 0) return /* @__PURE__ */ (0, import_jsx_runtime112.jsx)("p", { className: "workgraph-drawer__empty", children: "No activity in the recent window." });
   return /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)(import_jsx_runtime112.Fragment, { children: [
@@ -78816,8 +79380,8 @@ function WorkGraphZoomBar({
   listen,
   notDrawn
 }) {
-  const [scale, setScale] = import_react86.default.useState(() => graphRef.current?.viewport().scale ?? 1);
-  import_react86.default.useEffect(() => listen(setScale), [listen]);
+  const [scale, setScale] = import_react87.default.useState(() => graphRef.current?.viewport().scale ?? 1);
+  import_react87.default.useEffect(() => listen(setScale), [listen]);
   const percent = "".concat(Math.round(scale * 100), "%");
   return /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)("div", { className: "workgraph-graph__bar", children: [
     /* @__PURE__ */ (0, import_jsx_runtime112.jsxs)("div", { className: "workgraph-graph__zoom", role: "toolbar", "aria-label": "Zoom", children: [
@@ -78902,14 +79466,14 @@ function WorkGraphGraphView({
 }) {
   const directory = useAgentDirectory();
   const now3 = useNow();
-  const builtModel = import_react86.default.useMemo(
+  const builtModel = import_react87.default.useMemo(
     () => givenModel ? null : buildWorkGraphModel({ items, edges, attention: attention2, readyItemIds }),
     [givenModel, items, edges, attention2, readyItemIds]
   );
   const model = givenModel ?? builtModel;
-  const doneBy = import_react86.default.useMemo(() => workGraphDoneBy(events, directory), [events, directory]);
+  const doneBy = import_react87.default.useMemo(() => workGraphDoneBy(events, directory), [events, directory]);
   const minute = Math.floor(now3 / 6e4);
-  const graph = import_react86.default.useMemo(
+  const graph = import_react87.default.useMemo(
     () => buildWorkGraphGraph(model, {
       selectedId: selectedId ?? null,
       showDone,
@@ -78921,19 +79485,19 @@ function WorkGraphGraphView({
     }),
     [model, selectedId, showDone, showCancelled, highlightCriticalPath, directory, minute, doneBy]
   );
-  const graphRef = import_react86.default.useRef(null);
-  const canvasRef = import_react86.default.useRef(null);
-  const scaleListener = import_react86.default.useRef(null);
-  const scaleFrame = import_react86.default.useRef(0);
-  const latestScale = import_react86.default.useRef(null);
-  const listenToScale = import_react86.default.useCallback((onScale) => {
+  const graphRef = import_react87.default.useRef(null);
+  const canvasRef = import_react87.default.useRef(null);
+  const scaleListener = import_react87.default.useRef(null);
+  const scaleFrame = import_react87.default.useRef(0);
+  const latestScale = import_react87.default.useRef(null);
+  const listenToScale = import_react87.default.useCallback((onScale) => {
     scaleListener.current = onScale;
     if (latestScale.current !== null) onScale(latestScale.current);
     return () => {
       if (scaleListener.current === onScale) scaleListener.current = null;
     };
   }, []);
-  const onViewportChange = import_react86.default.useCallback((viewport) => {
+  const onViewportChange = import_react87.default.useCallback((viewport) => {
     latestScale.current = viewport.scale;
     if (scaleFrame.current) return;
     const deliver = () => {
@@ -78946,15 +79510,15 @@ function WorkGraphGraphView({
       queueMicrotask(deliver);
     }
   }, []);
-  import_react86.default.useEffect(() => () => {
+  import_react87.default.useEffect(() => () => {
     if (scaleFrame.current && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scaleFrame.current);
   }, []);
-  const selection = import_react86.default.useMemo(() => selectedId ? [selectedId] : [], [selectedId]);
-  const pendingReveal = import_react86.default.useRef(null);
-  import_react86.default.useEffect(() => {
+  const selection = import_react87.default.useMemo(() => selectedId ? [selectedId] : [], [selectedId]);
+  const pendingReveal = import_react87.default.useRef(null);
+  import_react87.default.useEffect(() => {
     if (revealRequest) pendingReveal.current = revealRequest.id;
   }, [revealRequest]);
-  import_react86.default.useEffect(() => {
+  import_react87.default.useEffect(() => {
     const id = pendingReveal.current;
     if (!id || !graph.nodes.some((node2) => node2.id === id)) return void 0;
     const drawn = () => Array.from(canvasRef.current?.querySelectorAll('[data-testid="workgraph-graph-node"]') ?? []).some((element3) => element3.getAttribute("data-item-id") === id);
@@ -79387,7 +79951,7 @@ function ActivityStrip({
   const directory = useAgentDirectory();
   const now3 = useNow();
   const minute = Math.floor(now3 / 6e4);
-  const days = import_react87.default.useMemo(() => workGraphActivityDays(events, minute * 6e4, 7), [events, minute]);
+  const days = import_react88.default.useMemo(() => workGraphActivityDays(events, minute * 6e4, 7), [events, minute]);
   const latest = events.slice(0, 2);
   return /* @__PURE__ */ (0, import_jsx_runtime113.jsxs)("div", { className: "workgraph-strip", "data-testid": "workgraph-activity-strip", children: [
     /* @__PURE__ */ (0, import_jsx_runtime113.jsxs)("div", { className: "workgraph-strip__chart", children: [
@@ -79411,8 +79975,8 @@ function ActivityStrip({
   ] });
 }
 function useMeasuredWidth4(ref) {
-  const [width, setWidth] = import_react87.default.useState(null);
-  import_react87.default.useLayoutEffect(() => {
+  const [width, setWidth] = import_react88.default.useState(null);
+  import_react88.default.useLayoutEffect(() => {
     const element3 = ref.current;
     if (!element3) return void 0;
     const apply = (next) => setWidth((current) => {
@@ -79443,6 +80007,7 @@ function WorkGraphPanel({
   onClaim,
   onClose,
   onRelease,
+  canRelease,
   onGoalConfirm,
   onGoalRequestClose,
   onAttentionPause,
@@ -79453,59 +80018,59 @@ function WorkGraphPanel({
   const now3 = useNow();
   const [density, setDensity] = usePanelDensity("workgraph");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("workgraph");
-  const model = import_react87.default.useMemo(
+  const model = import_react88.default.useMemo(
     () => buildWorkGraphModel({ items: data.items, edges: data.edges, attention: data.attention, readyItemIds: data.readyItemIds }),
     [data.items, data.edges, data.attention, data.readyItemIds]
   );
-  const rows = import_react87.default.useMemo(
+  const rows = import_react88.default.useMemo(
     () => buildWorkGraphPanelTree(data.items, data.edges),
     [data.items, data.edges]
   );
-  const blockers = import_react87.default.useMemo(
+  const blockers = import_react88.default.useMemo(
     () => workGraphBlockersOf(data.items, data.edges),
     [data.items, data.edges]
   );
-  const measureRef = import_react87.default.useRef(null);
+  const measureRef = import_react88.default.useRef(null);
   const width = useMeasuredWidth4(measureRef);
-  const [viewChoice, setViewChoice] = import_react87.default.useState(workGraphViewModeMemory);
+  const [viewChoice, setViewChoice] = import_react88.default.useState(workGraphViewModeMemory);
   const viewMode = viewChoice ?? workGraphDefaultView(width, model.items.size);
   const setViewMode = (mode) => {
     workGraphViewModeMemory = mode;
     setViewChoice(mode);
   };
-  const [criticalChoice, setCriticalChoice] = import_react87.default.useState(workGraphCriticalPathMemory);
+  const [criticalChoice, setCriticalChoice] = import_react88.default.useState(workGraphCriticalPathMemory);
   const chainLength = model.criticalPath.itemIds.length;
   const highlightCriticalPath = criticalChoice ?? chainLength >= 2;
   const setHighlightCriticalPath = (on) => {
     workGraphCriticalPathMemory = on;
     setCriticalChoice(on);
   };
-  const [showDone, setShowDoneState] = import_react87.default.useState(workGraphShowDoneMemory);
+  const [showDone, setShowDoneState] = import_react88.default.useState(workGraphShowDoneMemory);
   const setShowDone = (on) => {
     workGraphShowDoneMemory = on;
     setShowDoneState(on);
   };
-  const [showCancelled, setShowCancelledState] = import_react87.default.useState(workGraphShowCancelledMemory);
+  const [showCancelled, setShowCancelledState] = import_react88.default.useState(workGraphShowCancelledMemory);
   const setShowCancelled = (on) => {
     workGraphShowCancelledMemory = on;
     setShowCancelledState(on);
   };
-  const [hiddenRelations, setHiddenRelationsState] = import_react87.default.useState(workGraphHiddenRelationsMemory);
+  const [hiddenRelations, setHiddenRelationsState] = import_react88.default.useState(workGraphHiddenRelationsMemory);
   const showRelation = (relation, shown) => {
     const next = shown ? hiddenRelations.filter((value) => value !== relation) : [...hiddenRelations.filter((value) => value !== relation), relation];
     workGraphHiddenRelationsMemory = next;
     setHiddenRelationsState(next);
   };
-  const [selectedId, setSelectedId] = import_react87.default.useState(null);
-  const [activityOpen, setActivityOpen] = import_react87.default.useState(false);
-  const [unfolded, setUnfolded] = import_react87.default.useState(() => /* @__PURE__ */ new Set());
-  const [allRows, setAllRows] = import_react87.default.useState(false);
+  const [selectedId, setSelectedId] = import_react88.default.useState(null);
+  const [activityOpen, setActivityOpen] = import_react88.default.useState(false);
+  const [unfolded, setUnfolded] = import_react88.default.useState(() => /* @__PURE__ */ new Set());
+  const [allRows, setAllRows] = import_react88.default.useState(false);
   const selected = selectedId && model.items.has(selectedId) ? selectedId : null;
   const select = (itemId2) => {
     setSelectedId(itemId2);
     if (itemId2) setActivityOpen(false);
   };
-  const [revealRequest, setRevealRequest] = import_react87.default.useState(null);
+  const [revealRequest, setRevealRequest] = import_react88.default.useState(null);
   const focusWorkItem = (itemId2) => {
     setViewMode("graph");
     select(itemId2);
@@ -79536,6 +80101,7 @@ function WorkGraphPanel({
     onClaim,
     onClose,
     onRelease,
+    canRelease,
     onGoalConfirm,
     onGoalRequestClose,
     onAttentionPause,
@@ -79955,7 +80521,7 @@ function WorkGraphPanel({
 }
 
 // src/panels/RoutingPanel.tsx
-var import_react88 = __toESM(require("react"));
+var import_react89 = __toESM(require("react"));
 
 // src/panels/routing-model.ts
 var FOLD_ROUTES_OVER = 5;
@@ -80262,7 +80828,7 @@ function RecipientName({ view, link: link3, prefix }) {
 }
 function useRecipientName() {
   const directory = useAgentDirectory();
-  return import_react88.default.useCallback(
+  return import_react89.default.useCallback(
     (view) => view.recipientKind === "agent" ? agentDisplayName(view.route.recipient, directory) || view.route.recipient : view.route.recipient,
     [directory]
   );
@@ -80603,26 +81169,26 @@ function RoutingPanel({
   const directory = useAgentDirectory();
   const [density, setDensity] = usePanelDensity("routing");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("routing");
-  const [query, setQuery] = import_react88.default.useState("");
-  const [failingOnly, setFailingOnly] = import_react88.default.useState(false);
-  const [selectedKey, setSelectedKey] = import_react88.default.useState(null);
-  const [expanded, setExpanded] = import_react88.default.useState(() => /* @__PURE__ */ new Set());
-  const flowRef = import_react88.default.useRef(null);
-  const model = import_react88.default.useMemo(
+  const [query, setQuery] = import_react89.default.useState("");
+  const [failingOnly, setFailingOnly] = import_react89.default.useState(false);
+  const [selectedKey, setSelectedKey] = import_react89.default.useState(null);
+  const [expanded, setExpanded] = import_react89.default.useState(() => /* @__PURE__ */ new Set());
+  const flowRef = import_react89.default.useRef(null);
+  const model = import_react89.default.useMemo(
     () => buildRoutingModel(data, { isAgent: (key) => Boolean(directory.lookup(key)), summaries: deliverySummaries2 }),
     [data, directory, deliverySummaries2]
   );
-  const nameOf = import_react88.default.useCallback(
+  const nameOf = import_react89.default.useCallback(
     (view) => view.recipientKind === "agent" ? agentDisplayName(view.route.recipient, directory) || view.route.recipient : view.route.recipient,
     [directory]
   );
   const needle = query.trim().toLowerCase();
-  const matches = import_react88.default.useCallback((view) => {
+  const matches = import_react89.default.useCallback((view) => {
     if (failingOnly && view.failed === 0) return false;
     if (!needle) return true;
     return [view.key, view.route.recipient, nameOf(view), view.channelLabel, view.route.sink, view.route.target_module].some((value) => value.toLowerCase().includes(needle));
   }, [failingOnly, needle, nameOf]);
-  const groups = import_react88.default.useMemo(
+  const groups = import_react89.default.useMemo(
     () => model.groups.map((group) => ({ ...group, routes: group.routes.filter(matches) })).filter((group) => group.routes.length > 0),
     [model.groups, matches]
   );
@@ -80630,7 +81196,7 @@ function RoutingPanel({
   const filtering = Boolean(needle) || failingOnly;
   const failingRoutes = model.routes.filter((view) => view.failed > 0).length;
   const active = selectedKey ? model.routes.find((view) => view.key === selectedKey) ?? null : null;
-  const select = import_react88.default.useCallback((key) => {
+  const select = import_react89.default.useCallback((key) => {
     setSelectedKey(key);
     if (!key) return;
     const group = model.groups.find((candidate) => candidate.routes.some((view) => view.key === key));
@@ -80644,7 +81210,7 @@ function RoutingPanel({
   });
   const hasData = model.routes.length > 0 || model.deliveries.length > 0;
   const newest = model.deliveries[0];
-  const liveChannels = import_react88.default.useMemo(() => {
+  const liveChannels = import_react89.default.useMemo(() => {
     const live = /* @__PURE__ */ new Set();
     if (!newest || newest.clock !== "epoch") return live;
     const now3 = Date.now();
@@ -80826,17 +81392,17 @@ function RoutingPanel({
 }
 
 // src/panels/LogsPanel.tsx
-var import_react90 = __toESM(require("react"));
+var import_react91 = __toESM(require("react"));
 
 // ../packages/console-components/src/viz/charts/severity-strip.tsx
-var import_react89 = require("react");
+var import_react90 = require("react");
 var import_jsx_runtime115 = require("react/jsx-runtime");
 var DRAG_PX = 4;
 var AXIS_H2 = 13;
 function useElementWidth2(fallback) {
-  const ref = (0, import_react89.useRef)(null);
-  const [width, setWidth] = (0, import_react89.useState)(fallback);
-  (0, import_react89.useEffect)(() => {
+  const ref = (0, import_react90.useRef)(null);
+  const [width, setWidth] = (0, import_react90.useState)(fallback);
+  (0, import_react90.useEffect)(() => {
     const element3 = ref.current;
     if (!element3) return void 0;
     const read = () => {
@@ -80894,16 +81460,16 @@ function SeverityStrip({
   testId
 }) {
   const [rootRef, width] = useElementWidth2(defaultWidth);
-  const svgRef = (0, import_react89.useRef)(null);
-  const [active, setActive] = (0, import_react89.useState)(null);
-  const [focus, setFocus] = (0, import_react89.useState)(Math.max(0, bins.length - 1));
-  const [anchor, setAnchor] = (0, import_react89.useState)(null);
-  const [drag, setDrag] = (0, import_react89.useState)(null);
+  const svgRef = (0, import_react90.useRef)(null);
+  const [active, setActive] = (0, import_react90.useState)(null);
+  const [focus, setFocus] = (0, import_react90.useState)(Math.max(0, bins.length - 1));
+  const [anchor, setAnchor] = (0, import_react90.useState)(null);
+  const [drag, setDrag] = (0, import_react90.useState)(null);
   const tid = (part, id) => testIdPrefix ? "".concat(testIdPrefix, "-").concat(part).concat(id === void 0 ? "" : ":".concat(id)) : void 0;
   const plotH = height - AXIS_H2;
   const scale = createTimeScale({ start: start2, end, range: [0, width] });
   const slot = bins.length ? width / bins.length : width;
-  const max = (0, import_react89.useMemo)(() => bins.reduce((most, bin) => Math.max(most, bin.info + bin.warn + bin.crit), 0), [bins]);
+  const max = (0, import_react90.useMemo)(() => bins.reduce((most, bin) => Math.max(most, bin.info + bin.warn + bin.crit), 0), [bins]);
   const marker = now3 !== void 0 ? nowMarker(scale, now3) : null;
   const ticks = scale.ticks({ count: Math.max(2, Math.floor(width / 110)) }).filter((tick) => tick.x > 16 && tick.x < width - (marker ? 34 : 16));
   const toX = (clientX) => {
@@ -81270,39 +81836,39 @@ function LogsPanel({
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("logs");
   const [grouped, setGrouped] = usePanelPreference("meta-console-logs-group", "off", ["on", "off"]);
   const [internal, setInternal] = usePanelPreference("meta-console-logs-internal", "off", ["on", "off"]);
-  const [query, setQuery] = import_react90.default.useState("");
-  const [level, setLevel] = import_react90.default.useState("all");
-  const [agent, setAgent] = import_react90.default.useState("");
-  const [range, setRange] = import_react90.default.useState(null);
-  const [expanded, setExpanded] = import_react90.default.useState(() => /* @__PURE__ */ new Set());
-  const [openGroups, setOpenGroups] = import_react90.default.useState(() => /* @__PURE__ */ new Set());
-  const [target, setTarget] = import_react90.default.useState(null);
-  const [paused, setPaused] = import_react90.default.useState(null);
-  const streamRef = import_react90.default.useRef(null);
-  const nameOf = import_react90.default.useCallback((key) => agentDisplayName(key, agentDirectory) || key, [agentDirectory]);
+  const [query, setQuery] = import_react91.default.useState("");
+  const [level, setLevel] = import_react91.default.useState("all");
+  const [agent, setAgent] = import_react91.default.useState("");
+  const [range, setRange] = import_react91.default.useState(null);
+  const [expanded, setExpanded] = import_react91.default.useState(() => /* @__PURE__ */ new Set());
+  const [openGroups, setOpenGroups] = import_react91.default.useState(() => /* @__PURE__ */ new Set());
+  const [target, setTarget] = import_react91.default.useState(null);
+  const [paused, setPaused] = import_react91.default.useState(null);
+  const streamRef = import_react91.default.useRef(null);
+  const nameOf = import_react91.default.useCallback((key) => agentDisplayName(key, agentDirectory) || key, [agentDirectory]);
   const liveFrames = paused?.frames ?? frames;
   const liveHistory = paused ? paused.history : historyFrames;
-  const merged = import_react90.default.useMemo(
+  const merged = import_react91.default.useMemo(
     () => mergeFrameSources(liveFrames, liveHistory).filter(isLogFrameVisible),
     [liveFrames, liveHistory]
   );
-  const entries = import_react90.default.useMemo(
+  const entries = import_react91.default.useMemo(
     () => buildActivityEntries(merged, { directory: agentDirectory, includeInternal: internal === "on" }),
     [merged, agentDirectory, internal]
   );
-  const newWhilePaused = import_react90.default.useMemo(() => {
+  const newWhilePaused = import_react91.default.useMemo(() => {
     if (!paused) return 0;
     const newest = entries[0]?.atMs ?? 0;
     const current = mergeFrameSources(frames, historyFrames).filter((frame2) => isLogFrameVisible(frame2) && (frame2.timestampMs ?? 0) > newest);
     return buildActivityEntries(current, { directory: agentDirectory, includeInternal: internal === "on" }).length;
   }, [paused, entries, frames, historyFrames, agentDirectory, internal]);
-  const loaded2 = import_react90.default.useMemo(() => {
+  const loaded2 = import_react91.default.useMemo(() => {
     if (!entries.length) return null;
     const oldest = entries[entries.length - 1].atMs;
     const newest = Math.max(entries[0].atMs, paused ? entries[0].atMs : Date.now());
     return { start: oldest, end: Math.max(newest, oldest + 6e4) };
   }, [entries, paused]);
-  const agentOptions = import_react90.default.useMemo(() => {
+  const agentOptions = import_react91.default.useMemo(() => {
     const seen = /* @__PURE__ */ new Map();
     for (const entry of entries) {
       const key = entry.frame.identity?.trim();
@@ -81310,23 +81876,23 @@ function LogsPanel({
     }
     return [...seen.entries()].sort(([a2], [b2]) => nameOf(a2).localeCompare(nameOf(b2)));
   }, [entries, nameOf]);
-  const scoped = import_react90.default.useMemo(() => entries.filter((entry) => {
+  const scoped = import_react91.default.useMemo(() => entries.filter((entry) => {
     if (agent && entry.frame.identity !== agent && entry.actor !== agent) return false;
     if (query && !entryMatches(entry, query, nameOf) && !summarizeLogFrame(entry.frame).toLowerCase().includes(query.trim().toLowerCase())) return false;
     return true;
   }), [entries, agent, query, nameOf]);
-  const inRange = import_react90.default.useMemo(
+  const inRange = import_react91.default.useMemo(
     () => range ? scoped.filter((entry) => entry.atMs >= range.start && entry.atMs <= range.end) : scoped,
     [scoped, range]
   );
-  const counts = import_react90.default.useMemo(() => levelCounts(inRange), [inRange]);
-  const rows = import_react90.default.useMemo(
+  const counts = import_react91.default.useMemo(() => levelCounts(inRange), [inRange]);
+  const rows = import_react91.default.useMemo(
     () => level === "all" ? inRange : inRange.filter((entry) => logLevel(entry) === level),
     [inRange, level]
   );
-  const totals = import_react90.default.useMemo(() => levelCounts(entries), [entries]);
-  const bins = import_react90.default.useMemo(() => loaded2 ? severityBins(scoped.filter((entry) => level === "all" || logLevel(entry) === level).map((entry) => ({ t: entry.atMs, severity: entry.severity })), loaded2.start, loaded2.end, STRIP_BINS) : [], [scoped, loaded2, level]);
-  const items = import_react90.default.useMemo(() => {
+  const totals = import_react91.default.useMemo(() => levelCounts(entries), [entries]);
+  const bins = import_react91.default.useMemo(() => loaded2 ? severityBins(scoped.filter((entry) => level === "all" || logLevel(entry) === level).map((entry) => ({ t: entry.atMs, severity: entry.severity })), loaded2.start, loaded2.end, STRIP_BINS) : [], [scoped, loaded2, level]);
+  const items = import_react91.default.useMemo(() => {
     if (grouped !== "on") return rows.map((entry) => ({ kind: "row", key: entry.rowKey, entry }));
     const list5 = [];
     for (const group of groupByInteraction(rows)) {
@@ -81351,7 +81917,7 @@ function LogsPanel({
     },
     scrollRef: streamRef
   });
-  import_react90.default.useEffect(() => {
+  import_react91.default.useEffect(() => {
     if (!target) return void 0;
     const timer3 = setTimeout(() => setTarget(null), 1600);
     return () => clearTimeout(timer3);
@@ -81664,8 +82230,22 @@ function LogsPanel({
 }
 
 // src/panels/Topbar.tsx
-var import_react91 = __toESM(require("react"));
+var import_react92 = __toESM(require("react"));
 var import_jsx_runtime117 = require("react/jsx-runtime");
+function signOutThen(event, onSignOut, leave) {
+  const pending = onSignOut?.();
+  if (!pending) return;
+  event.preventDefault();
+  void pending.then(leave, leave);
+}
+function postSignOut(href) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = href;
+  form.hidden = true;
+  document.body.append(form);
+  form.submit();
+}
 function PanelGlyph({ side, open }) {
   const dividerLeft = side === "left";
   const cx6 = dividerLeft ? 16.5 : 7.5;
@@ -81700,9 +82280,9 @@ function DisplayOptions({
   onChoose,
   onReset
 }) {
-  const [open, setOpen] = import_react91.default.useState(false);
-  const triggerRef = import_react91.default.useRef(null);
-  const popoverId = "".concat(import_react91.default.useId(), "-display");
+  const [open, setOpen] = import_react92.default.useState(false);
+  const triggerRef = import_react92.default.useRef(null);
+  const popoverId = "".concat(import_react92.default.useId(), "-display");
   const controls = [
     {
       label: "Theme",
@@ -81785,9 +82365,71 @@ function DisplayOptions({
     )
   ] });
 }
+function IdentityChip({ identity }) {
+  const [open, setOpen] = import_react92.default.useState(false);
+  const triggerRef = import_react92.default.useRef(null);
+  const popoverId = "".concat(import_react92.default.useId(), "-identity");
+  const signOut = identity.signOut;
+  return /* @__PURE__ */ (0, import_jsx_runtime117.jsxs)("div", { className: "meta-topbar__identity", "data-testid": "identity-chip", "data-kind": identity.kind, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime117.jsxs)(
+      "button",
+      {
+        ref: triggerRef,
+        type: "button",
+        className: "meta-topbar__identity-trigger",
+        "aria-haspopup": "dialog",
+        "aria-expanded": open,
+        "aria-controls": open ? popoverId : void 0,
+        "aria-label": "".concat(identity.label, ", ").concat(identity.detail),
+        title: "".concat(identity.label, " (").concat(identity.detail, ")"),
+        onClick: () => setOpen((value) => !value),
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("span", { className: "meta-topbar__identity-mark", "aria-hidden": "true" }),
+          /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("span", { className: "meta-topbar__identity-label", children: identity.label })
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime117.jsxs)(
+      Popover,
+      {
+        open,
+        anchorRef: triggerRef,
+        onClose: () => setOpen(false),
+        ariaLabel: "Who this console acts as",
+        id: popoverId,
+        testId: "identity-popover",
+        className: "meta-topbar__identity-popover",
+        width: 260,
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("p", { className: "meta-topbar__identity-name", children: identity.label }),
+          /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("p", { className: "meta-topbar__identity-detail", children: identity.detail }),
+          signOut?.method === "post" ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(
+            "form",
+            {
+              method: "post",
+              action: signOut.href,
+              className: "meta-topbar__identity-sign-out",
+              onSubmit: (event) => signOutThen(event, identity.onSignOut, () => postSignOut(signOut.href)),
+              children: /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(Button, { type: "submit", size: "sm", children: "Sign out" })
+            }
+          ) : signOut ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(
+            "a",
+            {
+              className: "cc-btn cc-btn--sm meta-topbar__identity-sign-out",
+              href: signOut.href,
+              onClick: (event) => signOutThen(event, identity.onSignOut, () => window.location.assign(signOut.href)),
+              children: "Sign out"
+            }
+          ) : null
+        ]
+      }
+    )
+  ] });
+}
 function Topbar({
   mobName,
   connectionStatus,
+  identity,
   brandLabel = "Meta",
   brandLogoUrl,
   brandLogoAlt,
@@ -81832,6 +82474,7 @@ function Topbar({
     environment ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("div", { className: "meta-topbar__env", "data-testid": "topbar-environment", children: /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(Chip, { tone: "neutral", title: "Environment: ".concat(environment), children: environment }) }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("div", { className: "meta-topbar__spacer" }),
     connectionStatus,
+    identity ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(IdentityChip, { identity }) : null,
     /* @__PURE__ */ (0, import_jsx_runtime117.jsxs)("div", { className: "meta-topbar__util", children: [
       display && onChooseDisplay && onResetDisplay ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(DisplayOptions, { display, chosen: displayChosen, onChoose: onChooseDisplay, onReset: onResetDisplay }) : null,
       /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(
@@ -81862,7 +82505,7 @@ function Topbar({
 }
 
 // src/panels/Tweaks.tsx
-var import_react92 = __toESM(require("react"));
+var import_react93 = __toESM(require("react"));
 var DISPLAY_STORAGE_KEYS = {
   theme: "meta-console-theme",
   variant: "meta-console-variant",
@@ -81892,12 +82535,12 @@ function displayStorage() {
     return null;
   }
 }
-function readDisplayChoices(storage2 = displayStorage()) {
+function readDisplayChoices(storage2 = displayStorage(), scope) {
   const chosen = {};
   for (const key of DISPLAY_KEYS) {
     let raw = null;
     try {
-      raw = storage2?.getItem(DISPLAY_STORAGE_KEYS[key]) ?? null;
+      raw = scope === void 0 ? storage2?.getItem(DISPLAY_STORAGE_KEYS[key]) ?? null : readPreference(storage2, DISPLAY_STORAGE_KEYS[key], scope);
     } catch {
       raw = null;
     }
@@ -81914,40 +82557,49 @@ function resolveDisplaySettings(chosen, configured = {}) {
     motion: chosen.motion ?? configured.motion ?? DEFAULT_DISPLAY.motion
   };
 }
-function useConsoleDisplay(configured = {}) {
-  const [chosen, setChosen] = import_react92.default.useState(() => readDisplayChoices());
-  import_react92.default.useEffect(() => {
+function useConsoleDisplay(configured = {}, scope) {
+  const [state, setState] = import_react93.default.useState(() => ({ scope, chosen: readDisplayChoices(displayStorage(), scope) }));
+  let chosen = state.chosen;
+  if (state.scope !== scope) {
+    chosen = readDisplayChoices(displayStorage(), scope);
+    setState({ scope, chosen });
+  }
+  import_react93.default.useEffect(() => {
     if (typeof window === "undefined") return void 0;
-    const keys2 = new Set(Object.values(DISPLAY_STORAGE_KEYS));
+    const names = Object.values(DISPLAY_STORAGE_KEYS);
     const onStorage = (event) => {
-      if (event.key === null || keys2.has(event.key)) setChosen(readDisplayChoices());
+      if (event.key === null || event.key === LAST_PREFERENCE_SCOPE_KEY || names.some((name2) => event.key === name2 || event.key.startsWith("".concat(name2, ":")))) {
+        setState({ scope, chosen: readDisplayChoices(displayStorage(), scope) });
+      }
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, []);
-  const choose = import_react92.default.useCallback((key, value) => {
+  }, [scope]);
+  const choose = import_react93.default.useCallback((key, value) => {
     if (normalizeDisplayValue(key, value) === null) return;
-    setChosen((current) => ({ ...current, [key]: value }));
+    setState((current) => ({ ...current, chosen: { ...current.chosen, [key]: value } }));
     try {
-      displayStorage()?.setItem(DISPLAY_STORAGE_KEYS[key], value);
+      if (scope === void 0) displayStorage()?.setItem(DISPLAY_STORAGE_KEYS[key], value);
+      else writePreference(displayStorage(), DISPLAY_STORAGE_KEYS[key], scope, value);
     } catch {
     }
-  }, []);
-  const reset = import_react92.default.useCallback(() => {
-    setChosen({});
+  }, [scope]);
+  const reset = import_react93.default.useCallback(() => {
+    setState((current) => ({ ...current, chosen: {} }));
     const storage2 = displayStorage();
     for (const key of DISPLAY_KEYS) {
       try {
-        storage2?.removeItem(DISPLAY_STORAGE_KEYS[key]);
+        const stored = scope === void 0 ? DISPLAY_STORAGE_KEYS[key] : preferenceWriteKey(storage2, DISPLAY_STORAGE_KEYS[key], scope);
+        if (stored) storage2?.removeItem(stored);
       } catch {
       }
     }
-  }, []);
+  }, [scope]);
   const configuredTheme = configured.theme;
   const configuredVariant = configured.variant;
   const configuredDensity = configured.density;
   const configuredMotion = configured.motion;
-  const settings = import_react92.default.useMemo(
+  const settings = import_react93.default.useMemo(
     () => resolveDisplaySettings(chosen, {
       theme: configuredTheme,
       variant: configuredVariant,
@@ -81960,7 +82612,7 @@ function useConsoleDisplay(configured = {}) {
 }
 
 // src/panels/Sidebar.tsx
-var import_react93 = __toESM(require("react"));
+var import_react94 = __toESM(require("react"));
 var import_jsx_runtime118 = require("react/jsx-runtime");
 var ALL_NAV = ["topology", "timeline", "gating", "roster", "routing", "logs", "health", "access", "memory", "workgraph", "schedules"];
 var NAV_LABEL = {
@@ -82069,9 +82721,9 @@ function writeSidebarTime(storage2, key, atMs) {
   } catch {
   }
 }
-function pendingApprovalCount(snapshot) {
+function pendingApprovalCount(snapshot, viewer) {
   if (!snapshot || snapshot.status !== "ready") return 0;
-  return snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled").length;
+  return snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled" && (!viewer || approvalAudience(request, viewer).kind === "you")).length;
 }
 function healthNavAttention(agents) {
   const byWord = /* @__PURE__ */ new Map();
@@ -83147,9 +83799,9 @@ function pendingOrderFocusMatchesElement(pending, element3) {
   return true;
 }
 function useMeasuredHeight() {
-  const ref = import_react93.default.useRef(null);
-  const [height, setHeight] = import_react93.default.useState(0);
-  import_react93.default.useLayoutEffect(() => {
+  const ref = import_react94.default.useRef(null);
+  const [height, setHeight] = import_react94.default.useState(0);
+  import_react94.default.useLayoutEffect(() => {
     const element3 = ref.current;
     if (!element3) return void 0;
     const update = () => setHeight(element3.clientHeight);
@@ -83351,7 +84003,7 @@ function agentOpenRun(ledger, agent) {
   if (!ledger || agent.response_phase !== void 0 || agent.progress?.run_state === "idle") return false;
   return ledger.hasOpenRun(agent.identity || agent.member_id);
 }
-var Sidebar = import_react93.default.memo(function Sidebar2({
+var Sidebar = import_react94.default.memo(function Sidebar2({
   agents,
   selectedMemberId,
   recentActivity,
@@ -83377,47 +84029,47 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
   navAttention
 }) {
   countRender("Sidebar");
-  const [q2, setQ] = import_react93.default.useState("");
-  const [activityFilter, setActivityFilter] = import_react93.default.useState("all");
-  const [viewMenuOpen, setViewMenuOpen] = import_react93.default.useState(false);
-  const viewTriggerRef = import_react93.default.useRef(null);
-  const searchRef = import_react93.default.useRef(null);
-  const viewMenuId = "".concat(import_react93.default.useId(), "-roster-view");
-  const [draggingOrder, setDraggingOrder] = import_react93.default.useState(null);
-  const [dragOverOrder, setDragOverOrder] = import_react93.default.useState(null);
-  const [dragPreview, setDragPreview] = import_react93.default.useState(null);
-  const [orderAnnouncement, setOrderAnnouncement] = import_react93.default.useState("");
-  const pendingOrderFocusRef = import_react93.default.useRef(null);
-  const draggingOrderRef = import_react93.default.useRef(null);
-  const pointerDragRef = import_react93.default.useRef(null);
-  const suppressOrderClickRef = import_react93.default.useRef(false);
-  const virtualRowsRef = import_react93.default.useRef([]);
-  import_react93.default.useEffect(() => {
+  const [q2, setQ] = import_react94.default.useState("");
+  const [activityFilter, setActivityFilter] = import_react94.default.useState("all");
+  const [viewMenuOpen, setViewMenuOpen] = import_react94.default.useState(false);
+  const viewTriggerRef = import_react94.default.useRef(null);
+  const searchRef = import_react94.default.useRef(null);
+  const viewMenuId = "".concat(import_react94.default.useId(), "-roster-view");
+  const [draggingOrder, setDraggingOrder] = import_react94.default.useState(null);
+  const [dragOverOrder, setDragOverOrder] = import_react94.default.useState(null);
+  const [dragPreview, setDragPreview] = import_react94.default.useState(null);
+  const [orderAnnouncement, setOrderAnnouncement] = import_react94.default.useState("");
+  const pendingOrderFocusRef = import_react94.default.useRef(null);
+  const draggingOrderRef = import_react94.default.useRef(null);
+  const pointerDragRef = import_react94.default.useRef(null);
+  const suppressOrderClickRef = import_react94.default.useRef(false);
+  const virtualRowsRef = import_react94.default.useRef([]);
+  import_react94.default.useEffect(() => {
     draggingOrderRef.current = draggingOrder;
   }, [draggingOrder]);
-  const navKinds = import_react93.default.useMemo(() => workbenchNavKinds(visibleControls), [visibleControls]);
+  const navKinds = import_react94.default.useMemo(() => workbenchNavKinds(visibleControls), [visibleControls]);
   const preferenceNamespace = preferenceScope ?? storageNamespace;
-  const viewStorageKey = import_react93.default.useMemo(
+  const viewStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_VIEW_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace]
   );
-  const agentOrderStorageKey = import_react93.default.useMemo(
+  const agentOrderStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_AGENT_ORDER_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace]
   );
-  const [view, setView] = import_react93.default.useState(
+  const [view, setView] = import_react94.default.useState(
     () => readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW }
   );
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setView(readConsoleSidebarView(localSidebarStorage(), viewStorageKey) ?? { ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
   }, [viewStorageKey]);
-  const [agentOrder, setAgentOrder] = import_react93.default.useState(
+  const [agentOrder, setAgentOrder] = import_react94.default.useState(
     () => readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []
   );
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setAgentOrder(readSidebarStringList(localSidebarStorage(), agentOrderStorageKey) || []);
   }, [agentOrderStorageKey]);
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     if (typeof window === "undefined") return void 0;
     const onStorage = (event) => {
       if (event.key === agentOrderStorageKey) {
@@ -83429,7 +84081,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [agentOrderStorageKey, viewStorageKey]);
-  const updateView = import_react93.default.useCallback((patch2) => {
+  const updateView = import_react94.default.useCallback((patch2) => {
     setView((current) => {
       const next = { ...current, ...patch2 };
       writeConsoleSidebarView(localSidebarStorage(), viewStorageKey, next);
@@ -83438,13 +84090,13 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
   }, [viewStorageKey]);
   const viewSummary = sidebarViewSummary(activityFilter, view);
   const viewIsDefault = viewSummary.length === 0;
-  const resetView = import_react93.default.useCallback(() => {
+  const resetView = import_react94.default.useCallback(() => {
     setActivityFilter("all");
     updateView({ ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
   }, [updateView]);
   const ledger = useActivityLedger({ tickMs: collapsed ? void 0 : 6e4 });
-  const frameTimes = import_react93.default.useMemo(() => newestFrameTimes(recentActivity), [recentActivity]);
-  const liveActivity = import_react93.default.useMemo(() => {
+  const frameTimes = import_react94.default.useMemo(() => newestFrameTimes(recentActivity), [recentActivity]);
+  const liveActivity = import_react94.default.useMemo(() => {
     const byMember = /* @__PURE__ */ new Map();
     for (const agent of agents) {
       const at = agentLastActivity(agent, frameTimes);
@@ -83452,10 +84104,10 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     }
     return byMember;
   }, [agents, frameTimes]);
-  const heldActivityRef = import_react93.default.useRef(liveActivity);
+  const heldActivityRef = import_react94.default.useRef(liveActivity);
   if (!draggingOrder) heldActivityRef.current = liveActivity;
   const sortActivity = view.sortBy !== "activity" ? EMPTY_ACTIVITY : draggingOrder ? heldActivityRef.current : liveActivity;
-  const sortContext = import_react93.default.useMemo(() => ({
+  const sortContext = import_react94.default.useMemo(() => ({
     sortBy: view.sortBy,
     rank: new Map(agentOrder.map((key, index3) => [key, index3])),
     lastActivity: (agent) => sortActivity.get(agent.member_id)
@@ -83463,83 +84115,83 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
   const flat = view.groupBy === "none";
   const searchActive = Boolean(q2) || activityFilter !== "all";
   const filterLedger = activityFilter === "all" ? null : ledger;
-  const shown = import_react93.default.useMemo(
+  const shown = import_react94.default.useMemo(
     () => activityFilter === "all" ? agents : agents.filter((agent) => sidebarActivity(agent, agentOpenRun(filterLedger, agent)) === activityFilter),
     [agents, activityFilter, filterLedger]
   );
-  const filtered = import_react93.default.useMemo(() => {
+  const filtered = import_react94.default.useMemo(() => {
     const needle = q2.toLowerCase();
     if (!needle) return shown;
     return shown.filter((agent) => [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role].some((value) => value?.toLowerCase().includes(needle)));
   }, [shown, q2]);
   const mastCount = activityFilter === "all" ? agentCountText(agents.length) : "".concat(shown.length, " of ").concat(agentCountText(agents.length));
-  const sectionOrderStorageKey = import_react93.default.useMemo(
+  const sectionOrderStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_SECTION_ORDER_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const subgroupOrderStorageKey = import_react93.default.useMemo(
+  const subgroupOrderStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_SUBGROUP_ORDER_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const [sectionOrder, setSectionOrder] = import_react93.default.useState(() => {
+  const [sectionOrder, setSectionOrder] = import_react94.default.useState(() => {
     return readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || [];
   });
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setSectionOrder(readSidebarStringList(localSidebarStorage(), sectionOrderStorageKey) || []);
   }, [sectionOrderStorageKey]);
-  const [subgroupOrder, setSubgroupOrder] = import_react93.default.useState(() => {
+  const [subgroupOrder, setSubgroupOrder] = import_react94.default.useState(() => {
     return readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || [];
   });
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setSubgroupOrder(readSidebarStringList(localSidebarStorage(), subgroupOrderStorageKey) || []);
   }, [subgroupOrderStorageKey]);
-  const classified = import_react93.default.useMemo(() => classifySidebarAgents(filtered, grouping), [filtered, grouping]);
-  const categoryGrouped = import_react93.default.useMemo(
+  const classified = import_react94.default.useMemo(() => classifySidebarAgents(filtered, grouping), [filtered, grouping]);
+  const categoryGrouped = import_react94.default.useMemo(
     () => flat && view.sortBy !== "manual" ? null : orderSidebarGroups(classified, sortContext),
     [classified, flat, sortContext, view.sortBy]
   );
-  const categorySequence = import_react93.default.useMemo(
+  const categorySequence = import_react94.default.useMemo(
     () => categoryGrouped && view.sortBy === "manual" ? sidebarCategorySequence(categoryGrouped, grouping, sectionOrder, subgroupOrder) : [],
     [categoryGrouped, grouping, sectionOrder, subgroupOrder, view.sortBy]
   );
-  const grouped = import_react93.default.useMemo(
+  const grouped = import_react94.default.useMemo(
     () => !flat && categoryGrouped ? categoryGrouped : orderFlatSidebarGroup(classified, categorySequence, sortContext),
     [categoryGrouped, categorySequence, classified, flat, sortContext]
   );
-  const familyPinIdsByMemberId = import_react93.default.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
-  const sectionNames = import_react93.default.useMemo(
+  const familyPinIdsByMemberId = import_react94.default.useMemo(() => sidebarFamilyPinIdsByMemberId(grouped), [grouped]);
+  const sectionNames = import_react94.default.useMemo(
     () => flat ? grouped.has(FLAT_SECTION_NAME) ? [FLAT_SECTION_NAME] : [] : orderedSectionNames(grouped, grouping),
     [flat, grouped, grouping]
   );
-  const defaultCollapsedKey = import_react93.default.useMemo(
+  const defaultCollapsedKey = import_react94.default.useMemo(
     () => JSON.stringify((grouping?.sections || []).map((section) => [section.name, section.collapsed === true])),
     [grouping?.sections]
   );
-  const sectionCollapseStorageKey = import_react93.default.useMemo(
+  const sectionCollapseStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SECTION_COLLAPSE_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const subgroupCollapseStorageKey = import_react93.default.useMemo(
+  const subgroupCollapseStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SUBGROUP_COLLAPSE_STORAGE_PREFIX, storageNamespace),
     [storageNamespace]
   );
-  const [collapsedSections, setCollapsedSections] = import_react93.default.useState(() => {
+  const [collapsedSections, setCollapsedSections] = import_react94.default.useState(() => {
     return collapsedSectionsForStorage(grouping, sectionCollapseStorageKey);
   });
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setCollapsedSections(collapsedSectionsForStorage(grouping, sectionCollapseStorageKey));
   }, [defaultCollapsedKey, grouping, sectionCollapseStorageKey]);
-  const [collapsedSubgroups, setCollapsedSubgroups] = import_react93.default.useState(() => {
+  const [collapsedSubgroups, setCollapsedSubgroups] = import_react94.default.useState(() => {
     return collapsedSubgroupsForStorage(subgroupCollapseStorageKey);
   });
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setCollapsedSubgroups(collapsedSubgroupsForStorage(subgroupCollapseStorageKey));
   }, [subgroupCollapseStorageKey]);
-  const customSidebarButtons = import_react93.default.useMemo(
+  const customSidebarButtons = import_react94.default.useMemo(
     () => (customButtons || []).filter((button) => button.id && button.label && (button.control || button.href || button.panel)),
     [customButtons]
   );
-  const completeSectionDrop = import_react93.default.useCallback((target, where, draggedId = draggingOrderRef.current?.id, inputSource = "pointer") => {
+  const completeSectionDrop = import_react94.default.useCallback((target, where, draggedId = draggingOrderRef.current?.id, inputSource = "pointer") => {
     if (!draggedId || draggedId === target) return;
     if (inputSource === "keyboard") {
       pendingOrderFocusRef.current = { kind: "section", id: draggedId };
@@ -83552,12 +84204,12 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     });
     setOrderAnnouncement("Moved section ".concat(draggedId, " ").concat(where, " ").concat(target, "."));
   }, [sectionNames, sectionOrderStorageKey]);
-  const subgroupIdsForBucket = import_react93.default.useCallback((bucket) => {
+  const subgroupIdsForBucket = import_react94.default.useCallback((bucket) => {
     const list5 = grouped.get(bucket) || [];
     const ids = list5.map((row) => row.subgroup).filter((value) => Boolean(value)).map((subgroup) => sidebarSubgroupStorageId(bucket, subgroup));
     return Array.from(new Set(ids));
   }, [grouped]);
-  const completeSubgroupDrop = import_react93.default.useCallback((target, bucket, where, draggedId = draggingOrderRef.current?.id, draggedBucket = draggingOrderRef.current?.bucket, inputSource = "pointer") => {
+  const completeSubgroupDrop = import_react94.default.useCallback((target, bucket, where, draggedId = draggingOrderRef.current?.id, draggedBucket = draggingOrderRef.current?.bucket, inputSource = "pointer") => {
     if (!draggedId || draggedBucket !== bucket || draggedId === target) return;
     if (inputSource === "keyboard") {
       pendingOrderFocusRef.current = { kind: "subgroup", id: draggedId, bucket };
@@ -83575,12 +84227,12 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     });
     setOrderAnnouncement("Moved subgroup ".concat(sidebarSubgroupStorageLabel(draggedId), " ").concat(where, " ").concat(sidebarSubgroupStorageLabel(target), "."));
   }, [subgroupIdsForBucket, subgroupOrderStorageKey]);
-  const presentAgentKeys = import_react93.default.useMemo(
+  const presentAgentKeys = import_react94.default.useMemo(
     () => categorySequence.map((row) => sidebarAgentOrderKey(row.agent)),
     [categorySequence]
   );
   const agentReorderBlocked = view.sortBy !== "manual" ? "Choose Manual under Sort by in the roster view options to reorder agents." : searchActive ? "Clear the search and the activity filter to reorder agents." : null;
-  const completeAgentDrop = import_react93.default.useCallback((target, where, draggedId, container, inputSource) => {
+  const completeAgentDrop = import_react94.default.useCallback((target, where, draggedId, container, inputSource) => {
     if (!draggedId || draggedId === target) return;
     const siblings = virtualRowsRef.current.filter(
       (row) => row.kind === "agent" && row.container === container
@@ -83607,7 +84259,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     };
     setOrderAnnouncement("Moved ".concat(labelOf2(draggedId), " ").concat(where === "before" ? "above" : "below", " ").concat(labelOf2(target), "."));
   }, [agentOrder, agentOrderStorageKey, agents, presentAgentKeys]);
-  const handleSectionOrderKeyDown = import_react93.default.useCallback((event, bucket) => {
+  const handleSectionOrderKeyDown = import_react94.default.useCallback((event, bucket) => {
     if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     const ordered = applyConsoleSidebarOrder(sectionNames, sectionOrder);
     const index3 = ordered.indexOf(bucket);
@@ -83616,7 +84268,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     event.preventDefault();
     completeSectionDrop(target, event.key === "ArrowUp" ? "before" : "after", bucket, "keyboard");
   }, [completeSectionDrop, sectionNames, sectionOrder]);
-  const handleSubgroupOrderKeyDown = import_react93.default.useCallback((event, storageKey, bucket) => {
+  const handleSubgroupOrderKeyDown = import_react94.default.useCallback((event, storageKey, bucket) => {
     if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     const ordered = applyConsoleSidebarOrder(subgroupIdsForBucket(bucket), subgroupOrder);
     const index3 = ordered.indexOf(storageKey);
@@ -83625,7 +84277,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     event.preventDefault();
     completeSubgroupDrop(target, bucket, event.key === "ArrowUp" ? "before" : "after", storageKey, bucket, "keyboard");
   }, [completeSubgroupDrop, subgroupIdsForBucket, subgroupOrder]);
-  const handleAgentOrderKeyDown = import_react93.default.useCallback((event, row) => {
+  const handleAgentOrderKeyDown = import_react94.default.useCallback((event, row) => {
     if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
     event.preventDefault();
     if (agentReorderBlocked) {
@@ -83644,7 +84296,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     completeAgentDrop(target, up ? "before" : "after", key, row.container, "keyboard");
     return true;
   }, [agentReorderBlocked, completeAgentDrop]);
-  const beginPointerOrderDrag = import_react93.default.useCallback((event, item) => {
+  const beginPointerOrderDrag = import_react94.default.useCallback((event, item) => {
     if (event.button !== 0) return;
     event.preventDefault();
     pointerDragRef.current = {
@@ -83660,7 +84312,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     setDraggingOrder(item);
     draggingOrderRef.current = item;
   }, []);
-  const updatePointerOrderTarget = import_react93.default.useCallback((clientX, clientY) => {
+  const updatePointerOrderTarget = import_react94.default.useCallback((clientX, clientY) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     const hit = document.elementFromPoint(clientX, clientY);
@@ -83686,7 +84338,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     }
     setDragOverOrder({ kind, id, where, indicatorId });
   }, []);
-  const movePointerOrderDrag = import_react93.default.useCallback((event) => {
+  const movePointerOrderDrag = import_react94.default.useCallback((event) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     drag.lastX = event.clientX;
@@ -83701,7 +84353,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     });
     updatePointerOrderTarget(event.clientX, event.clientY);
   }, [updatePointerOrderTarget]);
-  const finishPointerOrderDrag = import_react93.default.useCallback((drop) => {
+  const finishPointerOrderDrag = import_react94.default.useCallback((drop) => {
     const drag = pointerDragRef.current;
     if (!drag) return;
     pointerDragRef.current = null;
@@ -83725,7 +84377,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     setDragOverOrder(null);
     setDragPreview(null);
   }, [completeAgentDrop, completeSectionDrop, completeSubgroupDrop]);
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     if (!draggingOrder) return void 0;
     const onMove = (event) => movePointerOrderDrag(event);
     const onDrop = () => finishPointerOrderDrag(true);
@@ -83739,7 +84391,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
       window.removeEventListener("pointercancel", onCancel);
     };
   }, [draggingOrder, finishPointerOrderDrag, movePointerOrderDrag]);
-  const sidebarNavigationModel = import_react93.default.useMemo(() => {
+  const sidebarNavigationModel = import_react94.default.useMemo(() => {
     return buildStockSidebarNavigationModel({
       sectionNames,
       grouped,
@@ -83754,26 +84406,26 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
       order: sortContext
     });
   }, [sectionNames, grouped, grouping, collapsedSections, collapsedSubgroups, pinnedAgentIds, sectionOrder, subgroupOrder, searchActive, flat, sortContext]);
-  const virtualRows = import_react93.default.useMemo(
+  const virtualRows = import_react94.default.useMemo(
     () => sidebarNavigationRows(sidebarNavigationModel),
     [sidebarNavigationModel]
   );
   virtualRowsRef.current = virtualRows;
-  const agentSiblingCounts = import_react93.default.useMemo(() => {
+  const agentSiblingCounts = import_react94.default.useMemo(() => {
     const counts = /* @__PURE__ */ new Map();
     for (const row of virtualRows) {
       if (row.kind === "agent") counts.set(row.container, (counts.get(row.container) || 0) + 1);
     }
     return counts;
   }, [virtualRows]);
-  const virtualOffsets = import_react93.default.useMemo(() => sidebarVirtualOffsets(virtualRows, density), [virtualRows, density]);
+  const virtualOffsets = import_react94.default.useMemo(() => sidebarVirtualOffsets(virtualRows, density), [virtualRows, density]);
   const [listRef, listHeight] = useMeasuredHeight();
-  const [scrollTop, setScrollTop] = import_react93.default.useState(0);
-  import_react93.default.useEffect(() => {
+  const [scrollTop, setScrollTop] = import_react94.default.useState(0);
+  import_react94.default.useEffect(() => {
     setScrollTop(0);
     if (listRef.current) listRef.current.scrollTop = 0;
   }, [q2, activityFilter, grouping, view.groupBy, view.sortBy, listRef]);
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     if (!draggingOrder || typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return void 0;
     let frame2 = 0;
     const step = () => {
@@ -83804,18 +84456,18 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     frame2 = window.requestAnimationFrame(step);
     return () => window.cancelAnimationFrame(frame2);
   }, [draggingOrder, listRef, updatePointerOrderTarget]);
-  const visibleRange = import_react93.default.useMemo(() => sidebarVisibleRange({
+  const visibleRange = import_react94.default.useMemo(() => sidebarVisibleRange({
     rowCount: virtualRows.length,
     offsets: virtualOffsets.offsets,
     total: virtualOffsets.total,
     scrollTop,
     listHeight
   }), [listHeight, scrollTop, virtualOffsets, virtualRows.length]);
-  const visibleRows = import_react93.default.useMemo(
+  const visibleRows = import_react94.default.useMemo(
     () => virtualRows.slice(visibleRange.start, visibleRange.end),
     [virtualRows, visibleRange]
   );
-  import_react93.default.useLayoutEffect(() => {
+  import_react94.default.useLayoutEffect(() => {
     const pending = pendingOrderFocusRef.current;
     const list5 = listRef.current;
     if (!pending || !list5) return;
@@ -83847,16 +84499,16 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
       window.setTimeout(restoreFocus, 0);
     }
   }, [density, listHeight, listRef, scrollTop, virtualOffsets, virtualRows]);
-  const dragPreviewRows = import_react93.default.useMemo(
+  const dragPreviewRows = import_react94.default.useMemo(
     () => sidebarDragPreviewRows(virtualRows, draggingOrder),
     [virtualRows, draggingOrder]
   );
-  const selectUnlessDropped = import_react93.default.useCallback((agent) => {
+  const selectUnlessDropped = import_react94.default.useCallback((agent) => {
     if (suppressOrderClickRef.current) return;
     setViewMenuOpen(false);
     onSelect(agent);
   }, [onSelect]);
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     if (collapsed || typeof window === "undefined") return void 0;
     const onKeyDown = (event) => {
       if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented) return;
@@ -83870,17 +84522,17 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [collapsed]);
-  const workbenchStorageKey = import_react93.default.useMemo(
+  const workbenchStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_WORKBENCH_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace]
   );
-  const [workbenchCollapsed, setWorkbenchCollapsed] = import_react93.default.useState(
+  const [workbenchCollapsed, setWorkbenchCollapsed] = import_react94.default.useState(
     () => readSidebarFlag(localSidebarStorage(), workbenchStorageKey)
   );
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setWorkbenchCollapsed(readSidebarFlag(localSidebarStorage(), workbenchStorageKey));
   }, [workbenchStorageKey]);
-  const toggleWorkbench = import_react93.default.useCallback(() => {
+  const toggleWorkbench = import_react94.default.useCallback(() => {
     setWorkbenchCollapsed((current) => {
       const next = !current;
       writeSidebarFlag(localSidebarStorage(), workbenchStorageKey, next);
@@ -83888,17 +84540,17 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     });
   }, [workbenchStorageKey]);
   const logsShown = Boolean(openControls?.includes("logs"));
-  const logsSeenStorageKey = import_react93.default.useMemo(
+  const logsSeenStorageKey = import_react94.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_LOGS_SEEN_STORAGE_PREFIX, preferenceNamespace),
     [preferenceNamespace]
   );
-  const [logsSeenAtMs, setLogsSeenAtMs] = import_react93.default.useState(
+  const [logsSeenAtMs, setLogsSeenAtMs] = import_react94.default.useState(
     () => readSidebarTime(localSidebarStorage(), logsSeenStorageKey)
   );
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     setLogsSeenAtMs(readSidebarTime(localSidebarStorage(), logsSeenStorageKey));
   }, [logsSeenStorageKey]);
-  import_react93.default.useEffect(() => {
+  import_react94.default.useEffect(() => {
     if (!logsShown || typeof window === "undefined") return void 0;
     const visit2 = () => {
       const now3 = Date.now();
@@ -83912,13 +84564,14 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
       visit2();
     };
   }, [logsShown, logsSeenStorageKey]);
-  const logsErrors = import_react93.default.useMemo(
+  const logsErrors = import_react94.default.useMemo(
     () => logsShown ? 0 : logsErrorCount(recentActivity, logsSeenAtMs),
     [logsSeenAtMs, logsShown, recentActivity]
   );
-  const healthAttention = import_react93.default.useMemo(() => healthNavAttention(agents), [agents]);
-  const pendingApprovals = pendingApprovalCount(approvals);
-  const attentionByKind = import_react93.default.useMemo(() => {
+  const healthAttention = import_react94.default.useMemo(() => healthNavAttention(agents), [agents]);
+  const approvalViewer = useApprovalViewer();
+  const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
+  const attentionByKind = import_react94.default.useMemo(() => {
     const out = { ...navAttention };
     if (pendingApprovals > 0) {
       out.gating = {
@@ -83937,7 +84590,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     }
     return out;
   }, [healthAttention, logsErrors, navAttention, pendingApprovals]);
-  const workbenchAttention = import_react93.default.useMemo(() => {
+  const workbenchAttention = import_react94.default.useMemo(() => {
     let count2 = 0;
     let tone = "warn";
     for (const kind of navKinds) {
@@ -83948,8 +84601,8 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
     }
     return count2 > 0 ? { count: count2, tone } : null;
   }, [attentionByKind, navKinds]);
-  const navDescriptionId = import_react93.default.useId();
-  const viewControls = import_react93.default.useMemo(() => [
+  const navDescriptionId = import_react94.default.useId();
+  const viewControls = import_react94.default.useMemo(() => [
     {
       label: "Show",
       ariaLabel: "Agent activity",
@@ -84152,7 +84805,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
               const attention2 = attentionByKind[kind];
               const descriptionId = "".concat(navDescriptionId, "-").concat(kind);
               const active = activeControl === kind;
-              return /* @__PURE__ */ (0, import_jsx_runtime118.jsxs)(import_react93.default.Fragment, { children: [
+              return /* @__PURE__ */ (0, import_jsx_runtime118.jsxs)(import_react94.default.Fragment, { children: [
                 /* @__PURE__ */ (0, import_jsx_runtime118.jsxs)(
                   "button",
                   {
@@ -84430,7 +85083,7 @@ var Sidebar = import_react93.default.memo(function Sidebar2({
 });
 
 // src/panels/SignalsRail.tsx
-var import_react94 = __toESM(require("react"));
+var import_react95 = __toESM(require("react"));
 
 // src/panels/activity/signals-model.ts
 var DEFAULT_FILTER_PRESETS = [
@@ -84956,7 +85609,7 @@ function openLabel(target) {
       return "Open Routing";
   }
 }
-var SignalsRail = import_react94.default.memo(function SignalsRail2({
+var SignalsRail = import_react95.default.memo(function SignalsRail2({
   frames,
   collapsed,
   filterPresets,
@@ -84974,32 +85627,32 @@ var SignalsRail = import_react94.default.memo(function SignalsRail2({
   countRender("SignalsRail");
   const navigation = useConsoleNavigation();
   const ledger = useActivityLedger({ tickMs: 6e4 });
-  const presets = import_react94.default.useMemo(() => {
+  const presets = import_react95.default.useMemo(() => {
     const configured = (filterPresets || []).filter((preset) => preset.id && preset.label);
     return configured.length > 0 ? configured : DEFAULT_FILTER_PRESETS;
   }, [filterPresets]);
-  const [filter, setFilter] = import_react94.default.useState(activePresetId || presets[0]?.id || "all");
-  const [expandedGroups, setExpandedGroups] = import_react94.default.useState(() => /* @__PURE__ */ new Set());
-  const detailIdPrefix = import_react94.default.useId();
-  import_react94.default.useEffect(() => {
+  const [filter, setFilter] = import_react95.default.useState(activePresetId || presets[0]?.id || "all");
+  const [expandedGroups, setExpandedGroups] = import_react95.default.useState(() => /* @__PURE__ */ new Set());
+  const detailIdPrefix = import_react95.default.useId();
+  import_react95.default.useEffect(() => {
     if (activePresetId && presets.some((preset) => preset.id === activePresetId)) {
       setFilter(activePresetId);
     }
   }, [activePresetId, presets]);
-  const groups = import_react94.default.useMemo(
+  const groups = import_react95.default.useMemo(
     () => buildSignalGroups(frames, agentDirectory, { approvals }),
     [frames, agentDirectory, approvals]
   );
-  const nameOf = import_react94.default.useMemo(() => signalNameResolver(agentDirectory), [agentDirectory]);
+  const nameOf = import_react95.default.useMemo(() => signalNameResolver(agentDirectory), [agentDirectory]);
   const activePreset = presets.find((preset) => preset.id === filter) || presets[0] || DEFAULT_FILTER_PRESETS[0];
-  const counts = import_react94.default.useMemo(() => new Map(presets.map((preset) => [
+  const counts = import_react95.default.useMemo(() => new Map(presets.map((preset) => [
     preset.id,
     groups.filter((group) => groupMatchesPreset(group, preset, watchedIdentities)).length
   ])), [groups, presets, watchedIdentities]);
   const shown = groups.filter((group) => groupMatchesPreset(group, activePreset, watchedIdentities));
   const nowMs = ledger.nowMs;
   const recent15m = groups.filter((group) => nowMs - (group.items[0]?.atMs || 0) < 15 * 60 * 1e3).length;
-  const pulse = import_react94.default.useMemo(
+  const pulse = import_react95.default.useMemo(
     () => ledger.series(null, "events", { bins: PULSE_BINS, binMs: 6e4, endMs: nowMs }),
     // The ledger's version moves with every change it counts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -85235,10 +85888,10 @@ var SignalsRail = import_react94.default.memo(function SignalsRail2({
 });
 
 // src/panels/ChatPane.tsx
-var import_react97 = __toESM(require("react"));
+var import_react98 = __toESM(require("react"));
 
 // src/panels/VoiceBar.tsx
-var import_react95 = __toESM(require("react"));
+var import_react96 = __toESM(require("react"));
 
 // src/lib/voice-context.ts
 var failureMessages = {
@@ -85341,11 +85994,11 @@ function AudioWaveform({
   sampleWaveform,
   active
 }) {
-  const canvasRef = import_react95.default.useRef(null);
+  const canvasRef = import_react96.default.useRef(null);
   const tokens = useVizTokens(canvasRef);
-  const colours = import_react95.default.useRef({ quiet: tokens.mid, speaking: tokens.live });
+  const colours = import_react96.default.useRef({ quiet: tokens.mid, speaking: tokens.live });
   colours.current = { quiet: tokens.mid, speaking: tokens.live };
-  import_react95.default.useEffect(() => {
+  import_react96.default.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const context = canvas.getContext("2d");
@@ -85418,7 +86071,7 @@ function AudioWaveform({
   }, [active, sampleWaveform, source]);
   return /* @__PURE__ */ (0, import_jsx_runtime120.jsx)("canvas", { className: "voice-waveform voice-waveform--".concat(source), ref: canvasRef, "aria-hidden": "true" });
 }
-var VoiceBar = import_react95.default.memo(function VoiceBar2({
+var VoiceBar = import_react96.default.memo(function VoiceBar2({
   state,
   sampleWaveform,
   onClose,
@@ -85613,7 +86266,7 @@ function stripConsoleBlobReferencesFromText(value, references = consoleBlobRefer
 }
 
 // src/panels/transcript-window.ts
-var React55 = __toESM(require("react"));
+var React56 = __toESM(require("react"));
 var TURN_WINDOW_OVERSCAN = 1.5;
 var TURN_WINDOW_MARGIN = 0.5;
 var TURN_FIND_BAND = 20;
@@ -85690,20 +86343,20 @@ function turnSlots(turns, mounted, measurements, gap, parked = []) {
 }
 var NO_ACTIONABLE_TURNS = /* @__PURE__ */ new Set();
 function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIONABLE_TURNS) {
-  const measurements = React55.useRef(/* @__PURE__ */ new Map());
-  const geometry = React55.useRef({ width: 0, gap: 0, top: 0, viewportHeight: 0 });
-  const turnsRef = React55.useRef(turns);
+  const measurements = React56.useRef(/* @__PURE__ */ new Map());
+  const geometry = React56.useRef({ width: 0, gap: 0, top: 0, viewportHeight: 0 });
+  const turnsRef = React56.useRef(turns);
   turnsRef.current = turns;
-  const keys2 = React55.useMemo(() => turns.map(renderKey), [turns, renderKey]);
-  const keysRef = React55.useRef(keys2);
+  const keys2 = React56.useMemo(() => turns.map(renderKey), [turns, renderKey]);
+  const keysRef = React56.useRef(keys2);
   keysRef.current = keys2;
-  const pins = React55.useRef({ selection: /* @__PURE__ */ new Set(), focus: /* @__PURE__ */ new Set(), jump: /* @__PURE__ */ new Set() });
-  const actionableRef = React55.useRef(actionable);
+  const pins = React56.useRef({ selection: /* @__PURE__ */ new Set(), focus: /* @__PURE__ */ new Set(), jump: /* @__PURE__ */ new Set() });
+  const actionableRef = React56.useRef(actionable);
   actionableRef.current = actionable;
-  const [plan, setPlan] = React55.useState(null);
-  const planRef = React55.useRef(plan);
+  const [plan, setPlan] = React56.useState(null);
+  const planRef = React56.useRef(plan);
   planRef.current = plan;
-  const replan = React55.useCallback(() => {
+  const replan = React56.useCallback(() => {
     const body = bodyRef.current;
     if (!enabled || !body) return;
     const current = turnsRef.current;
@@ -85729,7 +86382,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     if (sink) sink.TurnWindowPlans = (sink.TurnWindowPlans ?? 0) + 1;
     setPlan(next);
   }, [bodyRef, enabled]);
-  React55.useLayoutEffect(() => {
+  React56.useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!enabled || !body || typeof ResizeObserver === "undefined") return;
     const indexOf = /* @__PURE__ */ new Map();
@@ -85825,7 +86478,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
       body.removeEventListener("focusout", onFocus);
     };
   }, [bodyRef, enabled, replan]);
-  React55.useLayoutEffect(() => {
+  React56.useLayoutEffect(() => {
     if (!enabled) return;
     const body = bodyRef.current;
     if (body) {
@@ -85838,13 +86491,13 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     }
   }, [turns, keys2, enabled, bodyRef]);
   const actionableKey = [...actionable].sort().join("\n");
-  const actionableKeyRef = React55.useRef(actionableKey);
-  React55.useEffect(() => {
+  const actionableKeyRef = React56.useRef(actionableKey);
+  React56.useEffect(() => {
     if (actionableKeyRef.current === actionableKey) return;
     actionableKeyRef.current = actionableKey;
     replan();
   }, [actionableKey, replan]);
-  const mount = React55.useCallback((index3) => {
+  const mount = React56.useCallback((index3) => {
     if (index3 < 0 || index3 >= turnsRef.current.length) return false;
     pins.current.jump = /* @__PURE__ */ new Set([index3]);
     replan();
@@ -85860,8 +86513,8 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     body?.addEventListener("keydown", release);
     return true;
   }, [bodyRef, replan]);
-  const pendingFocus = React55.useRef(null);
-  const focusTurn = React55.useCallback((id) => {
+  const pendingFocus = React56.useRef(null);
+  const focusTurn = React56.useCallback((id) => {
     pendingFocus.current = id;
     const index3 = turnsRef.current.findIndex((turn) => turn.id === id);
     if (index3 >= 0) {
@@ -85874,7 +86527,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
       element3.focus();
     }
   }, [bodyRef, mount]);
-  const slots = React55.useMemo(() => {
+  const slots = React56.useMemo(() => {
     if (!enabled || !plan) return turns.map((_2, index3) => ({ kind: "turn", index: index3 }));
     const mounted = new Set(plan.mounted.filter((index3) => index3 < turns.length));
     for (let i2 = 0; i2 < turns.length; i2 += 1) {
@@ -85884,7 +86537,7 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     const parked = plan.parked.filter((index3) => index3 < turns.length && !mounted.has(index3));
     return turnSlots(turns, [...mounted].sort((a2, b2) => a2 - b2), measurements.current, geometry.current.gap, parked);
   }, [enabled, plan, turns, keys2]);
-  React55.useLayoutEffect(() => {
+  React56.useLayoutEffect(() => {
     const id = pendingFocus.current;
     if (!id) return;
     const element3 = bodyRef.current?.querySelector(':scope > [data-conversation-turn-id="'.concat(CSS.escape(id), '"]:not([hidden])'));
@@ -85892,11 +86545,11 @@ function useTurnWindow(bodyRef, turns, enabled, renderKey, actionable = NO_ACTIO
     pendingFocus.current = null;
     element3.focus();
   });
-  return React55.useMemo(() => ({ slots, mount, focusTurn }), [slots, mount, focusTurn]);
+  return React56.useMemo(() => ({ slots, mount, focusTurn }), [slots, mount, focusTurn]);
 }
 
 // src/panels/chat-header.tsx
-var import_react96 = __toESM(require("react"));
+var import_react97 = __toESM(require("react"));
 var import_jsx_runtime121 = require("react/jsx-runtime");
 var PEER_TOOL_VERBS = {
   send_message: "Messaging",
@@ -85955,8 +86608,8 @@ function chatRoleGroupWords(agent, agentLabel) {
   return [roleWords2, groupWords].filter(Boolean).join(" \xB7 ");
 }
 function useElapsedClock(sinceMs) {
-  const [now3, setNow] = import_react96.default.useState(() => Date.now());
-  import_react96.default.useEffect(() => {
+  const [now3, setNow] = import_react97.default.useState(() => Date.now());
+  import_react97.default.useEffect(() => {
     if (sinceMs === void 0) return void 0;
     let timer3;
     const schedule = () => {
@@ -86012,9 +86665,9 @@ function ConfirmStrip({
   onConfirm,
   onCancel
 }) {
-  const confirmRef = import_react96.default.useRef(null);
-  const questionId = import_react96.default.useId();
-  import_react96.default.useEffect(() => {
+  const confirmRef = import_react97.default.useRef(null);
+  const questionId = import_react97.default.useId();
+  import_react97.default.useEffect(() => {
     confirmRef.current?.focus();
   }, [action]);
   return /* @__PURE__ */ (0, import_jsx_runtime121.jsxs)(
@@ -86062,7 +86715,7 @@ function ConfirmStrip({
     }
   );
 }
-var ChatHeader = import_react96.default.memo(function ChatHeader2({
+var ChatHeader = import_react97.default.memo(function ChatHeader2({
   identity,
   agentLabel,
   agent,
@@ -86098,16 +86751,16 @@ var ChatHeader = import_react96.default.memo(function ChatHeader2({
   }) : null;
   const roleGroup = chatRoleGroupWords(agent, agentLabel);
   const lastActiveMs = agent?.last_activity_ms ?? live.lastActivityMs;
-  const [confirm, setConfirm] = import_react96.default.useState(null);
+  const [confirm, setConfirm] = import_react97.default.useState(null);
   const confirmAction = confirm === "respawn" ? onRespawn : confirm === "retire" ? onRetire : void 0;
-  import_react96.default.useEffect(() => {
+  import_react97.default.useEffect(() => {
     if (confirm && !confirmAction) setConfirm(null);
   }, [confirm, confirmAction]);
-  import_react96.default.useEffect(() => {
+  import_react97.default.useEffect(() => {
     setConfirm(null);
   }, [identity]);
-  const frameRef = import_react96.default.useRef(null);
-  const closeConfirm = import_react96.default.useCallback(() => {
+  const frameRef = import_react97.default.useRef(null);
+  const closeConfirm = import_react97.default.useCallback(() => {
     setConfirm(null);
     frameRef.current?.querySelector(".conv__menu")?.focus();
   }, []);
@@ -86348,14 +87001,14 @@ function TranscriptFindBar({
   onJump,
   onClose
 }) {
-  const [query, setQuery] = import_react97.default.useState("");
-  const matches = import_react97.default.useMemo(() => transcriptFindMatches(messages, query), [messages, query]);
-  const [current, setCurrent] = import_react97.default.useState(-1);
-  import_react97.default.useEffect(() => {
+  const [query, setQuery] = import_react98.default.useState("");
+  const matches = import_react98.default.useMemo(() => transcriptFindMatches(messages, query), [messages, query]);
+  const [current, setCurrent] = import_react98.default.useState(-1);
+  import_react98.default.useEffect(() => {
     setCurrent(matches.length ? matches.length - 1 : -1);
   }, [query]);
   const target = current >= 0 && current < matches.length ? matches[current] : null;
-  import_react97.default.useEffect(() => {
+  import_react98.default.useEffect(() => {
     if (!target) {
       clearFindHighlight();
       return;
@@ -86371,7 +87024,7 @@ function TranscriptFindBar({
     handle2 = window.requestAnimationFrame(tryHighlight);
     return () => window.cancelAnimationFrame(handle2);
   }, [target]);
-  import_react97.default.useEffect(() => clearFindHighlight, []);
+  import_react98.default.useEffect(() => clearFindHighlight, []);
   const step = (delta) => {
     if (!matches.length) return;
     setCurrent((index3) => ((index3 < 0 ? 0 : index3) + delta + matches.length) % matches.length);
@@ -86760,9 +87413,9 @@ function CopyInlineButton({
   label: label2,
   className = ""
 }) {
-  const [outcome, setOutcome] = import_react97.default.useState("idle");
-  const resetTimer = import_react97.default.useRef(null);
-  import_react97.default.useEffect(
+  const [outcome, setOutcome] = import_react98.default.useState("idle");
+  const resetTimer = import_react98.default.useRef(null);
+  import_react98.default.useEffect(
     () => () => {
       if (resetTimer.current) clearTimeout(resetTimer.current);
     },
@@ -86948,7 +87601,7 @@ function MessageHeader({ message: m3, copyLabel }) {
     copyLabel ? /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(CopyInlineButton, { className: "msg__copy--head", label: copyLabel, text: msgCopyText(m3) }) : null
   ] });
 }
-var MessageRow = import_react97.default.memo(function MessageRow2({
+var MessageRow = import_react98.default.memo(function MessageRow2({
   message: m3,
   suppressWorked,
   workGraphActions,
@@ -86987,7 +87640,7 @@ function MessageRowBody({
     ] })
   ] });
 }
-var TranscriptTurn = import_react97.default.memo(function TranscriptTurn2({
+var TranscriptTurn = import_react98.default.memo(function TranscriptTurn2({
   turn,
   turnIndex,
   identity,
@@ -87004,8 +87657,8 @@ var TranscriptTurn = import_react97.default.memo(function TranscriptTurn2({
   parkedHeight
 }) {
   countRender("TranscriptTurn");
-  const turnRef = import_react97.default.useRef(null);
-  import_react97.default.useLayoutEffect(() => {
+  const turnRef = import_react98.default.useRef(null);
+  import_react98.default.useLayoutEffect(() => {
     const element3 = turnRef.current;
     if (!element3) return;
     if (parkedHeight === void 0) {
@@ -87051,18 +87704,18 @@ var TranscriptTurn = import_react97.default.memo(function TranscriptTurn2({
       tabIndex: -1,
       children: [
         groupRoutineToolRows(turn.messages, (message) => message.kind === "tool" ? message.blocks : void 0).map((run) => {
-          const rows = run.rows.map((m3) => /* @__PURE__ */ (0, import_jsx_runtime122.jsxs)(import_react97.default.Fragment, { children: [
+          const rows = run.rows.map((m3) => /* @__PURE__ */ (0, import_jsx_runtime122.jsxs)(import_react98.default.Fragment, { children: [
             daySeparator(m3),
             /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(MessageRow, { message: m3, suppressWorked: m3.id === suppressWorkedId, workGraphActions, markdownUrlPolicy })
           ] }, m3.scrollRowId ?? m3.id));
-          return /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(import_react97.default.Fragment, { children: run.tools.length >= 2 ? /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(CompletedToolDisclosure, { blocks: run.tools, children: rows }) : rows }, run.rows[0].scrollRowId ?? run.rows[0].id);
+          return /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(import_react98.default.Fragment, { children: run.tools.length >= 2 ? /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(CompletedToolDisclosure, { blocks: run.tools, children: rows }) : rows }, run.rows[0].scrollRowId ?? run.rows[0].id);
         }),
         /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(ConversationRowStateScope, { rowId: "approvals:".concat(turn.id), children: /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(ConversationApprovals, { approvalSnapshot, approvalIdentity: identity, onApprovalDecision, conversationId, interactionIds: approvalInteractionIds }) })
       ]
     }
   );
 });
-var TranscriptView = import_react97.default.memo(function TranscriptView2({
+var TranscriptView = import_react98.default.memo(function TranscriptView2({
   identity,
   agentLabel,
   turns,
@@ -87088,12 +87741,12 @@ var TranscriptView = import_react97.default.memo(function TranscriptView2({
   onOpenFind
 }) {
   countRender("TranscriptView");
-  const windowedTurns = import_react97.default.useMemo(
+  const windowedTurns = import_react98.default.useMemo(
     () => windowStart > 0 ? turns.slice(windowStart) : turns,
     [turns, windowStart]
   );
-  const approvalIdsRef = import_react97.default.useRef(/* @__PURE__ */ new Map());
-  const approvalInteractions = import_react97.default.useMemo(() => {
+  const approvalIdsRef = import_react98.default.useRef(/* @__PURE__ */ new Map());
+  const approvalInteractions = import_react98.default.useMemo(() => {
     const next = approvalInteractionIdsByTurn(windowedTurns.map((turn) => turn.messages.flatMap((message) => message.interactionId ? [message.interactionId] : [])));
     const interned = /* @__PURE__ */ new Map();
     const result = next.map((ids, offset) => {
@@ -87106,7 +87759,7 @@ var TranscriptView = import_react97.default.memo(function TranscriptView2({
     approvalIdsRef.current = interned;
     return result;
   }, [windowedTurns]);
-  const previousDays = import_react97.default.useMemo(() => {
+  const previousDays = import_react98.default.useMemo(() => {
     let day = null;
     return windowedTurns.map((turn) => {
       const before = day;
@@ -87115,8 +87768,8 @@ var TranscriptView = import_react97.default.memo(function TranscriptView2({
     });
   }, [windowedTurns]);
   const todayKey = transcriptDayKey((/* @__PURE__ */ new Date()).toISOString());
-  const dayLabelNow = import_react97.default.useMemo(() => /* @__PURE__ */ new Date(), [todayKey]);
-  const getTranscriptText = import_react97.default.useCallback(() => transcriptCopyText(messages), [messages]);
+  const dayLabelNow = import_react98.default.useMemo(() => /* @__PURE__ */ new Date(), [todayKey]);
+  const getTranscriptText = import_react98.default.useCallback(() => transcriptCopyText(messages), [messages]);
   const setSize = windowStart > 0 || hasOlderHistory ? -1 : turns.length;
   const renderTurn = (offset, parkedHeight) => {
     const turn = windowedTurns[offset];
@@ -87274,7 +87927,7 @@ var TranscriptView = import_react97.default.memo(function TranscriptView2({
     }
   );
 });
-var ComposerTextarea = import_react97.default.memo(function ComposerTextarea2({
+var ComposerTextarea = import_react98.default.memo(function ComposerTextarea2({
   identity,
   agentLabel,
   agentRole,
@@ -87295,8 +87948,8 @@ var ComposerTextarea = import_react97.default.memo(function ComposerTextarea2({
   onSubmit
 }) {
   countRender("ComposerTextarea");
-  const [value, setValue] = import_react97.default.useState(initialValue);
-  const [appliedExternal, setAppliedExternal] = import_react97.default.useState(null);
+  const [value, setValue] = import_react98.default.useState(initialValue);
+  const [appliedExternal, setAppliedExternal] = import_react98.default.useState(null);
   if (externalValue && appliedExternal !== externalValue.at) {
     setAppliedExternal(externalValue.at);
     setValue(externalValue.value);
@@ -87355,7 +88008,7 @@ var ComposerTextarea = import_react97.default.memo(function ComposerTextarea2({
 });
 function SideChatSourceName({ id, label: label2 }) {
   const navigation = useConsoleNavigation();
-  const directory = import_react97.default.useMemo(() => id ? createAgentDirectory([{ id, label: label2 }]) : void 0, [id, label2]);
+  const directory = import_react98.default.useMemo(() => id ? createAgentDirectory([{ id, label: label2 }]) : void 0, [id, label2]);
   if (!id || !navigation?.openAgent) return /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(import_jsx_runtime122.Fragment, { children: label2 });
   return /* @__PURE__ */ (0, import_jsx_runtime122.jsx)(AgentName, { id, link: true, directory, testId: "side-chat-source" });
 }
@@ -87427,19 +88080,19 @@ function ChatPane({
   peerLabels = null
 }) {
   countRender("ChatPane");
-  const [quoteError, setQuoteError] = import_react97.default.useState(null);
-  const quoteErrorRef = import_react97.default.useRef(quoteError);
+  const [quoteError, setQuoteError] = import_react98.default.useState(null);
+  const quoteErrorRef = import_react98.default.useRef(quoteError);
   quoteErrorRef.current = quoteError;
-  import_react97.default.useEffect(() => {
+  import_react98.default.useEffect(() => {
     setQuoteError(null);
   }, [submittedRowId, identity, conversationId, viewportKey?.authority, viewportKey?.pane]);
-  const liveDraftRef = import_react97.default.useRef(draft);
-  const liveDraftRevisionRef = import_react97.default.useRef(0);
-  const lastPublishedDraftRef = import_react97.default.useRef(draft);
-  const publishDraftTimerRef = import_react97.default.useRef(null);
-  const onDraftChangeRef = import_react97.default.useRef(onDraftChange);
+  const liveDraftRef = import_react98.default.useRef(draft);
+  const liveDraftRevisionRef = import_react98.default.useRef(0);
+  const lastPublishedDraftRef = import_react98.default.useRef(draft);
+  const publishDraftTimerRef = import_react98.default.useRef(null);
+  const onDraftChangeRef = import_react98.default.useRef(onDraftChange);
   onDraftChangeRef.current = onDraftChange;
-  const publishDraft = import_react97.default.useCallback(() => {
+  const publishDraft = import_react98.default.useCallback(() => {
     if (publishDraftTimerRef.current !== null) {
       window.clearTimeout(publishDraftTimerRef.current);
       publishDraftTimerRef.current = null;
@@ -87449,8 +88102,8 @@ function ChatPane({
     lastPublishedDraftRef.current = value;
     onDraftChangeRef.current(value);
   }, []);
-  const [liveDraftTick, setLiveDraftTick] = import_react97.default.useState(0);
-  const onLiveChange = import_react97.default.useCallback(
+  const [liveDraftTick, setLiveDraftTick] = import_react98.default.useState(0);
+  const onLiveChange = import_react98.default.useCallback(
     (value) => {
       if (quoteErrorRef.current !== null) setQuoteError(null);
       liveDraftRef.current = value;
@@ -87463,16 +88116,16 @@ function ChatPane({
     },
     [publishDraft]
   );
-  const externalSeqRef = import_react97.default.useRef(0);
-  const [externalValue, setExternalValue] = import_react97.default.useState(null);
-  import_react97.default.useEffect(() => {
+  const externalSeqRef = import_react98.default.useRef(0);
+  const [externalValue, setExternalValue] = import_react98.default.useState(null);
+  import_react98.default.useEffect(() => {
     if (draft === lastPublishedDraftRef.current) return;
     lastPublishedDraftRef.current = draft;
     liveDraftRef.current = draft;
     externalSeqRef.current += 1;
     setExternalValue({ value: draft, at: externalSeqRef.current });
   }, [draft]);
-  const setDraft = import_react97.default.useCallback(
+  const setDraft = import_react98.default.useCallback(
     (value) => {
       liveDraftRef.current = value;
       externalSeqRef.current += 1;
@@ -87481,43 +88134,43 @@ function ChatPane({
     },
     [publishDraft]
   );
-  import_react97.default.useEffect(() => () => publishDraft(), [publishDraft]);
-  const bodyRef = import_react97.default.useRef(null);
-  const activeTurnFrameRef = import_react97.default.useRef(0);
-  const [visibleTurnIndexes, setVisibleTurnIndexes] = import_react97.default.useState([]);
-  const visibleLiveSpeech = import_react97.default.useMemo(
+  import_react98.default.useEffect(() => () => publishDraft(), [publishDraft]);
+  const bodyRef = import_react98.default.useRef(null);
+  const activeTurnFrameRef = import_react98.default.useRef(0);
+  const [visibleTurnIndexes, setVisibleTurnIndexes] = import_react98.default.useState([]);
+  const visibleLiveSpeech = import_react98.default.useMemo(
     () => uncommittedLiveSpeech(entries, liveSpeech, activeVoiceScope),
     [entries, liveSpeech, activeVoiceScope]
   );
-  const onApprovalDecisionRef = import_react97.default.useRef(onApprovalDecision);
+  const onApprovalDecisionRef = import_react98.default.useRef(onApprovalDecision);
   onApprovalDecisionRef.current = onApprovalDecision;
-  const stableApprovalDecision = import_react97.default.useCallback(
+  const stableApprovalDecision = import_react98.default.useCallback(
     (pendingId, action) => onApprovalDecisionRef.current?.(pendingId, action),
     []
   );
-  const presentationLabels = import_react97.default.useMemo(
+  const presentationLabels = import_react98.default.useMemo(
     () => displayLabels ?? { peers: peerLabels ?? void 0 },
     [displayLabels, peerLabels]
   );
-  const resolvePeerLabel = import_react97.default.useMemo(
+  const resolvePeerLabel = import_react98.default.useMemo(
     () => peerLabels ? (alias) => peerLabels.get(alias) ?? null : null,
     [peerLabels]
   );
-  const chatMessagesRef = import_react97.default.useRef(null);
-  const messages = import_react97.default.useMemo(() => {
+  const chatMessagesRef = import_react98.default.useRef(null);
+  const messages = import_react98.default.useMemo(() => {
     const next = extendChatMessages(chatMessagesRef.current, entries, { resolvePeerLabel });
     chatMessagesRef.current = next;
     return next.messages;
   }, [entries, resolvePeerLabel]);
-  const turnsRef = import_react97.default.useRef([]);
-  const turns = import_react97.default.useMemo(() => {
+  const turnsRef = import_react98.default.useRef([]);
+  const turns = import_react98.default.useMemo(() => {
     const next = internTurns(buildChatTurns(messages), turnsRef.current);
     turnsRef.current = next;
     return next;
   }, [messages]);
-  const [revealedFrom, setRevealedFrom] = import_react97.default.useState(null);
+  const [revealedFrom, setRevealedFrom] = import_react98.default.useState(null);
   const windowAnchor = revealedFrom && revealedFrom.identity === identity ? revealedFrom : null;
-  const turnIndexById = import_react97.default.useMemo(() => {
+  const turnIndexById = import_react98.default.useMemo(() => {
     const index3 = /* @__PURE__ */ new Map();
     turns.forEach((turn, i2) => index3.set(turn.id, i2));
     return index3;
@@ -87527,8 +88180,8 @@ function ChatPane({
     windowAnchor,
     (id) => turnIndexById.get(id) ?? -1
   );
-  const revealedTurns = import_react97.default.useMemo(() => windowStart > 0 ? turns.slice(windowStart) : turns, [turns, windowStart]);
-  const turnRenderKey = import_react97.default.useMemo(() => {
+  const revealedTurns = import_react98.default.useMemo(() => windowStart > 0 ? turns.slice(windowStart) : turns, [turns, windowStart]);
+  const turnRenderKey = import_react98.default.useMemo(() => {
     let day = null;
     const previous3 = revealedTurns.map((turn) => {
       const before = day;
@@ -87537,7 +88190,7 @@ function ChatPane({
     });
     return (turn, index3) => "".concat(previous3[index3] ?? "", "\0").concat(turnContentKey(turn));
   }, [revealedTurns]);
-  const actionableTurnIds = import_react97.default.useMemo(() => {
+  const actionableTurnIds = import_react98.default.useMemo(() => {
     if (!approvalSnapshot?.requests.length) return NO_TURN_IDS;
     const indexes = pendingApprovalTurns(
       revealedTurns.map((turn) => turn.messages.flatMap((message) => message.interactionId ? [message.interactionId] : [])),
@@ -87546,7 +88199,7 @@ function ChatPane({
     return indexes.length > 0 ? new Set(indexes.map((index3) => revealedTurns[index3].id)) : NO_TURN_IDS;
   }, [approvalSnapshot, revealedTurns, identity, conversationId]);
   const turnWindow = useTurnWindow(bodyRef, revealedTurns, windowed, turnRenderKey, actionableTurnIds);
-  const revealScrollAnchorRef = import_react97.default.useRef(() => false);
+  const revealScrollAnchorRef = import_react98.default.useRef(() => false);
   const scroll = useConversationScrollController({
     viewportRef: bodyRef,
     viewportKey,
@@ -87559,7 +88212,7 @@ function ChatPane({
     },
     revealAnchor: (rowId) => revealScrollAnchorRef.current(rowId)
   });
-  const revealTurnsFrom = import_react97.default.useCallback(
+  const revealTurnsFrom = import_react98.default.useCallback(
     (firstIndex) => {
       const target = Math.max(0, firstIndex);
       scroll.captureBeforePrepend();
@@ -87568,16 +88221,16 @@ function ChatPane({
     },
     [identity, turns, scroll.captureBeforePrepend]
   );
-  const revealEarlier = import_react97.default.useCallback(() => {
+  const revealEarlier = import_react98.default.useCallback(() => {
     revealTurnsFrom(windowStart - TRANSCRIPT_WINDOW_STEP);
   }, [revealTurnsFrom, windowStart]);
-  const lastAgentMessageId = import_react97.default.useMemo(() => {
+  const lastAgentMessageId = import_react98.default.useMemo(() => {
     for (let i2 = messages.length - 1; i2 >= 0; i2 -= 1) {
       if (messages[i2].kind === "agent" && messages[i2].source?.kind === "assistant") return messages[i2].id;
     }
     return null;
   }, [messages]);
-  const scrollSignature = import_react97.default.useMemo(() => {
+  const scrollSignature = import_react98.default.useMemo(() => {
     const last = messages[messages.length - 1];
     const lastTextLength = last?.text?.length ?? 0;
     const lastBlockLength = last?.blocks ? JSON.stringify(last.blocks).length : last?.workGraphEntry ? JSON.stringify(last.workGraphEntry).length : 0;
@@ -87598,7 +88251,7 @@ function ChatPane({
     setRevealedFrom({ identity, turnId, mountedTurns: turns.length - index3 });
     return true;
   };
-  const updateActiveTurn = import_react97.default.useCallback(() => {
+  const updateActiveTurn = import_react98.default.useCallback(() => {
     activeTurnFrameRef.current = 0;
     const body = bodyRef.current;
     if (!body || turns.length <= 1) {
@@ -87654,16 +88307,16 @@ function ChatPane({
       return nextIndexes;
     });
   }, [turns.length]);
-  const scheduleActiveTurnUpdate = import_react97.default.useCallback(() => {
+  const scheduleActiveTurnUpdate = import_react98.default.useCallback(() => {
     if (activeTurnFrameRef.current) {
       return;
     }
     activeTurnFrameRef.current = window.requestAnimationFrame(updateActiveTurn);
   }, [updateActiveTurn]);
-  import_react97.default.useEffect(() => {
+  import_react98.default.useEffect(() => {
     scheduleActiveTurnUpdate();
   }, [scheduleActiveTurnUpdate, scrollSignature, turnWindow.slots]);
-  import_react97.default.useEffect(() => {
+  import_react98.default.useEffect(() => {
     updateActiveTurn();
     window.addEventListener("resize", scheduleActiveTurnUpdate);
     return () => {
@@ -87679,37 +88332,37 @@ function ChatPane({
     const rowId = message?.scrollRowId ?? message?.id;
     if (rowId) scroll.jumpToRow(rowId);
   }
-  const onLoadOlderRef = import_react97.default.useRef(onLoadOlder);
+  const onLoadOlderRef = import_react98.default.useRef(onLoadOlder);
   onLoadOlderRef.current = onLoadOlder;
-  const requestOlderHistory = import_react97.default.useCallback(() => {
+  const requestOlderHistory = import_react98.default.useCallback(() => {
     scroll.captureBeforePrepend();
     onLoadOlderRef.current?.();
   }, [scroll.captureBeforePrepend]);
-  const hasOlderHistoryRef = import_react97.default.useRef(hasOlderHistory);
+  const hasOlderHistoryRef = import_react98.default.useRef(hasOlderHistory);
   hasOlderHistoryRef.current = hasOlderHistory;
-  const loadingOlderHistoryRef = import_react97.default.useRef(loadingOlderHistory);
+  const loadingOlderHistoryRef = import_react98.default.useRef(loadingOlderHistory);
   loadingOlderHistoryRef.current = loadingOlderHistory;
-  const windowStartRef = import_react97.default.useRef(windowStart);
+  const windowStartRef = import_react98.default.useRef(windowStart);
   windowStartRef.current = windowStart;
-  const revealEarlierRef = import_react97.default.useRef(revealEarlier);
+  const revealEarlierRef = import_react98.default.useRef(revealEarlier);
   revealEarlierRef.current = revealEarlier;
-  const [findOpen, setFindOpen] = import_react97.default.useState(false);
-  const openFind = import_react97.default.useCallback(() => setFindOpen(true), []);
-  const closeFind = import_react97.default.useCallback(() => {
+  const [findOpen, setFindOpen] = import_react98.default.useState(false);
+  const openFind = import_react98.default.useCallback(() => setFindOpen(true), []);
+  const closeFind = import_react98.default.useCallback(() => {
     setFindOpen(false);
     bodyRef.current?.focus();
   }, []);
-  const jumpToFoundRef = import_react97.default.useRef(() => {
+  const jumpToFoundRef = import_react98.default.useRef(() => {
   });
   jumpToFoundRef.current = (rowId) => {
     scroll.jumpToRow(rowId);
   };
-  const jumpToFound = import_react97.default.useCallback((rowId) => jumpToFoundRef.current(rowId), []);
-  const turnsRefForKeys = import_react97.default.useRef(turns);
+  const jumpToFound = import_react98.default.useCallback((rowId) => jumpToFoundRef.current(rowId), []);
+  const turnsRefForKeys = import_react98.default.useRef(turns);
   turnsRefForKeys.current = turns;
-  const turnWindowRef = import_react97.default.useRef(turnWindow);
+  const turnWindowRef = import_react98.default.useRef(turnWindow);
   turnWindowRef.current = turnWindow;
-  const onTranscriptKeyDown = import_react97.default.useCallback((event) => {
+  const onTranscriptKeyDown = import_react98.default.useCallback((event) => {
     const target = event.target;
     if (!target.matches?.("[data-conversation-turn-id]") || event.altKey || event.metaKey || event.shiftKey) return;
     if (event.ctrlKey && event.key === "End") {
@@ -87726,7 +88379,7 @@ function ChatPane({
     if (next < windowStartRef.current) revealEarlierRef.current();
     turnWindowRef.current.focusTurn(all2[next].id);
   }, []);
-  const onBodyScroll = import_react97.default.useCallback(
+  const onBodyScroll = import_react98.default.useCallback(
     (event) => {
       if (event.currentTarget.scrollLeft !== 0) {
         event.currentTarget.scrollLeft = 0;
@@ -87744,18 +88397,18 @@ function ChatPane({
     [requestOlderHistory, scheduleActiveTurnUpdate]
   );
   const state = (agent?.state || "").trim().toLowerCase();
-  const runningTool = import_react97.default.useMemo(
+  const runningTool = import_react98.default.useMemo(
     () => phase2 === "tool-executing" ? runningToolOf(entries) : null,
     [phase2, entries]
   );
   const canAttachImages = !readOnly && agent?.model_capabilities?.image_input === true;
   const sendWithheld = accessEnforcing && agent?.affordances?.can_send_message === false;
-  const [dragActive, setDragActive] = import_react97.default.useState(false);
-  const [attachmentError, setAttachmentError] = import_react97.default.useState(null);
-  const resolvedDraftBlobRefs = import_react97.default.useRef("");
-  const railRef = import_react97.default.useRef(null);
-  const [railHeight, setRailHeight] = import_react97.default.useState(null);
-  import_react97.default.useEffect(() => {
+  const [dragActive, setDragActive] = import_react98.default.useState(false);
+  const [attachmentError, setAttachmentError] = import_react98.default.useState(null);
+  const resolvedDraftBlobRefs = import_react98.default.useRef("");
+  const railRef = import_react98.default.useRef(null);
+  const [railHeight, setRailHeight] = import_react98.default.useState(null);
+  import_react98.default.useEffect(() => {
     const nav = railRef.current;
     const body = bodyRef.current;
     const pane = body?.parentElement;
@@ -87779,8 +88432,8 @@ function ChatPane({
     observer.observe(pane);
     return () => observer.disconnect();
   }, [turns.length > 1]);
-  const [transcriptOverflows, setTranscriptOverflows] = import_react97.default.useState(null);
-  import_react97.default.useEffect(() => {
+  const [transcriptOverflows, setTranscriptOverflows] = import_react98.default.useState(null);
+  import_react98.default.useEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
     const measure = () => setTranscriptOverflows(body.scrollHeight > body.clientHeight + 1);
@@ -87911,7 +88564,7 @@ function ChatPane({
       return current.filter((item) => item.id !== id);
     });
   }
-  import_react97.default.useEffect(() => {
+  import_react98.default.useEffect(() => {
     if (!canAttachImages) return;
     const refs = consoleBlobReferencesFromText(liveDraftRef.current);
     if (refs.length === 0) {
@@ -87947,9 +88600,9 @@ function ChatPane({
       window.clearTimeout(timer3);
     };
   }, [canAttachImages, liveDraftTick, publishDraft, setDraft]);
-  const submitComposerRef = import_react97.default.useRef(async () => {
+  const submitComposerRef = import_react98.default.useRef(async () => {
   });
-  const submitComposer = import_react97.default.useCallback(() => submitComposerRef.current(), []);
+  const submitComposer = import_react98.default.useCallback(() => submitComposerRef.current(), []);
   submitComposerRef.current = async function submitComposerNow() {
     if (staged.length > 0 && !canAttachImages) {
       setAttachmentError("model cannot see images");
@@ -88204,7 +88857,7 @@ function ChatPane({
 }
 
 // src/panels/MetaDock.tsx
-var import_react98 = __toESM(require("react"));
+var import_react99 = __toESM(require("react"));
 var import_jsx_runtime123 = require("react/jsx-runtime");
 function tabPanelCount(node2) {
   if (!node2) return 0;
@@ -88227,7 +88880,7 @@ function MetaDock({
   onOpenTargetInPanel
 }) {
   const activeTab = viewState.tabs.find((t) => t.id === viewState.activeTabId) || viewState.tabs[0];
-  import_react98.default.useEffect(() => {
+  import_react99.default.useEffect(() => {
     function onKey(e) {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
@@ -88354,7 +89007,7 @@ function DockLayout(props) {
 }
 function SplitView(props) {
   const { node: node2 } = props;
-  const hostRef = import_react98.default.useRef(null);
+  const hostRef = import_react99.default.useRef(null);
   if (node2.kind !== "split") return null;
   const ratio = typeof node2.ratio === "number" ? Math.max(0.1, Math.min(0.9, node2.ratio)) : 0.5;
   const direction = node2.direction;
@@ -88422,9 +89075,9 @@ function PaneView({
   onClosePanel,
   onOpenTargetInPanel
 }) {
-  const [menuOpen, setMenuOpen] = import_react98.default.useState(false);
-  const titleRef = import_react98.default.useRef(null);
-  const menuId = "".concat(import_react98.default.useId(), "-pane-menu");
+  const [menuOpen, setMenuOpen] = import_react99.default.useState(false);
+  const titleRef = import_react99.default.useRef(null);
+  const menuId = "".concat(import_react99.default.useId(), "-pane-menu");
   const panel = viewState.panels.find((p2) => p2.id === panelId);
   if (!panel) return null;
   const isFocused = viewState.focusedPanelId === panelId;
@@ -88567,18 +89220,18 @@ function PaneMenuBody({
   onClose,
   onPick
 }) {
-  const [query, setQuery] = import_react98.default.useState("");
-  const [active, setActive] = import_react98.default.useState(0);
-  const [scrollTop, setScrollTop] = import_react98.default.useState(0);
-  const [listHeight, setListHeight] = import_react98.default.useState(0);
-  const listRef = import_react98.default.useRef(null);
+  const [query, setQuery] = import_react99.default.useState("");
+  const [active, setActive] = import_react99.default.useState(0);
+  const [scrollTop, setScrollTop] = import_react99.default.useState(0);
+  const [listHeight, setListHeight] = import_react99.default.useState(0);
+  const listRef = import_react99.default.useRef(null);
   const needle = query.trim().toLowerCase();
-  const navKinds = import_react98.default.useMemo(() => workbenchNavKinds(visibleControls), [visibleControls]);
-  const titledAgents = import_react98.default.useMemo(
+  const navKinds = import_react99.default.useMemo(() => workbenchNavKinds(visibleControls), [visibleControls]);
+  const titledAgents = import_react99.default.useMemo(
     () => agents.map((agent) => ({ agent, title: agentDisplayTitle(agent) })),
     [agents]
   );
-  const rows = import_react98.default.useMemo(() => {
+  const rows = import_react99.default.useMemo(() => {
     const views = navKinds.filter((kind) => !needle || NAV_LABEL[kind].toLowerCase().includes(needle));
     const panels = customPanels.filter((panel) => !needle || panel.title.toLowerCase().includes(needle));
     const matching = titledAgents.filter(({ agent, title }) => !needle || agentMatches(agent, title, needle));
@@ -88594,11 +89247,11 @@ function PaneMenuBody({
     }
     return out;
   }, [customPanels, navKinds, needle, titledAgents]);
-  const options = import_react98.default.useMemo(
+  const options = import_react99.default.useMemo(
     () => rows.flatMap((row, index3) => row.kind === "label" ? [] : [{ row, index: index3 }]),
     [rows]
   );
-  const offsets = import_react98.default.useMemo(() => {
+  const offsets = import_react99.default.useMemo(() => {
     const tops = [];
     let total = 0;
     for (const row of rows) {
@@ -88609,12 +89262,12 @@ function PaneMenuBody({
   }, [rows]);
   const activeIndex = Math.min(active, Math.max(0, options.length - 1));
   const activeOption = options[activeIndex];
-  import_react98.default.useLayoutEffect(() => {
+  import_react99.default.useLayoutEffect(() => {
     const list5 = listRef.current;
     if (!list5) return;
     setListHeight(list5.clientHeight);
   }, [rows]);
-  import_react98.default.useLayoutEffect(() => {
+  import_react99.default.useLayoutEffect(() => {
     const list5 = listRef.current;
     if (!list5 || !activeOption) return;
     const top = offsets.tops[activeOption.index] ?? 0;
@@ -88772,7 +89425,7 @@ function PaneMenuBody({
 }
 
 // src/panels/PendingStack.tsx
-var import_react99 = __toESM(require("react"));
+var import_react100 = __toESM(require("react"));
 var import_jsx_runtime124 = require("react/jsx-runtime");
 function pendingStateTone(state) {
   switch (state) {
@@ -88875,9 +89528,9 @@ function StackItem({
   onDrop,
   onDragEnd
 }) {
-  const taRef = import_react99.default.useRef(null);
-  const [draft, setDraft] = import_react99.default.useState(item.text);
-  import_react99.default.useEffect(() => {
+  const taRef = import_react100.default.useRef(null);
+  const [draft, setDraft] = import_react100.default.useState(item.text);
+  import_react100.default.useEffect(() => {
     if (item.editing && taRef.current) {
       taRef.current.focus();
       const len = taRef.current.value.length;
@@ -88886,7 +89539,7 @@ function StackItem({
       taRef.current.style.height = taRef.current.scrollHeight + "px";
     }
   }, [item.editing]);
-  import_react99.default.useEffect(() => {
+  import_react100.default.useEffect(() => {
     setDraft(item.text);
   }, [item.text, item.editing]);
   const handleEditKey = (e) => {
@@ -88904,7 +89557,7 @@ function StackItem({
   const settledFailure = item.state === "outcome-unknown" || item.state === "definitely-rejected";
   const canResend = item.state === "definitely-rejected" || item.state === "outcome-unknown" && resendUncertain;
   const checking = check2?.phase === "checking";
-  const previewId = import_react99.default.useId();
+  const previewId = import_react100.default.useId();
   const tone = pendingStateTone(item.state);
   const cls = [
     "stk-item",
@@ -89127,21 +89780,21 @@ function PendingStack3({
   onClearAll,
   onToggleExpand
 }) {
-  const [dragId, setDragId] = import_react99.default.useState(null);
-  const [dropTarget, setDropTarget] = import_react99.default.useState({ id: null, where: null });
-  const [collapsed, setCollapsed] = import_react99.default.useState(false);
-  const firstSeenAttempting = import_react99.default.useRef(/* @__PURE__ */ new Map());
-  const [, revealTick] = import_react99.default.useReducer((n2) => n2 + 1, 0);
+  const [dragId, setDragId] = import_react100.default.useState(null);
+  const [dropTarget, setDropTarget] = import_react100.default.useState({ id: null, where: null });
+  const [collapsed, setCollapsed] = import_react100.default.useState(false);
+  const firstSeenAttempting = import_react100.default.useRef(/* @__PURE__ */ new Map());
+  const [, revealTick] = import_react100.default.useReducer((n2) => n2 + 1, 0);
   const graceDeadlines = acceptanceGraceDeadlines(items, firstSeenAttempting.current, Date.now(), directSendIds);
   const nextReveal = graceDeadlines.size > 0 ? Math.min(...graceDeadlines.values()) : null;
-  import_react99.default.useEffect(() => {
+  import_react100.default.useEffect(() => {
     if (nextReveal === null) return void 0;
     const timer3 = window.setTimeout(revealTick, Math.max(0, nextReveal - Date.now()));
     return () => window.clearTimeout(timer3);
   }, [nextReveal]);
   const visibleItems2 = graceDeadlines.size > 0 ? items.filter((item) => !graceDeadlines.has(item.id)) : items;
-  const lastCount = import_react99.default.useRef(0);
-  import_react99.default.useEffect(() => {
+  const lastCount = import_react100.default.useRef(0);
+  import_react100.default.useEffect(() => {
     if (visibleItems2.length > lastCount.current) setCollapsed(false);
     lastCount.current = visibleItems2.length;
   }, [visibleItems2.length]);
@@ -89370,6 +90023,64 @@ function loadConsoleSendAttempts(storage2, namespace, destination, now3 = Date.n
 function readPredecessorConsoleQueue(storage2, namespace, destination, now3 = Date.now()) {
   return parseConsoleSendDocument(storage2.getItem(predecessorConsoleSendStorageKey(namespace, destination)), namespace, destination, now3);
 }
+var legacyConsoleQueueKey = (destination) => "mobkit-pending-stack:".concat(destination);
+function removeOlderConsoleQueues(storage2, namespace, destination, hostOnlyNamespace) {
+  const older = [predecessorConsoleSendStorageKey(namespace, destination)];
+  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) older.push(consoleSendStorageKey(hostOnlyNamespace, destination));
+  storage2.removeItem(legacyConsoleQueueKey(destination));
+  for (const key of older) storage2.removeItem(key);
+  return forgetConsoleQueueLockRecords(older, []);
+}
+function removeKeysWithPrefixes(storage2, prefixes) {
+  if (!storage2) return;
+  try {
+    const doomed = [];
+    for (let index3 = 0; index3 < storage2.length; index3 += 1) {
+      const key = storage2.key(index3);
+      if (key && prefixes.some((prefix) => key.startsWith(prefix))) doomed.push(key);
+    }
+    for (const key of doomed) storage2.removeItem(key);
+  } catch {
+  }
+}
+function purgeConsoleSendScope(local, session, namespace) {
+  const scope = encodeURIComponent(namespace);
+  const queues = ["meta-send-attempts:v1:".concat(scope, ":"), "mobkit-send-attempts:v1:".concat(scope, ":")];
+  removeKeysWithPrefixes(local, queues);
+  removeKeysWithPrefixes(session, ["meta-composer-draft:v1:".concat(scope, ":"), "meta-composer-draft:v2:".concat(scope, ":")]);
+  return forgetConsoleQueueLockRecords([], queues);
+}
+async function forgetConsoleQueueLockRecords(keys2, prefixes) {
+  if (typeof indexedDB === "undefined" || !indexedDB) return;
+  const database = await new Promise((resolve) => {
+    let request;
+    try {
+      request = indexedDB.open("meta-console-queue-locks");
+    } catch {
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => request.transaction?.abort();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+  if (!database) return;
+  try {
+    if (!database.objectStoreNames.contains("locks")) return;
+    await new Promise((resolve) => {
+      const transaction = database.transaction("locks", "readwrite");
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => resolve();
+      const store = transaction.objectStore("locks");
+      for (const key of keys2) store.delete(key);
+      for (const prefix of prefixes) store.delete(IDBKeyRange.bound(prefix, prefix + String.fromCharCode(65535)));
+    });
+  } catch {
+  } finally {
+    database.close();
+  }
+}
 function parseConsoleSendDocument(raw, namespace, destination, now3) {
   try {
     if (raw === null) return { kind: "ready", attempts: [] };
@@ -89448,7 +90159,7 @@ function consoleLegacyQueueImported(storage2, namespace, destination) {
   return raw !== null && JSON.parse(raw).legacyImported === true;
 }
 function readLegacyConsoleQueue(storage2, destination) {
-  const raw = storage2.getItem("mobkit-pending-stack:".concat(destination));
+  const raw = storage2.getItem(legacyConsoleQueueKey(destination));
   if (!raw) return [];
   const data = JSON.parse(raw);
   if (!Array.isArray(data) || data.some((item) => !item || typeof item.id !== "string" || typeof item.text !== "string" || !Number.isFinite(item.addedAt))) {
@@ -89486,10 +90197,10 @@ function saveConsoleComposerDraft(storage2, namespace, destination, draft, compo
 }
 
 // src/lib/use-voice-controller.ts
-var import_react100 = __toESM(require("react"));
+var import_react101 = __toESM(require("react"));
 
 // ../sdk/typescript/src/live.ts
-function asRecord3(value, context) {
+function asRecord2(value, context) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("".concat(context, " must be an object"));
   }
@@ -89531,7 +90242,7 @@ function parseExecutionMode(raw, context) {
   return mode;
 }
 function parsePendingLiveChannelHandle(raw) {
-  const d2 = asRecord3(raw, "pending live channel handle");
+  const d2 = asRecord2(raw, "pending live channel handle");
   assertExactKeys(
     d2,
     [
@@ -89564,7 +90275,7 @@ function parsePendingLiveChannelHandle(raw) {
   };
 }
 function parseActiveLiveChannelHandle(raw) {
-  const d2 = asRecord3(raw, "active live channel handle");
+  const d2 = asRecord2(raw, "active live channel handle");
   assertExactKeys(
     d2,
     ["channel_id", "target_identity", "execution_mode", "activation_receipt"],
@@ -89584,7 +90295,7 @@ function parseActiveLiveChannelHandle(raw) {
   };
 }
 function parseLivePlaybackOwnerReadiness(raw) {
-  const d2 = asRecord3(raw, "playback owner readiness");
+  const d2 = asRecord2(raw, "playback owner readiness");
   assertExactKeys(d2, ["channel_id", "readiness_receipt"], "playback owner readiness");
   return {
     channelId: requireString(d2.channel_id, "playback owner readiness.channel_id"),
@@ -89595,7 +90306,7 @@ function parseLivePlaybackOwnerReadiness(raw) {
   };
 }
 function parseExperimentalLiveChannelStatus(raw) {
-  const d2 = asRecord3(raw, "experimental live channel status");
+  const d2 = asRecord2(raw, "experimental live channel status");
   const phase2 = requireString(d2.phase, "experimental live channel status.phase");
   if (phase2 === "pending" || phase2 === "revoked" || phase2 === "closed") {
     assertExactKeys(d2, ["phase"], "experimental live channel status");
@@ -89608,7 +90319,7 @@ function parseExperimentalLiveChannelStatus(raw) {
   throw new TypeError("experimental live channel status.phase is unknown");
 }
 function parseTransport(raw) {
-  const d2 = asRecord3(raw, "transport");
+  const d2 = asRecord2(raw, "transport");
   const kind = requireString(d2.transport, "transport.transport");
   if (kind === "websocket") {
     assertExactKeys(d2, ["transport", "url", "token"], "websocket transport");
@@ -89635,7 +90346,7 @@ function parseTransport(raw) {
   throw new TypeError("unknown live transport ".concat(kind));
 }
 function parseCapabilities(raw) {
-  const d2 = asRecord3(raw, "capabilities");
+  const d2 = asRecord2(raw, "capabilities");
   const keys2 = [
     "audio_in",
     "audio_out",
@@ -89661,7 +90372,7 @@ function parseCapabilities(raw) {
   };
 }
 function parseContinuity(raw) {
-  const d2 = asRecord3(raw, "continuity");
+  const d2 = asRecord2(raw, "continuity");
   const mode = requireString(d2.mode, "continuity.mode");
   if (mode === "fresh" || mode === "transcript_only" || mode === "degraded") {
     assertExactKeys(d2, ["mode"], "continuity");
@@ -89803,7 +90514,19 @@ function isTransientRpcFailure(error48) {
   if (status !== null) return status === 429 || status >= 500;
   return true;
 }
-function browserEnvironment2(baseUrl) {
+function createVoiceRpc(baseUrl, callerScope, reportFailure) {
+  let named;
+  return async (method, params, timeoutMs) => {
+    named ?? (named = { scope: await callerScope?.() });
+    try {
+      return await callConsoleRpc2(baseUrl, method, { ...params, ...callerScopeParam2(named.scope) }, timeoutMs);
+    } catch (error48) {
+      reportFailure?.(error48);
+      throw error48;
+    }
+  };
+}
+function browserEnvironment2(baseUrl, callerScope, reportFailure) {
   return {
     voiceAvailable: (identity) => queryVoiceAvailability(baseUrl, identity),
     createAudioContext: () => {
@@ -89824,7 +90547,7 @@ function browserEnvironment2(baseUrl) {
     createPeerConnection: () => new RTCPeerConnection(),
     createMediaStream: (tracks) => new MediaStream(tracks ?? []),
     createAudioElement: () => document.createElement("audio"),
-    rpc: (method, params, timeoutMs) => callConsoleRpc2(baseUrl, method, params, timeoutMs),
+    rpc: createVoiceRpc(baseUrl, callerScope, reportFailure),
     pagehideClose: (params) => {
       void fetch("".concat(baseUrl).concat(CONSOLE_RPC_PATHS2.jsonRpc), {
         method: "POST",
@@ -89911,8 +90634,8 @@ function voiceError(error48, stage) {
   }
   return "Voice could not connect. Check your network and gateway configuration, then try again.";
 }
-function createVoiceSession(baseUrl, environment) {
-  const env2 = environment ?? browserEnvironment2(baseUrl);
+function createVoiceSession(baseUrl, environment, callerScope, reportFailure) {
+  const env2 = environment ?? browserEnvironment2(baseUrl, callerScope, reportFailure);
   const listeners2 = /* @__PURE__ */ new Set();
   let snapshot = {
     phase: "idle",
@@ -91041,14 +91764,18 @@ var IDLE = {
 var idleSnapshot = () => IDLE;
 var idleSubscribe = () => () => {
 };
-function useVoiceController(baseUrl) {
-  const [voice, setVoice] = import_react100.default.useState(null);
-  import_react100.default.useEffect(() => {
-    const owned = createVoiceSession(baseUrl);
+function useVoiceController(baseUrl, callerScope, reportFailure) {
+  const [voice, setVoice] = import_react101.default.useState(null);
+  const callerScopeRef = import_react101.default.useRef(callerScope);
+  callerScopeRef.current = callerScope;
+  const reportFailureRef = import_react101.default.useRef(reportFailure);
+  reportFailureRef.current = reportFailure;
+  import_react101.default.useEffect(() => {
+    const owned = createVoiceSession(baseUrl, void 0, () => callerScopeRef.current?.(), (error48) => reportFailureRef.current?.(error48));
     setVoice(owned);
     return () => owned.dispose();
   }, [baseUrl]);
-  const state = import_react100.default.useSyncExternalStore(
+  const state = import_react101.default.useSyncExternalStore(
     voice?.subscribe ?? idleSubscribe,
     voice?.getSnapshot ?? idleSnapshot,
     idleSnapshot
@@ -91057,7 +91784,7 @@ function useVoiceController(baseUrl) {
 }
 
 // src/lib/use-voice-readiness.ts
-var import_react101 = __toESM(require("react"));
+var import_react102 = __toESM(require("react"));
 var NO_READINESS = {};
 var READINESS_REFRESH_INTERVAL_MS = 15e3;
 var READINESS_RETRY_BASE_MS = 1e3;
@@ -91081,14 +91808,14 @@ function voiceReadinessPending(state) {
   return state === "checking" || state === "retrying";
 }
 function useVoiceReadiness(baseUrl, focusedIdentity, voiceIdentity, enabled) {
-  const identities = import_react101.default.useMemo(
+  const identities = import_react102.default.useMemo(
     () => enabled ? [...new Set([focusedIdentity, voiceIdentity].filter(
       (identity) => Boolean(identity)
     ))] : [],
     [enabled, focusedIdentity, voiceIdentity]
   );
-  const [state, setState] = import_react101.default.useState({ baseUrl: "", values: NO_READINESS });
-  import_react101.default.useEffect(() => {
+  const [state, setState] = import_react102.default.useState({ baseUrl: "", values: NO_READINESS });
+  import_react102.default.useEffect(() => {
     if (!identities.length) return;
     const abort = new AbortController();
     const timers = /* @__PURE__ */ new Set();
@@ -91121,7 +91848,7 @@ function useVoiceReadiness(baseUrl, focusedIdentity, voiceIdentity, enabled) {
       timers.clear();
     };
   }, [baseUrl, identities]);
-  return import_react101.default.useMemo(() => {
+  return import_react102.default.useMemo(() => {
     if (!identities.length) return NO_READINESS;
     const known = state.baseUrl === baseUrl ? state.values : NO_READINESS;
     const values = {};
@@ -91212,7 +91939,6 @@ function agentWorkItems(items, identity, agent) {
     priority: item.priority ?? null
   }));
 }
-var DEFAULT_APPROVER_ID = "console-ops-lead";
 function isWorkGraphSignalFrame(frame2) {
   if (frame2.event.startsWith("workgraph.")) return true;
   if (frame2.event !== "tool_execution_completed" && frame2.event !== "tool_result_received") {
@@ -91223,6 +91949,8 @@ function isWorkGraphSignalFrame(frame2) {
   return name2.startsWith("workgraph_");
 }
 var DOCK_LAYOUT_STORAGE_PREFIX = "meta-console-dock-state";
+var SIDEBAR_COLLAPSED_PREFERENCE = "meta-console-sidebar-collapsed";
+var RAIL_COLLAPSED_PREFERENCE = "meta-console-rail-collapsed";
 var SIDE_CHAT_LIST_ATTEMPTS = 6;
 var SIDE_CHAT_LIST_RETRY_MS = 500;
 function createIdempotencyKey() {
@@ -91270,6 +91998,20 @@ function browserLocalStorage() {
     return window.localStorage;
   } catch {
     return null;
+  }
+}
+function consoleCallerWords(whoami) {
+  switch (whoami.actorKind) {
+    case "person":
+      return { kind: "person", label: whoami.principal ?? "Signed in", detail: "Signed in" };
+    case "token_principal":
+      return { kind: "token_principal", label: whoami.principal ?? "Shared account", detail: "Signed in with a shared account, not as a person" };
+    case "service":
+      return { kind: "service", label: whoami.principal ?? "Service", detail: "Signed in as a service" };
+    case "anonymous":
+      return { kind: "anonymous", label: "Not signed in", detail: "Open console: everyone here acts as the open console" };
+    default:
+      return { kind: whoami.actorKind, label: whoami.principal ?? "Signed in", detail: "Signed in" };
   }
 }
 async function settleDetachedConsoleSendAttempt(namespace, identity, id, settle, removeWhenAccepted) {
@@ -91470,37 +92212,174 @@ function emptyWorkGraphPanelData() {
   };
 }
 function ConsoleApp(props) {
-  const instanceKey = import_react102.default.useMemo(() => createConsoleId("console-instance"), [props.baseUrl, props.transport, props.storageNamespace, props.panelService, props.mcpAppsHost]);
+  const instanceKey = import_react103.default.useMemo(() => createConsoleId("console-instance"), [props.baseUrl, props.transport, props.storageNamespace, props.panelService, props.mcpAppsHost]);
   return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleAppAuthority, { ...props }, instanceKey);
 }
+var SIGN_OUT_PURGE_WAIT_MS = 1500;
 function ConsoleAppAuthority(props) {
-  const observedScope = import_react102.default.useRef(null);
-  const [generation, setGeneration] = import_react102.default.useState(0);
-  const observeScope = import_react102.default.useCallback((value) => {
+  const observedScope = import_react103.default.useRef(null);
+  const [generation, setGeneration] = import_react103.default.useState(0);
+  const [signedOut, setSignedOut] = import_react103.default.useState(null);
+  const signedOutRef = import_react103.default.useRef(signedOut);
+  signedOutRef.current = signedOut;
+  const callerRef = import_react103.default.useRef(void 0);
+  const lastCallerRef = import_react103.default.useRef(void 0);
+  const lifetimeRef = import_react103.default.useRef(null);
+  const storageScopeRef = import_react103.default.useRef(null);
+  const signingOutRef = import_react103.default.useRef(false);
+  const stagedAttachmentsReaderRef = import_react103.default.useRef(null);
+  const carriedAttachmentsRef = import_react103.default.useRef(null);
+  const retireInstance = import_react103.default.useCallback(() => {
+    const lifetime = lifetimeRef.current;
+    if (lifetime) {
+      lifetime.active = false;
+      lifetime.generation += 1;
+    }
+    callerRef.current = void 0;
+  }, []);
+  const forgetSignedOutUser = import_react103.default.useCallback(() => {
+    signingOutRef.current = true;
+    carriedAttachmentsRef.current = null;
+    retireInstance();
+    const namespace = storageScopeRef.current;
+    return namespace ? purgeConsoleSendScope(browserLocalStorage(), browserComposerStorage(), namespace) : Promise.resolve();
+  }, [retireInstance]);
+  const restart = import_react103.default.useCallback((callerChanged) => {
+    retireInstance();
+    if (callerChanged) forgetOwnSends();
+    observedScope.current = null;
+    signingOutRef.current = false;
+    setSignedOut(null);
+    setGeneration((current) => current + 1);
+  }, [retireInstance]);
+  const observeScope = import_react103.default.useCallback((value) => {
     const previous3 = observedScope.current;
     observedScope.current = { value };
     if (previous3 && previous3.value !== value) {
+      retireInstance();
       forgetOwnSends();
       setGeneration((current) => current + 1);
       return false;
     }
     return true;
-  }, []);
-  return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleAppInstance, { ...props, observeScope }, generation);
+  }, [retireInstance]);
+  const handlers2 = import_react103.default.useMemo(() => ({
+    observeScope,
+    onCaller: (callerScope) => {
+      if (callerRef.current !== void 0 && callerRef.current !== callerScope) {
+        restart(true);
+        return;
+      }
+      callerRef.current = callerScope;
+      lastCallerRef.current = callerScope;
+      announceConsoleCaller(browserLocalStorage(), props.baseUrl, callerScope);
+    },
+    onStorageScope: (namespace) => {
+      storageScopeRef.current = namespace;
+    },
+    onSignInRequired: () => {
+      if (signedOutRef.current) return;
+      const namespace = storageScopeRef.current;
+      const staged = Object.entries(stagedAttachmentsReaderRef.current?.() ?? {}).filter(([, items]) => items.length > 0).map(([identity, items]) => [identity, items.map((item) => item.file)]);
+      carriedAttachmentsRef.current = namespace && staged.length > 0 ? { namespace, files: Object.fromEntries(staged) } : null;
+      retireInstance();
+      setSignedOut("ended");
+    },
+    onCallerChanged: () => restart(true),
+    onSignOut: () => {
+      const purged = Promise.race([
+        forgetSignedOutUser(),
+        new Promise((resolve) => window.setTimeout(resolve, SIGN_OUT_PURGE_WAIT_MS))
+      ]);
+      announceConsoleCaller(browserLocalStorage(), props.baseUrl, null);
+      void purged.then(() => window.setTimeout(() => setSignedOut("signed_out"), 100));
+      return purged;
+    },
+    signingOut: () => signingOutRef.current,
+    registerLifetime: (lifetime) => {
+      lifetimeRef.current = lifetime;
+    },
+    registerStagedAttachments: (read) => {
+      stagedAttachmentsReaderRef.current = read;
+    },
+    takeCarriedAttachments: (namespace) => {
+      const carried = carriedAttachmentsRef.current;
+      carriedAttachmentsRef.current = null;
+      return carried?.namespace === namespace ? carried.files : null;
+    }
+  }), [forgetSignedOutUser, observeScope, props.baseUrl, restart, retireInstance]);
+  import_react103.default.useEffect(() => subscribeConsoleCaller(props.baseUrl, (announcement) => {
+    if (announcement.caller === null) {
+      void forgetSignedOutUser();
+      setSignedOut("signed_out");
+      return;
+    }
+    if (signedOutRef.current) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    if (callerRef.current === void 0) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    if (announcement.caller !== callerRef.current) restart(true);
+  }), [forgetSignedOutUser, props.baseUrl, restart]);
+  import_react103.default.useEffect(() => {
+    if (!signedOut) return void 0;
+    const retry = () => {
+      if (document.visibilityState !== "hidden") restart(false);
+    };
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, [signedOut, restart]);
+  if (signedOut) return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleSignInState, { reason: signedOut, onRetry: () => restart(false) });
+  return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleAppInstance, { ...props, callerHandlers: handlers2 }, generation);
 }
-function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, observeScope }) {
+function ConsoleSignInState({ reason, onRetry }) {
+  const display = useConsoleDisplay({}, null);
+  return /* @__PURE__ */ (0, import_jsx_runtime125.jsxs)(
+    "div",
+    {
+      className: "cc-theme-scope console-sign-in",
+      "data-cc-theme": display.settings.theme,
+      "data-cc-variant": display.settings.variant,
+      "data-testid": "console-sign-in",
+      "data-reason": reason,
+      role: "alert",
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime125.jsx)("h1", { className: "console-sign-in__title", children: reason === "signed_out" ? "You signed out of this console" : "Your console sign-in ended" }),
+        /* @__PURE__ */ (0, import_jsx_runtime125.jsx)("p", { className: "console-sign-in__text", children: reason === "signed_out" ? "Your queued messages and drafts were removed from this browser, and other tabs of this console signed out too. Sign in to use the console again." : "Sign in again to continue. Nothing from the ended sign-in is shown, and messages you queued stay saved in this browser." }),
+        /* @__PURE__ */ (0, import_jsx_runtime125.jsxs)("div", { className: "console-sign-in__actions", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime125.jsx)("button", { type: "button", className: "cc-btn cc-btn--primary", onClick: () => window.location.reload(), children: "Sign in" }),
+          /* @__PURE__ */ (0, import_jsx_runtime125.jsx)("button", { type: "button", className: "cc-btn", onClick: onRetry, children: "Try again" })
+        ] })
+      ]
+    }
+  );
+}
+function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, callerHandlers }) {
   countRender("ConsoleApp");
-  const lifetimeRef = import_react102.default.useRef({ active: true, generation: 0 });
-  import_react102.default.useLayoutEffect(() => {
+  const observeScope = callerHandlers.observeScope;
+  const callerHandlersRef = import_react103.default.useRef(callerHandlers);
+  callerHandlersRef.current = callerHandlers;
+  const lifetimeRef = import_react103.default.useRef({ active: true, generation: 0 });
+  import_react103.default.useLayoutEffect(() => {
     lifetimeRef.current.active = true;
     lifetimeRef.current.generation += 1;
+    callerHandlersRef.current.registerLifetime(lifetimeRef.current);
     return () => {
       lifetimeRef.current.active = false;
       lifetimeRef.current.generation += 1;
     };
   }, []);
-  const consoleFetchTimeoutMsRef = import_react102.default.useRef(DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2);
-  const consoleTransport = import_react102.default.useMemo(
+  const consoleFetchTimeoutMsRef = import_react103.default.useRef(DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2);
+  const reportCallerFailure = import_react103.default.useCallback((error49, generation = lifetimeRef.current.generation) => {
+    if (!lifetimeRef.current.active || lifetimeRef.current.generation !== generation) return;
+    const failure = consoleCallerFailure(error49);
+    if (failure === "sign_in") callerHandlersRef.current.onSignInRequired();
+    else if (failure === "caller_changed") callerHandlersRef.current.onCallerChanged();
+  }, []);
+  const consoleConnection = import_react103.default.useMemo(
     () => {
       const source = transport ?? createHttpConsoleTransport2({
         baseUrl,
@@ -91514,18 +92393,40 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const call = async (operation2) => {
         const generation = lifetimeRef.current.generation;
         current(generation);
-        const value = await operation2();
+        let value;
+        try {
+          value = await operation2();
+        } catch (error49) {
+          reportCallerFailure(error49, generation);
+          throw error49;
+        }
         current(generation);
         return value;
+      };
+      const caller2 = createConsoleInstanceCaller(source.whoami ? async () => {
+        try {
+          return await source.whoami();
+        } catch (error49) {
+          reportCallerFailure(error49);
+          throw error49;
+        }
+      } : void 0);
+      const change = (operation2) => {
+        const generation = lifetimeRef.current.generation;
+        return call(async () => {
+          const callerScope = await caller2.forChange();
+          current(generation);
+          return operation2(callerScope);
+        });
       };
       const scoped = {
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules()) : void 0,
         capabilities: () => call(() => source.capabilities()),
         queryTimeline: (input) => call(() => source.queryTimeline(input)),
-        send: (input) => call(() => source.send(input)),
-        executeCommand: source.executeCommand ? (input) => call(() => source.executeCommand(input)) : void 0,
-        upload: source.upload ? (input) => call(() => source.upload(input)) : void 0,
+        send: (input) => change((expectedCallerScope) => source.send({ ...input, expectedCallerScope })),
+        executeCommand: source.executeCommand ? (input) => change((expectedCallerScope) => source.executeCommand({ ...input, expectedCallerScope })) : void 0,
+        upload: source.upload ? (input) => change((expectedCallerScope) => source.upload({ ...input, expectedCallerScope })) : void 0,
         readBlob: source.readBlob ? (input) => call(() => source.readBlob(input)) : void 0,
         blobUrl: source.blobUrl ? (id) => {
           current();
@@ -91535,62 +92436,101 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           const generation = lifetimeRef.current.generation;
           current(generation);
           const active = () => lifetimeRef.current.active && lifetimeRef.current.generation === generation;
+          const watch = (state) => {
+            if (state.phase === "authentication-required") callerHandlersRef.current.onSignInRequired();
+          };
           return source.subscribeTimeline(
             { ...input, onTransportState: (state) => {
-              if (active()) input.onTransportState?.(state);
+              if (active()) {
+                input.onTransportState?.(state);
+                watch(state);
+              }
             } },
             (frame2) => {
               if (active()) onFrame(frame2);
             },
             { ...options, onTransportState: (state) => {
-              if (active()) options?.onTransportState?.(state);
+              if (active()) {
+                options?.onTransportState?.(state);
+                watch(state);
+              }
             } }
           );
         }
       };
-      return scoped;
+      return { transport: scoped, caller: caller2 };
     },
-    [baseUrl, transport]
+    [baseUrl, transport, reportCallerFailure]
   );
-  const consoleController = import_react102.default.useMemo(
+  const consoleTransport = consoleConnection.transport;
+  const instanceCaller = consoleConnection.caller;
+  const consoleController = import_react103.default.useMemo(
     () => createMetaConsoleController2({ transport: consoleTransport }),
     [consoleTransport]
   );
-  const blobReader = import_react102.default.useMemo(
+  const blobReader = import_react103.default.useMemo(
     () => consoleTransport.readBlob ? (input) => consoleTransport.readBlob(input) : void 0,
     [consoleTransport]
   );
-  const { voice, state: voiceState } = useVoiceController(baseUrl);
-  const sampleVoiceWaveform = import_react102.default.useCallback(
+  const callerForRequest = import_react103.default.useCallback(
+    () => instanceCaller.forChange().then((callerScope) => callerScope ?? void 0),
+    [instanceCaller]
+  );
+  const { voice, state: voiceState } = useVoiceController(baseUrl, callerForRequest, reportCallerFailure);
+  const [caller, setCaller] = import_react103.default.useState();
+  const adoptCaller = import_react103.default.useCallback((whoami) => {
+    setCaller(whoami);
+    for (const [key, request] of autoDrainRequestedRef.current) {
+      if (!request.inFlight) autoDrainRequestedRef.current.delete(key);
+    }
+    if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
+  }, []);
+  import_react103.default.useEffect(() => {
+    let active = true;
+    void instanceCaller.read().then(
+      (whoami) => {
+        if (active) adoptCaller(whoami);
+      },
+      () => {
+        if (active) setCaller(null);
+      }
+    );
+    return () => {
+      active = false;
+    };
+  }, [instanceCaller, adoptCaller]);
+  const sampleVoiceWaveform = import_react103.default.useCallback(
     (source, samples) => voice?.sampleWaveform(source, samples),
     [voice]
   );
-  const [pendingChecks, setPendingChecks] = import_react102.default.useState({});
-  const [deliveredNotices, setDeliveredNotices] = import_react102.default.useState({});
-  const [experience, setExperience] = import_react102.default.useState(
+  const [pendingChecks, setPendingChecks] = import_react103.default.useState({});
+  const [deliveredNotices, setDeliveredNotices] = import_react103.default.useState({});
+  const [experience, setExperience] = import_react103.default.useState(
     null
   );
-  const persistentSendScope = storageNamespace?.trim() || (experience?.storage_scope?.trim() ? JSON.stringify([baseUrl, experience.storage_scope]) : null);
-  const savedPanelRuntimeSelection = import_react102.default.useMemo(
+  const serverStorageScope = experience?.storage_scope?.trim() ? experience.storage_scope : void 0;
+  const hostStorageNamespace = storageNamespace?.trim() || null;
+  const persistentSendScope = serverStorageScope ? JSON.stringify([hostStorageNamespace ?? baseUrl, serverStorageScope]) : experience && hostStorageNamespace ? hostStorageNamespace : null;
+  const savedPanelRuntimeSelection = import_react103.default.useMemo(
     () => loadPanelRuntimeSelection(browserLocalStorage(), persistentSendScope),
     [persistentSendScope]
   );
-  const [panelRuntimeSelection, setPanelRuntimeSelection] = import_react102.default.useState(null);
+  const [panelRuntimeSelection, setPanelRuntimeSelection] = import_react103.default.useState(null);
   const explicitPanelRuntime = panelRuntimeSelection?.scope === persistentSendScope ? panelRuntimeSelection.key : savedPanelRuntimeSelection;
   const panelRuntimeKey = selectedPanelRuntime(explicitPanelRuntime, experience?.panel_runtimes);
   const emptyPanelRegistry = experience?.panel_runtimes?.length === 0 && experience.memory?.available === false && experience.workgraph?.available === false;
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     if (!panelRuntimeKey) return;
     setPanelRuntimeSelection((current) => current?.scope === persistentSendScope && current.key === panelRuntimeKey ? current : { scope: persistentSendScope, key: panelRuntimeKey });
     savePanelRuntimeSelection(browserLocalStorage(), persistentSendScope, panelRuntimeKey);
   }, [persistentSendScope, panelRuntimeKey]);
-  const panelRuntimeKeyRef = import_react102.default.useRef(panelRuntimeKey);
-  const memoryDetailRequestRef = import_react102.default.useRef(0);
+  const panelRuntimeKeyRef = import_react103.default.useRef(panelRuntimeKey);
+  const memoryDetailRequestRef = import_react103.default.useRef(0);
   panelRuntimeKeyRef.current = panelRuntimeKey;
-  const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = import_react102.default.useState("");
-  const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = import_react102.default.useState("");
-  const [agents, setAgents] = import_react102.default.useState([]);
-  const peerLabels = import_react102.default.useMemo(() => {
+  const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = import_react103.default.useState("");
+  const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = import_react103.default.useState("");
+  const [agents, setAgents] = import_react103.default.useState([]);
+  const peerLabels = import_react103.default.useMemo(() => {
     const labels2 = /* @__PURE__ */ new Map();
     for (const agent of agents) {
       const label2 = agentDisplayTitle(agent);
@@ -91602,139 +92542,123 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return labels2;
   }, [agents]);
-  const chatDisplayLabels = import_react102.default.useMemo(() => ({ peers: peerLabels }), [peerLabels]);
-  const [draftByKey, setDraftByKey] = import_react102.default.useState(
+  const chatDisplayLabels = import_react103.default.useMemo(() => ({ peers: peerLabels }), [peerLabels]);
+  const [draftByKey, setDraftByKey] = import_react103.default.useState(
     {}
   );
-  const [stagedAttachmentsByIdentity, setStagedAttachmentsByIdentity] = import_react102.default.useState({});
-  const [sendingPanels, setSendingPanels] = import_react102.default.useState(
+  const [stagedAttachmentsByIdentity, setStagedAttachmentsByIdentity] = import_react103.default.useState({});
+  const [sendingPanels, setSendingPanels] = import_react103.default.useState(
     /* @__PURE__ */ new Set()
   );
-  const sendingPanelsRef = import_react102.default.useRef(sendingPanels);
+  const sendingPanelsRef = import_react103.default.useRef(sendingPanels);
   sendingPanelsRef.current = sendingPanels;
-  const [pinnedAgentIds, setPinnedAgentIds] = import_react102.default.useState(
+  const [pinnedAgentIds, setPinnedAgentIds] = import_react103.default.useState(
     /* @__PURE__ */ new Set()
   );
-  const [inspectByIdentity, setInspectByIdentity] = import_react102.default.useState({});
-  const [routingData, setRoutingData] = import_react102.default.useState({
+  const [inspectByIdentity, setInspectByIdentity] = import_react103.default.useState({});
+  const [routingData, setRoutingData] = import_react103.default.useState({
     routes: [],
     deliveries: []
   });
-  const [routingRead, setRoutingRead] = import_react102.default.useState(emptyRoutingRead);
-  const [gatingData, setGatingData] = import_react102.default.useState({
+  const [routingRead, setRoutingRead] = import_react103.default.useState(emptyRoutingRead);
+  const [gatingData, setGatingData] = import_react103.default.useState({
     pending: [],
     audit: []
   });
-  const [accessData, setAccessData] = import_react102.default.useState({
+  const [accessData, setAccessData] = import_react103.default.useState({
     scope: "",
     loading: false,
     status: null,
     config: null,
     error: null
   });
-  const [memoryData, setMemoryData] = import_react102.default.useState(emptyMemoryPanelData);
-  const [workGraphData, setWorkGraphData] = import_react102.default.useState(emptyWorkGraphPanelData);
-  import_react102.default.useEffect(() => {
+  const [memoryData, setMemoryData] = import_react103.default.useState(emptyMemoryPanelData);
+  const [workGraphData, setWorkGraphData] = import_react103.default.useState(emptyWorkGraphPanelData);
+  import_react103.default.useEffect(() => {
     setMemoryDataRuntimeKey("");
     setWorkGraphDataRuntimeKey("");
     memoryDetailRequestRef.current += 1;
     setMemoryData(emptyMemoryPanelData());
     setWorkGraphData(emptyWorkGraphPanelData());
   }, [panelRuntimeKey]);
-  const [topologyQueryResult, setTopologyQueryResult] = import_react102.default.useState(null);
-  const [topologyCapabilities, setTopologyCapabilities] = import_react102.default.useState(null);
-  const [topologyOperations, setTopologyOperations] = import_react102.default.useState([]);
-  const [topologyConnectionSourceId, setTopologyConnectionSourceId] = import_react102.default.useState(null);
-  const [activeActivityPresetId, setActiveActivityPresetId] = import_react102.default.useState("");
-  const [selectedRosterMemberId, setSelectedRosterMemberId] = import_react102.default.useState("");
-  const [loading, setLoading] = import_react102.default.useState(true);
-  const [loadingHistory, setLoadingHistory] = import_react102.default.useState({});
-  const [error48, setError] = import_react102.default.useState("");
-  const [actionError, setActionError] = import_react102.default.useState("");
-  const [runStopNotices, setRunStopNotices] = import_react102.default.useState({});
-  const [sideChatsOffered, setSideChatsOffered] = import_react102.default.useState(false);
-  const [sideChatNotices, setSideChatNotices] = import_react102.default.useState({});
-  const [forkingPanels, setForkingPanels] = import_react102.default.useState(() => /* @__PURE__ */ new Set());
-  const [scheduleOffer, setScheduleOffer] = import_react102.default.useState(NO_CONSOLE_SCHEDULES);
-  const [transportState, setTransportState] = import_react102.default.useState({
+  const [topologyQueryResult, setTopologyQueryResult] = import_react103.default.useState(null);
+  const [topologyCapabilities, setTopologyCapabilities] = import_react103.default.useState(null);
+  const [topologyOperations, setTopologyOperations] = import_react103.default.useState([]);
+  const [topologyConnectionSourceId, setTopologyConnectionSourceId] = import_react103.default.useState(null);
+  const [activeActivityPresetId, setActiveActivityPresetId] = import_react103.default.useState("");
+  const [selectedRosterMemberId, setSelectedRosterMemberId] = import_react103.default.useState("");
+  const [loading, setLoading] = import_react103.default.useState(true);
+  const [loadingHistory, setLoadingHistory] = import_react103.default.useState({});
+  const [error48, setError] = import_react103.default.useState("");
+  const [actionError, setActionError] = import_react103.default.useState("");
+  const [runStopNotices, setRunStopNotices] = import_react103.default.useState({});
+  const [sideChatsOffered, setSideChatsOffered] = import_react103.default.useState(false);
+  const [sideChatNotices, setSideChatNotices] = import_react103.default.useState({});
+  const [forkingPanels, setForkingPanels] = import_react103.default.useState(() => /* @__PURE__ */ new Set());
+  const [scheduleOffer, setScheduleOffer] = import_react103.default.useState(NO_CONSOLE_SCHEDULES);
+  const [transportState, setTransportState] = import_react103.default.useState({
     phase: "connecting",
     stale: true,
     freshness: "unknown"
   });
-  const [transportRetry, setTransportRetry] = import_react102.default.useState(0);
-  const display = useConsoleDisplay({
-    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? void 0,
-    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? void 0
-  });
-  const theme = display.settings.theme;
-  const variant = display.settings.variant;
-  const sidebarStorageScope = import_react102.default.useMemo(
+  const [transportRetry, setTransportRetry] = import_react103.default.useState(0);
+  const sidebarStorageScope = import_react103.default.useMemo(
     () => sidebarPreferencesScope(baseUrl, experience),
     [baseUrl, experience]
   );
-  const sidebarStorageNamespace = import_react102.default.useMemo(
+  const sidebarStorageNamespace = import_react103.default.useMemo(
     () => sidebarPreferencesNamespace(baseUrl, experience),
     [baseUrl, experience]
   );
-  const sidebarPinsStorageKey = import_react102.default.useMemo(
+  const sidebarPinsStorageKey = import_react103.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_PINS_STORAGE_PREFIX, sidebarStorageNamespace),
     [sidebarStorageNamespace]
   );
-  const sidebarPreferenceScope = import_react102.default.useMemo(
+  const sidebarPreferenceScope = import_react103.default.useMemo(
     () => encodeURIComponent(persistentSendScope || sidebarStorageScope),
     [persistentSendScope, sidebarStorageScope]
   );
-  const sidebarAgentPinsStorageKey = import_react102.default.useMemo(
+  const sidebarAgentPinsStorageKey = import_react103.default.useMemo(
     () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
     [sidebarPreferenceScope]
   );
-  import_react102.default.useEffect(() => {
+  const sidebarSectionNamespace = import_react103.default.useMemo(() => {
+    if (!persistentSendScope) return sidebarStorageNamespace;
+    const own5 = [persistentSendScope, sidebarAgentListConfigIdentity(experience)].map((part) => encodeURIComponent(part)).join(":");
+    adoptSharedSectionPreferences(browserLocalStorage(), sidebarStorageNamespace, own5);
+    return own5;
+  }, [experience, persistentSendScope, sidebarStorageNamespace]);
+  import_react103.default.useEffect(() => {
     pruneStaleSidebarStorage(browserLocalStorage(), sidebarStorageScope, sidebarStorageNamespace);
-  }, [sidebarStorageScope, sidebarStorageNamespace]);
-  const [sidebarCollapsed, setSidebarCollapsed] = import_react102.default.useState(
-    () => {
-      try {
-        return localStorage.getItem("meta-console-sidebar-collapsed") === "1";
-      } catch {
-        return false;
-      }
-    }
-  );
-  const toggleSidebarCollapsed = import_react102.default.useCallback(() => {
-    setSidebarCollapsed((c2) => {
-      const next = !c2;
-      try {
-        localStorage.setItem(
-          "meta-console-sidebar-collapsed",
-          next ? "1" : "0"
-        );
-      } catch {
-      }
-      return next;
-    });
-  }, []);
-  const [railCollapsed, setRailCollapsed] = import_react102.default.useState(() => {
-    try {
-      return localStorage.getItem("meta-console-rail-collapsed") === "1";
-    } catch {
-      return false;
-    }
-  });
-  const toggleRailCollapsed = import_react102.default.useCallback(() => {
-    setRailCollapsed((c2) => {
-      const next = !c2;
-      try {
-        localStorage.setItem("meta-console-rail-collapsed", next ? "1" : "0");
-      } catch {
-      }
-      return next;
-    });
-  }, []);
-  const defaultPinnedAgentIdsKey = import_react102.default.useMemo(
+    if (persistentSendScope) pruneStaleSidebarStorage(browserLocalStorage(), persistentSendScope, sidebarSectionNamespace);
+  }, [persistentSendScope, sidebarSectionNamespace, sidebarStorageScope, sidebarStorageNamespace]);
+  const browserPreferenceScope = experience ? sidebarPreferenceScope : null;
+  import_react103.default.useEffect(() => {
+    if (browserPreferenceScope) rememberPreferenceScope(browserLocalStorage(), browserPreferenceScope);
+  }, [browserPreferenceScope]);
+  const display = useConsoleDisplay({
+    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? void 0,
+    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? void 0
+  }, browserPreferenceScope);
+  const theme = display.settings.theme;
+  const variant = display.settings.variant;
+  const [sidebarCollapseChoice, chooseSidebarCollapse] = useBrowserPreference(SIDEBAR_COLLAPSED_PREFERENCE, browserPreferenceScope);
+  const configuredSidebarCollapsed = experience?.console_config?.layout?.sidebar_collapsed;
+  const sidebarCollapsed = sidebarCollapseChoice !== null ? sidebarCollapseChoice === "1" : configuredSidebarCollapsed === true;
+  const toggleSidebarCollapsed = import_react103.default.useCallback(() => {
+    chooseSidebarCollapse(sidebarCollapsed ? "0" : "1");
+  }, [chooseSidebarCollapse, sidebarCollapsed]);
+  const [railCollapseChoice, chooseRailCollapse] = useBrowserPreference(RAIL_COLLAPSED_PREFERENCE, browserPreferenceScope);
+  const configuredRailCollapsed = experience?.console_config?.rail?.collapsed;
+  const railCollapsed = railCollapseChoice !== null ? railCollapseChoice === "1" : configuredRailCollapsed === true;
+  const toggleRailCollapsed = import_react103.default.useCallback(() => {
+    chooseRailCollapse(railCollapsed ? "0" : "1");
+  }, [chooseRailCollapse, railCollapsed]);
+  const defaultPinnedAgentIdsKey = import_react103.default.useMemo(
     () => JSON.stringify(experience?.console_config?.agent_list?.default_pinned_agent_ids || []),
     [experience?.console_config?.agent_list?.default_pinned_agent_ids]
   );
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     setPinnedAgentIds(readSidebarPins(
       browserLocalStorage(),
       sidebarAgentPinsStorageKey,
@@ -91742,31 +92666,40 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.console_config?.agent_list?.default_pinned_agent_ids || []
     ));
   }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarAgentPinsStorageKey, sidebarPinsStorageKey]);
-  const togglePinnedAgent = import_react102.default.useCallback((agent, renderedFamilyPinIds) => {
+  import_react103.default.useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key !== sidebarAgentPinsStorageKey) return;
+      const stored = readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey);
+      if (stored) setPinnedAgentIds(stored);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [sidebarAgentPinsStorageKey]);
+  const pinnedAgentIdsRef = import_react103.default.useRef(pinnedAgentIds);
+  pinnedAgentIdsRef.current = pinnedAgentIds;
+  const togglePinnedAgent = import_react103.default.useCallback((agent, renderedFamilyPinIds) => {
     const pinId = sidebarAgentPinId2(agent);
-    setPinnedAgentIds((current) => {
-      const next = new Set(current);
-      const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0 ? renderedFamilyPinIds : sidebarPinnedFamilyPinIds(agent, agents);
-      const familyPinned = Array.from(familyPinIds).some((id) => next.has(id));
-      if (next.has(pinId) || next.has(agent.member_id) || familyPinned) {
-        for (const id of familyPinIds) next.delete(id);
-      } else {
-        next.add(pinId);
-      }
-      writeSidebarStringSet(
-        browserLocalStorage(),
-        sidebarAgentPinsStorageKey,
-        next
-      );
-      return next;
-    });
+    const next = new Set(readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey) ?? pinnedAgentIdsRef.current);
+    const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0 ? renderedFamilyPinIds : sidebarPinnedFamilyPinIds(agent, agents);
+    const familyPinned = Array.from(familyPinIds).some((id) => next.has(id));
+    if (next.has(pinId) || next.has(agent.member_id) || familyPinned) {
+      for (const id of familyPinIds) next.delete(id);
+    } else {
+      next.add(pinId);
+    }
+    writeSidebarStringSet(
+      browserLocalStorage(),
+      sidebarAgentPinsStorageKey,
+      next
+    );
+    setPinnedAgentIds(next);
   }, [agents, sidebarAgentPinsStorageKey]);
-  const [, setRenderTick] = import_react102.default.useState(0);
-  const liveFramesRef = import_react102.default.useRef([]);
-  const [liveFrames, setLiveFrames] = import_react102.default.useState([]);
-  const renderScheduledRef = import_react102.default.useRef(null);
-  const liveFramesDirtyRef = import_react102.default.useRef(false);
-  const flushScheduledRender = import_react102.default.useCallback((transition = false) => {
+  const [, setRenderTick] = import_react103.default.useState(0);
+  const liveFramesRef = import_react103.default.useRef([]);
+  const [liveFrames, setLiveFrames] = import_react103.default.useState([]);
+  const renderScheduledRef = import_react103.default.useRef(null);
+  const liveFramesDirtyRef = import_react103.default.useRef(false);
+  const flushScheduledRender = import_react103.default.useCallback((transition = false) => {
     renderScheduledRef.current = null;
     countRender("LiveRenderFlush");
     const commit = () => {
@@ -91776,10 +92709,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       setRenderTick((n2) => n2 + 1);
     };
-    if (transition) import_react102.default.startTransition(commit);
+    if (transition) import_react103.default.startTransition(commit);
     else commit();
   }, []);
-  const onScheduledFrame = import_react102.default.useCallback(() => {
+  const onScheduledFrame = import_react103.default.useCallback(() => {
     const pending = renderScheduledRef.current;
     if (!pending || pending.kind !== "raf") return;
     pending.frames += 1;
@@ -91789,14 +92722,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     flushScheduledRender(pending.textOnly);
   }, [flushScheduledRender]);
-  const cancelScheduledRender = import_react102.default.useCallback(() => {
+  const cancelScheduledRender = import_react103.default.useCallback(() => {
     const pending = renderScheduledRef.current;
     if (!pending || typeof window === "undefined") return;
     if (pending.kind === "raf") window.cancelAnimationFrame(pending.id);
     else window.clearTimeout(pending.id);
     renderScheduledRef.current = null;
   }, []);
-  const forceRender = import_react102.default.useCallback((cause = "frame") => {
+  const forceRender = import_react103.default.useCallback((cause = "frame") => {
     const pending = renderScheduledRef.current;
     if (cause === "now") {
       cancelScheduledRender();
@@ -91824,7 +92757,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       frames: 0
     };
   }, [cancelScheduledRender, flushScheduledRender, onScheduledFrame]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     if (typeof document === "undefined") return;
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") return;
@@ -91838,11 +92771,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       cancelScheduledRender();
     };
   }, [cancelScheduledRender, flushScheduledRender]);
-  const stagedAttachmentsRef = import_react102.default.useRef(stagedAttachmentsByIdentity);
-  import_react102.default.useEffect(() => {
+  const stagedAttachmentsRef = import_react103.default.useRef(stagedAttachmentsByIdentity);
+  import_react103.default.useEffect(() => {
     stagedAttachmentsRef.current = stagedAttachmentsByIdentity;
   }, [stagedAttachmentsByIdentity]);
-  import_react102.default.useEffect(
+  import_react103.default.useEffect(() => {
+    callerHandlersRef.current.registerStagedAttachments(() => stagedAttachmentsRef.current);
+  }, []);
+  import_react103.default.useEffect(
     () => () => {
       for (const items of Object.values(stagedAttachmentsRef.current)) {
         items.forEach((item) => URL.revokeObjectURL(item.previewUrl));
@@ -91934,11 +92870,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       params: scopedPanelParams(target.kind, panelRuntimeKey, params)
     })).result;
   }
-  const identityLogRef = import_react102.default.useRef({});
-  const timelineFetchInFlightRef = import_react102.default.useRef(
+  const identityLogRef = import_react103.default.useRef({});
+  const timelineFetchInFlightRef = import_react103.default.useRef(
     {}
   );
-  const optimisticUserByPanelKeyRef = import_react102.default.useRef({});
+  const optimisticUserByPanelKeyRef = import_react103.default.useRef({});
   function getOrCreateLog(identity) {
     let log = identityLogRef.current[identity];
     if (!log) {
@@ -92271,20 +93207,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       forceRender();
     }
   }
-  const loadDayHistoryRef = import_react102.default.useRef(() => Promise.resolve());
+  const loadDayHistoryRef = import_react103.default.useRef(() => Promise.resolve());
   loadDayHistoryRef.current = async (identity) => {
     const normalized = identity.trim();
     if (!normalized) return;
     const { page, metadataChanged } = await queryIdentityTimelinePage(normalized, { mode: "recent", limit: 1e3 });
     if (reconcileServerLog(normalized, page.frames, page.available) || metadataChanged) forceRender();
   };
-  const loadDayHistory = import_react102.default.useCallback((identity) => loadDayHistoryRef.current(identity), []);
+  const loadDayHistory = import_react103.default.useCallback((identity) => loadDayHistoryRef.current(identity), []);
   function getSortedFrames(identity) {
     const log = identityLogRef.current[identity];
     if (!log) return [];
     return sortedEvents(log);
   }
-  const derivedTranscriptRef = import_react102.default.useRef({});
+  const derivedTranscriptRef = import_react103.default.useRef({});
   function derivedTranscriptFor(identity, panelId, agent) {
     const log = getOrCreateLog(identity);
     const cached2 = derivedTranscriptRef.current[identity];
@@ -92306,7 +93242,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     derivedTranscriptRef.current[identity] = next;
     return next;
   }
-  const panelPhaseRef = import_react102.default.useRef({});
+  const panelPhaseRef = import_react103.default.useRef({});
   function panelPhaseFor(panelKey, sortedFrames, inputs) {
     if (inputs.hasLocalPhase) return inputs.localPhase ?? null;
     const cached2 = panelPhaseRef.current[panelKey];
@@ -92336,7 +93272,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     panelPhaseRef.current[panelKey] = { frames: sortedFrames.slice(), serverPhase: inputs.serverPhase, phase: phase2 };
     return phase2;
   }
-  const activeRunIdRef = import_react102.default.useRef({});
+  const activeRunIdRef = import_react103.default.useRef({});
   function activeRunIdFor(identity, version2, sortedFrames) {
     const cached2 = activeRunIdRef.current[identity];
     if (cached2 && cached2.version === version2) return cached2.runId;
@@ -92348,17 +93284,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     void panelId;
     return frames;
   }
-  const activityRef = import_react102.default.useRef([]);
+  const activityRef = import_react103.default.useRef([]);
   function commitLiveFrames(frames, cause = "frame") {
     liveFramesRef.current = frames;
     liveFramesDirtyRef.current = true;
     forceRender(cause);
   }
-  const sendControllerRef = import_react102.default.useRef(consoleController);
+  const sendControllerRef = import_react103.default.useRef(consoleController);
   sendControllerRef.current = consoleController;
-  const transientSendScope = import_react102.default.useMemo(() => "transient:".concat(createIdempotencyKey()), [consoleController]);
+  const transientSendScope = import_react103.default.useMemo(() => "transient:".concat(createIdempotencyKey()), [consoleController]);
   const sendScope = persistentSendScope || "".concat(transientSendScope, ":").concat(baseUrl);
-  const [composerTabId] = import_react102.default.useState(() => {
+  const [composerTabId] = import_react103.default.useState(() => {
     try {
       return consoleComposerTabId(window.sessionStorage, createIdempotencyKey);
     } catch {
@@ -92366,16 +93302,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   });
   const composerIdFor = (panelKey) => JSON.stringify([composerTabId, panelKey]);
-  const sendScopeRef = import_react102.default.useRef(sendScope);
-  const persistentSendScopeRef = import_react102.default.useRef(persistentSendScope);
-  const pendingStackRef = import_react102.default.useRef({});
-  const autoDrainRequestedRef = import_react102.default.useRef(/* @__PURE__ */ new Map());
-  const sendRetryEpochRef = import_react102.default.useRef(0);
-  const pendingStorageErrorRef = import_react102.default.useRef({});
-  const queueStorageBannerRef = import_react102.default.useRef(null);
-  const [contextDrafts, setContextDrafts] = import_react102.default.useState({});
-  const [submittedFrames, setSubmittedFrames] = import_react102.default.useState({});
-  const loadedComposerDraftsRef = import_react102.default.useRef({});
+  const sendScopeRef = import_react103.default.useRef(sendScope);
+  const persistentSendScopeRef = import_react103.default.useRef(persistentSendScope);
+  const pendingStackRef = import_react103.default.useRef({});
+  const autoDrainRequestedRef = import_react103.default.useRef(/* @__PURE__ */ new Map());
+  const sendRetryEpochRef = import_react103.default.useRef(0);
+  const pendingStorageErrorRef = import_react103.default.useRef({});
+  const queueStorageBannerRef = import_react103.default.useRef(null);
+  const [contextDrafts, setContextDrafts] = import_react103.default.useState({});
+  const [submittedFrames, setSubmittedFrames] = import_react103.default.useState({});
+  const loadedComposerDraftsRef = import_react103.default.useRef({});
   function storedComposerDraft(identity, panelKey) {
     const namespace = persistentSendScopeRef.current;
     const key = "".concat(sendScopeRef.current, ":").concat(composerIdFor(panelKey));
@@ -92391,6 +93327,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return loadedComposerDraftsRef.current[key];
   }
   function persistComposerDraft(identity, panelKey, text14, contexts) {
+    if (callerHandlersRef.current.signingOut()) return true;
     const namespace = persistentSendScopeRef.current;
     try {
       validateConsoleContexts(contexts);
@@ -92418,7 +93355,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     optimisticUserByPanelKeyRef.current = {};
   }
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     setDraftByKey({});
     setContextDrafts({});
     setSubmittedFrames({});
@@ -92427,6 +93364,24 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     setDeliveredNotices({});
   }, [sendScope]);
   persistentSendScopeRef.current = persistentSendScope;
+  import_react103.default.useEffect(() => {
+    callerHandlersRef.current.onStorageScope(persistentSendScope);
+    if (!persistentSendScope) return;
+    const carried = callerHandlersRef.current.takeCarriedAttachments(persistentSendScope);
+    if (!carried) return;
+    const restored = {};
+    for (const [identity, files] of Object.entries(carried)) {
+      if (stagedAttachmentsRef.current[identity]?.length) continue;
+      restored[identity] = files.map((file2, index3) => ({
+        id: "restored-".concat(Date.now().toString(36), "-").concat(index3),
+        file: file2,
+        previewUrl: URL.createObjectURL(file2)
+      }));
+    }
+    setStagedAttachmentsByIdentity((current) => ({ ...restored, ...current }));
+  }, [persistentSendScope]);
+  const hostOnlyQueueNamespaceRef = import_react103.default.useRef(null);
+  hostOnlyQueueNamespaceRef.current = serverStorageScope && hostStorageNamespace ? hostStorageNamespace : null;
   const scopedDraftKey = (panelKey) => "".concat(sendScopeRef.current, ":").concat(panelKey);
   function loadPendingStack(identity) {
     const namespace = persistentSendScopeRef.current;
@@ -92499,7 +93454,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return false;
     });
   }
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     const onStorage = (event) => {
       const namespace = persistentSendScopeRef.current;
       if (!namespace) return;
@@ -92523,7 +93478,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       window.removeEventListener("online", onRetryOpportunity);
     };
   }, []);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     const timer3 = window.setInterval(() => {
       let changed = false;
       for (const [identity, items] of Object.entries(pendingStackRef.current)) {
@@ -92537,29 +93492,30 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }, 15e3);
     return () => window.clearInterval(timer3);
   }, []);
-  const identityBusyRef = import_react102.default.useRef({});
-  const identityLifecycleRef = import_react102.default.useRef({});
+  const identityBusyRef = import_react103.default.useRef({});
+  const identityLifecycleRef = import_react103.default.useRef({});
   const isIdentityBusy = (identity) => identityBusyRef.current[identity] === true;
-  const phaseRef = import_react102.default.useRef({});
-  const phaseValueByKey = import_react102.default.useRef({});
-  const phaseSinceByKey = import_react102.default.useRef({});
-  const phaseTimerByKey = import_react102.default.useRef({});
-  const refreshTimersRef = import_react102.default.useRef({});
-  const experienceTimerRef = import_react102.default.useRef(null);
-  const experienceLoadInFlightRef = import_react102.default.useRef(
+  const phaseRef = import_react103.default.useRef({});
+  const phaseValueByKey = import_react103.default.useRef({});
+  const phaseSinceByKey = import_react103.default.useRef({});
+  const phaseTimerByKey = import_react103.default.useRef({});
+  const refreshTimersRef = import_react103.default.useRef({});
+  const experienceTimerRef = import_react103.default.useRef(null);
+  const experienceLoadInFlightRef = import_react103.default.useRef(
     null
   );
-  const experienceLoadGenerationRef = import_react102.default.useRef(-1);
-  const agentsRef = import_react102.default.useRef([]);
-  const identityAliasesRef = import_react102.default.useRef(/* @__PURE__ */ new Map());
-  import_react102.default.useEffect(() => {
+  const experienceLoadGenerationRef = import_react103.default.useRef(-1);
+  const agentsRef = import_react103.default.useRef([]);
+  const identityAliasesRef = import_react103.default.useRef(/* @__PURE__ */ new Map());
+  import_react103.default.useEffect(() => {
     agentsRef.current = agents;
     identityAliasesRef.current = buildConsoleIdentityAliasMap(agents);
   }, [agents]);
-  const initialTargetOpened = import_react102.default.useRef(false);
-  const dockLayoutHydrated = import_react102.default.useRef(false);
-  const dockLayoutRestored = import_react102.default.useRef(false);
-  const dockLayoutRestoring = import_react102.default.useRef(false);
+  const initialTargetOpened = import_react103.default.useRef(false);
+  const dockLayoutHydrated = import_react103.default.useRef(false);
+  const dockLayoutRestored = import_react103.default.useRef(false);
+  const dockLayoutRestoring = import_react103.default.useRef(false);
+  const dockLayoutWritten = import_react103.default.useRef(null);
   const dock = useConsoleDockController({
     createPanelState: ({ target }) => ({
       id: createConsoleId("panel"),
@@ -92567,11 +93523,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       mode: "console"
     })
   });
-  const currentDockLayoutStorageKey = import_react102.default.useMemo(
+  const currentDockLayoutStorageKey = import_react103.default.useMemo(
     () => dockLayoutStorageKey(sendScope),
     [sendScope]
   );
-  import_react102.default.useLayoutEffect(() => {
+  import_react103.default.useLayoutEffect(() => {
     if (!experience || dockLayoutHydrated.current) return;
     dockLayoutHydrated.current = true;
     try {
@@ -92593,17 +93549,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     } catch {
     }
   }, [currentDockLayoutStorageKey, experience]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     if (!experience || !dockLayoutHydrated.current) return;
     if (dockLayoutRestoring.current) {
       dockLayoutRestoring.current = false;
+      dockLayoutWritten.current = { key: currentDockLayoutStorageKey, layout: JSON.stringify(dock.state) };
       return;
     }
+    const layout = JSON.stringify(dock.state);
+    const written = dockLayoutWritten.current;
+    if (written?.key === currentDockLayoutStorageKey && written.layout === layout) return;
     try {
-      localStorage.setItem(
-        currentDockLayoutStorageKey,
-        JSON.stringify(dock.state)
-      );
+      localStorage.setItem(currentDockLayoutStorageKey, layout);
+      dockLayoutWritten.current = { key: currentDockLayoutStorageKey, layout };
     } catch {
     }
   }, [currentDockLayoutStorageKey, dock.state, experience]);
@@ -92702,7 +93660,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         return false;
     }
   }
-  const dockRef = import_react102.default.useRef(dock);
+  const dockRef = import_react103.default.useRef(dock);
   dockRef.current = dock;
   function updatePhaseForIdentity(identity, frame2) {
     if (frame2.sourceKind === "session_history" || frame2.event === "assistant_history_snapshot" || frame2.event === "frame_updated") {
@@ -92763,7 +93721,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     return changed;
   }
-  const settleIdleIdentitiesRef = import_react102.default.useRef(() => {
+  const settleIdleIdentitiesRef = import_react103.default.useRef(() => {
   });
   function settleIdleIdentities(agents2, logVersionsAtRequest) {
     let changed = false;
@@ -92810,12 +93768,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (changed) forceRender();
   }
   settleIdleIdentitiesRef.current = settleIdleIdentities;
-  const loadExperience = import_react102.default.useCallback(() => {
+  const loadExperience = import_react103.default.useCallback(() => {
     if (experienceLoadInFlightRef.current && experienceLoadGenerationRef.current === lifetimeRef.current.generation) {
       return experienceLoadInFlightRef.current;
     }
     let request;
     request = (async () => {
+      const callerAgain = instanceCaller.readAgain();
+      const answeredAgain = callerAgain ? await callerAgain.then((whoami) => ({ whoami }), () => void 0) : void 0;
       const logVersionsAtRequest = new Map(
         Object.entries(identityLogRef.current).map(([identity, log]) => [identity, log.version])
       );
@@ -92824,6 +93784,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         consoleTransport.loadModules?.() ?? Promise.resolve({ modules: [] })
       ]);
       if (!observeScope(experienceJson.storage_scope?.trim() || void 0)) return [];
+      if (answeredAgain) {
+        instanceCaller.bind(answeredAgain.whoami);
+        adoptCaller(answeredAgain.whoami);
+      }
       const configuredTimeoutMs = experienceJson.console_policy?.fetch_timeout_ms;
       if (typeof configuredTimeoutMs === "number" && Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0) {
         consoleFetchTimeoutMsRef.current = configuredTimeoutMs;
@@ -92845,8 +93809,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     experienceLoadInFlightRef.current = request;
     experienceLoadGenerationRef.current = lifetimeRef.current.generation;
     return request;
-  }, [consoleTransport]);
-  import_react102.default.useEffect(() => {
+  }, [consoleTransport, instanceCaller, adoptCaller]);
+  import_react103.default.useEffect(() => {
     let mounted = true;
     setLoading(true);
     setError("");
@@ -92859,41 +93823,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       mounted = false;
     };
   }, [loadExperience]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     const timer3 = window.setInterval(() => {
       void loadExperience().catch(() => {
       });
     }, 15e3);
     return () => window.clearInterval(timer3);
   }, [loadExperience]);
-  import_react102.default.useEffect(() => {
-    const configured = experience?.console_config?.layout?.sidebar_collapsed;
-    if (typeof configured !== "boolean") return;
-    try {
-      if (localStorage.getItem("meta-console-sidebar-collapsed") !== null)
-        return;
-    } catch {
-    }
-    setSidebarCollapsed(configured);
-  }, [experience?.console_config?.layout?.sidebar_collapsed]);
-  import_react102.default.useEffect(() => {
-    const configured = experience?.console_config?.rail?.collapsed;
-    if (typeof configured !== "boolean") return;
-    try {
-      if (localStorage.getItem("meta-console-rail-collapsed") !== null)
-        return;
-    } catch {
-    }
-    setRailCollapsed(configured);
-  }, [experience?.console_config?.rail?.collapsed]);
   const hasMobControlSurface = experience?.runtime_id !== SHARED_CONSOLE_RUNTIME_ID;
-  const frontendReadOnly = import_react102.default.useMemo(() => resolveConsoleReadOnlyOverride(), []);
+  const frontendReadOnly = import_react103.default.useMemo(() => resolveConsoleReadOnlyOverride(), []);
   const accessEnforcing = experience?.access?.enabled === true;
   const consoleReadOnly = frontendReadOnly || experience?.console_policy?.read_only === true || !accessEnforcing && experience?.runtime_capabilities?.can_send_messages === false;
-  const consoleReadOnlyRef = import_react102.default.useRef(false);
+  const consoleReadOnlyRef = import_react103.default.useRef(false);
   consoleReadOnlyRef.current = consoleReadOnly;
   const canSpawnMembers = experience?.runtime_capabilities?.can_spawn_members === true;
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     if (!canSpawnMembers) setSideChatsOffered(false);
     let active = true;
     void Promise.resolve().then(() => consoleTransport.capabilities()).then((capabilities) => {
@@ -92912,31 +93856,55 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, [consoleTransport, canSpawnMembers, sendScope]);
   const resendUncertain = experience?.send_dedupe?.durable === true;
-  const resendUncertainRef = import_react102.default.useRef(false);
+  const resendUncertainRef = import_react103.default.useRef(false);
   resendUncertainRef.current = resendUncertain;
-  const [approvalSnapshot, setApprovalSnapshot] = import_react102.default.useState();
-  const [selectedApprovalId, setSelectedApprovalId] = import_react102.default.useState();
-  const [approvalOpens, setApprovalOpens] = import_react102.default.useState(0);
-  const approvalResourceRef = import_react102.default.useRef(null);
+  const [approvalSnapshot, setApprovalSnapshot] = import_react103.default.useState();
+  const [selectedApprovalId, setSelectedApprovalId] = import_react103.default.useState();
+  const [approvalOpens, setApprovalOpens] = import_react103.default.useState(0);
+  const approvalResourceRef = import_react103.default.useRef(null);
   const approvalScope = "".concat(sendScope, ":").concat(experience?.runtime_id || "loading");
-  import_react102.default.useEffect(() => {
+  const approvalsDecidable = caller === void 0 ? void 0 : caller?.actorKind === "person";
+  const signInToDecide = Boolean(caller) && caller?.actorKind !== "person";
+  const approvalViewer = import_react103.default.useMemo(
+    () => caller ? { decides: caller.actorKind === "person", approverIds: caller.approverIds } : void 0,
+    [caller]
+  );
+  const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : void 0;
+  const workGraphAdmin = caller?.canAdminister === true;
+  const signOutOfConsole = import_react103.default.useCallback(() => callerHandlersRef.current.onSignOut(), []);
+  const signOutHref = experience?.console_config?.sign_out?.href;
+  const signOutMethod = experience?.console_config?.sign_out?.method === "post" ? "post" : "get";
+  const identityChip = import_react103.default.useMemo(() => caller ? {
+    ...consoleCallerWords(caller),
+    ...signOutHref ? { signOut: { href: signOutHref, method: signOutMethod }, onSignOut: signOutOfConsole } : {}
+  } : void 0, [caller, signOutHref, signOutMethod, signOutOfConsole]);
+  import_react103.default.useEffect(() => {
     setApprovalSnapshot(void 0);
     setSelectedApprovalId(void 0);
-    if (!experience || !hasMobControlSurface) return;
+    if (!experience || !hasMobControlSurface || approvalsDecidable === void 0) return;
     const target = controlWorkbenchTarget("gating");
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
-      readOnly: consoleReadOnly,
+      readOnly: consoleReadOnly || !approvalsDecidable,
+      ...!consoleReadOnly && signInToDecide ? { readOnlyReason: "sign_in" } : {},
       load: async (signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.listGatingPending,
         target,
         signal
       })).result,
+      // No approver in the request: the gateway decides as the signed-in person.
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES2.decideGating,
         target,
         signal,
-        params: { pending_id: pendingId, approver_id: DEFAULT_APPROVER_ID, decision, reason: "console_".concat(decision) }
+        params: { pending_id: pendingId, decision, reason: "console_".concat(decision) }
+      })).result,
+      // Who decided a request that left the list elsewhere: the gating audit.
+      loadDecisions: async (signal) => (await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES2.listGatingAudit,
+        target,
+        signal,
+        params: { limit: GATING_AUDIT_LIMIT }
       })).result
     });
     approvalResourceRef.current = resource;
@@ -92948,16 +93916,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope ? approvalSnapshot.snapshot : void 0;
   const hostAttentionKey = JSON.stringify(experience?.console_config?.attention?.sources || []);
-  const hostAttentionSources = import_react102.default.useMemo(
+  const hostAttentionSources = import_react103.default.useMemo(
     () => JSON.parse(hostAttentionKey),
     [hostAttentionKey]
   );
-  const [hostAttentionState, setHostAttentionState] = import_react102.default.useState();
+  const [hostAttentionState, setHostAttentionState] = import_react103.default.useState();
   const hostAttention = hostAttentionState?.scope === approvalScope ? hostAttentionState.snapshot : void 0;
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     setHostAttentionState(void 0);
     const sources = hostAttentionSources;
     if (!sources.length) return;
@@ -92988,7 +93956,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     voiceState.target?.identity ?? null,
     hasVoiceHost && !consoleReadOnly && voice !== null
   );
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     const target = voiceState.target;
     if (!experience || !voice || !target || !["requesting", "connecting", "active"].includes(voiceState.phase)) return;
     const voiceAgent = agents.find(
@@ -92999,7 +93967,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       void voice.close();
     }
   }, [agents, consoleReadOnly, experience, hasVoiceHost, voice, voiceReadiness, voiceState.phase, voiceState.target]);
-  const normalizedTopology = import_react102.default.useMemo(
+  const normalizedTopology = import_react103.default.useMemo(
     () => normalizeConsoleTopologyQuery(topologyQueryResult, {
       agents,
       fallbackNodes: experience?.topology?.live_snapshot?.nodes || [],
@@ -93018,7 +93986,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       topologyQueryResult
     ]
   );
-  const visibleControls = import_react102.default.useMemo(() => consoleNavControls({
+  const visibleControls = import_react103.default.useMemo(() => consoleNavControls({
     hasMobControlSurface,
     sidebar: experience?.console_config?.sidebar,
     access: experience?.access,
@@ -93035,7 +94003,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     hasMobControlSurface,
     scheduleOffer.list
   ]);
-  import_react102.default.useLayoutEffect(() => {
+  import_react103.default.useLayoutEffect(() => {
     if (initialTargetOpened.current || dock.focusedTarget || !experience)
       return;
     if (!dockLayoutHydrated.current) return;
@@ -93070,7 +94038,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (preset) dock.applyPreset(preset);
     dock.openTarget(target, "replace_focused");
   }, [agents, dock, experience, visibleControls]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     const target = dock.focusedTarget;
     if (!target || target.kind !== "agent-chat" || agents.length === 0) return;
     const identity = target.identity || target.memberId;
@@ -93087,26 +94055,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       dock.openTarget(buildControlTarget2("roster"), "replace_focused");
     }
   }, [agents, dock.focusedTarget]);
-  const panelRefreshFlight = import_react102.default.useMemo(() => createSingleFlight(), []);
-  const visiblePanelTargets = import_react102.default.useMemo(() => {
+  const panelRefreshFlight = import_react103.default.useMemo(() => createSingleFlight(), []);
+  const visiblePanelTargets = import_react103.default.useMemo(() => {
     const activeTab = dock.viewState.tabs.find((tab2) => tab2.id === dock.viewState.activeTabId);
     const visible = new Set(collectConsoleDockPanelIds(activeTab?.layout));
     return dock.viewState.panels.filter((panel) => visible.has(panel.id)).map((panel) => panel.target).filter(Boolean);
   }, [dock.viewState.panels, dock.viewState.tabs, dock.viewState.activeTabId]);
   const accessScope = JSON.stringify([baseUrl, storageNamespace, experience?.runtime_id, experience?.access?.subject]);
-  const accessScopeRef = import_react102.default.useRef(accessScope);
+  const accessScopeRef = import_react103.default.useRef(accessScope);
   accessScopeRef.current = accessScope;
-  const accessRefreshVersion = import_react102.default.useRef(0);
-  const accessSettledScope = import_react102.default.useRef(null);
-  const accessRevisionRef = import_react102.default.useRef(void 0);
+  const accessRefreshVersion = import_react103.default.useRef(0);
+  const accessSettledScope = import_react103.default.useRef(null);
+  const accessRevisionRef = import_react103.default.useRef(void 0);
   const visibleAccessData = accessData.scope === accessScope ? accessData : null;
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     accessRefreshVersion.current += 1;
     accessSettledScope.current = null;
     accessRevisionRef.current = void 0;
     setAccessData({ scope: accessScope, loading: false, status: null, config: null, error: null });
   }, [accessScope, experience?.access?.can_administer]);
-  const refreshAccessData = import_react102.default.useCallback((mode = "explicit") => {
+  const refreshAccessData = import_react103.default.useCallback((mode = "explicit") => {
     if (accessScope === accessScopeRef.current && (mode === "explicit" || accessSettledScope.current !== accessScope)) {
       if (mode === "explicit") accessRefreshVersion.current += 1;
       setAccessData((current) => ({
@@ -93157,7 +94125,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
     });
   }, [panelRefreshFlight, baseUrl, accessScope]);
-  const refreshMemoryData = import_react102.default.useCallback(() => panelRefreshFlight("memory:".concat(panelRuntimeKey), async () => {
+  const refreshMemoryData = import_react103.default.useCallback(() => panelRefreshFlight("memory:".concat(panelRuntimeKey), async () => {
     if (emptyPanelRegistry) return;
     if (memoryNotSetUp(experience?.memory)) {
       if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
@@ -93334,8 +94302,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       setMemoryData((current) => ({ ...current, error: errorMessage(err) }));
     }
   }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry, experience?.memory?.can_review_quarantine, experience?.memory?.available]);
-  const workGraphRefreshSequencerRef = import_react102.default.useRef(createWorkGraphRefreshSequencer());
-  const refreshWorkGraphData = import_react102.default.useCallback(() => panelRefreshFlight("workgraph:".concat(panelRuntimeKey), async () => {
+  const workGraphRefreshSequencerRef = import_react103.default.useRef(createWorkGraphRefreshSequencer());
+  const refreshWorkGraphData = import_react103.default.useCallback(() => panelRefreshFlight("workgraph:".concat(panelRuntimeKey), async () => {
     if (emptyPanelRegistry) return;
     const workGraphTarget = controlWorkbenchTarget("workgraph");
     const isCurrent = workGraphRefreshSequencerRef.current.begin();
@@ -93399,7 +94367,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       setWorkGraphData((current) => ({ ...current, error: errorMessage(err) }));
     }
   }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry]);
-  const queryMemoryRecords = import_react102.default.useCallback(
+  const queryMemoryRecords = import_react103.default.useCallback(
     async (params) => {
       try {
         return await executeHeadlessCommand(
@@ -93416,7 +94384,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, panelRuntimeKey]
   );
-  const loadMemoryEvidence = import_react102.default.useCallback(
+  const loadMemoryEvidence = import_react103.default.useCallback(
     async (identity, evidence) => {
       if (!evidence.session_id) return null;
       try {
@@ -93442,7 +94410,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [consoleController, panelRuntimeKey, experience?.panel_runtimes]
   );
-  const loadMemoryRecordDetail = import_react102.default.useCallback(
+  const loadMemoryRecordDetail = import_react103.default.useCallback(
     async (realm, memoryId, preserveDetail = false) => {
       const request = ++memoryDetailRequestRef.current;
       setMemoryData((current) => ({ ...current, detail: preserveDetail ? current.detail : null, detailLoading: true, error: null }));
@@ -93473,7 +94441,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, panelRuntimeKey]
   );
-  const decideMemoryQuarantine = import_react102.default.useCallback(
+  const decideMemoryQuarantine = import_react103.default.useCallback(
     async (realm, record10, verdict, rationale) => {
       const identity = record10.scope.scope === "identity" ? record10.scope.identity : void 0;
       const result = await executeHeadlessCommand(
@@ -93494,7 +94462,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshMemoryData]
   );
-  const runAccessMutation = import_react102.default.useCallback(
+  const runAccessMutation = import_react103.default.useCallback(
     async (command, params, base) => {
       if (accessData.scope !== accessScope || accessData.loading || accessData.error || accessData.status?.available !== true || accessData.status.can_administer !== true || accessData.status.conditional_mutations !== "checked_v1" || typeof accessData.status.owner_instance !== "string" || !accessData.status.owner_instance || !Number.isSafeInteger(accessData.status.revision) || accessData.status.revision < 0 || typeof base.owner_instance !== "string" || !base.owner_instance || !Number.isSafeInteger(base.revision) || base.revision < 0 || experience?.access?.can_administer !== true || frontendReadOnly || experience?.console_policy?.read_only === true) return false;
       let failure = null;
@@ -93516,11 +94484,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshAccessData, loadExperience, accessData, accessScope, experience?.access?.can_administer, frontendReadOnly, experience?.console_policy?.read_only]
   );
-  const [topologyRelations, setTopologyRelations] = import_react102.default.useState(EMPTY_TOPOLOGY_RELATIONS);
-  const [topologyRefreshing, setTopologyRefreshing] = import_react102.default.useState(false);
+  const [topologyRelations, setTopologyRelations] = import_react103.default.useState(EMPTY_TOPOLOGY_RELATIONS);
+  const [topologyRefreshing, setTopologyRefreshing] = import_react103.default.useState(false);
   const topologyMemoryReadable = experience?.memory?.available === true && experience?.memory?.can_read === true;
-  const topologyBackfilledLedgerRef = import_react102.default.useRef(null);
-  const refreshTopologyData = import_react102.default.useCallback(() => panelRefreshFlight("topology", async () => {
+  const topologyBackfilledLedgerRef = import_react103.default.useRef(null);
+  const refreshTopologyData = import_react103.default.useCallback(() => panelRefreshFlight("topology", async () => {
     const ledger = timelineScopeRef.current?.ledger;
     if (ledger && topologyBackfilledLedgerRef.current !== ledger) {
       topologyBackfilledLedgerRef.current = ledger;
@@ -93561,8 +94529,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error49;
     }
   }), [panelRefreshFlight, consoleTransport, consoleController, topologyMemoryReadable]);
-  const [gatingAuditError, setGatingAuditError] = import_react102.default.useState(null);
-  const refreshGatingAudit = import_react102.default.useCallback(() => panelRefreshFlight("gating-audit", async () => {
+  const [gatingAuditError, setGatingAuditError] = import_react103.default.useState(null);
+  const refreshGatingAudit = import_react103.default.useCallback(() => panelRefreshFlight("gating-audit", async () => {
     try {
       const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT });
       setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
@@ -93572,7 +94540,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error49;
     }
   }), [baseUrl, panelRefreshFlight]);
-  const refreshRoutingData = import_react102.default.useCallback(() => panelRefreshFlight("routing", async () => {
+  const refreshRoutingData = import_react103.default.useCallback(() => panelRefreshFlight("routing", async () => {
     const scope = accessScopeRef.current;
     setRoutingRead((current) => current.scope === scope ? { ...current, loading: true } : { ...emptyRoutingRead(), scope, loading: true });
     const routingTarget = controlWorkbenchTarget("routing");
@@ -93603,11 +94571,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error49;
     }
   }), [baseUrl, panelRefreshFlight, accessEnforcing]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     setRoutingData({ routes: [], deliveries: [] });
     setRoutingRead({ ...emptyRoutingRead(), scope: accessScope });
   }, [accessScope]);
-  const refreshPanelData = import_react102.default.useCallback(async ({ access = true } = {}) => {
+  const refreshPanelData = import_react103.default.useCallback(async ({ access = true } = {}) => {
     const openPanels = visiblePanelTargets;
     const inspects = openPanels.filter(
       (t) => t.kind === "identity-inspect"
@@ -93629,14 +94597,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     await Promise.all(refreshes);
   }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
-  const refreshPanelDataRef = import_react102.default.useRef(refreshPanelData);
+  const refreshPanelDataRef = import_react103.default.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
   const visiblePanelKey = JSON.stringify(visiblePanelTargets);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     void refreshPanelDataRef.current().catch(() => {
     });
   }, [visiblePanelKey, accessScope, panelRuntimeKey, emptyPanelRegistry, experience?.access?.can_administer]);
-  const scheduleExperienceRefresh = import_react102.default.useCallback(() => {
+  const scheduleExperienceRefresh = import_react103.default.useCallback(() => {
     if (experienceTimerRef.current !== null) return;
     experienceTimerRef.current = window.setTimeout(() => {
       experienceTimerRef.current = null;
@@ -93647,7 +94615,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
     }, 150);
   }, [loadExperience, panelRefreshFlight]);
-  const handleAccessChangedRef = import_react102.default.useRef(() => {
+  const handleAccessChangedRef = import_react103.default.useRef(() => {
   });
   handleAccessChangedRef.current = (revision) => {
     const known = accessRevisionRef.current;
@@ -93661,7 +94629,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     scheduleExperienceRefresh();
   };
-  const scheduleHistoryRefresh = import_react102.default.useCallback(
+  const scheduleHistoryRefresh = import_react103.default.useCallback(
     (identity) => {
       clearTimeout(refreshTimersRef.current[identity]);
       refreshTimersRef.current[identity] = window.setTimeout(async () => {
@@ -93679,7 +94647,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [baseUrl, forceRender]
   );
-  const workGraphHydrationGateRef = import_react102.default.useRef(createWorkGraphHydrationGate());
+  const workGraphHydrationGateRef = import_react103.default.useRef(createWorkGraphHydrationGate());
   async function hydrateWorkGraphCardsForIdentity(identity) {
     const shouldFetch = workGraphHydrationGateRef.current.shouldFetch(identity, {
       workgraphAvailable: experience?.workgraph?.available === true,
@@ -93710,7 +94678,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     } catch {
     }
   }
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     for (const panel of dock.viewState.panels) {
       const target = panel.target;
       if (!target || target.kind !== "agent-chat") continue;
@@ -93724,8 +94692,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
     }
   }, [baseUrl, dock.viewState.panels, forceRender, experience?.workgraph?.available]);
-  const identityRefreshInFlightRef = import_react102.default.useRef(/* @__PURE__ */ new Set());
-  const repairIdentityAfterReplayGap = import_react102.default.useCallback(
+  const identityRefreshInFlightRef = import_react103.default.useRef(/* @__PURE__ */ new Set());
+  const repairIdentityAfterReplayGap = import_react103.default.useCallback(
     async (identity) => {
       const log = getOrCreateLog(identity);
       if (log.hasServerLog === false) return false;
@@ -93766,43 +94734,43 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, forceRender]
   );
-  const repairIdentityAfterReplayGapRef = import_react102.default.useRef(repairIdentityAfterReplayGap);
+  const repairIdentityAfterReplayGapRef = import_react103.default.useRef(repairIdentityAfterReplayGap);
   repairIdentityAfterReplayGapRef.current = repairIdentityAfterReplayGap;
-  const scheduleHistoryRefreshRef = import_react102.default.useRef(scheduleHistoryRefresh);
+  const scheduleHistoryRefreshRef = import_react103.default.useRef(scheduleHistoryRefresh);
   scheduleHistoryRefreshRef.current = scheduleHistoryRefresh;
-  const scheduleExperienceRefreshRef = import_react102.default.useRef(scheduleExperienceRefresh);
+  const scheduleExperienceRefreshRef = import_react103.default.useRef(scheduleExperienceRefresh);
   scheduleExperienceRefreshRef.current = scheduleExperienceRefresh;
-  const refreshMemoryDataRef = import_react102.default.useRef(refreshMemoryData);
+  const refreshMemoryDataRef = import_react103.default.useRef(refreshMemoryData);
   refreshMemoryDataRef.current = refreshMemoryData;
-  const memoryPanelDockedRef = import_react102.default.useRef(false);
+  const memoryPanelDockedRef = import_react103.default.useRef(false);
   memoryPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "memory");
-  const dockedChatIdentitiesRef = import_react102.default.useRef([]);
+  const dockedChatIdentitiesRef = import_react103.default.useRef([]);
   dockedChatIdentitiesRef.current = dock.viewState.panels.flatMap((panel) => {
     const target = panel.target;
     return target && target.kind === "agent-chat" ? [target.identity || target.memberId] : [];
   });
-  const memoryRefreshTimerRef = import_react102.default.useRef(null);
-  const refreshWorkGraphDataRef = import_react102.default.useRef(refreshWorkGraphData);
+  const memoryRefreshTimerRef = import_react103.default.useRef(null);
+  const refreshWorkGraphDataRef = import_react103.default.useRef(refreshWorkGraphData);
   refreshWorkGraphDataRef.current = refreshWorkGraphData;
-  const workGraphPanelDockedRef = import_react102.default.useRef(false);
+  const workGraphPanelDockedRef = import_react103.default.useRef(false);
   workGraphPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "workgraph");
-  const workGraphRefreshTimerRef = import_react102.default.useRef(null);
-  const timelineScopeRef = import_react102.default.useRef(null);
+  const workGraphRefreshTimerRef = import_react103.default.useRef(null);
+  const timelineScopeRef = import_react103.default.useRef(null);
   if (timelineScopeRef.current?.owner !== consoleController) {
     timelineScopeRef.current = { owner: consoleController, dedupe: createConsoleTimelineDedupe(), ledger: createActivityLedger() };
   }
   const timelineScope = timelineScopeRef.current;
-  const bufferScopeRef = import_react102.default.useRef(timelineScope);
-  const agentResolver = import_react102.default.useMemo(() => createAgentResolver(agents), [agents]);
-  import_react102.default.useEffect(() => {
+  const bufferScopeRef = import_react103.default.useRef(timelineScope);
+  const agentResolver = import_react103.default.useMemo(() => createAgentResolver(agents), [agents]);
+  import_react103.default.useEffect(() => {
     timelineScope.ledger.setResolver(agentResolver);
   }, [agentResolver, timelineScope]);
-  const ledgerPeersVersion = import_react102.default.useSyncExternalStore(
+  const ledgerPeersVersion = import_react103.default.useSyncExternalStore(
     timelineScope.ledger.subscribe,
     timelineScope.ledger.getPeersVersion,
     timelineScope.ledger.getPeersVersion
   );
-  const agentDirectory = import_react102.default.useMemo(() => {
+  const agentDirectory = import_react103.default.useMemo(() => {
     const peerIds = timelineScope.ledger.peerIds();
     return createAgentDirectory(agents.map((agent) => {
       const entry = agentDirectoryEntry(agent);
@@ -93810,7 +94778,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return ids.length ? { ...entry, aliases: [...entry.aliases, ...ids] } : entry;
     }));
   }, [agents, timelineScope, ledgerPeersVersion]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     const scope = timelineScope;
     if (bufferScopeRef.current !== scope) {
       bufferScopeRef.current = scope;
@@ -93902,7 +94870,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe?.();
     };
   }, [consoleController, consoleTransport, sidebarStorageNamespace, transportRetry]);
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     return () => {
       for (const timer3 of Object.values(phaseTimerByKey.current))
         window.clearTimeout(timer3);
@@ -94137,8 +95105,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return true;
   }
   const reducedMotion = typeof window !== "undefined" ? window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false : false;
-  const directSendIdsRef = import_react102.default.useRef(/* @__PURE__ */ new Set());
-  const pendingDrainOwnerRef = import_react102.default.useRef(
+  const directSendIdsRef = import_react103.default.useRef(/* @__PURE__ */ new Set());
+  const pendingDrainOwnerRef = import_react103.default.useRef(
     "tab-".concat(Date.now().toString(36), "-").concat(Math.random().toString(36).slice(2, 8))
   );
   function findChatTargetFor(identity) {
@@ -94306,7 +95274,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   function onStackToggleExpand(identity, id) {
     setPendingStack(identity, (previous3) => previous3.map((item) => item.id === id ? { ...item, expanded: !item.expanded } : item));
   }
-  import_react102.default.useEffect(() => {
+  import_react103.default.useEffect(() => {
     for (const identity of Object.keys(pendingStackRef.current)) {
       if (getOrCreateLog(identity).hasServerLog === null) continue;
       maybeDrainHead(identity);
@@ -94330,16 +95298,34 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       if (previous3?.inFlight || previous3?.token === token) return;
       const request = { inFlight: true, token };
       autoDrainRequestedRef.current.set(key, request);
-      void dispatchPendingAttempt(identity, head.id, "queue").finally(() => {
+      const scope = sendScopeRef.current;
+      let keptBack = false;
+      void (async () => {
+        try {
+          await loadExperience();
+        } catch {
+          return false;
+        }
+        if (!lifetimeRef.current.active || scope !== sendScopeRef.current) return false;
+        if (!instanceCaller.known()) {
+          keptBack = true;
+          return false;
+        }
+        return dispatchPendingAttempt(identity, head.id, "queue");
+      })().finally(() => {
         if (autoDrainRequestedRef.current.get(key) !== request) return;
         const current = getPendingStack(identity).find((item) => item.id === head.id);
-        if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
+        if (keptBack && instanceCaller.known()) {
+          autoDrainRequestedRef.current.delete(key);
+          maybeDrainHead(identity);
+        } else if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
         else autoDrainRequestedRef.current.delete(key);
       });
     }
   }
   async function importLegacyPending(identity) {
     const namespace = persistentSendScopeRef.current;
+    const hostOnlyNamespace = hostOnlyQueueNamespaceRef.current;
     const storage2 = browserLocalStorage();
     if (!namespace || !storage2) return;
     try {
@@ -94347,16 +95333,24 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const legacy = readLegacyConsoleQueue(storage2, identity);
       const predecessor = readPredecessorConsoleQueue(storage2, namespace, identity);
       if (predecessor.kind === "blocked") throw new Error(predecessor.reason);
-      const imported = [...legacy.map((item) => createConsoleSendAttempt({
-        id: "legacy:".concat(item.id),
-        scope: namespace,
-        destination: identity,
-        origin: "console:legacy-import",
-        idempotencyKey: createIdempotencyKey(),
-        text: item.text,
-        now: item.addedAt
-      })), ...predecessor.attempts];
-      await setPendingStack(identity, (previous3) => [...previous3, ...imported.filter((item) => !previous3.some((old) => old.id === item.id))], true);
+      const hostOnly = hostOnlyNamespace ? loadConsoleSendAttempts(storage2, hostOnlyNamespace, identity) : null;
+      if (hostOnly?.kind === "blocked") throw new Error(hostOnly.reason);
+      const imported = [
+        ...legacy.map((item) => createConsoleSendAttempt({
+          id: "legacy:".concat(item.id),
+          scope: namespace,
+          destination: identity,
+          origin: "console:legacy-import",
+          idempotencyKey: createIdempotencyKey(),
+          text: item.text,
+          now: item.addedAt
+        })),
+        ...predecessor.attempts,
+        // The same messages, now kept in this user's scope.
+        ...(hostOnly?.attempts ?? []).map((attempt) => ({ ...attempt, scope: namespace }))
+      ];
+      const saved = await setPendingStack(identity, (previous3) => [...previous3, ...imported.filter((item) => !previous3.some((old) => old.id === item.id))], true);
+      if (saved) await removeOlderConsoleQueues(storage2, namespace, identity, hostOnlyNamespace);
     } catch (error49) {
       setActionError(errorMessage(error49));
     }
@@ -94534,28 +95528,28 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }
   const panelState = useConsolePanels(suppliedPanels, experience?.console_config?.panel_modules, baseUrl);
   const customPanels = panelState.panels;
-  const panelDockRef = import_react102.default.useRef(dock.openTarget);
+  const panelDockRef = import_react103.default.useRef(dock.openTarget);
   panelDockRef.current = dock.openTarget;
-  const panelVisibleIdentities = import_react102.default.useMemo(() => agents.flatMap((agent) => [agent.identity, agent.member_id, agent.agent_id]).filter((id) => Boolean(id)), [agents]);
-  const panelSelectionRef = import_react102.default.useRef(null);
+  const panelVisibleIdentities = import_react103.default.useMemo(() => agents.flatMap((agent) => [agent.identity, agent.member_id, agent.agent_id]).filter((id) => Boolean(id)), [agents]);
+  const panelSelectionRef = import_react103.default.useRef(null);
   if (dock.focusedTarget?.kind === "agent-chat" && panelVisibleIdentities.includes(dock.focusedTarget.identity)) {
     panelSelectionRef.current = dock.focusedTarget.identity;
   } else if (panelSelectionRef.current && !panelVisibleIdentities.includes(panelSelectionRef.current)) {
     panelSelectionRef.current = null;
   }
   const selectedPanelIdentity = panelSelectionRef.current;
-  const panelSelection = import_react102.default.useMemo(() => selectedPanelIdentity ? { scopeKey: sendScope, identity: selectedPanelIdentity } : null, [sendScope, selectedPanelIdentity]);
-  const panelAuthority = import_react102.default.useMemo(() => ({ key: sendScope, runtimeId: experience?.runtime_id }), [sendScope, experience?.runtime_id]);
-  const panelLifetime = import_react102.default.useMemo(() => ({ abort: new AbortController() }), [sendScope]);
-  import_react102.default.useLayoutEffect(() => {
+  const panelSelection = import_react103.default.useMemo(() => selectedPanelIdentity ? { scopeKey: sendScope, identity: selectedPanelIdentity } : null, [sendScope, selectedPanelIdentity]);
+  const panelAuthority = import_react103.default.useMemo(() => ({ key: sendScope, runtimeId: experience?.runtime_id }), [sendScope, experience?.runtime_id]);
+  const panelLifetime = import_react103.default.useMemo(() => ({ abort: new AbortController() }), [sendScope]);
+  import_react103.default.useLayoutEffect(() => {
     if (panelLifetime.abort.signal.aborted) panelLifetime.abort = new AbortController();
     return () => panelLifetime.abort.abort();
   }, [panelLifetime]);
-  const panelHostService = import_react102.default.useMemo(() => {
+  const panelHostService = import_react103.default.useMemo(() => {
     const service = panelService ?? createConsolePanelService(baseUrl);
     return (request, scope, signal) => bindConsolePanelService(service, panelLifetime.abort.signal)(request, scope, signal);
   }, [panelService, baseUrl, panelLifetime]);
-  const openCustomPanel = import_react102.default.useCallback((id, options) => {
+  const openCustomPanel = import_react103.default.useCallback((id, options) => {
     const panel = customPanels.find((panel2) => panel2.id === id);
     if (!panel) return;
     const input = typeof options === "string" ? { intent: options } : options ?? {};
@@ -94567,7 +95561,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       conversation
     }), input.intent);
   }, [customPanels, panelSelection, panelVisibleIdentities, sendScope]);
-  const panelContext = import_react102.default.useMemo(() => ({
+  const panelContext = import_react103.default.useMemo(() => ({
     baseUrl,
     readOnly: consoleReadOnly,
     experience,
@@ -94581,8 +95575,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return panelHostService(request, { authority: panelAuthority, conversation, readOnly: consoleReadOnlyRef.current }, signal);
     }
   }), [baseUrl, consoleReadOnly, experience, openCustomPanel, panelAuthority, panelSelection, panelHostService, panelVisibleIdentities, sendScope]);
-  const panelProvider = import_react102.default.useMemo(() => ({ panels: panelState.panels, context: panelContext }), [panelState.panels, panelContext]);
-  const effectiveMcpAppsHost = import_react102.default.useMemo(() => {
+  const panelProvider = import_react103.default.useMemo(() => ({ panels: panelState.panels, context: panelContext }), [panelState.panels, panelContext]);
+  const effectiveMcpAppsHost = import_react103.default.useMemo(() => {
     if (mcpAppsHost) return mcpAppsHost;
     const sandboxProxyUrl = experience?.console_config?.mcp_apps_sandbox_url;
     if (!sandboxProxyUrl) return void 0;
@@ -94593,14 +95587,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         authority: sendScope,
         runtimeId: experience?.runtime_id,
         readOnly: consoleReadOnly,
-        requestTimeoutMs: consoleFetchTimeoutMsRef.current
+        requestTimeoutMs: consoleFetchTimeoutMsRef.current,
+        callerScope: callerForRequest,
+        reportFailure: reportCallerFailure
       });
     } catch {
       return void 0;
     }
-  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly]);
+  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly, callerForRequest, reportCallerFailure]);
   const canManageWorkGraph = experience?.workgraph?.can_manage === true && !consoleReadOnly;
-  const runWorkGraphCommand = import_react102.default.useCallback(
+  const runWorkGraphCommand = import_react103.default.useCallback(
     async (command, params, cardIdentity) => {
       if (consoleReadOnlyRef.current) return;
       const echoResultToCard = (result, failureMessage) => {
@@ -94625,28 +95621,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         setActionError(message);
         echoResultToCard(void 0, message);
         if (cardIdentity && jsonRpcErrorCode(err) === WORKGRAPH_CONFLICT_CODE) {
-          const refresh = workGraphConflictRefreshRequest(params);
-          if (refresh) {
-            try {
-              const fresh = await executeHeadlessCommand(
-                refresh.command,
-                controlWorkbenchTarget("workgraph"),
-                refresh.params
-              );
-              appendFrame(
-                cardIdentity,
-                buildWorkGraphOperatorResultFrame({
-                  method: consoleCommandMethod2(refresh.command),
-                  params: refresh.params,
-                  result: fresh,
-                  identity: cardIdentity,
-                  refresh: true
-                })
-              );
-              forceRender();
-            } catch {
-            }
-          }
+          await rereadWorkGraphCard(params, cardIdentity);
         }
       }
       if (workGraphPanelDockedRef.current) {
@@ -94657,75 +95632,101 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshWorkGraphData]
   );
-  const runWorkGraphQuery = import_react102.default.useCallback(
-    (command, params) => executeHeadlessCommand(command, controlWorkbenchTarget("workgraph"), params),
+  async function rereadWorkGraphCard(params, cardIdentity) {
+    const refresh = workGraphConflictRefreshRequest(params);
+    if (!refresh) return;
+    try {
+      const fresh = await executeHeadlessCommand(
+        refresh.command,
+        controlWorkbenchTarget("workgraph"),
+        refresh.params
+      );
+      appendFrame(
+        cardIdentity,
+        buildWorkGraphOperatorResultFrame({
+          method: consoleCommandMethod2(refresh.command),
+          params: refresh.params,
+          result: fresh,
+          identity: cardIdentity,
+          refresh: true
+        })
+      );
+      forceRender();
+    } catch {
+    }
+  }
+  const holdUnobservedWorkGraphAction = import_react103.default.useCallback(
+    async (entity, cardIdentity) => {
+      setActionError(WORKGRAPH_UNOBSERVED_REVISION_MESSAGE);
+      if (cardIdentity) await rereadWorkGraphCard(entity, cardIdentity);
+      if (workGraphPanelDockedRef.current) {
+        await refreshWorkGraphData().catch(() => {
+        });
+      }
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [baseUrl]
+    [baseUrl, refreshWorkGraphData]
   );
-  const makeWorkGraphOperatorHandlers = import_react102.default.useCallback(
+  const makeWorkGraphOperatorHandlers = import_react103.default.useCallback(
     (cardIdentity) => {
-      const dispatch2 = (resolveRevision, send) => {
-        void (async () => {
-          let expectedRevision;
-          try {
-            expectedRevision = await resolveRevision();
-          } catch (err) {
-            setActionError(errorMessage(err));
-            return;
-          }
-          await send(expectedRevision);
-        })();
+      const dispatch2 = (revision, entity, send) => {
+        void (revision === void 0 ? holdUnobservedWorkGraphAction(entity, cardIdentity) : send(revision));
       };
-      const revisionOr = (revision, resolve) => revision !== void 0 ? () => Promise.resolve(revision) : resolve;
       return {
-        onClaim: ({ itemId: itemId2, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2)),
+        // The gateway owns a claim by the connection's caller, so the
+        // request names no owner. A caller who can own nothing is offered
+        // no claim, and only a signed-in person confirms a goal.
+        onClaim: workGraphClaimant === void 0 ? void 0 : ({ itemId: itemId2, revision }) => dispatch2(
+          revision,
+          { id: itemId2 },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphClaim, {
             id: itemId2,
-            expected_revision: expectedRevision,
-            owner: {
-              kind: "principal",
-              id: workGraphClaimOwnerId(experience?.access?.subject, DEFAULT_APPROVER_ID)
-            }
+            expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onClose: ({ itemId: itemId2, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2)),
+          revision,
+          { id: itemId2 },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphClose, {
             id: itemId2,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
-        onGoalConfirm: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+        onGoalConfirm: approvalsDecidable !== true ? void 0 : ({ bindingId, revision }) => dispatch2(
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphGoalConfirm, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onGoalRequestClose: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphGoalRequestClose, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onAttentionPause: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphAttentionPause, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onAttentionResume: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphAttentionResume, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onAttentionReassign: ({ bindingId, revision, identity }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphAttentionReassign, {
             binding_id: bindingId,
             expected_revision: expectedRevision,
@@ -94735,9 +95736,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject]
+    [runWorkGraphCommand, holdUnobservedWorkGraphAction, workGraphClaimant, approvalsDecidable]
   );
-  const workGraphCardActions = import_react102.default.useCallback(
+  const workGraphCardActions = import_react103.default.useCallback(
     (cardIdentity) => {
       if (!canManageWorkGraph) return void 0;
       const { onAttentionReassign: _panelOnly, ...cardHandlers } = makeWorkGraphOperatorHandlers(cardIdentity);
@@ -94745,7 +95746,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     },
     [canManageWorkGraph, makeWorkGraphOperatorHandlers]
   );
-  const workGraphCardActionsByIdentity = import_react102.default.useMemo(
+  const workGraphCardActionsByIdentity = import_react103.default.useMemo(
     () => /* @__PURE__ */ new Map(),
     [workGraphCardActions]
   );
@@ -94823,36 +95824,36 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     window.addEventListener("pointerup", cleanup);
     window.addEventListener("pointercancel", cleanup);
   }
-  const voiceRef = import_react102.default.useRef(voice);
+  const voiceRef = import_react103.default.useRef(voice);
   voiceRef.current = voice;
-  const closeVoice = import_react102.default.useCallback(() => void voiceRef.current?.close(), []);
-  const toggleVoiceMicrophone = import_react102.default.useCallback(() => voiceRef.current?.toggleMicrophone(), []);
-  const toggleVoiceSpeaker = import_react102.default.useCallback(() => voiceRef.current?.toggleSpeaker(), []);
-  const openAgentChatRef = import_react102.default.useRef(openAgentChat);
+  const closeVoice = import_react103.default.useCallback(() => void voiceRef.current?.close(), []);
+  const toggleVoiceMicrophone = import_react103.default.useCallback(() => voiceRef.current?.toggleMicrophone(), []);
+  const toggleVoiceSpeaker = import_react103.default.useCallback(() => voiceRef.current?.toggleSpeaker(), []);
+  const openAgentChatRef = import_react103.default.useRef(openAgentChat);
   openAgentChatRef.current = openAgentChat;
-  const selectSidebarAgent = import_react102.default.useCallback(
+  const selectSidebarAgent = import_react103.default.useCallback(
     (agent) => openAgentChatRef.current(agent),
     []
   );
-  const openSidebarControl = import_react102.default.useCallback((kind) => {
+  const openSidebarControl = import_react103.default.useCallback((kind) => {
     dockRef.current.openTarget(buildControlTarget2(kind), "replace_focused");
   }, []);
   const sidebarButtons = experience?.console_config?.sidebar?.buttons;
-  const openOperatorPanel = import_react102.default.useCallback((buttonId) => {
+  const openOperatorPanel = import_react103.default.useCallback((buttonId) => {
     const button = (sidebarButtons || []).find((candidate) => candidate.id === buttonId);
     if (!button || !operatorPanelPath(button.panel)) return;
     dockRef.current.openTarget(buildOperatorPanelTarget(button), "replace_focused");
   }, [sidebarButtons]);
-  const loadMemoryRecordDetailRef = import_react102.default.useRef(loadMemoryRecordDetail);
+  const loadMemoryRecordDetailRef = import_react103.default.useRef(loadMemoryRecordDetail);
   loadMemoryRecordDetailRef.current = loadMemoryRecordDetail;
-  const selectRailFrame = import_react102.default.useCallback((frame2) => {
+  const selectRailFrame = import_react103.default.useCallback((frame2) => {
     if (!frame2.event.startsWith("memory.")) return;
     dockRef.current.openTarget(buildControlTarget2("memory"), "replace_focused");
     const pivot = memoryFramePivot(frame2);
     if (pivot) void loadMemoryRecordDetailRef.current(pivot.realm, pivot.recordId);
   }, []);
   const navigationFocus = useNavigationFocusSource();
-  const navigationHostRef = import_react102.default.useRef(null);
+  const navigationHostRef = import_react103.default.useRef(null);
   navigationHostRef.current = {
     dockState: () => dockRef.current.state,
     dispatch: (action) => dockRef.current.dispatch(action),
@@ -94880,26 +95881,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     loadMemoryRecord: (realm, id) => void loadMemoryRecordDetailRef.current(realm, id),
     focus: navigationFocus.focus
   };
-  const consoleNavigation = import_react102.default.useMemo(
+  const consoleNavigation = import_react103.default.useMemo(
     () => buildConsoleNavigation(() => navigationHostRef.current, visibleControls),
     [visibleControls]
   );
-  const watchedIdentities = import_react102.default.useMemo(
+  const watchedIdentities = import_react103.default.useMemo(
     () => new Set(
       agents.filter((agent) => agent.watched).map((agent) => agent.identity || agent.member_id).filter((value) => Boolean(value))
     ),
     [agents]
   );
-  const sidebarAgents = import_react102.default.useMemo(
+  const sidebarAgents = import_react103.default.useMemo(
     () => sidebarAgentsWithLineage(agents, topologyQueryResult),
     [agents, topologyQueryResult]
   );
-  const sidebarOpenControls = import_react102.default.useMemo(
+  const sidebarOpenControls = import_react103.default.useMemo(
     () => visiblePanelTargets.map((target) => normalizeNavKind(target.kind)).filter((kind) => kind !== null),
     [visiblePanelTargets]
   );
   const sidebarActiveControl = normalizeNavKind(dock.focusedTarget?.kind);
-  const sidebarNavAttention = import_react102.default.useMemo(() => {
+  const sidebarNavAttention = import_react103.default.useMemo(() => {
     const attention2 = {};
     if (!workGraphData.unavailable && !workGraphData.denied) {
       const blocked = workGraphData.items.filter((item) => item.status === "blocked").length;
@@ -94916,7 +95917,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return attention2;
   }, [memoryData, workGraphData]);
   const activityFeedPresets = experience?.activity_feed?.filter_presets;
-  const railFilterPresets = import_react102.default.useMemo(
+  const railFilterPresets = import_react103.default.useMemo(
     () => experience?.console_config?.rail?.filter_presets?.length ? experience.console_config.rail.filter_presets : railPresetsFromActivityFeed(activityFeedPresets),
     [experience?.console_config?.rail?.filter_presets, activityFeedPresets]
   );
@@ -95017,7 +96018,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     try {
       const storage2 = browserLocalStorage();
       const namespace = persistentSendScopeRef.current;
-      hasLegacyQueue = Boolean(storage2 && namespace && !consoleLegacyQueueImported(storage2, namespace, identity) && (Boolean(storage2.getItem("mobkit-pending-stack:".concat(identity))) || readPredecessorConsoleQueue(storage2, namespace, identity).attempts.length > 0));
+      const hostOnlyNamespace = hostOnlyQueueNamespaceRef.current;
+      hasLegacyQueue = Boolean(storage2 && namespace && !consoleLegacyQueueImported(storage2, namespace, identity) && (Boolean(storage2.getItem(legacyConsoleQueueKey(identity))) || readPredecessorConsoleQueue(storage2, namespace, identity).attempts.length > 0 || hostOnlyNamespace !== null && loadConsoleSendAttempts(storage2, hostOnlyNamespace, identity).attempts.length > 0));
     } catch {
     }
     const agentBusy = isIdentityBusy(identity);
@@ -95566,7 +96568,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             },
             onQueryRecords: queryMemoryRecords,
             onLoadEvidence: loadMemoryEvidence,
-            onDecideQuarantine: memoryData.canDecideQuarantine && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
+            onDecideQuarantine: memoryData.canDecideQuarantine && approvalsDecidable === true && !frontendReadOnly && experience?.console_policy?.read_only !== true ? decideMemoryQuarantine : void 0,
             onOpenGating: (
               // Only offered where the nav itself offers gating — on runtimes
               // without a mob control surface (or with gating hidden) the
@@ -95589,22 +96591,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             onRefresh: () => void refreshWorkGraphData(),
             onClaim: workGraphPanelHandlers.onClaim,
             onClose: workGraphPanelHandlers.onClose,
+            canRelease: (item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin }),
             onRelease: ({ itemId: itemId2, revision }) => {
-              void (async () => {
-                let expectedRevision = revision;
-                if (expectedRevision === void 0) {
-                  try {
-                    expectedRevision = await resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2);
-                  } catch (err) {
-                    setActionError(errorMessage(err));
-                    return;
-                  }
-                }
-                await runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphRelease, {
-                  id: itemId2,
-                  expected_revision: expectedRevision
-                });
-              })();
+              if (revision === void 0) {
+                void holdUnobservedWorkGraphAction({ id: itemId2 });
+                return;
+              }
+              void runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphRelease, {
+                id: itemId2,
+                expected_revision: revision
+              });
             },
             onGoalConfirm: workGraphPanelHandlers.onGoalConfirm,
             onGoalRequestClose: workGraphPanelHandlers.onGoalRequestClose,
@@ -95629,7 +96625,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
     return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(PanelShell, { children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(EmptyState, { kind: "unavailable", title: "This panel isn't available in this console" }) });
   }
-  return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(AgentDirectoryProvider, { directory: agentDirectory, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ActivityLedgerProvider, { ledger: timelineScope.ledger, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleNavigationProvider, { value: consoleNavigation, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(NavigationFocusProvider, { value: navigationFocus.value, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(PanelPreferencesProvider, { scope: sidebarPreferenceScope, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(HostDecideSourcesProvider, { value: hostAttentionSources, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleMcpAppsProvider, { value: effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsolePanelsProvider, { value: panelProvider, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(AgentDirectoryProvider, { directory: agentDirectory, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ActivityLedgerProvider, { ledger: timelineScope.ledger, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleNavigationProvider, { value: consoleNavigation, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(NavigationFocusProvider, { value: navigationFocus.value, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(PanelPreferencesProvider, { scope: sidebarPreferenceScope, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(HostDecideSourcesProvider, { value: hostAttentionSources, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ApprovalViewerProvider, { value: approvalViewer, children: /* @__PURE__ */ (0, import_jsx_runtime125.jsxs)(
     "div",
     {
       className: "cc-theme-scope meta-shell".concat(display.settings.motion === "reduced" ? " reduced-motion" : ""),
@@ -95660,6 +96656,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           Topbar,
           {
             connectionStatus: /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleTransportStatus, { state: transportState, onRetry: () => setTransportRetry((value) => value + 1) }),
+            identity: identityChip,
             mobName,
             brandLabel: brand?.label,
             brandLogoUrl: brand?.logo_url,
@@ -95699,7 +96696,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                   customPanels,
                   onOpenCustomPanel: openCustomPanel,
                   grouping: experience?.console_config?.agent_list,
-                  storageNamespace: sidebarStorageNamespace,
+                  storageNamespace: sidebarSectionNamespace,
                   preferenceScope: sidebarPreferenceScope,
                   pinnedAgentIds,
                   onSelect: selectSidebarAgent,
@@ -95782,7 +96779,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         )
       ]
     }
-  ) }) }) }) }) }) }) }) });
+  ) }) }) }) }) }) }) }) }) });
 }
 
 // src/index.tsx

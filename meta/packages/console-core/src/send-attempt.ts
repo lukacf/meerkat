@@ -34,6 +34,10 @@ export interface ConsoleSendAttempt {
  * layer failure kind), never from message text. */
 export type ConsoleSendFailureKind =
   | "unauthenticated"
+  /** The gateway serves another caller than the one the console sent for. */
+  | "caller_changed"
+  /** The console did not know the caller it acts for, so it sent nothing. */
+  | "caller_unknown"
   | "access_denied"
   | "read_only"
   | "rejected"
@@ -180,7 +184,12 @@ const PRE_INGRESS_REFUSAL_STATUSES = new Set([400, 404, 405, 413, 414, 415, 422,
  * Classify a failed send into a typed state, kind and operator message.
  *
  * Only a refusal that proves the request never reached dispatch is
- * `definitely-rejected`: a 401 or typed `unauthenticated` refusal, a 403 or
+ * `definitely-rejected`: a 401, a typed `unauthenticated` or
+ * `caller_not_current` refusal or a sign-in redirect (the request met a
+ * front's sign-in page, not the gateway), a typed `caller_changed` refusal
+ * (the gateway serves another caller than the console sent for), the
+ * console's own `caller_unknown` refusal (it did not know whom it sends for,
+ * so it sent nothing), a 403 or
  * typed `access_denied`, a typed read-only refusal, invalid params (-32602),
  * or a listed pre-ingress HTTP status. Network loss, timeouts, 5xx,
  * non-JSON answers and conflicts are `outcome-unknown`: the server may have
@@ -194,6 +203,22 @@ export function classifyConsoleSendFailure(error: unknown): ConsoleSendFailure {
   const status = typeof typed.httpStatus === "number" ? typed.httpStatus : undefined;
   const detail = error instanceof Error && error.message.trim() ? error.message.trim()
     : typeof typed.message === "string" && typed.message.trim() ? typed.message.trim() : undefined;
+  if (rpcKind === "caller_changed") {
+    return { state: "definitely-rejected", kind: "caller_changed",
+      message: "Not sent: this browser is now signed in as someone else. Nothing was sent." };
+  }
+  if (typed.transportFailure === "caller_unknown") {
+    return { state: "definitely-rejected", kind: "caller_unknown",
+      message: "Not sent: the console could not confirm whom this browser is signed in as. Nothing was sent." };
+  }
+  if (typed.transportFailure === "sign_in_redirect") {
+    return { state: "definitely-rejected", kind: "unauthenticated",
+      message: "Sign-in required: a sign-in page answered instead of the gateway. Nothing was sent. Sign in again, then review the saved message before resending." };
+  }
+  if (rpcKind === "caller_not_current") {
+    return { state: "definitely-rejected", kind: "unauthenticated",
+      message: "Sign-in required: your console login ended before this message was sent. Nothing was sent. Sign in again, then review the saved message before resending." };
+  }
   if (rpcKind === "unauthenticated" || status === 401) {
     return { state: "definitely-rejected", kind: "unauthenticated",
       message: "Sign-in required (401). Nothing was sent. Sign in again or check this connection's authentication, then review the saved message before resending." };
@@ -266,6 +291,8 @@ export function consoleSendFailureState(error: unknown): "definitely-rejected" |
 export function consoleSendFailureLabel(attempt: Pick<ConsoleSendAttempt, "state" | "failureKind">): string {
   switch (attempt.failureKind) {
     case "unauthenticated": return "Not authorized";
+    case "caller_changed": return "Signed in as someone else";
+    case "caller_unknown": return "Sign-in not confirmed";
     case "access_denied": return "Not allowed";
     case "read_only": return "Console read-only";
     case "capability_unavailable": return "Send unavailable";
@@ -386,6 +413,8 @@ export function describeConsolePendingRow(
     const detail = (() => {
       switch (attempt.failureKind) {
         case "unauthenticated": return "Sign in again or check this connection's authentication. Then review your saved message before choosing Send again.";
+        case "caller_changed": return "This browser is now signed in as someone else, so the console did not send it.";
+        case "caller_unknown": return "The console couldn't confirm whom you're signed in as, so it didn't send it. Try again in a moment.";
         case "access_denied": return `You don't have permission to message ${names.agent}.`;
         case "read_only": return "This console is read-only.";
         case "capability_unavailable": return "Sending isn't available here.";

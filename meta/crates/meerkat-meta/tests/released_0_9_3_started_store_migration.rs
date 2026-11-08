@@ -696,11 +696,12 @@ fn released_0_9_3_started_store_migrates_and_boots_its_mobkit_manifest_authorita
 /// Launch parity: a candidate launch and then an authoritative launch over
 /// the same migrated store report the same identity facts, and both read the
 /// capture back. The member Meta 0.9.3 spawned lacks the durable-identity
-/// marker: the candidate does not respawn it and reports its identity
-/// deferred as `resume_member`, with a complete bootstrap and no broken
-/// identity, while its member detail lists it as Core holds it, seated and
-/// not materialized: active, under the endpoint key the capture records. The
-/// authoritative launch respawns it.
+/// marker, and Core's legacy adoption takes it as it is (its identity label
+/// is one legacy mark): the candidate defers nothing, since the
+/// authoritative verdict keeps the member, with a complete bootstrap and no
+/// broken identity, while its member detail lists it as Core holds it,
+/// seated and not materialized: active, under the endpoint key the capture
+/// records. The authoritative launch adopts it as it is, with no respawn.
 #[test]
 fn released_0_9_3_started_store_reports_one_identity_to_candidate_and_authoritative_launches() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -725,14 +726,10 @@ fn released_0_9_3_started_store_reports_one_identity_to_candidate_and_authoritat
         (
             bootstrap["complete"].clone(),
             bootstrap["counts"]["broken"].clone(),
-            bootstrap["deferred"].clone(),
+            bootstrap.get("deferred").cloned(),
         ),
-        (
-            json!(true),
-            json!(0),
-            json!([{ "identity": IDENTITY, "reason": "resume_member" }]),
-        ),
-        "the candidate defers the unmarked member's respawn: {bootstrap}"
+        (json!(true), json!(0), None),
+        "the candidate defers nothing: the authoritative verdict keeps the member: {bootstrap}"
     );
     assert_migrated_identity_reads_back(&mut gateway, Launch::Candidate);
     let candidate = identity_facts(&mut gateway);
@@ -757,7 +754,7 @@ fn released_0_9_3_started_store_reports_one_identity_to_candidate_and_authoritat
             bootstrap["identities"][IDENTITY]["state"].clone(),
         ),
         (json!(true), json!(0), None, json!("active")),
-        "the authoritative launch respawns the member: {bootstrap}"
+        "the authoritative launch adopts the member as it is: {bootstrap}"
     );
     assert_migrated_identity_reads_back(&mut gateway, Launch::Authoritative);
     let authoritative = identity_facts(&mut gateway);

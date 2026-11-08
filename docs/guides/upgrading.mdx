@@ -117,6 +117,102 @@ While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
 - Upgrade every process that executes decisions on one store together.
 - A host that took a second loop's start refusal as the sign of another
   executor reads `DecisionExecutorPass::unclaimed` instead.
+- Before a rollback to 0.9.10 or 0.9.9, read the CHANGELOG's upgrade note on
+  durable decisions and a rollback: those releases read a decision decided in
+  a login on 0.9.11 as torn and do not execute it.
+
+### A kept input's max age counts from the stop
+
+The max age of a graceful stop that keeps queued work
+(`UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown's
+`RequeueMaxAge`; every default graceful shutdown uses 15 minutes) now counts
+from the stop that kept an input, not from the input's admission. The next
+start runs a kept input, or resumes a run the stop suspended, unless more
+than `max_age` has passed since that stop; a later graceful stop that keeps
+the input again counts from its own time. 0.9.10 counted from the admission,
+so every run admitted more than 15 minutes before a graceful restart ended
+`requeue_expired`, however short the restart.
+
+**Do:** nothing, unless you relied on `max_age` to limit how old an input may
+be when it runs: a kept input now runs after a restart shorter than
+`max_age`, whenever it was admitted.
+
+### Meta's roster pass declares through Core
+
+Meerkat Meta's roster pass (the bootstrap, each refresh and the held pass)
+declares the host's roster in Core's mob through Core's declared apply, and
+no longer seats, respawns, releases or retires members itself. A send, a
+dispatch or a materialization of an identity Core holds no member for
+declares that identity alone first. What changes for a host:
+
+- A member Meta 0.9.3 spawned carries the identity's `agent_identity` label
+  but not the durable-identity marker. When the roster lists its identity,
+  Core adopts the member as the identity's entry and keeps it as it is: Meta
+  no longer respawns it onto its session to give it the marker, so its
+  session resolves no principal for extension documents until the identity's
+  next fresh life. The roster pass no longer retires such a member when the
+  roster stops listing it either. Every Meta from 0.9.4 to 0.9.10 respawned
+  these members at its first roster pass, so a state directory Meta 0.9.10
+  last ran holds none.
+- A rotation (`reset`, `delete_identity`) a crash interrupted is finished by
+  Core, from its own record, when the mob next starts; Meta's roster pass no
+  longer drives it. Meta still writes its record of the rotation, which a
+  rollback's roster pass reads.
+- An identity a complete roster no longer lists is unlisted by Core's seal,
+  which retires its member; the pass answers each such identity in
+  `RestoreFlowResult::unlisted` (Rust).
+
+**Do:** coming from Meta 0.9.3 or earlier, run Meta 0.9.10 over the state
+directory once before 0.9.11.
+
+### A host's adoption of a declared identity
+
+A host's adoption of an identity a declared roster lists
+(`MobHandle::adopt_member_identity_declaration` over a declared identity
+entry, Rust only) takes the entry over: Core retires the member with the
+cause `MemberRetirementCause::HostAdopted` and materializes it again under
+the host's intent, on its own session, as no entry, and the end of that
+retirement ends the entry. The adoption ends the identity's entry, not the
+identity: the identity continues under the host's intent and keeps its
+scoped tool grants. In 0.9.10 the entry outlived the retirement,
+unseated and owed its seat, and Core refused the host's spawn of the
+identity (`IdentityMember`), so the identity was not served again. From the
+host's intent row on, a declared apply answers the identity host-adopted
+(`DeclaredEntryRefusal::HostAdopted`), and a complete roster's seal leaves
+its entry as it is, whether the roster lists the identity or not.
+
+**Do:** nothing on the upgrade; see the rollback below.
+
+### Rolling back Core to 0.9.10
+
+0.9.10 does not know the cause `HostAdopted`: it replays that retirement as
+one the seal did not start, so it reads the identity a host took over as
+the declared entry again, seated by the member the host's intent
+materialized. The member keeps serving, and a declaration naming the
+identity is refused `HostAdopted`. But a complete roster that does not list
+the identity unlists the entry and retires the member once, and once the
+member retires for any other reason, Core refuses the host's spawn of the
+identity (`IdentityMember`) while the entry stands.
+
+**Do:** after rolling Core back to 0.9.10, unlist each identity that 0.9.10
+reads as a declared entry while a host's identity intent row names it
+(`MemberBindingHistory::identity_management` answers `IntentManaged`), with
+`MobHandle::unlist_declared_identity`: its member retires once (cause
+`Unlisted`), the entry ends, and the host's intent materializes the member
+again, as no entry.
+
+### Rolling back Meta to 0.9.10
+
+Meta 0.9.10 reads what Meta 0.9.11 writes, with one boundary: an identity
+Core holds declared but unseated (its member retired by a seal or by a host,
+its session archived) stays unseated under 0.9.10, whose seat step is
+refused for it typed (`IdentityMember`) and writes nothing, so the identity
+is not served until it is seated again.
+
+**Do:** before rolling back, deliver to or warm (`meta/identity/warm`) each
+identity the roster lists that Core holds unseated, so that Core seats it;
+an identity left unseated is seated again by the first roster pass after the
+next upgrade.
 
 ### Tool grant run scopes and grant requests
 

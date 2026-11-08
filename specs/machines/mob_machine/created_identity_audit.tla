@@ -434,15 +434,15 @@ NamesShape == <<AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, Non
 \* unreadable name.
 DeclareArmAll(id, s) ==
     \/ DeclareArm(id, s)
-    \/ DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
+    \/ DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
 DeclareOneArmAll(id, s) ==
     Cardinality({i \in 1..18 :
         (DeclareEnabled(id, s) \o
-         << ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-            ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-            ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE) >>)[i]}) = 1
+         << ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+            ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+            ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0) >>)[i]}) = 1
 
 \* Every arm of the legacy adoption, every phase of the run, for each of the
 \* sixteen combinations of the shell's raw observations (AdoptArm).
@@ -508,7 +508,7 @@ AuditNamesProbeExactlyOne == ProbeExactlyOne
 \* unreadable name's entry.
 AuditSealNeverTouchesCreated ==
     [][\A d \in SUBSET CreatedIds :
-         SealDeclaredRosterSealed(d)
+         SealDeclaredRosterSealed(d, {})
            => \A id \in CreatedIds :
                 (Created(id) \/ id \in identity_entry_unreadable)
                   => /\ OriginNext(id) = Origin(id)
@@ -524,7 +524,7 @@ AuditSealNeverTouchesCreated ==
 \* A complete seal that does not list a Created entry keeps it.
 AuditWitnessSealKeepsCreated ==
     /\ Created(Id2)
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterSealed({}, {})
     /\ OriginNext(Id2) = Some("Created")
 \* A complete seal that does not list an unreadable name's Declared entry
 \* keeps it unmarked.
@@ -532,7 +532,7 @@ AuditWitnessSealSkipsUnreadable ==
     /\ Origin(Id1) = Some("Declared")
     /\ Id1 \in identity_entry_unreadable
     /\ Id1 \in DOMAIN identity_to_runtime
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterSealed({}, {})
     /\ Id1 \notin identity_entry_retiring'
 \* The probe refuses entry custody over a Created entry's name.
 AuditWitnessProbeOtherOrigin ==
@@ -744,43 +744,43 @@ UnlistVerdicts(id) ==
 \* custody `cc` (TRUE: a store-owned identity's update) with the host's rule
 \* requiring a preparation or not (`pr`), in a running and a stopped mob.
 DeclareCustodyArm(id, s, cc, pr) ==
-    \/ DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryPreparationPending(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
-    \/ DeclareIdentityEntryRecordOnly(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
+    \/ DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryPreparationPending(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRecordOnly(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0)
 DeclareCustodyVerdicts(id, s, cc, pr) ==
-    << ENABLED DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryPreparationPending(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryRecordOnly(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr) >>
+    << ENABLED DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryPreparationPending(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRecordOnly(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr, FALSE, FALSE, 0) >>
 \* The arms a declaration answers, by their index in the tuple above.
 DeclareAnswers(id, s, cc, pr) == {i \in 1..18 : DeclareCustodyVerdicts(id, s, cc, pr)[i]}
 
@@ -987,12 +987,12 @@ AuditUpdateParity ==
 \* Witnesses of the update run: the store-owned update's migration and
 \* restamp verdicts, and its verdict for an identity owed its seat.
 AuditWitnessUpdateMigrates ==
-    DeclareIdentityEntryRoleMigrate(Id2, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", TRUE, FALSE)
+    DeclareIdentityEntryRoleMigrate(Id2, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", TRUE, FALSE, FALSE, FALSE, 0)
 AuditWitnessUpdateRestamps ==
-    DeclareIdentityEntryRuntimeModeRestamp(Id2, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
+    DeclareIdentityEntryRuntimeModeRestamp(Id2, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE, FALSE, FALSE, 0)
 AuditWitnessUpdateOfUnseated ==
     /\ ~Seated(Id2)
-    /\ DeclareIdentityEntrySeatOwed(Id2, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id2, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE, FALSE, FALSE, 0)
 
 NotAuditWitnessUpdateMigrates == [][~AuditWitnessUpdateMigrates]_vars
 NotAuditWitnessUpdateRestamps == [][~AuditWitnessUpdateRestamps]_vars
@@ -1097,7 +1097,7 @@ AuditWitnessRemovalAlreadyRemoved ==
     /\ RemoveIdentityEntryAlreadyRemoved(Id2)
 AuditWitnessRemovalRefusesDeclaration ==
     /\ Id1 \in identity_entry_tombstones
-    /\ DeclareIdentityEntryRefusedNameTombstoned(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntryRefusedNameTombstoned(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 
 NotAuditWitnessRemovalRetiring == [][~AuditWitnessRemovalRetiring]_vars
 NotAuditWitnessRemovalEndsAtTerminal == [][~AuditWitnessRemovalEndsAtTerminal]_vars
@@ -1213,7 +1213,7 @@ AuditWitnessArchivePendingRefused ==
     /\ UnseatedNext(Id2) = Some("PreparationPending")
 AuditWitnessArchiveUpdateRecordOnly ==
     /\ Unseated(Id2) = Some("Archived")
-    /\ DeclareIdentityEntryRecordOnly(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
+    /\ DeclareIdentityEntryRecordOnly(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE, FALSE, FALSE, 0)
 AuditWitnessArchiveRemovalWaits ==
     /\ Id2 \in identity_entry_archiving
     /\ RemoveIdentityEntryInFlight(Id2)
@@ -1392,10 +1392,10 @@ AuditConstructedNeverSettledWithoutAttempt ==
 
 \* Witnesses of the preparation run.
 AuditWitnessPrepRosterPending ==
-    DeclareIdentityEntryPreparationPending(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, TRUE)
+    DeclareIdentityEntryPreparationPending(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, TRUE, FALSE, FALSE, 0)
 AuditWitnessPrepRosterSettledByDeclaration ==
     /\ Unseated(Id1) = Some("PreparationPending")
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
     /\ UnseatedNext(Id1) = Some("SeatOwed")
 AuditWitnessPrepStoreSettleSeats ==
     /\ SettleHostPreparationSeat(Id2, None, FALSE, FALSE, FALSE)
@@ -1451,7 +1451,7 @@ AuditWitnessPrepUpdateRecordOnly ==
     /\ Unseated(Id2) = Some("PreparationPending")
     /\ Held(Id2) = None
     /\ Activating(Id2) = None
-    /\ DeclareIdentityEntryRecordOnly(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
+    /\ DeclareIdentityEntryRecordOnly(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE, FALSE, FALSE, 0)
 
 NotAuditWitnessPrepRosterPending == [][~AuditWitnessPrepRosterPending]_vars
 NotAuditWitnessPrepRosterSettledByDeclaration == [][~AuditWitnessPrepRosterSettledByDeclaration]_vars

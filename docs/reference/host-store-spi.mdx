@@ -155,6 +155,26 @@ once, a batch makes at most 14 within the default budget, and about 1.6% of
 batches make 13. Any other error ends the commit at once. The chunk batches
 of a large value are settled the same way.
 
+Core sends a batch, the first time or again, only while the realm holds its
+fence and before the self-fence deadline of the fence token the batch
+carries: the start of the writer's last successful acquire or renew plus the
+self-fence window (see [Fence Leases](#fence-leases)). A renew of that token
+moves the deadline later; a failed renew does not move it. The store's lease
+for the token can end soon after that deadline, and another writer may then
+acquire. A commit still unsettled at the deadline stops there: its outcome
+is unknown, and it is never taken as landed (a head that shows its commit id
+still settles it). It fails with the typed
+`RuntimeStoreError::UnsettledAtFenceWindow` (`SpiError::UnsettledAtFenceWindow`
+for a layer that commits through the realm directly), its scopes are
+poisoned like those of any batch whose outcome stays unknown, and the realm
+keeps its fence. While renews fail, the retry budget is therefore cut at the
+self-fence window (20 s at the default timing). A batch sent before the
+deadline can still reach your store's commit point after the lease ended,
+since Core sets no deadline on a commit: refusing it there with `FencedOut`
+(obligation 5) is what keeps it out of the realm. No bound on the writer's
+side closes that case, a stricter one included (stopping at the first failed
+renew): obligation 5 at commit does.
+
 A commit that does not settle within its budget, or ends in another error,
 fails the call that made it with a write error, and every scope the batch
 would have changed is poisoned; `FencedOut` poisons the whole realm. A
@@ -319,6 +339,60 @@ holding back the other sessions' calls: it takes the store at a moment when
 no call holds it. Under a sustained partial outage, with slow commits
 overlapping, that wait can last several retry budgets.
 
+### Core's Timeouts And The Safety Condition
+
+The host also passes `SpiRealmConfig` when it opens the realm (for a Meta
+gateway, `HostStoreMetaStorageProvider::open`):
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `acquire` | `AcquireMode::Exclusive` | How the open acquires the fence |
+| `renew_timeout` | 5 s | How long a renew may take before it counts as failed, held to at most the renew interval; the two acquires of a re-acquire use it as configured |
+| `commit_retry_budget` | 30 s | How long an unknown or unavailable commit is retried, never past its token's self-fence deadline ([How Core Settles A Commit](#how-core-settles-a-commit)) |
+
+A renew that does not answer within the shorter of `renew_timeout` and the
+renew interval stops the writer: it acquires again by itself at the next
+renew interval, proves with a fresh listing that nobody else wrote, renews
+once and resumes. So the tolerance of a slow renew is that shorter time,
+5 s at the defaults.
+
+The safety condition is the timing bounds Core enforces when the timing is
+built, plus one obligation of yours:
+
+- Core enforces: the renew interval `I` is at least 1 s; the lease `L` is
+  at least `3 x I` and at most 1 hour; the self-fence margin `M` is at
+  least `I` and at most `L - 2 x I`; the longest commit is above zero and at
+  most `L`.
+- Your obligation: `M >= I + 2 x V`, where `V` is your store's visibility
+  lag (the time from the start of a write until every acquire and renew
+  sees it). Size `V` for your store under load.
+
+Neither `renew_timeout` nor commit latency is a safety term. The window
+counts from the start of each acquire or renew, which your store records
+no earlier, so a slow answer only makes the writer stop earlier, and renews
+are held to the renew interval anyway: any `renew_timeout` up to the renew
+interval is safe. Commits are fenced by token at your store's commit point
+(obligation 5), and Core sends no commit attempt past its token's
+self-fence deadline.
+
+To tolerate a slower store:
+
+- set `renew_timeout` to the renew interval (10 s at the default timing):
+  this doubles the tolerance of a slow renew with no other change, and
+  gives the acquires of a re-acquire 10 s too;
+- beyond that, lengthen the timing consistently: a renew interval above
+  the slowest renew you want to tolerate, `renew_timeout` equal to it,
+  `M >= I + 2 x V` and `L >= M + 2 x I`. For example, with `V = 5 s`:
+  `I = 20 s`, `M = 30 s`, `L = 70 s`, a 40 s window. The cost is the wait
+  after a crash or a kill: the next process waits up to `L` for the old
+  lease.
+
+An acquire Core gave up on at its timeout should not take effect later:
+where your store can, give it a server-side deadline below Core's
+timeout. Core copes with one that does (see
+[Core's Writer Rules](#cores-writer-rules)), but only by waiting out its
+lease, and a late takeover stops the realm.
+
 ### Core's Writer Rules
 
 The store relies on Core keeping these rules:
@@ -329,6 +403,21 @@ The store relies on Core keeping these rules:
   `AcquireMode::Takeover`. Core takes over its own recorded lease
   when a stopped holder re-acquires and an exclusive acquire answers `Held`
   with its own token.
+- **Acquires Core gave up on.** Each acquire of a re-acquire runs under
+  `SpiRealmConfig::renew_timeout`, and Core records no token for one that
+  times out. If your store grants it anyway, its token holds the fence, and
+  Core meets it as the holder at its next re-acquire. While an acquire of
+  its own timed out since its last grant, Core cannot tell that token from
+  another writer's: it waits out the holder's recorded lease (the
+  `remaining` of `Held`), makes no acquire before it ends, and then acquires
+  exclusively again and checks the listing as at any re-acquire. The realm
+  stops until it is opened again only when the same holder still holds the
+  fence after that lease ended (only a live writer renews it), or when the
+  listing shows a batch this writer did not write. With no acquire of its
+  own timed out, a holder Core does not know stops the realm at once. A
+  takeover your store grants after Core's next successful acquire
+  supersedes Core's live token; Core then meets `FencedOut` and the realm
+  stops until it is opened again.
 - **Renewing.** The holder renews once per renew interval. After a failed
   renew, or once its self-fence window has closed, it stops every write and
   dispatch, and goes on only through a fresh acquire, with a new token,
@@ -343,7 +432,11 @@ The store relies on Core keeping these rules:
   acquires and its renew, 35 s at the default timing), trying again once
   per renew interval while it fails, and goes on once it resumed the
   holder. A round commit refused while the holder is stopped waits the same
-  way and is written again, once, when the acquire succeeds. When no
+  way and is written again, once, when the acquire succeeds. A commit whose
+  batch was already sent and is still unsettled at its token's self-fence
+  deadline is not refused but stopped: its scopes are poisoned (see
+  [How Core Settles A Commit](#how-core-settles-a-commit)), so writing them
+  again is refused until the realm is opened again. When no
   acquire succeeds in that time and no other process shows up (a fence
   gap), the runtime suspends the run with its inputs bound to it and
   resumes it once the fence is back; the gap may last as long as the store

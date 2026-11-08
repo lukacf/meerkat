@@ -556,6 +556,30 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     // or a stop (0.9.10).
     "CompleteUntilChangedSwitchTurnReconfigureRetired",
     "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    // A host's settle of the run its session retained (0.9.11).
+    "SettleRetainedRunAcceptedIdle",
+    "SettleRetainedRunAcceptedAttached",
+    "SettleRetainedRunBusyRunCurrentInitializing",
+    "SettleRetainedRunBusyRunCurrentIdle",
+    "SettleRetainedRunBusyRunCurrentAttached",
+    "SettleRetainedRunBusyRunCurrentRunning",
+    "SettleRetainedRunBusyRunCurrentRetired",
+    "SettleRetainedRunBusyRunCurrentStopped",
+    "SettleRetainedRunBusyDrainingIdle",
+    "SettleRetainedRunBusyDrainingAttached",
+    "SettleRetainedRunBusyStaleRunIdle",
+    "SettleRetainedRunBusyStaleRunAttached",
+    "SettleRetainedRunBusyNotServingInitializing",
+    "SettleRetainedRunBusyNotServingRunning",
+    "SettleRetainedRunBusyNotServingRetired",
+    "SettleRetainedRunBusyNotServingStopped",
+    "SettleRetainedRunNotRetainedInitializing",
+    "SettleRetainedRunNotRetainedIdle",
+    "SettleRetainedRunNotRetainedAttached",
+    "SettleRetainedRunNotRetainedRunning",
+    "SettleRetainedRunNotRetainedRetired",
+    "SettleRetainedRunNotRetainedStopped",
+    "SettleRetainedRunInertDestroyed",
     // The scoped tool grant gate's server gate (0.9.11): a model-request
     // boundary's extension of the gate by a gated server's names, and the
     // grant path's stage of a gated server. Both inputs are declared after
@@ -1036,6 +1060,27 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // (0.9.11).
             "AdoptLegacyIdentityEntryAdoptedUnlisted",
             "AdoptLegacyIdentityEntryRetireUnadopted",
+            // A host's adoption over a declared identity entry (0.9.11): its
+            // archive terminals, the takeover's verdicts and the replay of
+            // its mark.
+            "ObserveMemberRetirementArchivedLiveHostAdopted",
+            "ObserveMemberRetirementArchivedRetiredHostAdopted",
+            "TakeOverIdentityEntryAdopting",
+            "TakeOverIdentityEntryEnded",
+            "TakeOverIdentityEntryDeferred",
+            "TakeOverIdentityEntryNotADeclaredEntry",
+            "TakeOverIdentityEntryNonAuthoritative",
+            "TakeOverIdentityEntryMobNotRunningStopped",
+            "TakeOverIdentityEntryMobNotRunningCompleted",
+            "TakeOverIdentityEntryMobNotRunningDestroyed",
+            "RecoverIdentityEntryAdoptingMarkedRunning",
+            "RecoverIdentityEntryAdoptingStaleRunning",
+            // A build preparation the host asked to retry (0.9.11): the wake
+            // feedback arm that records it, and its resolution.
+            "ResolveMemberRevivalRetryableBuildPreparationRunning",
+            "ResolveMemberBuildPreparationRunning",
+            "ResolveMemberBuildPreparationStopped",
+            "ResolveMemberBuildPreparationCompleted",
             // The seal refused while an unseated entry it does not list
             // remains, which the one-entry unlist ends first (0.9.11).
             "SealDeclaredRosterRefused",

@@ -29,11 +29,13 @@ pub(crate) mod memory_methods;
 pub(crate) mod mob_methods;
 pub(crate) mod operator_methods;
 pub(crate) mod params;
+pub(crate) mod realm_mcp_methods;
 mod routing_delivery_methods;
 pub(crate) mod schedule_methods;
 mod session_store_methods;
 pub(crate) mod storage_methods;
 mod subscribe_methods;
+pub(crate) mod tool_grant_methods;
 pub(crate) mod topology_methods;
 pub(crate) mod workgraph_methods;
 
@@ -75,6 +77,13 @@ pub const CONSOLE_REVOKE_SESSIONS_METHOD: &str = "meta/console/revoke_sessions";
 /// accepted, and the caller scope a client sends back with a change. Served
 /// on the Console route only; the stdin host is not a Console caller.
 pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
+/// Sign the calling request's caller out of one Console login: the login its
+/// token belongs to (the issuer's `sid`, or the token alone without one).
+/// The Console refuses every token of that login issued before the
+/// sign-out, on every route, and ends the streams and voice sessions such
+/// tokens opened; the caller's other logins and its schedules are untouched.
+/// Served on the Console route only.
+pub const CONSOLE_SIGN_OUT_METHOD: &str = "meta/console/sign_out";
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";
@@ -534,6 +543,27 @@ pub(crate) fn console_session_fence_json(
         "accepts_tokens_issued_from": crate::runtime::session_fence_first_accepted_iat(
             fence.not_before_epoch_seconds,
         ),
+    })
+}
+
+/// The answer to [`CONSOLE_SIGN_OUT_METHOD`]: what the login was
+/// (`session`, the issuer's `sid`; `token`, a token without one) and, for a
+/// `session` login, the earliest `iat` a token of it is accepted with from
+/// now on (a sign-in again). A `token` login is no other token, so it has
+/// none.
+pub(crate) fn console_sign_out_json(signed_out: &crate::runtime::ConsoleSignedOut) -> Value {
+    let (login, accepts_tokens_issued_from) = match signed_out.login {
+        crate::runtime::ConsoleLoginKind::Session => (
+            "session",
+            Some(crate::runtime::session_fence_first_accepted_iat(
+                signed_out.not_before_epoch_seconds,
+            )),
+        ),
+        crate::runtime::ConsoleLoginKind::Token => ("token", None),
+    };
+    serde_json::json!({
+        "login": login,
+        "accepts_tokens_issued_from": accepts_tokens_issued_from,
     })
 }
 
@@ -2059,6 +2089,7 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/access/groups/set",
     "meta/access/groups/delete",
     CONSOLE_REVOKE_SESSIONS_METHOD,
+    CONSOLE_SIGN_OUT_METHOD,
     "meta/blob/upload",
     "meta/cancel_flow",
     "jobs/cancel",
@@ -2085,14 +2116,18 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// member declaration mutation (an identity adoption or a tool declaration
 /// apply, [`mob_methods::is_member_declaration_mutating_method`]), which
 /// writes durable member intent and schedules the identity convergence that
-/// can replace a stored member; a WorkGraph write
+/// can replace a stored member; a scoped tool grant write
+/// ([`tool_grant_methods::is_tool_grant_mutating_method`]), which writes the
+/// runtime's grant rows and can seat a member; a realm MCP write
+/// ([`realm_mcp_methods::is_realm_mcp_mutating_method`]), which writes the
+/// realm's own config document or its credential store; a WorkGraph write
 /// ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
-/// Flow Editor draft store write the authoritative launch reads
-/// ([`candidate_launch_refuses_draft_store_write`]). Reads still answer:
-/// the declaration read, the WorkGraph reads, the draft reads, a deploy
-/// plan, a structural validation and a BigQuery read among them.
+/// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
+/// still answer: the declaration read, the grant reads, the WorkGraph reads,
+/// the draft reads, a deploy plan, a structural validation and a BigQuery
+/// read among them.
 pub(crate) fn candidate_launch_refuses(
     method: &str,
     params: &Value,
@@ -2100,36 +2135,77 @@ pub(crate) fn candidate_launch_refuses(
 ) -> bool {
     CANDIDATE_LAUNCH_REFUSED_METHODS.contains(&method)
         || mob_methods::is_member_declaration_mutating_method(method)
+        || tool_grant_methods::is_tool_grant_mutating_method(method)
+        || realm_mcp_methods::is_realm_mcp_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
-        || candidate_launch_refuses_draft_store_write(method, params, state_dir)
+        || candidate_launch_refuses_mobpack_change(method, params, state_dir)
 }
 
-/// The Flow Editor draft store methods that write the store.
-const MOBPACK_DRAFT_STORE_WRITE_METHODS: &[&str] = &[
-    "meta/mobpacks/create",
-    "meta/mobpacks/save",
-    "meta/mobpacks/delete",
-    "meta/mobpacks/undo",
-    "meta/mobpacks/redo",
-];
+/// What a Flow Editor change does on the host ([`mobpack_authoring_change`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobpackAuthoringChange {
+    /// Writes the Flow Editor's draft store.
+    DraftStoreWrite,
+    /// Writes a mobpack archive and runs `rkat` on the host.
+    HostRun,
+}
 
-/// Whether a candidate launch refuses a Flow Editor draft store write: every
-/// one but a write to a store file the caller names (`store_path`) outside
-/// the launch's `state_dir` and the gateway home that is not the store
-/// `META_FLOW_EDITOR_DRAFT_STORE` names
+/// The change a mobpack authoring request makes, `None` for one that only
+/// reads and renders. This is the one list of the Flow Editor's changes:
+/// the draft store writes (`meta/mobpacks/create`, `save`, `delete`, `undo`
+/// and `redo`), a deploy with `execute` and a validation with
+/// `rkat_validate`, each arm decided on the request as its handler parses
+/// it. The Console's caller check of the Flow Editor
+/// ([`is_mobpack_authoring_change`]) and a candidate launch's refusal
+/// ([`candidate_launch_refuses_mobpack_change`]) both read it, so the two
+/// cannot drift.
+pub(crate) fn mobpack_authoring_change(
+    method: &str,
+    params: &Value,
+) -> Option<MobpackAuthoringChange> {
+    match method {
+        "meta/mobpacks/create"
+        | "meta/mobpacks/save"
+        | "meta/mobpacks/delete"
+        | "meta/mobpacks/undo"
+        | "meta/mobpacks/redo" => Some(MobpackAuthoringChange::DraftStoreWrite),
+        "meta/mobpacks/deploy" if crate::mobpack::deploy_execute_requested(params) => {
+            Some(MobpackAuthoringChange::HostRun)
+        }
+        "meta/mobpacks/validate" if crate::mobpack::validate_with_rkat_requested(params) => {
+            Some(MobpackAuthoringChange::HostRun)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a mobpack authoring request changes anything
+/// ([`mobpack_authoring_change`]).
+pub(crate) fn is_mobpack_authoring_change(method: &str, params: &Value) -> bool {
+    mobpack_authoring_change(method, params).is_some()
+}
+
+/// Whether a candidate launch refuses a Flow Editor change
+/// ([`mobpack_authoring_change`]): each one that runs `rkat` on the host,
+/// and each draft store write but one to a store file the caller names
+/// (`store_path`) outside the launch's `state_dir` and the gateway home
+/// that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names
 /// ([`draft_store_write_reaches_a_read_store`]).
-fn candidate_launch_refuses_draft_store_write(
+fn candidate_launch_refuses_mobpack_change(
     method: &str,
     params: &Value,
     state_dir: Option<&std::path::Path>,
 ) -> bool {
-    MOBPACK_DRAFT_STORE_WRITE_METHODS.contains(&method)
-        && draft_store_write_reaches_a_read_store(
+    match mobpack_authoring_change(method, params) {
+        Some(MobpackAuthoringChange::HostRun) => true,
+        Some(MobpackAuthoringChange::DraftStoreWrite) => draft_store_write_reaches_a_read_store(
             params,
             state_dir,
             crate::mobpack::env_draft_store_path().as_deref(),
-        )
+        ),
+        None => false,
+    }
 }
 
 /// Whether a draft write with `params` reaches a store the authoritative
@@ -2197,19 +2273,15 @@ fn resolved_host_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The arms of methods a candidate otherwise serves that run something on
-/// the host or write outside it: `meta/mobpacks/deploy` with `execute`
-/// (writes a mobpack archive and runs `rkat mob run`),
-/// `meta/mobpacks/validate` with `rkat_validate` (writes an archive and runs
-/// `rkat mob validate`), `meta/session_store/bigquery`'s row insert, and a
-/// `meta/gating/evaluate` of an R3 action that names an approval route
-/// (`approval_recipient` and `approval_channel`), which sends the approval
-/// request through the delivery module. Each is decided on the request as
-/// its handler parses it.
+/// the host or write outside it, other than the Flow Editor's changes
+/// ([`candidate_launch_refuses_mobpack_change`]):
+/// `meta/session_store/bigquery`'s row insert, and a `meta/gating/evaluate`
+/// of an R3 action that names an approval route (`approval_recipient` and
+/// `approval_channel`), which sends the approval request through the
+/// delivery module. Each is decided on the request as its handler parses
+/// it.
 fn candidate_launch_refuses_host_execution(method: &str, params: &Value) -> bool {
-    let flag = |name: &str| params.get(name).and_then(Value::as_bool).unwrap_or(false);
     match method {
-        "meta/mobpacks/deploy" => flag("execute"),
-        "meta/mobpacks/validate" => flag("rkat_validate") || flag("rkatValidate"),
         "meta/gating/evaluate" => parse_gating_evaluate_params(params).is_ok_and(|request| {
             let named = |field: Option<&str>| field.is_some_and(|value| !value.trim().is_empty());
             request.risk_tier == GatingRiskTier::R3
@@ -2239,11 +2311,8 @@ pub(crate) fn explicit_provider_credentials_refusal(
     params: &Value,
     response_id: Value,
 ) -> Option<JsonRpcResponse> {
-    let executes = method == "meta/mobpacks/deploy"
-        && params
-            .get("execute")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let executes =
+        method == "meta/mobpacks/deploy" && crate::mobpack::deploy_execute_requested(params);
     if !(explicit_provider_credentials && executes) {
         return None;
     }
@@ -2292,6 +2361,12 @@ fn candidate_launch_refused(method: &str, response_id: Value) -> JsonRpcResponse
             "{method} is refused: this gateway is a candidate launch, which writes no session \
              fence; revoke the sessions on the authoritative launch, whose fence record this \
              launch's Console reads"
+        )
+    } else if method == CONSOLE_SIGN_OUT_METHOD {
+        format!(
+            "{method} is refused: this gateway is a candidate launch, which writes no session \
+             fence; sign out on the authoritative launch, whose fence record this launch's \
+             Console reads"
         )
     } else {
         format!(
@@ -2659,6 +2734,18 @@ async fn handle_unified_rpc_json_inner(
             // it cannot SERVE these. Advertising what a surface cannot serve is the
             // same defect as serving what it does not advertise.
             methods.extend_from_slice(mob_methods::MEMBER_DECLARATION_METHODS);
+            // The scoped tool grant family, derived from its registry: a grant
+            // names an identity the identity runtime serves, so the family is
+            // served and advertised with it.
+            if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
+                methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
+            }
+            // The stdio gateway's realm MCP administration, derived from its
+            // registry: advertised by the runtime the stdio gateway composed
+            // it on, and by no other.
+            if runtime.realm_mcp_administration().is_some() {
+                methods.extend_from_slice(realm_mcp_methods::REALM_MCP_METHODS);
+            }
             // Workgraph methods are advertised only when the service is
             // configured (`runtime_options.workgraph = false` or a failed
             // store open leave them off).
@@ -3976,6 +4063,77 @@ async fn handle_unified_rpc_json_inner(
                     }),
                 },
             }
+        }
+        // ONE arm for the scoped tool grant family, from its registry, served
+        // with the identity runtime as the capabilities advertise it. The
+        // stdio host is the operator: no caller and no access view.
+        method
+            if tool_grant_methods::is_tool_grant_method(method)
+                && (identity_ctx.is_some() || runtime.identity_runtime_ref().is_some()) =>
+        {
+            let surface = tool_grant_methods::ToolGrantSurface {
+                mob: runtime.mob_runtime(),
+                identity_runtime: identity_ctx
+                    .map(|ctx| ctx.runtime.runtime())
+                    .or_else(|| runtime.identity_runtime_ref()),
+                caller: None,
+                access: None,
+            };
+            match tool_grant_methods::handle_tool_grant_rpc(
+                &surface,
+                method,
+                response_id.clone(),
+                &request.params,
+            )
+            .await
+            {
+                Some(response) => response,
+                None => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: format!(
+                            "{method} is registered in the tool grant family but has no dispatcher arm"
+                        ),
+                        data: None,
+                    }),
+                },
+            }
+        }
+        // ONE arm for the realm MCP administration family, from its registry,
+        // served by the runtime the stdio gateway composed it on (its SDK host
+        // administers the installation realm), as the capabilities advertise
+        // it; every other runtime answers method not found.
+        method
+            if realm_mcp_methods::is_realm_mcp_method(method)
+                && runtime.realm_mcp_administration().is_some() =>
+        {
+            let response = match runtime.realm_mcp_administration() {
+                Some(administration) => {
+                    realm_mcp_methods::handle_realm_mcp_rpc(
+                        administration,
+                        method,
+                        response_id.clone(),
+                        &request.params,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            response.unwrap_or_else(|| JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32601,
+                    message: format!(
+                        "{method} is registered in the realm MCP family but has no dispatcher arm"
+                    ),
+                    data: None,
+                }),
+            })
         }
         "meta/send_message" => {
             // Pass the identity runtime so bare durable identities resolve
@@ -8266,6 +8424,69 @@ mod tests {
         }
     }
 
+    /// The Flow Editor's changes are one list, read by the Console's caller
+    /// check and by a candidate launch's refusal alike, and each arm is
+    /// decided on the request as its handler parses it: a change for one is
+    /// a change for the other, and a read or an in-process arm is neither.
+    /// (A candidate refuses every draft write that reaches a store the
+    /// authoritative launch reads, as one naming no store does.)
+    #[test]
+    fn the_flow_editor_changes_are_one_list_for_both_checks() {
+        let changes = [
+            ("meta/mobpacks/create", json!({})),
+            ("meta/mobpacks/save", json!({})),
+            ("meta/mobpacks/delete", json!({})),
+            ("meta/mobpacks/undo", json!({})),
+            ("meta/mobpacks/redo", json!({})),
+            ("meta/mobpacks/deploy", json!({ "execute": true })),
+            ("meta/mobpacks/validate", json!({ "rkat_validate": true })),
+            ("meta/mobpacks/validate", json!({ "rkatValidate": true })),
+        ];
+        let reads = [
+            ("meta/mobpacks/list", json!({})),
+            ("meta/mobpacks/get", json!({})),
+            ("meta/mobpacks/catalogs", json!({})),
+            ("meta/mobpacks/schema", json!({})),
+            ("meta/mobpacks/templates", json!({})),
+            ("meta/mobpacks/apply_operation", json!({})),
+            ("meta/mobpacks/graph_projection", json!({})),
+            ("meta/mobpacks/graph_to_flow", json!({})),
+            ("meta/mobpacks/source", json!({})),
+            ("meta/mobpacks/export", json!({})),
+            ("meta/mobpacks/import", json!({})),
+            ("meta/mobpacks/deploy_command", json!({ "execute": true })),
+            ("meta/mobpacks/deploy", json!({ "execute": false })),
+            ("meta/mobpacks/deploy", json!({ "execute": "true" })),
+            ("meta/mobpacks/validate", json!({})),
+            // The handler reads `rkat_validate` first and only falls back to
+            // `rkatValidate` when it is absent.
+            (
+                "meta/mobpacks/validate",
+                json!({ "rkat_validate": false, "rkatValidate": true }),
+            ),
+        ];
+        for (method, params) in &changes {
+            assert!(
+                super::is_mobpack_authoring_change(method, params),
+                "{method} with {params} is a change"
+            );
+            assert!(
+                super::candidate_launch_refuses(method, params, None),
+                "a candidate refuses {method} with {params}"
+            );
+        }
+        for (method, params) in &reads {
+            assert!(
+                !super::is_mobpack_authoring_change(method, params),
+                "{method} with {params} changes nothing"
+            );
+            assert!(
+                !super::candidate_launch_refuses(method, params, None),
+                "a candidate serves {method} with {params}"
+            );
+        }
+    }
+
     /// A candidate launch acts nowhere: it refuses the operator verbs that
     /// write a member's session transcript, typed, as it refuses member
     /// input, and an authoritative launch serves them.
@@ -8289,6 +8510,64 @@ mod tests {
                 "an authoritative launch serves {method}"
             );
         }
+    }
+
+    /// A candidate launch refuses the grant writes typed (they change the
+    /// grant rows the authoritative launch reads) and still answers the
+    /// grant reads.
+    #[test]
+    fn a_candidate_launch_refuses_grant_writes_and_serves_grant_reads() {
+        for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+        }
+        for method in ["meta/tool_grants/list", "meta/tool_grants/audit"] {
+            assert!(
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .is_none(),
+                "a candidate serves {method}"
+            );
+        }
+    }
+
+    /// A candidate launch refuses the realm MCP writes (the realm's own
+    /// config document and its credential store are the authoritative
+    /// launch's) and serves the listing.
+    #[test]
+    fn a_candidate_launch_refuses_realm_mcp_writes_and_serves_the_listing() {
+        for method in [
+            "meta/realm_mcp/install",
+            "meta/realm_mcp/set_secret",
+            "meta/realm_mcp/remove_secret",
+        ] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+        }
+        assert!(
+            super::candidate_launch_refusal(
+                false,
+                None,
+                "meta/realm_mcp/servers",
+                &json!({}),
+                json!(7)
+            )
+            .is_none(),
+            "a candidate serves the listing"
+        );
     }
 
     /// A candidate's refusal of a session revocation sends the operator to
@@ -8319,6 +8598,49 @@ mod tests {
             ),
             "{}",
             refusal.message
+        );
+    }
+
+    /// A candidate launch refuses a sign-out, which would write the session
+    /// fence record the authoritative launch reads, and sends the caller to
+    /// the authoritative launch.
+    #[test]
+    fn a_candidate_launch_refusal_of_a_sign_out_names_the_authoritative_launch() {
+        let refusal = super::candidate_launch_refusal(
+            false,
+            None,
+            super::CONSOLE_SIGN_OUT_METHOD,
+            &json!({}),
+            json!(7),
+        )
+        .and_then(|refusal| refusal.error)
+        .expect("a candidate refuses a sign-out");
+        assert_eq!(
+            (
+                refusal.code,
+                refusal.data,
+                refusal
+                    .message
+                    .contains("sign out on the authoritative launch"),
+            ),
+            (
+                crate::mob_announcements::rpc::ANNOUNCEMENTS_REFUSED_CODE,
+                Some(json!({ "kind": "candidate_launch" })),
+                true,
+            ),
+            "{}",
+            refusal.message
+        );
+        assert!(
+            super::candidate_launch_refusal(
+                true,
+                None,
+                super::CONSOLE_SIGN_OUT_METHOD,
+                &json!({}),
+                json!(7)
+            )
+            .is_none(),
+            "an authoritative launch serves it"
         );
     }
 
@@ -8939,6 +9261,16 @@ mod tests {
             identity: &AgentIdentity,
         ) -> Result<crate::identity_first::MemberStanding, BridgeError> {
             self.core.member_standing(identity)
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -10353,9 +10685,12 @@ shell = true
             default_timeout: None,
         }));
         let owed = AgentIdentity::parse("owed-member")?;
-        // Its held pass ended without publishing it: Core never spawned it,
-        // and the identity owes its host a fresh held completion.
-        identity_rt.record_held_completion(&owed, false);
+        // Its host holds it (a held pass marked it and ended without
+        // publishing it): Core never spawned it, and the identity owes its
+        // host a held completion.
+        identity_rt
+            .mark_held_completion_owed(std::slice::from_ref(&owed))
+            .await?;
         let roster_provider = Arc::new(ContextRequiredStaticRosterProvider::new(vec![
             DurableAgentSpec {
                 identity: owed.clone(),
@@ -11274,7 +11609,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -11609,7 +11945,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -13355,7 +13692,8 @@ shell = true
                     binding: None,
                     placement: None,
                 })
-                .await;
+                .await
+                .expect("the identity registers");
         }
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
@@ -15034,9 +15372,16 @@ comms = true
                 default_timeout: None,
             }));
             let identity = AgentIdentity::parse(durable)?;
+            // Declared as Core holds its member (turn-driven), so the
+            // registration's declaration keeps the member as it is: a
+            // declared runtime mode that differs restamps the member, whose
+            // successor's comms runtime the wiring could reach before it is up.
+            let mut spec = rpc_durable_spec(identity.as_str(), "worker");
+            spec.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
             identity_rt
-                .register(rpc_durable_spec(identity.as_str(), "worker"))
-                .await;
+                .register(spec)
+                .await
+                .expect("the identity registers");
             runtime.attach_identity_first_context(Arc::new(
                 crate::identity_first::IdentityFirstRuntimeContext::new(
                     identity_rt,

@@ -17,6 +17,9 @@ def load(name, path):
 
 p = load("candidate_cli", Path(__file__).with_name("connect-candidate.py"))
 f = load("inert_assembler_cli", Path(__file__).with_name("test_assemble_connect_product.py"))
+# Release mode scans the assembled product; these rules are synthetic test data (a made-up marker).
+PRIVACY = Path(__file__).with_name("fixtures") / "release-payload-privacy-scan"
+SCAN = {"rules": PRIVACY / "synthetic-rules.json", "exemptions": PRIVACY / "synthetic-exemptions.json"}
 
 
 def dump(path, value):
@@ -79,7 +82,7 @@ def test_final_cli_reuses_original_records_and_owner_without_building(ready):
         except ValueError:
             pytest.skip("actual Linux archive owner requires a case-sensitive test filesystem")
     before = (cli / "build-record.json").read_bytes()
-    p.assemble_cli(work, original.shutdown, p.digest(original.shutdown), output)
+    p.assemble_cli(work, original.shutdown, p.digest(original.shutdown), output, **SCAN)
     assert len(calls) == 1
     assert (cli / "build-record.json").read_bytes() == before
     final = p.read_json(output / "assembled/assembly.json")
@@ -125,7 +128,7 @@ def test_missing_failed_or_different_review_never_assembles(ready, change):
     if change == "missing":
         review.unlink()
     with pytest.raises((ValueError, FileNotFoundError)):
-        p.assemble_cli(work, review, selected, output)
+        p.assemble_cli(work, review, selected, output, **SCAN)
     assert calls == []
     assert not output.exists()
 

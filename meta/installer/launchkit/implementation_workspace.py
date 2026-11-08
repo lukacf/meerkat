@@ -302,19 +302,25 @@ class ImplementationWorkspace:
             with self._locked():
                 self._files(self._state())
 
-    def adopt_application_inputs(self, sources, *, require_current):
+    def adopt_application_inputs(self, sources, *, require_current, replacements=None):
         """Host-only adoption into the existing signed framework baseline.
 
         The preparation owner supplies actual selected source paths and its
         currentness fence. Neither builder tools nor HTTP requests expose this
         method. It transfers source bytes only, never native preparation facts.
+        `replacements` names the text the owner declares for a selected input
+        instead of its selected bytes; the selected file itself stays pinned.
         """
+        replacements = {} if replacements is None else replacements
         if (not isinstance(sources, dict) or not sources or not callable(require_current)
-                or any(not isinstance(name, str) or name not in PROTECTED_APPLICATION_PATHS for name in sources)):
+                or any(not isinstance(name, str) or name not in PROTECTED_APPLICATION_PATHS for name in sources)
+                or not isinstance(replacements, dict)
+                or any(name not in sources or not isinstance(text, str) for name, text in replacements.items())):
             raise WorkspaceError("Choose actual protected application inputs through the host preparation owner.")
         require_current()
         observed = []
         files = []
+        selected = {}
         for name, source in sorted(sources.items()):
             path = Path(source).absolute()
             if any(parent.is_symlink() for parent in (path, *path.parents)):
@@ -325,10 +331,11 @@ class ImplementationWorkspace:
             item = _read_protected_application_file(path, name)
             observed.append((path, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
                 info.st_ctime_ns, info.st_uid, info.st_mode), item))
+            selected[name] = item.content
             # The selected artifact retains its original source mode in the
             # currentness pin. Public package text uses the existing archive
             # projection, so this single destination baseline owns mode 0644.
-            files.append(PackageFile(name, item.content, 0o644))
+            files.append(PackageFile(name, replacements.get(name, item.content), 0o644))
 
         def original_sources_current():
             require_current()
@@ -355,8 +362,11 @@ class ImplementationWorkspace:
                 if any(entry.path.casefold() == item.path.casefold() and entry.path != item.path for entry in before):
                     raise WorkspaceError("Selected application source aliases an existing project path.")
                 if item.path in baseline:
-                    if (item.path not in prior_paths or baseline[item.path] != {
-                            "sha256": _sha(item.content), "mode": item.mode}):
+                    # A retained baseline holds this input as adopted before:
+                    # its selected bytes, or the owner's declared replacement.
+                    adopted = {item.content, selected[item.path]}
+                    if (item.path not in prior_paths or baseline[item.path] not in [
+                            {"sha256": _sha(content), "mode": item.mode} for content in adopted]):
                         raise WorkspaceError("Selected application source collides with the protected framework.")
                 elif any(name.casefold() == item.path.casefold() for name in baseline):
                     raise WorkspaceError("Selected application source aliases the protected framework.")

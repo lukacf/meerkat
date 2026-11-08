@@ -2268,6 +2268,15 @@ pub struct MobToolsBuildArgs {
     pub session_id: crate::SessionId,
     /// Model name of the owning agent — inherited by implicit mob helpers.
     pub model: String,
+    /// The provider the owning agent's build resolved for `model`. Implicit
+    /// mob helpers inherit it with the model, so they run on the agent's own
+    /// route and a model outside the catalog (a realm `[models.<id>]` entry,
+    /// a self-hosted model) names its provider.
+    pub provider: crate::Provider,
+    /// The self-hosted server the owning agent's build resolved for `model`
+    /// (`Some` only when `provider` is [`crate::Provider::SelfHosted`]),
+    /// inherited with the provider.
+    pub self_hosted_server_id: Option<String>,
     /// Runtime-injected mob operator authority context.
     ///
     /// The session factory only calls [`MobToolsFactory::build_mob_tools`]

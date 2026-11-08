@@ -865,7 +865,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_declared_apply_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor/declared_apply.rs",
-                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and refusing the seal while an unseated one remains, which the one-entry unlist ends first on the seal's own step (each end named by the identity ended effect), leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, declared roster seal refused, identity entry unlisted, identity ended and archived session forgotten effects",
+                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and refusing the seal while an unseated one remains, which the one-entry unlist ends first on the seal's own step (each end named by the identity ended effect), leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; take a Declared entry over for a host's adoption before the identity reconciler acts on its member, marking it while its member is seated so that the end of the member's retirement, whose start row records the cause HostAdopted for replay, ends the entry, ending an unseated one at once, and leaving it to the reconciler's next pass while a member step of it is in flight, and seal no entry whose identity a host's intent row names (it neither marks one nor refuses the seal for one); let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, a takeover mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, declared roster seal refused, identity entry unlisted, identity ended, identity entry taken over and archived session forgotten effects",
                     CoverageClaims::none()
                         .transitions(&[
                             "DeclareIdentityEntryKept",
@@ -900,6 +900,12 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "UnlistIdentityEntryDeferred",
                             "UnlistIdentityEntryNotADeclaredEntry",
                             "UnlistIdentityEntryNonAuthoritative",
+                            "TakeOverIdentityEntryAdopting",
+                            "TakeOverIdentityEntryEnded",
+                            "TakeOverIdentityEntryDeferred",
+                            "TakeOverIdentityEntryNotADeclaredEntry",
+                            "TakeOverIdentityEntryNonAuthoritative",
+                            "RecoverIdentityEntryAdoptingMarkedRunning",
                             "SealDeclaredRosterRefused",
                         ])
                         .effects(&[
@@ -907,12 +913,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "DeclaredRosterSealed",
                             "ArchivedSessionForgotten",
                             "IdentityEntryUnlisted",
+                            "IdentityEntryTakenOver",
                             "IdentityEnded",
                             "DeclaredRosterSealRefused",
                         ])
                         .invariants(&[
                             "unseated_entry_is_not_a_member",
                             "retiring_entry_is_a_declared_entry",
+                            "adopting_entry_is_a_seated_declared_entry",
                             "marked_entry_has_no_spawn_in_flight",
                             "held_creation_entry_was_never_created",
                             "archived_session_record_is_unseated",

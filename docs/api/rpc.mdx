@@ -2269,13 +2269,16 @@ grants end, `revoked`, when the identity ends, and so do the grants of the
 session the mob holds for it then (its member's session, or an identity
 entry's archived session). The identity ends at the end of a plain retire
 of its member; at the end of a retirement that unlists or removes its
-identity entry; at the one-entry unlist, or a complete roster's seal, of an
-unseated identity entry; at the removal of an unseated store-owned
+identity entry; at the one-entry unlist of an unseated identity entry, or a
+complete roster's seal of one it does not list and no host's intent row
+names; at the removal of an unseated store-owned
 identity; when a respawn whose replacement fails after the old member's
 archive is abandoned, by its own step or by the resume after a stop; and at
 a reset of its mob, which ends every identity the mob held. A respawn keeps
 them, and so does a retirement an identity entry outlives (the entry stays
-unseated, and the next apply seats it on its own session). A grant ended
+unseated, and the next apply seats it on its own session), and so does a
+host's adoption of a declared identity, which ends the identity's entry,
+not the identity: the identity continues under the host's intent. A grant ended
 with its identity explains no later refusal: a name created or declared
 again, on a fresh session or on the old one, needs a grant of its own
 (`tool_grant_required`). The one exception is a session the mob no longer

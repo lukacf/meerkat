@@ -873,6 +873,42 @@ async fn the_agent_lane_unwires_rotates_and_cancels_no_entry() {
         .expect("the agent lane unwires two workers");
 }
 
+/// The build preparation a member's host asked to retry is the host's to
+/// retry: the agent lane never retries it (`resolve_member_build_preparation`
+/// is host-only), for an entry or a worker, and the host's retry of the same
+/// members answers.
+///
+/// Pin: classify the retry as addressing no member
+/// (`AgentLaneAdmission::Unaddressed`): the agent lane retries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agent_lane_retries_no_build_preparation() {
+    let mob = EntryMob::new("entry-agent-build-preparation").await;
+    mob.handle
+        .spawn_spec(entry_spec("preparation-entry"))
+        .await
+        .expect("the host declares its entry");
+    mob.handle
+        .spawn_spec(worker_spec("preparation-worker"))
+        .await
+        .expect("a worker");
+    let agent = mob.agent();
+
+    for name in ["preparation-entry", "preparation-worker"] {
+        let error = agent
+            .resolve_member_build_preparation(&id(name))
+            .await
+            .expect_err("the agent lane retries no build preparation");
+        assert!(
+            matches!(error, MobError::ScopeDenied(_)),
+            "{name}: {error:?}"
+        );
+        mob.handle
+            .resolve_member_build_preparation(&id(name))
+            .await
+            .expect("the host's retry answers");
+    }
+}
+
 /// The legacy adoption observes a member again when MobMachine answers its
 /// observation stale, a bounded number of times, and answers a retryable
 /// refusal when the incarnation keeps changing. The agent lane runs no
@@ -1027,6 +1063,104 @@ async fn a_host_retire_beside_an_agent_retire_of_an_entry_retires_it() {
             .any(|member| member.agent_identity == id("slot-entry")),
         "the entry's member is retired"
     );
+}
+
+/// The rotation of an identity entry no member holds (its host retired the
+/// member, so the entry is unseated, owed its seat) is the entry's fresh
+/// life, an ordinary seat of its name. Without the entry's custody it is
+/// refused typed (`MobError::IdentityMember`) before anything is created, as
+/// a spawn or a seat of the name is: no member, no row, and the entry stays
+/// unseated. With the custody, the fresh life is seated on a fresh session
+/// and the identity stays a Declared entry.
+///
+/// RED: plan the rotation's seat without the member admission verdict
+/// (`plan_dormant_seat` asks it of `SeatPlanMode::Seat` only): the seat
+/// reaches MobMachine, which rejects its `BeginSpawnExec` untyped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotation_of_an_unseated_entry_takes_its_name_only_with_its_custody() {
+    let mob = EntryMob::new("entry-unseated-rotation").await;
+    mob.handle
+        .spawn_spec(entry_spec("unseated-entry"))
+        .await
+        .expect("the host declares its entry");
+    let retired_session = mob
+        .handle
+        .resolve_bridge_session_id(&id("unseated-entry"))
+        .await
+        .expect("the entry's member is bound to a session");
+    tokio::time::timeout(STEP, mob.handle.retire(id("unseated-entry")))
+        .await
+        .expect("the retire answers")
+        .expect("the host retires its entry's member");
+    let unseated = Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed));
+    assert_eq!(mob.standing("unseated-entry"), unseated);
+    let members = mob.handle.list_members().await.len();
+    let journal = mob.journal_len().await;
+
+    let refused = tokio::time::timeout(
+        STEP,
+        mob.handle.rotate_member(worker_spec("unseated-entry")),
+    )
+    .await
+    .expect("the rotation answers");
+    assert!(
+        matches!(&refused, Err(error) if is_identity_member(error, "unseated-entry")),
+        "a rotation without the entry's custody does not take its name: {refused:?}"
+    );
+    assert_eq!(
+        mob.handle.list_members().await.len(),
+        members,
+        "the refusal created no member"
+    );
+    assert_eq!(mob.journal_len().await, journal, "the refusal wrote no row");
+    assert_eq!(mob.standing("unseated-entry"), unseated);
+    assert_eq!(
+        mob.entry("unseated-entry"),
+        Some(IdentityEntryOrigin::Declared)
+    );
+
+    let session =
+        tokio::time::timeout(STEP, mob.handle.rotate_member(entry_spec("unseated-entry")))
+            .await
+            .expect("the rotation answers")
+            .expect("with the entry's custody the rotation seats its fresh life");
+    assert_ne!(session, retired_session, "a fresh life is a fresh session");
+    assert!(
+        matches!(
+            mob.standing("unseated-entry"),
+            Some(EntryStanding::Seated(_))
+        ),
+        "the fresh life is seated: {:?}",
+        mob.standing("unseated-entry")
+    );
+    assert_eq!(
+        mob.entry("unseated-entry"),
+        Some(IdentityEntryOrigin::Declared)
+    );
+    // The fresh life let go only the entry's record of the archived session
+    // (ForgetArchivedSession): the session stays archived, its retained
+    // record stays readable through the archived-session read, and Core's
+    // member history keeps the retired incarnation's binding to it.
+    assert!(
+        mob.service.test_is_session_archived(&retired_session).await,
+        "the retired member's session stays archived"
+    );
+    let retained =
+        MobSessionService::load_retained_session_metadata(mob.service.as_ref(), &retired_session)
+            .await
+            .expect("the retained read answers")
+            .expect("the archived session stays readable");
+    assert_eq!(retained.session_id, retired_session);
+    let history = mob
+        .handle
+        .member_binding_history()
+        .await
+        .expect("Core's member history reads");
+    let retired = history
+        .binding_for_session(&retired_session)
+        .expect("the history keeps the retired incarnation's binding");
+    assert_eq!(retired.identity(), &id("unseated-entry"));
+    assert!(!retired.is_live(), "{retired:?}");
 }
 
 /// The worker reconcile and ensure spawn workers only: a spec that carries

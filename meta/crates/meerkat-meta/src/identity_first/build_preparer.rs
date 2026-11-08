@@ -75,8 +75,12 @@ struct PreparerState {
     /// The identity runtime declared itself composed: builds of its
     /// registered identities are prepared inline from then on.
     composed: bool,
-    /// Identities whose builds were held before the runtime was bound.
-    held_unbound: BTreeSet<AgentIdentity>,
+    /// The members whose build in progress this preparer answered
+    /// `HoldUntilReleased`: Core stages the hold with the build, so the
+    /// build's report publishes it when the runtime was composed meanwhile
+    /// (a composition that read Core's held members before the hold was
+    /// staged did not see it).
+    held_builds: BTreeSet<MobAgentIdentity>,
     /// Builds reported before the runtime was bound: the identity, the
     /// session and the visible tools of each.
     reports_unbound: Vec<(AgentIdentity, meerkat_core::types::SessionId, Vec<String>)>,
@@ -139,9 +143,10 @@ impl IdentityBuildPreparer {
     }
 
     /// Bind this preparer to `runtime`, once its customizer, customizer tool
-    /// registry and identity records are installed: the identities held
-    /// before are recorded on it as pending, and the builds reported before
-    /// are written to their tool records. A second bind is ignored.
+    /// registry and identity records are installed: the builds reported
+    /// before are written to their tool records. The builds held before are
+    /// Core's to name: the composition reads which members Core holds. A
+    /// second bind is ignored.
     pub(crate) async fn bind(
         self: &Arc<Self>,
         runtime: &Arc<IdentityRuntime>,
@@ -150,17 +155,12 @@ impl IdentityBuildPreparer {
         if let Some(service) = session_service {
             let _ = self.session_service.set(service);
         }
-        // The held identities move to the runtime under the lock a hold
-        // takes, so none is missed by a composition that follows.
         let reports = {
             let mut state = self.lock_state();
             if self.runtime.set(Arc::downgrade(runtime)).is_err() {
                 return;
             }
             runtime.set_member_build_preparer(Arc::clone(self));
-            for identity in std::mem::take(&mut state.held_unbound) {
-                runtime.hold_member_build(&identity);
-            }
             std::mem::take(&mut state.reports_unbound)
         };
         for (identity, session_id, visible_tools) in reports {
@@ -178,13 +178,11 @@ impl IdentityBuildPreparer {
             .map(|runtime| runtime.upgrade().ok_or(()))
     }
 
-    /// Mark the bound runtime composed, with `snapshot` read under the same
-    /// lock that a hold before the composition takes: no build held before
-    /// the composition is missed by it.
-    pub(crate) fn compose<T>(&self, snapshot: impl FnOnce() -> T) -> T {
-        let mut state = self.lock_state();
-        state.composed = true;
-        snapshot()
+    /// Mark the bound runtime composed: from now on a registered identity's
+    /// build is prepared inline. A build held before is published by the
+    /// composition (Core names it) or by its report.
+    pub(crate) fn compose(&self) {
+        self.lock_state().composed = true;
     }
 
     /// Read the live tools of `identity`'s member on `session_id` and write
@@ -300,18 +298,19 @@ impl IdentityBuildPreparer {
                 });
             }
         }
-        // The check and the hold are one step under the preparer's lock,
-        // which the composition takes to read what is held, so no hold
-        // before the composition is missed by it.
+        // A build answered before the composition is held: Core stages its
+        // hold, and the composition (which reads Core's held members) or the
+        // build's report publishes it. The check and the mark are one step
+        // under the preparer's lock, which the composition takes.
         let runtime = {
             let mut state = self.lock_state();
             match runtime {
                 None => {
-                    state.held_unbound.insert(identity);
+                    state.held_builds.insert(member.clone());
                     return Ok(MemberBuildPrepared::HoldUntilReleased);
                 }
-                Some(runtime) if !state.composed => {
-                    runtime.hold_member_build(&identity);
+                Some(_) if !state.composed => {
+                    state.held_builds.insert(member.clone());
                     return Ok(MemberBuildPrepared::HoldUntilReleased);
                 }
                 Some(runtime) => runtime,
@@ -323,23 +322,26 @@ impl IdentityBuildPreparer {
         if runtime.contains(&identity).await {
             return runtime.prepare_identity_build(&identity).await;
         }
-        runtime.hold_member_build(&identity);
         Ok(MemberBuildPrepared::HoldUntilReleased)
     }
 
     /// Record the visible tools Core reported for the build of `member` on
     /// `session_id`, for the identity its preparation named, or, for a build
     /// Core did not ask this preparer about, the registered identity its
-    /// member id names. Any other build is not recorded.
+    /// member id names. Any other build is not recorded. A build this
+    /// preparer held before the composition, reported once the runtime is
+    /// composed, is published now
+    /// ([`IdentityRuntime::publish_held_member_build`]).
     async fn record_member_build(
         &self,
         member: &MobAgentIdentity,
         session_id: meerkat_core::types::SessionId,
         visible_tools: Vec<String>,
     ) {
-        let prepared = {
+        let (prepared, held_and_composed) = {
             let mut state = self.lock_state();
             let prepared = state.building.remove(member);
+            let held = state.held_builds.remove(member);
             if let Some(identity) = &prepared
                 && self.runtime.get().is_none()
             {
@@ -348,7 +350,7 @@ impl IdentityBuildPreparer {
                     .push((identity.clone(), session_id, visible_tools));
                 return;
             }
-            prepared
+            (prepared, held && state.composed)
         };
         let Some(Ok(runtime)) = self.bound_runtime() else {
             return;
@@ -373,6 +375,11 @@ impl IdentityBuildPreparer {
         runtime
             .record_built_tools(&identity, &session_id, visible_tools)
             .await;
+        if held_and_composed {
+            runtime
+                .publish_held_member_build(self, &identity, session_id)
+                .await;
+        }
     }
 }
 

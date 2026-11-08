@@ -18,6 +18,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 |--------|--------|
 | `agent.view` | See the agent anywhere: sidebar, roster, topology, timeline frames, event streams, inspection |
 | `agent.send` | Send messages to the agent |
+| `schedule.manage` | Change the agent's console schedules (create, edit, pause, resume, delete); each change also needs `agent.send`, since a schedule is a deferred send |
 | `agent.memory.write` | Persist durable identity-scoped agent memory for future context injection |
 | `agent.memory.delete` | Delete durable identity-scoped agent memory records |
 | `agent.memory.read` | Read identity-scoped memory: recall/manifest RPCs and the console Memory panel. An **unscoped** grant (a rule with no resource selector) additionally reads realm-scoped records and the dream history |
@@ -31,6 +32,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.respawn` | Respawn the agent |
 | `agent.retire` | Retire / force-cancel / delete the agent |
 | `agent.reset` | Reset durable agent state |
+| `agent.tool_grants.manage` | Grant and revoke the agent's [scoped tool grants](/api/rpc#scoped-tool-grants) (`meta/tool_grants/grant` and `revoke`); listing them and reading their audit needs `agent.view` |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
@@ -48,6 +50,10 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 - **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
 
 Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
+
+A pattern covers the actions a later release adds to its family: a rule
+with `agent.*` or `*` also covers `agent.tool_grants.manage`, allow and deny
+alike.
 
 WorkGraph actions are resource-less grants over the whole WorkGraph, not
 per-agent permissions. Console mutations also require the independent
@@ -171,7 +177,7 @@ subjects = ["alice@example.com"]
 groups = ["release-managers"]
 ```
 
-Holders are read from the live configuration when a decision is made, so removing a subject from a binding or from a holding group revokes the identity for the next request. An approver id must not be empty or carry surrounding whitespace, must have at least one holder, and may only reference defined groups. A binding grants no permission by itself: deciding still requires `gating.decide`. Bindings apply only to authenticated console decisions; an open console (no app authentication) takes the approver id from the request and is for trusted local use only. The console re-checks `gating.decide`, the request's origin and the held approver ids against the live configuration while it records the decision, so a revocation published while a decision waits is honored.
+Holders are read from the live configuration when a decision is made, so removing a subject from a binding or from a holding group revokes the identity for the next request. An approver id must not be empty or carry surrounding whitespace, must have at least one holder, and may only reference defined groups. A binding grants no permission by itself: deciding still requires `gating.decide`. Bindings apply only to console decisions by a signed-in person: on an open console a caller without a token decides nothing (`approver_unauthenticated`), and the host's stdio RPC gateway names the approver id itself. The console re-checks `gating.decide`, the request's origin and the held approver ids against the live configuration while it records the decision, so a revocation published while a decision waits is honored.
 
 ## Live administration from the console
 
@@ -282,11 +288,12 @@ upsert a rule using the owner instance and revision returned by the read
 | `meta/access/groups/delete` | `name` |
 
 Successful writes return the new `revision`; refresh before starting a new edit.
-Malformed, mixed or unknown checked envelopes fail without falling back to a
-legacy write. Do not duplicate the payload at the top level or retry without
-`checked_v1`: older handlers reject the nested-only request because the required
-legacy payload is absent. Legacy top-level requests remain compatible but do
-not provide the checked-save concurrency guarantee.
+Malformed, mixed or unknown checked envelopes fail without falling back to an
+unchecked write. Every write needs `checked_v1`: one without it (the payload
+at the top level) is refused with `-32602` (`revision_required`) and changes
+nothing, so no save lands over an edit its client did not see. Do not
+duplicate the payload at the top level: the request is then mixed, and
+refused.
 
 Use the error code together with `data.kind`, rather than matching free-form
 server messages:
@@ -296,6 +303,7 @@ server messages:
 | `-32009`, `access_revision_conflict` | Retain the draft, refresh, review and explicitly reapply. `expected_revision` and `actual_revision` describe the mismatch. |
 | `-32009`, `access_owner_changed` | Read the replacement owner and explicitly review before another save. |
 | `-32004`, `access_mutation_unavailable` | Keep the draft; do not fall back to an unchecked write. Refresh after availability is restored. |
+| `-32602`, `revision_required` | Read `meta/access/get` and send the edit inside `checked_v1` with the `owner_instance` and `revision` it returned. |
 | `-32602`, invalid configuration or checked request | Correct the request; do not treat it as a successful save. An invalid configuration answers `invalid_access_config` with `reason` and `detail`, which say what is wrong (below). |
 | `-32000`, `access_persistence_failed` | Report that persistence failed and refresh before an explicit retry. The new live revision was not published. |
 | `-32030`, `access_denied`, or the separate `read_only` error | Respect the current authorization or connection policy; changing the revision cannot authorize the write. |
@@ -354,13 +362,14 @@ the composed Console bundle; discovery alone is not an E2E result.
 
 ## What gets enforced
 
-- `/console/experience` — agents the caller can't view vanish from the sidebar, roster, topology, identity status; per-agent affordances (`can_send_message`, `can_retire`, `can_respawn`) and runtime capabilities are intersected with the caller's grants, so the stock console UI degrades invisibly. Affordances are resolved per agent: a caller who can view and retire an agent but not message it gets a disabled composer on that agent while keeping the retire action — having no send grant anywhere does not flip the whole console to deployment read-only.
+- `/console/experience`: agents the caller can't view vanish from the sidebar, roster, topology, identity status; per-agent affordances (`can_send_message`, `can_retire`, `can_respawn`, and `can_manage_schedules`, which needs `agent.send` and `schedule.manage` on the agent) and runtime capabilities are intersected with the caller's grants, so the stock console UI degrades invisibly. Affordances are resolved per agent: a caller who can view and retire an agent but not message it gets a disabled composer on that agent while keeping the retire action, since having no send grant anywhere does not flip the whole console to deployment read-only; a caller who may message an agent but not manage its schedules sees its schedules read-only.
 - `/console/timeline`, timeline streams, and `meta/console/query_timeline` — frames for hidden identities are filtered out.
 - `meta/console/send` and `/console/send` — require `agent.send` on the target.
-- `meta/schedule/list` (an agent's console schedules) - requires `agent.view` on the agent; `meta/schedule/create`, `update`, `pause`, `resume` and `delete` require `agent.send` on it, since a console schedule is a deferred send. Each fire is a console send by the schedule's sender, judged when it fires: the Console admits the sender as it admits a live request by it (sign-in, allowlist, trusted issuer, revoked sessions), and the send needs `agent.send` for the sender under the policy at that time, so withdrawing the grant stops the schedule's later sends.
+- `meta/schedule/list` (an agent's console schedules) - requires `agent.view` on the agent; `meta/schedule/create`, `update`, `pause`, `resume` and `delete` require `agent.send` and `schedule.manage` on it, since a console schedule is a deferred send. A configuration that names no schedule action grants `schedule.manage` wherever it grants `agent.send` (see the migration note below), so a deployment restricts who changes schedules by writing `schedule.manage` rules. Each fire is a console send by the schedule's sender, judged when it fires: the Console admits the sender as it admits a live request by it (sign-in, allowlist, trusted issuer, revoked sessions), and the send needs `agent.send` for the sender under the policy at that time, so withdrawing the grant stops the schedule's later sends.
 - `meta/agent_memory/remember` and `meta/agent_memory/forget` — require `agent.memory.write` and `agent.memory.delete` respectively on the target identity. `meta/agent_memory/recall` and `meta/agent_memory/manifest` require **both** `agent.memory.read` and `agent.view` on the identity.
 - `meta/memory/panel/*` (the console Memory panel's reads) filters every returned record by its scope: identity-scoped records need `agent.memory.read` + `agent.view` on that identity, mob-scoped records need `mob.memory.read`, operator-scoped records need `operator.memory.read`, realm-scoped records and `meta/memory/panel/dreams` need an unscoped `agent.memory.read` grant, and quarantined records (still quarantined, or tombstoned after ever being quarantined) plus `meta/memory/panel/quarantine` need `memory.quarantine.review`. The review grant only opens the quarantine surface; each queue record is still filtered by the per-scope read grants above on its scope, and each pending promotion both on its target scope and on its source record or proposal (a promotion the steward made from a proposal names that proposal, judged by its scope), whose content it would publish and which still holds that content. Once applied, the promoted content is a record of its target scope and is judged there. The other realm-level reads (`overview`, `proposals`, `injections`, `harvests` and `audit_verdicts`) also need the unscoped `agent.memory.read` grant to be called, and return only the rows the caller may read by the same rules: a store-overview scope row and a proposal by their scope, a harvest by its identity, an audit verdict by its record, and an injection-ledger row by both its record and the identity it went into (a record's detail likewise lists only the injections into identities the caller may read). Their entry check has no resource, so a deny on one identity, role or label does not refuse the call; it removes that identity's rows from the answer. Each row is judged under the name the console gives the identity, and so is the identity a record listing is filtered by: on a shared Console that is `<namespace>/<identity>`, so its rules name identities that way, and the Console records its runtimes' roles and labels before a memory read. An identity whose attributes the console does not know (memory written for a name no member holds) is withheld while a deny scoped by a role, a label or another agent applies to `agent.memory.read` or `agent.view`, since its bare name cannot be matched against such a deny. `meta/memory/panel/dreams` and `meta/memory/panel/dream_runs` summarize steward runs that span a realm's scopes and can describe quarantined content, so they list a realm's runs only to a caller who may read every memory scope the realm names (the scopes of its records, proposals and gated promotions, and its harvested identities: each identity by the identity rule above, its mobs by `mob.memory.read`, and the operator scope by `operator.memory.read`) and, while the realm holds quarantined content (a quarantined record, or a tombstoned one that was ever quarantined), also holds `memory.quarantine.review`. For any other caller those runs are left out, and `withheld_by_access` in the result is true when access withholds the dream history of at least one realm, whether or not that realm has runs (`false` otherwise), so a client can tell withheld history from none. Memory content is more sensitive than roster visibility, so plain `agent.view` alone no longer reads any of it.
-- `meta/memory/quarantine/decide` (the operator quarantine decision) requires `memory.quarantine.review`, `agent.view` and `agent.memory.read` on the identity, and `agent.memory.write` to release or `agent.memory.delete` to tombstone (any other verdict needs both, then fails validation). Every effect is one the same caller could already cause through `remember`, `update` or `forget` (a released update supersedes its prior, as `update` does); the decision adds the lineage, the trust ceiling, the content binding and the audit trail. An anonymous caller is held to the same grants whenever access control is on. The capabilities list advertises it only to callers holding `memory.quarantine.review`.
+- `meta/memory/quarantine/decide` (the operator quarantine decision) requires `memory.quarantine.review`, `agent.view` and `agent.memory.read` on the identity, and `agent.memory.write` to release or `agent.memory.delete` to tombstone (any other verdict needs both, then fails validation). Every effect is one the same caller could already cause through `remember`, `update` or `forget` (a released update supersedes its prior, as `update` does); the decision adds the lineage, the trust ceiling, the content binding and the audit trail. The caller must also be a signed-in person; any other caller is refused with `approver_unauthenticated`. Right before the decision is applied the console reads the caller's grants again, so a grant withdrawn while the decision waited is honored (`access_denied`). The capabilities list advertises it only to a signed-in person holding `memory.quarantine.review`.
+- `meta/workgraph/*` - reads require `workgraph.view` and every change `workgraph.manage`, with no resource. A console claim is owned by its caller, and its release is the owner's or an access admin's (a named admin, or a subject granted `access.admin` while enforcement is on): the work graph's Released event records an admin's release of someone else's claim with the admin and the released claim. A goal confirmation is a signed-in person's and, like the quarantine decision and the release, reads the caller's grants again right before it is applied. The capabilities list advertises the goal confirmation only to a signed-in person, and the claim, the release and `attention/break_glass_reassign` (which records its caller) only to a caller with a principal.
 - Lifecycle and runtime RPCs — mapped to `agent.retire` / `agent.respawn` / `agent.reset` / `agent.spawn` / `runtime.admin` per method.
 - `meta/mob_announcements/*` on `/console/rpc` - every method, the reads included, requires `runtime.admin` with no resource: they list announcements, subscriptions and deliveries across members and mobs with no per-agent filter. A read-only console refuses the ones that change state (`announce`, `subscriptions/put`, `pause`, `resume`, `cancel` and `deliveries/reconcile`) with the `read_only` error. The capabilities list names the family only while the runtime has mob announcements.
 - Topology control — query visibility requires `agent.view` and
@@ -380,6 +389,10 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 
 <Note>
 **Migration — memory read actions.** Recall used to ride bare `agent.view`. Configs written before `agent.memory.read` existed (no `*.memory.*` action mentioned in any rule) keep working: on load, every rule matching `agent.view` is extended to also cover `agent.memory.read` — allow *and* deny rules alike — and a warning is logged recommending explicit rules. Normalization is in memory on load and reaches the TOML file on the next successful persisted admin mutation/save. Until then, an unchanged old file is normalized again on restart; after the normalized config is saved, the rewrite is self-limiting. A config that mentions any memory action anywhere is taken literally.
+</Note>
+
+<Note>
+**Migration - `schedule.manage`.** Console schedule changes used to need only `agent.send`. A configuration that names no schedule action (no `schedule.*` action in any rule) keeps working the same way: every rule matching `agent.send` is extended to also cover `schedule.manage`, allow and deny rules alike, with a logged recommendation to write explicit rules. As with the memory actions, the extension is made in memory on load and reaches the TOML file with the next saved change, and a configuration that names a schedule action anywhere is taken literally. A Meta release before `schedule.manage` refuses a configuration that names it: to roll back, remove `schedule.manage` from the rules, or restore the configuration saved before the upgrade.
 </Note>
 
 ### `mob.observe` and per-agent filtering

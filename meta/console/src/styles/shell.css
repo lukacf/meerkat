@@ -198,6 +198,24 @@
   padding: 2px 6px;
 }
 
+/* === One sign-in state: the login ended, or this browser signed out === */
+.console-sign-in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 100%;
+  padding: 32px;
+  text-align: center;
+  background: var(--_cc-surface-canvas);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+}
+.console-sign-in__title { margin: 0; font-size: 18px; font-weight: 600; }
+.console-sign-in__text { margin: 0; max-width: 32rem; color: var(--_cc-foreground-muted); }
+.console-sign-in__actions { display: flex; gap: 8px; }
+
 
 .runtime-scoped-panel { display:flex; flex-direction:column; height:100%; min-height:0; }
 .runtime-scoped-panel > :last-child { flex:1; min-height:0; }

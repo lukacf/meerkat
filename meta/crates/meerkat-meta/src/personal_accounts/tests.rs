@@ -1889,7 +1889,7 @@ oauth_account_selection = "discover"
     // personal server's credential waits on a plan no composition takes
     // waits out its connection's deadline (the connect timeout and the
     // sign-in window), so the row fails here, naming that, well before.
-    let side_chat = tokio::time::timeout(Duration::from_secs(60), async {
+    let side_chat = tokio::time::timeout(Duration::from_mins(1), async {
         let mut forked = None;
         for _ in 0..50 {
             match crate::side_chat::fork_side_chat(

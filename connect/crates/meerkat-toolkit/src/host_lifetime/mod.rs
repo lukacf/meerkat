@@ -24,7 +24,7 @@ use toolkit_catalog::{
     ToolkitComponentLifetimeMachineMutator,
 };
 use toolkit_package::Id;
-use toolkit_store::SqliteStore;
+use toolkit_store::{SqliteStore, StoreCustody};
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, HostLifetimeError>;
@@ -398,8 +398,9 @@ pub struct NativeHostLifetime {
     /// already dropped released its custody then.
     native_grant_custody: Option<Weak<LocalGrantAuthority>>,
     /// The native host's published store whose custody the close's final
-    /// release ends. Held weakly, as the grant owner is.
-    native_store_custody: Option<Weak<SqliteStore>>,
+    /// release ends, through the store's custody handle, which covers every
+    /// clone of the store and keeps none of them open.
+    native_store_custody: Option<StoreCustody>,
 }
 
 impl NativeHostLifetime {
@@ -569,25 +570,25 @@ impl NativeHostLifetime {
 
     /// Install the native host's published store whose custody this host's
     /// close ends, before this lifetime is shared, beside the grant owner.
-    /// The close's final release ends it, as it ends the grant owner's: a
-    /// reference a task of this host still holds can no longer read or
-    /// change the store, and its physical owner is handed back, so a
-    /// successor in this process opens the same store at once. Rebinding is
-    /// refused.
-    pub fn bind_native_store_custody(&mut self, store: &Arc<SqliteStore>) -> Result<()> {
+    /// The close's final release ends it, as it ends the grant owner's, for
+    /// every clone of the store (value clones included): a reference a task
+    /// of this host still holds can no longer read or change the store, and
+    /// its physical owner is handed back, so a successor in this process
+    /// opens the same store at once. Rebinding is refused.
+    pub fn bind_native_store_custody(&mut self, store: &SqliteStore) -> Result<()> {
         self.validate_current_selection()?;
         if self.native_store_custody.is_some() {
             return Err(HostLifetimeError::Denied);
         }
-        self.native_store_custody = Some(Arc::downgrade(store));
+        self.native_store_custody = Some(store.custody());
         Ok(())
     }
 
     /// End the bound native store's custody (the close's final release).
     async fn release_native_store_custody(&self) -> Result<()> {
-        match self.native_store_custody.as_ref().and_then(Weak::upgrade) {
-            Some(store) => store
-                .release_custody()
+        match &self.native_store_custody {
+            Some(custody) => custody
+                .release()
                 .await
                 .map_err(|_| HostLifetimeError::Unavailable),
             None => Ok(()),

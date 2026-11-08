@@ -16,6 +16,45 @@ pub struct SqliteStore {
     record_publication: Option<Arc<dyn RecordChangePublication>>,
 }
 
+/// A handle to an opened store's physical custody, from
+/// [`SqliteStore::custody`]: it covers every clone of that store, value
+/// clones included, yet neither keeps the store open nor reads or changes
+/// anything. Its [`release`](Self::release) ends the custody as
+/// [`SqliteStore::release_custody`] does, whichever clones are still held.
+#[derive(Clone)]
+pub struct StoreCustody(std::sync::Weak<Mutex<Option<OwnedConnection>>>);
+
+impl StoreCustody {
+    /// End the store's physical custody, as [`SqliteStore::release_custody`]
+    /// does. A store whose every clone is gone has no custody left to end.
+    ///
+    /// # Errors
+    /// [`StoreError::Worker`] when the blocking release could not run.
+    pub async fn release(&self) -> StoreResult<()> {
+        match self.0.upgrade() {
+            Some(connection) => release_connection(connection).await,
+            None => Ok(()),
+        }
+    }
+}
+
+// Take the connection slot after any entered blocking work, and drop the
+// connection and its physical owner, in the blocking pool like every
+// operation on it.
+async fn release_connection(connection: Arc<Mutex<Option<OwnedConnection>>>) -> StoreResult<()> {
+    tokio::task::spawn_blocking(move || {
+        // Poisoned by a panicked operation, the connection is still
+        // closed: SQLite rolls back an unfinished transaction.
+        let released = match connection.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        drop(released);
+    })
+    .await
+    .map_err(|_| StoreError::Worker)
+}
+
 // Entered blocking work retains this same Arc, including physical custody,
 // after its awaiting caller or last public store handle has been dropped.
 // The slot is emptied only by the store's release, which waits for that work.
@@ -163,18 +202,13 @@ impl SqliteStore {
     /// [`StoreError::Worker`] when the blocking release could not run; the
     /// custody then ends when the last clone and the entered work drop.
     pub async fn release_custody(&self) -> StoreResult<()> {
-        let connection = self.connection.clone();
-        tokio::task::spawn_blocking(move || {
-            // Poisoned by a panicked operation, the connection is still
-            // closed: SQLite rolls back an unfinished transaction.
-            let released = match connection.lock() {
-                Ok(mut slot) => slot.take(),
-                Err(poisoned) => poisoned.into_inner().take(),
-            };
-            drop(released);
-        })
-        .await
-        .map_err(|_| StoreError::Worker)
+        release_connection(self.connection.clone()).await
+    }
+
+    /// A handle to this store's physical custody, shared by every clone of
+    /// the store, for a host whose close ends it. See [`StoreCustody`].
+    pub fn custody(&self) -> StoreCustody {
+        StoreCustody(Arc::downgrade(&self.connection))
     }
 
     /// Test-only: a copy of the physical owner file's descriptor while this

@@ -6,7 +6,7 @@ Order: every mutant must violate exactly its attributed invariant with the
 intended final state, every row must be reachable (its negated end state
 violated), then the clean base must pass with every non-fault action taken,
 and every control (a fault an earlier mark masks) must pass. Generic deadlock
-checking stays on. A bounded contract model, not Stage A's code.
+checking stays on. A bounded contract model, not the current binder's code.
 """
 
 import datetime

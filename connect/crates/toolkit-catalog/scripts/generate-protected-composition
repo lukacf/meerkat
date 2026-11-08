@@ -4,7 +4,7 @@
 Usage: generate-protected-composition TWO_PAIR_EXPORT NEW_DIRECTORY
 The source/offer models are retained unchanged. This bounded slice activates
 one pair and models A/B, Find/Launch, P/A, and fresh/partial/saved binding rows.
-It checks the contract, not the unreviewed Stage A implementation or Rust locks.
+It checks the contract, not the current binder's implementation or Rust locks.
 """
 
 import hashlib
@@ -138,7 +138,7 @@ def main():
         'cause = "None"', 'waiting = FALSE', 'retry_owed = FALSE']
     text = '\n\n'.join([
         '---- MODULE protected_composition ----\nEXTENDS source_offer_composition',
-        '\\* Differential bridge contract, not proof of Stage A code or real locks.\n'
+        '\\* Differential bridge contract, not proof of the current binder code or real locks.\n'
         '\\* Grant/binding actions model entry into durable writes atomically with marking.\n'
         '\\* Blocking-writer cancellation and nested-section races are not modeled here.',
         'CONSTANTS StageValues, DoorValues, SiteValues, InitialBindingValues',

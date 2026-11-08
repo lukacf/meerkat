@@ -6,7 +6,7 @@ Copies models/bind_attempt.tla byte-exact and writes one TLC config per profile:
 the clean base, one mutant per ownership edge (each attributed to the invariant
 its counterexample must violate), controls whose fault an earlier mark masks,
 and reachability rows (a negated row end state that must be violated). This is
-a contract model of Stage A's protected_section attempt, not its code.
+a contract model of the current binder's protected_section attempt, not its code.
 """
 
 import hashlib
@@ -217,7 +217,8 @@ def main():
                           'stage': stages, 'door': doors, 'initial': initial,
                           'max_attempts': attempts, 'interrupts': interrupts, 'invariants': invariants}
     manifest = {
-        'scope': 'one original, bounded bind attempts, Stage A and B; attempt effect-mark ownership '
+        'scope': 'one original, bounded bind attempts, the current binder and the planned send; attempt '
+                 'effect-mark ownership '
                  'across nested sections, a pre-section door write, inline writers and blocking '
                  'writers (the first-send write inventory and the service setup observation '
                  'record) under drops, failed later writes and checks, one process interruption, and '

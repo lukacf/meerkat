@@ -5,19 +5,19 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* Every actor runs one shape: a nested sequence of acquisitions (blocking or try) and
 \* releases, inside a protected section or none. A blocking acquisition waits while
 \* another actor holds the lock; a try acquisition refuses at once and the actor gives up.
-\* Mode A is the current code's shapes (each step cites its site); mode B is the stage B
+\* Mode A is the current code's shapes (each step cites its site); mode B is the planned
 \* design: the effect runner takes the publication writer before the store transaction,
 \* no SQLite callback takes it, the bind decides over a snapshot without locks, native
 \* readers answer from published state. Contract model: not the real mutexes or tokio.
 
 CONSTANTS Fault, Mode
 
-\* Locks, in the declared stage B order (rank). Tokio mutexes first (the source writer
+\* Locks, in the declared order of the planned design (rank). Tokio mutexes first (the source writer
 \* before the class callback exclusion, as the code takes and documents them: "Source
 \* writer precedes this existing policy exclusion", callbacks.rs:57), then the shared
 \* publication writer ("acquire the publication guard before owner write guards",
 \* meerkat-authorization publication.rs), then the store connection with its IMMEDIATE
-\* transaction, then owner state. Lines are the Stage A build E tree's.
+\* transaction, then owner state. Lines are the current code's.
 Rank == [SW |-> 1,     \* source writer (tokio), original_ingress source_writer()
          CX |-> 2,     \* class callback exclusion (tokio), callbacks.rs:66-67, member_classes.rs:113
          PUB |-> 3,    \* publication writer (std), begin_owner_change / reserve_owner_change
@@ -79,7 +79,7 @@ ShapesA == <<
      steps |-> Nest("SW", Nest("CX", GrantChange))]
 >>
 
-\* Stage B: the same work, with the publication writer first and nothing blocking inside
+\* Mode B: the same work, with the publication writer first and nothing blocking inside
 \* a protected section. Each fault restores one A edge.
 ShapesB == <<
     [name |-> "effect_runner", section |-> "none",

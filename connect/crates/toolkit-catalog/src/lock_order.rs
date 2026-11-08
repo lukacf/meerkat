@@ -1,9 +1,9 @@
-//! The declared lock order of the source owner's synchronization (stage B, I10).
+//! The declared lock order of the source owner's synchronization (the planned design, I10).
 //!
 //! This is the one rank table. The combined model's generator reads it through the
 //! canonical exporter (`lock_order/ranks.json`), the lock-order model must state the
 //! same ranks (a drift test and the model generator refuse a difference), and the
-//! stage B runtime lock-order guard reads [`SOURCE_OWNER_LOCK_ORDER`] itself.
+//! planned runtime lock-order guard reads [`SOURCE_OWNER_LOCK_ORDER`] itself.
 //!
 //! Rule: a blocking acquisition may only take a lock ranked after every lock its
 //! holder already holds. Two exemptions:
@@ -23,7 +23,7 @@ pub struct LockRank {
     pub owner: &'static str,
 }
 
-/// The declared stage B order, lowest rank first. The source writer precedes the class
+/// The declared order of the planned design, lowest rank first. The source writer precedes the class
 /// callback exclusion, as the code takes and documents them: the class input path holds
 /// the source writer while its callback targets take the exclusion, and the native and
 /// peer operation writers hold it while a member-context route takes the exclusion

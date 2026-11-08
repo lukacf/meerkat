@@ -1,7 +1,7 @@
 ---- MODULE bind_attempt ----
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
-\* Bind-attempt effect-mark ownership, after Stage A's meerkat_core::protected_section.
+\* Bind-attempt effect-mark ownership, after the current binder's meerkat_core::protected_section.
 \* An outermost GovernedBind section opens one attempt (effect mark, decision point),
 \* shared by everything nested inside it. Inline writers note their mark in the bind
 \* task before writing; the peer door's source record precedes the section and is
@@ -13,9 +13,9 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* with the outer mark set. The G3 write witness (assert_effect_marked) sits at the
 \* grants.change and toolkit_store funnels.
 \*
-\* The first-send write inventory is Stage A's, its errata included (the class input
+\* The first-send write inventory is the current binder's, its errata included (the class input
 \* selection record), plus a write no erratum lists: the service setup child's observation
-\* record (service.rs:379), whose mark here is this model's proposal for Stage A.
+\* record (service.rs:379), whose mark here is this model's proposal for the current binder.
 \* A bind can end between two of its writes: dropped at an await point (a writer's join,
 \* an awaited store write, a wait in place), refused by a failed write or a check after an
 \* earlier write, or interrupted with its process. A dropped bind's blocking writer runs on
@@ -25,8 +25,8 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* earlier writes and makes the next one first: the partial-issuance states. So does a
 \* later original whose shared parents another original issued (a class's callback
 \* grants, a native operation root): the Shared initial.
-\* Stage B prepares every first-send write before the send, outside protection.
-\* Contract model only: not the Stage A code, real locks, Core or the native store.
+\* The planned send prepares every first-send write before the send, outside protection.
+\* Contract model only: not the current binder's code, real locks, Core or the native store.
 
 CONSTANTS Fault, StageValues, DoorValues, InitialValues, MaxAttempts, Interrupts
 
@@ -239,7 +239,7 @@ Begin ==
                    nested, after_store, bw, gate, gate_moves, outcome, dup_refused, backstop, witness,
                    silent, misplaced, firstw, ended, crashed>>
 
-\* Stage B: every first-send write is prepared before the send, outside protection (the
+\* The planned send: every first-send write is prepared before the send, outside protection (the
 \* one flip of the write inventory: every write of it, FI:533 and PO:1610; the
 \* Console and peer records too). No attempt exists while they run: nothing to mark.
 PrepareOutside ==
@@ -583,7 +583,7 @@ MetaExpire ==
                    wrote, nested, step, after_store, bw, gate, gate_moves, answer, offers, waited,
                    notnow_seen, dup_refused, backstop, witness, silent, misplaced, firstw, ended, crashed>>
 
-\* Stage B peer door: the waiter's one deadline; past it the delivery stays pending.
+\* The planned send's peer door: the waiter's one deadline; past it the delivery stays pending.
 PeerWaiter ==
     /\ pc = "PeerWait" /\ gate = "Free" /\ attempt < MaxAttempts
     /\ pc' = "Rebind"
@@ -713,7 +713,7 @@ G3_NoSilentUnmarkedWrite == silent = {}
 \* interruption.
 MarkReflectsWrites ==
     (stage = "A" /\ pc \in {"P", "A", "HelperCheck"}) => ((effect[nested] # "") <=> wrote[attempt])
-\* Stage A's I4: the binder answers not-now only before its attempt's first durable write.
+\* The current binder's I4: it answers not-now only before its attempt's first durable write.
 I4_NoNotNowAfterEffect == answer = "NotNow" => ~wrote[attempt]
 \* Meta and the peer waiter never wait to bind again after a durable write.
 MetaNeverWaitsAfterEffect == pc \in {"MetaWait", "PeerWait"} => ~wrote[attempt]
@@ -723,7 +723,7 @@ G4_BackstopQuiet == ~backstop
 DecisionPlacement == misplaced = {}
 \* One issuance per artifact, even when a dropped bind's writer races a resend.
 GrantUnique == \A x \in AllArts : issue_count[x] <= 1
-\* Stage B never waits in place inside the bind (I1).
+\* The planned send never waits in place inside the bind (I1).
 I1_NoWaitInProtectedB == stage = "B" => pc # "WaitInPlace"
 
 \* Rows, as negated end states (each profile expects its own one violated: reachable).
@@ -744,7 +744,7 @@ NotRowBoundResendA ==
       /\ notnow_seen /\ attempt = 2)
 \* A bind dropped while its blocking writer runs, then a resend whose lookup misses the
 \* orphan's grant: issue_child answers Duplicate and the resend ends refused. Fail-closed
-\* and retryable (the next send's lookup finds the grant); stage B must look up again on
+\* and retryable (the next send's lookup finds the grant); the planned send must look up again on
 \* Duplicate and continue only with a current issued child.
 NotRowOrphanDuplicate ==
     ~(dup_refused /\ issue_count["controller_grant"] = 1 /\ outcome = "Refused")

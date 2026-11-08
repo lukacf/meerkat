@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Compose the generated offer and component lifetime owners with the stage B driver.
+"""Compose the generated offer and component lifetime owners with the planned driver.
 
 Usage: generate-driver-composition GENERATED_ORIGINALS NEW_DIRECTORY
 The owner module headers are renamed for TLA INSTANCE; their bodies stay exact,
 and only generated owner transitions change owner state. The environment is
-the stage B driver (effect runner, restart scan), the declared composition
+the planned driver (effect runner, restart scan), the declared composition
 mode (I12), admission closure with the driver's join (I11), a dropped guard
 (I8), a lost CAS reply, and the B controller-grant preparation that looks the
 child up again on Duplicate. The owner records the preparation's
@@ -230,7 +230,7 @@ def main():
     }
     text = '\n\n'.join([
         '---- MODULE driver_composition ----\nEXTENDS TLC, Naturals, Sequences, FiniteSets',
-        '\\* One canonical offer owner and one component lifetime owner with the stage B driver.\n'
+        '\\* One canonical offer owner and one component lifetime owner with the planned driver.\n'
         '\\* Only generated owner transitions change owner state. Core commit and dedup are\n'
         '\\* assumptions. No lock, bind, all-door, liveness or full I1-I13 acceptance here.',
         'CONSTANTS ' + ', '.join(constants) + ', Fault, ModeValues',
@@ -267,7 +267,7 @@ def main():
         (output / (name + '.cfg')).write_text(config)
         exported[name] = {'kind': kind, 'fault': fault, 'modes': modes, 'expected': expected}
     manifest = {
-        'scope': 'one offer and one component lifetime owner, the stage B driver with one crash and '
+        'scope': 'one offer and one component lifetime owner, the planned driver with one crash and '
                  'restart, declared composition mode, admission closure with the driver join, a dropped '
                  'guard, a lost CAS reply, and the B controller-grant preparation with an orphan preparer; '
                  'dispatch starts, lost answers, found reads, the restart withdrawal and the close '

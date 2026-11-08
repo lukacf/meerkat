@@ -51,7 +51,7 @@ def main():
         body.append(frame(v for v in extra if v not in changed))
         definitions.append(name + ' ==\n' + '\n'.join('    /\\ ' + expr for expr in body))
 
-    # Stage B only. Stage A and the completed mark-drop controls remain closed.
+    # The planned send only. The current binder and the completed mark-drop controls remain closed.
     excluded = {'EnterA', 'GrantInside', 'BindingInside', 'FinishLegacyWait',
                 'AbortBeforePreparation'}
     inherited_actions = [a for a in manifest['actions']
@@ -146,7 +146,7 @@ def main():
         (output / (name + '.cfg')).write_text(config)
         exported[name] = {'fault': fault, 'drift_case': drift,
                           'expected_invariant': None if name == 'none' else 'I9_CurrentAuthorityAtCommit'}
-    result = {'scope': 'one active Stage B canonical source/offer pair; authority/controller/incarnation drift during one released wait; unchanged original session; one crash/restart',
+    result = {'scope': 'one active canonical source/offer pair of the planned send; authority/controller/incarnation drift during one released wait; unchanged original session; one crash/restart',
               'full_b1_acceptance': False, 'closed_composition_inputs': copied, 'actions': actions,
               'held_rows': [a for a in actions if a.startswith('Auth_Held_')],
               'profiles': exported, 'generator_sha256': sha(Path(__file__)),

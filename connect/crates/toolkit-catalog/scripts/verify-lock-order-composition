@@ -4,7 +4,7 @@
 Usage: verify-lock-order-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY
 Order: the A baseline legs and the B mutants first (each must violate exactly
 its attributed invariant, or deadlock under generic deadlock checking, with
-the intended final state), then the clean passes (A has no cycle; the stage B
+the intended final state), then the clean passes (A has no cycle; the planned
 design keeps the declared order with nothing blocking in a section). A
 bounded contract model, not the real mutexes.
 """

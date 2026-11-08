@@ -19,7 +19,7 @@ pub struct OriginalRecoveryProfile {
 }
 
 /// Recovery environment composed over the byte-exact generated offer owner.
-/// This is a partial model, not native runtime or full stage B acceptance.
+/// This is a partial model, not native runtime or full acceptance of the planned send.
 pub struct OriginalRecoveryArtifacts {
     pub owner_model: String,
     pub composition_model: &'static str,

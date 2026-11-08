@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Compose the combined I1-I13 model: the bind attempt (stage A), the generated source,
-offer and component lifetime owners, and the stage B send in the accepted order, in one module.
+"""Compose the combined I1-I13 model: the bind attempt part, the generated source,
+offer and component lifetime owners, and the send and driver part in the accepted order, in one
+module.
 
 Usage: generate-combined-composition GENERATED_ORIGINALS NEW_DIRECTORY
-Stage A is models/bind_attempt.tla, instanced byte-exact (the first-send write inventory
+The bind attempt part is models/bind_attempt.tla, instanced byte-exact (the first-send write inventory
 and the service setup observation record, their marks, the partial-issuance and shared-parent
-states, the G3 witness). Stage B follows the accepted order: the offer owner is
+states, the G3 witness). The send and driver part follows the accepted order: the offer owner is
 prepared first, the door's first-send writes are issued outside protection (looked up again on
 Duplicate), the preparation is sealed, the effect runner records the send intent (Offered with
 its outbox) under the publication writer then the store transaction, records the dispatch start
@@ -54,7 +55,7 @@ ALL_INITIAL = ['First', 'Partial', 'Bound', 'Shared']
 OWN_INITIAL = ['First', 'Partial', 'Bound']
 BOTH = ['A', 'B']
 HELD_DOORS = ['Find', 'Launch']
-# Stage B environment dimensions a profile may enable. The full-environment bases take ALL_ENV;
+# The send and driver part's environment dimensions a profile may enable. The full-environment bases take ALL_ENV;
 # the stop (the process ends after its close and restarts into a new component lifetime), the
 # late landing (Core's admission write still in flight after its call returned, and the driver's
 # durable read beside the live one) and the poisoned publication (the fail-stop) run in profiles
@@ -62,7 +63,7 @@ HELD_DOORS = ['Find', 'Launch']
 ALL_ENV = ['hold', 'revoke', 'session', 'srcclose', 'close', 'crash', 'drop', 'lost', 'corerefuse']
 ENV_TOKENS = ALL_ENV + ['stop', 'late', 'poison']
 
-# The attempt model's own variables (stage A), renamed a_*; the rest are shared with B.
+# The bind attempt part's own variables, renamed a_*; the rest are shared with the send part.
 A_OWN = ['attempt', 'effect', 'decided', 'wrote', 'nested', 'pc', 'step', 'after_store', 'bw', 'answer',
          'outcome', 'offers', 'waited', 'notnow_seen', 'dup_refused', 'backstop', 'witness', 'silent',
          'misplaced', 'firstw', 'ended', 'crashed']
@@ -129,7 +130,7 @@ OWNER_MUTANTS = {
 # Actions present in Next but enabled only by a fault; no clean base takes them.
 FAULT_ONLY_ACTIONS = (['A_SpawnedWrite', 'B_StoreHook', 'B_ForgetAmbiguity']
                       + ['B_Forge_' + field for field in FORGE_FIELDS])
-# The attempt model's own stage B actions: stage B here is the composition's own send.
+# The attempt model's own actions of the planned send: the composition's own send replaces them.
 A_STAGE_B_ONLY = {'PrepareOutside', 'PeerWaiter', 'PeerWaitExpire'}
 PROC = [('p', 'Procs')]
 SLOT = [('i', 'Slots')]
@@ -228,7 +229,7 @@ def build_model(root, output):
         else:
             definitions.append(name + ' ==\n' + text)
 
-    # Stage A: one wrapper per action of the attempt model. The held site is recorded for
+    # The bind attempt part: one wrapper per action of the attempt model. The held site is recorded for
     # the held rows (its converted sites (P) and (A), and SH:1505 for the helper).
     held_update = {
         'SiteP': "a_held' = IF RecordRows /\\ a_pc' = \"Answered\" THEN \"P\" ELSE a_held",
@@ -245,7 +246,7 @@ def build_model(root, output):
             changed.add('a_held')
         action('A_' + name, expressions, changed, stage='A')
 
-    # ---- Stage B: the environment. ----
+    # ---- The send and driver part: the environment. ----
     # The source owner: registered and made ready at the start; it may close (and its
     # cancellation be confirmed) while a send is under way or an offer is not terminal,
     # an Offered one included (closing a source does not settle an offered input).
@@ -310,7 +311,7 @@ def build_model(root, output):
                                 'Busy \\/ \\E i \\in Slots : NonTerminal(i)', "current_inc' = \"inc2\""],
            {'current_inc'})
 
-    # ---- Stage B: the send in the accepted order. ----
+    # ---- The send and driver part: the send in the accepted order. ----
     # A caller's send of the original begins (a door's send, a same-key replay of it, or a
     # peer delivery): only while the component admits and the source was made ready. A peer
     # delivery is Core's drain's: one peer bind per session at a time, and Core's FIFO head (a
@@ -520,7 +521,7 @@ def build_model(root, output):
                       "                 /\\ sp' = [sp EXCEPT ![p] = EndUnder(sp[p], i)]"],
                OFFERS | {'sp', 'jr'}, params=PROC)
     # The bind's protected section. Meta's doors: the identity's lifecycle lock, held from the
-    # bind through native submission (stage A runtime.rs:10988-11185), a FIFO tokio mutex. The
+    # bind through native submission, a FIFO tokio mutex. The
     # peer door: the peer binder's section inside Core's drain (one peer bind per session at a
     # time); it takes no Meta lock. Each bind reads its snapshot fresh (the cached-authority
     # mutant keeps the first bind's authority across the wait, for the bind and the entry
@@ -702,7 +703,7 @@ def build_model(root, output):
                           '                                    THEN "" ELSE offer_preparation_receipt'],
            {'sp', 'drop_partial', 'offer_phase', 'offer_withdrawal_cause', 'offer_preparation_receipt'}, params=PROC)
 
-    # ---- Stage B: the driver. ----
+    # ---- The send and driver part: the driver. ----
     # Reads by the offer's own qualified key when one is owed (a lost answer, a restart):
     # Found, a successful Absent or Unavailable (I13: unavailable is never absence; the
     # mutant publishes it as Absent). Core and storage are unavailable for at most
@@ -1208,11 +1209,11 @@ def build_model(root, output):
         'TypeOK': ('BA!TypeOK /\\ begun \\in 0..SendBound /\\ meta_holder \\in 0..ProcBound\n'
                    '    /\\ pub_holder \\in {"none", "store", "runner1", "runner2"} /\\ conn_holder \\in {"none", "store"}\n'
                    '    /\\ current_inc \\in {"inc1", "inc2"} /\\ dup_arts \\subseteq BA!AllArts /\\ life_cur \\in {1, 2}\n'
-                   '    /\\ native \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
-                   '    /\\ landing \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
+                   '    /\\ native \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..RustU64Max))\n'
+                   '    /\\ landing \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..RustU64Max))\n'
                    '    /\\ read_kind \\in {"", "Live", "Durable"} /\\ absence_epoch \\in 0..2\n'
                    '    /\\ fatal \\in {"", "PublicationPoisoned"}\n'
-                   '    /\\ refusals \\subseteq (Slots \\X (0..9) \\X {"CoreRefused", "EntryRefused"})'),
+                   '    /\\ refusals \\subseteq (Slots \\X (0..RustU64Max) \\X {"CoreRefused", "EntryRefused"})'),
         'OwnerCanonical': ' /\\ '.join(['src!' + i for i in src_invs] + ['offer!' + i for i in offer_invs]
                                         + ['offer2!' + i for i in offer_invs] + ['life!' + i for i in life_invs]
                                         + ['life2!' + i for i in life_invs]),
@@ -1294,19 +1295,23 @@ def build_model(root, output):
         # A send whose grants exist is never refused for a Duplicate.
         'NoDuplicateRefusalB': ('\\A p \\in Procs : (sp[p].out = "Refused" /\\ sp[p].cause = "PreparationRefused")\n'
                                 '    => ~(BA!StepArts(door) \\subseteq issued)'),
-        # The model is finite by construction (no state constraint): every owner stays in its steps.
-        'StepBound': ('src_model_step_count <= 8 /\\ offer_model_step_count <= 16 /\\ offer2_model_step_count <= 16\n'
-                      '    /\\ life_model_step_count <= 8 /\\ life2_model_step_count <= 8'),
+        # The model is finite by construction (no state constraint): every owner stays in its steps,
+        # and each offer owner strictly below the model's bound for u64::MAX (RustU64Max, which its
+        # generated guards check), so that bound never disables an owner step: a behavior that would
+        # reach it fails this invariant instead of stopping there.
+        'StepBound': ('src_model_step_count <= 8 /\\ offer_model_step_count < RustU64Max\n'
+                      '    /\\ offer2_model_step_count < RustU64Max /\\ life_model_step_count <= 8\n'
+                      '    /\\ life2_model_step_count <= 8'),
     }
     rows = {
-        # Stage A rows, from the attempt model (its partial-issuance and shared-parent states).
+        # The bind attempt part's rows, from the attempt model (its partial-issuance and shared-parent states).
         **{f'NotRow{name}': 'BA!NotRow' + name for name in [
             'ClassFirstSendA', 'BatchFirstSendA', 'BoundResendA', 'OrphanDuplicate', 'OrphanDuplicateRetry',
             'LeafFirstAfterRefusal', 'LeafFirstAfterCrash', 'NativeChildFirstAfterDrop',
             'NativeChildFirstAfterCrash', 'TargetsFirstAfterDrop', 'ConfiguredGrantFirstAfterDrop',
             'ClassSelectionFirstShared', 'ClassSelectionFirstAfterRefusal', 'NativeChildFirstShared',
             'ServiceObservationFirstAfterRefusal', 'ServiceObservationFirstAfterCrash']},
-        # Stage B rows.
+        # The send and driver part's rows.
         'NotRowClassFirstSendB': ('~(stage = "B" /\\ door \\in {"ClassInput", "ClassNative"} /\\ initial = "First"\n'
                                   '    /\\ \\E p \\in Procs : sp[p].out = "Admitted" /\\ sp[p].waited)'),
         'NotRowBatchFirstSendB': ('~(stage = "B" /\\ door = "BatchSetup" /\\ initial = "First"\n'
@@ -1606,9 +1611,9 @@ def build_model(root, output):
     }
     text = '\n\n'.join([
         '---- MODULE combined_composition ----\nEXTENDS TLC, Naturals, Sequences, FiniteSets',
-        '\\* The combined I1-I13 model. Stage A: the bind attempt model, instanced byte-exact (the\n'
+        '\\* The combined I1-I13 model. The bind attempt part: the bind attempt model, instanced byte-exact (the\n'
         '\\* first-send writes and the service setup observation record, their marks, drops,\n'
-        '\\* failures, one interruption, the partial-issuance and shared-parent states, G3). Stage B,\n'
+        '\\* failures, one interruption, the partial-issuance and shared-parent states, G3). The send and driver part,\n'
         '\\* in the accepted order: one source with two offer slots and a component lifetime (and,\n'
         '\\* after a stop, the next process\'s new one; generated owners: only their transitions change\n'
         '\\* owner state); two send tasks; the offer owner prepared first, the same writes issued\n'
@@ -1821,7 +1826,7 @@ def config_text(spec, checked, properties):
     return (f'SPECIFICATION {spec["spec"]}\nCONSTANTS\n'
             '  BooleanValues = {TRUE,FALSE}\n  NatValues = {0,1,2}\n  StringValues = {"","alpha"}\n'
             '  SetOfU64Values = {{},{1}}\n'
-            '  RustU64Max = 16\n'
+            '  RustU64Max = 24\n'
             '  ToolkitSourceKindValues = {"Ordinary","Helper"}\n'
             '  ToolkitSourceReadinessValues = {"Preparing","Ready","ClosedToOffers"}\n'
             '  ToolkitCoreObservationValues = {"Unresolved","Admitted","NotAdmitted","Absent","Unavailable"}\n'
@@ -1893,8 +1898,8 @@ def main():
     if missing_forges or missing_owner:
         raise ValueError(f'mutants without a profile: {sorted(missing_forges | missing_owner)}')
     manifest = {
-        'scope': 'combined I1-I13: stage A bind attempt (the first-send write inventory and the service setup '
-                 'observation record, marks, partial-issuance and shared-parent states) and stage B in the accepted '
+        'scope': 'combined I1-I13: the bind attempt part (the first-send write inventory and the service setup '
+                 'observation record, marks, partial-issuance and shared-parent states) and the send and driver part in the accepted '
                  'order (owner first, preparation outside protection with re-lookup, seal, send intent with its '
                  'outbox under the publication writer then the store transaction, the dispatch start recorded in '
                  'the owner, then Meta: pure decision, wait or Core\'s peer waiter, native admission behind the '
@@ -1956,8 +1961,8 @@ LIVE2 = {'procs': 2, 'sends': 2}
 ONE = {'procs': 1, 'sends': 1}
 
 PROFILES = {
-    # ---- Clean bases (their union is the model's full scope). Stage B treats Find, Launch and
-    # Console alike (the same preparation inventory and decision path), so the full stage B
+    # ---- Clean bases (their union is the model's full scope). The send and driver part treats Find, Launch and
+    # Console alike (the same preparation inventory and decision path), so its full
     # environment runs on Find, the helper door and the peer door; the fixture's stand-in, the
     # entry doors and the preparation inventory doors (with every initial state) run with the
     # environment that reaches what they change.
@@ -2029,7 +2034,7 @@ PROFILES = {
     'live-driver-only-disposition': lm('none', 'LV1_OfferDisposition', 'LiveSpecDriverOnly', env=['hold'], **ONE),
     'live-driver-only-rebind': lm('none', 'LV2_FreedWaitRebinds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
     'live-driver-only-send-ends': lm('none', 'LV6_SendEnds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
-    # ---- Stage B mutants, each against what kills it. ----
+    # ---- The send and driver part's mutants, each against what kills it. ----
     'block-in-protected': m('block-in-protected', 'I1_ProtectedStepsNeverBlock', env=['hold']),
     'stale-snapshot': m('stale-snapshot', 'I2_FreshSnapshotAtCommit', env=['srcclose']),
     'cached-incarnation': m('cached-incarnation', 'I2_FreshSnapshotAtCommit', env=['session']),
@@ -2127,7 +2132,7 @@ PROFILES = {
     # The I8 mutants, one per owner field that decides a transition.
     **{forge_fault(field): m(forge_fault(field), 'I8_OwnerFieldsByTransition') for field in FORGE_FIELDS},
     'no-relookup-b': m('no-relookup-b', 'NoDuplicateRefusalB', procs=2, sends=2),
-    # ---- Stage A: the attempt model's mutants, inside the combined model. ----
+    # ---- The bind attempt part: the attempt model's mutants, inside the combined model. ----
     'a-drop-controller-mark': m('drop-controller-mark', 'G3_WitnessQuiet', **A),
     'a-silent-blocking-writer': m('silent-blocking-writer', 'G3_NoSilentUnmarkedWrite', **A),
     'a-drop-callback-mark': m('drop-callback-mark', 'G3_WitnessQuiet', door=['ClassInput'], **A),
@@ -2185,7 +2190,7 @@ PROFILES = {
                                          initial=OWN_INITIAL, attempts=3, **A),
     'a-masked-service-observation-no-interrupt': c('drop-service-observation-mark', door=['BatchSetup'],
                                                    initial=ALL_INITIAL, attempts=3, **A),
-    # Rows, stage A (from the attempt model).
+    # Rows, the bind attempt part (from the attempt model).
     'row-class-first-send-a': r('NotRowClassFirstSendA', door=['ClassInput'], **A),
     'row-batch-first-send-a': r('NotRowBatchFirstSendA', door=['BatchSetup'], **A),
     'row-bound-resend-a': r('NotRowBoundResendA', initial=['Bound'], attempts=2, **A),
@@ -2213,7 +2218,7 @@ PROFILES = {
                                                      door=['BatchSetup'], attempts=2, interrupts=['fail'], **A),
     'row-service-observation-first-after-crash': r('NotRowServiceObservationFirstAfterCrash', door=['BatchSetup'],
                                                    attempts=2, interrupts=['crash'], **A),
-    # Rows, stage B.
+    # Rows, the send and driver part.
     'row-class-first-send-b': r('NotRowClassFirstSendB', door=['ClassInput'], env=['hold']),
     'row-batch-first-send-b': r('NotRowBatchFirstSendB', door=['BatchSetup'], env=['hold']),
     'row-production-claimed': r('NotRowProductionClaimed'),
@@ -2278,14 +2283,14 @@ PROFILES = {
     **{f'row-b-partial-resend-{door.lower()}': r(f'NotRowBPartialResend{door}', door=[door], procs=2, sends=2,
                                                   env=['drop'])
        for door in ['ClassInput', 'FindNative', 'BatchSetup', 'ConfiguredSetup', 'SetupRequest']},
-    # The held rows of the protected slice: stages A and B, Find and Launch, (P) and
+    # The held rows of the protected slice: both parts, Find and Launch, (P) and
     # (A), first send, one-write (Partial) and bound originals.
     **{f'row-held-{stage.lower()}-{door.lower()}-{site.lower()}-{initial.lower()}':
        r(f'NotRowHeld_{stage}_{door}_{site}_{initial}', stage=[stage], door=[door], initial=[initial],
          env=['hold'] if stage == 'B' else [])
        for stage in BOTH for door in HELD_DOORS for site in ['P', 'A'] for initial in OWN_INITIAL},
     # The two largest clean bases last (the verifier runs the clean profiles in this order): the
-    # full stage B environment on Find and on the helper door.
+    # full environment of the send and driver part on Find and on the helper door.
     'none-b-find': profile('base', door=['Find'], **FULL_ENV_B),
     'none-b-helper': profile('base', door=['Helper'], **FULL_ENV_B),
 }

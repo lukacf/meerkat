@@ -6,7 +6,7 @@ Reads the one rank table from the canonical export (lock_order/ranks.json,
 written by the generate_originals example from lock_order.rs) and refuses a
 model whose Rank record differs from it. Copies models/lock_order.tla
 byte-exact and writes one TLC config per profile: the current code's shapes
-(mode A) against stage B's declared order, the stage B design (clean), and one
+(mode A) against the planned design's declared order, that design (clean), and one
 mutant per restored A edge, each attributed to the invariant it violates or to
 a deadlock that generic deadlock checking reports.
 """
@@ -86,8 +86,9 @@ def main():
         exported[name] = {'kind': kind, 'mode': mode, 'fault': fault,
                           'expected': expected, 'invariants': invariants}
     manifest = {
-        'scope': 'declared stage B lock order over the source owner synchronization; current A shapes, '
-                 'stage B shapes and one restored A edge per mutant; blocking versus try acquisitions; '
+        'scope': 'declared lock order of the planned design over the source owner synchronization; current A '
+                 'shapes, '
+                 'planned B shapes and one restored A edge per mutant; blocking versus try acquisitions; '
                  'protected sections where nothing may block',
         'full_b1_acceptance': False,
         'model': source.name,

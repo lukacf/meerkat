@@ -914,7 +914,7 @@ async fn a_kill_inside_a_reset_s_distillation_distills_the_retired_session_after
 /// them anything the step kept in process of the session's compactions).
 /// The next start replays the retirement from Core's journal: it harvests
 /// the compactions the retired session's memory holds, then distills the
-/// session's transcript, once each.
+/// session's transcript, once each per retirement.
 ///
 /// RED before the harvest was planned from the retirement's cause: only a
 /// batch the step kept in process was harvested, so the restart harvested
@@ -988,7 +988,7 @@ async fn a_kill_after_a_reset_harvests_the_retired_session_before_its_transcript
         reads.of(&retired),
         vec![format!("discards {retired}"), transcript],
         "the replayed retirement harvests the retired session's compactions, then distills its \
-         transcript, once each"
+         transcript, once each per retirement"
     );
     let _ = boot.runtime.shutdown().await;
 }
@@ -997,7 +997,7 @@ async fn a_kill_after_a_reset_harvests_the_retired_session_before_its_transcript
 /// after Core answered, before the retirement's side effects ran. The next
 /// start replays the retirement from Core's journal: it harvests the
 /// compactions the retired session's memory holds before it drops that
-/// session's scope, once each.
+/// session's scope, once each per retirement.
 ///
 /// RED before the harvest was planned from the retirement's cause: only a
 /// batch the step kept in process was harvested, so the restart dropped the
@@ -1073,7 +1073,7 @@ async fn a_kill_after_a_delete_harvests_the_retired_session_before_its_scope_dro
         reads.of(&retired),
         vec![format!("discards {retired}"), drop],
         "the replayed retirement harvests the retired session's compactions, then drops its \
-         scope, once each"
+         scope, once each per retirement"
     );
     let _ = boot.runtime.shutdown().await;
 }

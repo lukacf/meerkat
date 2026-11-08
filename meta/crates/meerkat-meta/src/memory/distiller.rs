@@ -2413,10 +2413,11 @@ mod tests {
         Ok(())
     }
 
-    /// A scope that holds more compaction records than a harvest reads
-    /// yields its newest ones, in durable order: a compaction's batch is the
-    /// newest its session's scope holds, so a harvest finds the batch it is
-    /// owed however long the scope grew, never only the oldest records.
+    /// A scope that holds more compaction records than a harvest reads, and
+    /// more than one page of the paged read, yields its newest ones, in
+    /// durable order: a compaction's batch is the newest its session's scope
+    /// holds, so a harvest finds the batch it is owed however long the scope
+    /// grew, never only the oldest records or the first page's.
     #[tokio::test]
     async fn hnsw_discard_source_reads_the_newest_records_of_a_long_scope()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2429,7 +2430,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let session = SessionId::new();
         let limit = COMPACTION_HARVEST_LIMIT as u64;
-        let seeded = limit + 6;
+        // Past the first page, so the read's continuation runs.
+        let seeded = HARVEST_PAGE_ROWS as u64 + limit + 6;
         {
             let store = meerkat_memory::HnswMemoryStore::open(dir.path())?;
             let scope = MemoryIndexScope::for_session(session.clone());

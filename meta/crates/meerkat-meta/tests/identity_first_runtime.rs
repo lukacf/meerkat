@@ -7202,7 +7202,7 @@ async fn a_delete_harvests_an_owed_compaction_an_earlier_finalization_published(
     assert_eq!(
         events.iter().filter(|event| *event == "harvest").count(),
         1,
-        "the compaction is harvested once: {events:?}"
+        "the compaction is harvested once per retirement: {events:?}"
     );
 }
 
@@ -7993,12 +7993,13 @@ async fn a_delete_core_refuses_harvests_its_settled_batch_before_it_answers() {
 }
 
 /// The roster stops listing an identity whose member owes a compaction's
-/// projection, and Core refuses the retirement before any of it started;
-/// then the roster lists the identity again. The pass that takes the
-/// unlisting back hands the batch the unlisting settled to the ordinary
-/// harvest, as a step Core refuses does: the session goes on. Nothing of
-/// the retirement runs. RED before: the batch stayed in this process until
-/// the incarnation's next retirement, and a restart lost it.
+/// projection, and Core's seal fails to retire the member; then the roster
+/// lists the identity again. The declaration that unlisted it settled the
+/// projection before Core was asked and, Core having left the member live
+/// on its session, hands the batch back to the ordinary harvest at once, as
+/// a step Core refuses does; it records no unlisted intent, so the pass that
+/// lists the identity again has nothing to take back. Nothing of the
+/// retirement runs.
 #[tokio::test]
 async fn a_relisted_identity_s_taken_back_unlisting_hands_its_settled_batch_to_the_ordinary_harvest()
  {
@@ -8118,7 +8119,7 @@ async fn a_delete_whose_harvest_failed_retries_it_before_the_scope_drop() {
 
 /// A reset whose settle answered the batch, which the session's memory then
 /// also holds (the settle published it there), harvests the compaction
-/// once: the answered batch, never the fallback read as well.
+/// once per retirement: the answered batch, never the fallback read as well.
 #[tokio::test]
 async fn a_reset_harvests_a_settled_batch_once_though_its_memory_holds_it() {
     let (runtime, bridge, _session, events, _memory_store, _context, _memory_dir) =
@@ -8141,7 +8142,7 @@ async fn a_reset_harvests_a_settled_batch_once_though_its_memory_holds_it() {
     assert_eq!(
         events.iter().filter(|event| *event == "harvest").count(),
         1,
-        "the compaction is harvested once: {events:?}"
+        "the compaction is harvested once per retirement: {events:?}"
     );
     assert_eq!(
         bridge.settles(),
@@ -8191,7 +8192,7 @@ async fn a_delete_of_a_live_identity_harvests_its_session_s_compactions_before_t
     assert_eq!(
         events.iter().filter(|event| *event == "harvest").count(),
         1,
-        "the compaction is harvested once: {events:?}"
+        "the compaction is harvested once per retirement: {events:?}"
     );
     assert_eq!(
         bridge.settles(),
@@ -8555,6 +8556,59 @@ async fn a_host_adopted_identity_the_roster_unlists_is_not_settled_or_handed_bac
     assert!(
         !events.iter().any(|event| event == "harvest"),
         "nothing of the adopted identity's session is harvested: {events:?}"
+    );
+    drop(runtime);
+}
+
+/// The roster's unlisting of a dormant identity whose settle answers that
+/// nothing is owed, while the session's memory holds a compaction's
+/// discards (an earlier finalization published them): the declaration
+/// keeps nothing for the incarnation, and the lifecycle projection's
+/// retirement, whose cause plans the harvest, reads the compactions the
+/// session's memory holds before it distills the retired session's
+/// transcript.
+#[tokio::test]
+async fn an_unlisting_reads_the_compactions_its_session_s_memory_holds_before_its_transcript() {
+    let (runtime, bridge, _session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction_over(
+            "triage:owed-unlist-read",
+            OwedDiscards::Published,
+            0,
+        )
+        .await;
+    let id = make_identity("triage:owed-unlist-read");
+    // Core's settle answers that nothing is owed.
+    *bridge.owed_compaction.lock().unwrap() = None;
+
+    context
+        .bootstrap_roster(&[])
+        .await
+        .expect("the roster pass");
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        1,
+        "the roster pass retires the unlisted identity in Core"
+    );
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!("the unlisting's planned read reaches the distiller as harvest evidence: {events:?}")
+    });
+    let transcript = at("transcript").expect("the unlisting distills the session's transcript");
+    assert!(
+        harvest < transcript,
+        "the read comes before the transcript distillation: {events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|event| *event == "harvest").count(),
+        1,
+        "the compactions are harvested once per retirement: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's seal"
     );
     drop(runtime);
 }

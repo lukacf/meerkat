@@ -97,7 +97,9 @@ pub struct ApprovalGrantPolicy {
     /// Longest window one offer may ask for, never past the host's own grant
     /// maximum.
     pub max_window_ms: u64,
-    /// How long the approver has to decide an offer.
+    /// How long the approver has to decide an offer, at most: an offer whose
+    /// offering grant's window ends sooner is due by that window's end less
+    /// its requested window.
     pub decision_window_ms: u64,
 }
 

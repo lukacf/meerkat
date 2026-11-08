@@ -65,6 +65,9 @@ pub const APPROVAL_BRANCH_LABEL: &str = "decision.approval_branch";
 /// executor refuses an execution whose provenance is not a person's. A
 /// model reviewer's allow can therefore never approve a grant, a tool
 /// grant, a release or a gate.
+///
+/// The list must grow with each kind decided by people only, whichever crate
+/// owns the kind: a kind missing from it keeps a review stage.
 pub const DECIDED_BY_PEOPLE_ONLY: &[&str] = &[
     "grant.child",
     "tool_grant.issue",

@@ -24,7 +24,7 @@ use meerkat_authorization_contracts::constraints::LifetimeBound;
 use meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 use meerkat_authorization_contracts::work_association::GrantLineageRef;
 use meerkat_core::approval::decision::{
-    ConsentProvenance, DecisionEvidence, DecisionId, DecisionKind, DecisionPhase,
+    ConsentProvenance, DecisionCleanup, DecisionEvidence, DecisionId, DecisionKind, DecisionPhase,
     DecisionReference, DecisionTier, StoredDecision,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState};
@@ -54,9 +54,11 @@ use crate::decision::{
 /// from the decision. A commit landed exactly when that grant exists. The
 /// decision's notice admits the approved work into the branch the execution
 /// opened, then tells the origin it was approved; an admission that fails
-/// for good tells the origin it was refused. An ended decision that executed
-/// nothing retires any branch it opened and tells the origin how it ended,
-/// with no content. Each pass of the loop sweeps the cleanup that is due
+/// for good tells the origin it was refused, and a notice delivered once
+/// that branch ended tells the origin how the request ended, from the
+/// decision's reply fact. An ended decision that executed nothing retires
+/// any branch it opened and tells the origin how it ended, with no content.
+/// Each pass of the loop sweeps the cleanup that is due
 /// ([`DecisionExecutor::sweep`]).
 pub struct GrantDecisionExecutor {
     grants: ApprovalGrants,
@@ -152,6 +154,10 @@ enum Due {
     NotYet,
     /// It cannot be told now: nothing is done this pass.
     Unknown,
+    /// Its cleanup is settled and no controller grant of it is left: a
+    /// branch its host would not retire stays listed, and nothing more is
+    /// done or reported for it.
+    Settled,
 }
 
 impl ApprovalGrants {
@@ -275,7 +281,8 @@ impl ApprovalGrants {
     /// admits nothing new: the admission is idempotent per decision (the
     /// approved work's input carries the decision's work id as its
     /// idempotency key), and a branch that already ended is never opened
-    /// again. `None` to be asked again at a later pass.
+    /// again: the origin is told how the request ended
+    /// ([`Self::branch_ended`]). `None` to be asked again at a later pass.
     async fn admit_approved_work(
         &self,
         decision: &StoredDecision,
@@ -295,18 +302,12 @@ impl ApprovalGrants {
         };
         // Only the branch the execution opened runs the approved work. Once
         // it ended (its work ran, or its window passed, before this notice's
-        // receipt was recorded), the notice settles and nothing is forked.
+        // receipt was recorded), nothing is forked, and the origin is told
+        // how its request ended. A host that cannot list every open branch
+        // now answers unavailable, and the notice waits for a later pass.
         match inner.branches.open_branches().await {
             Ok(open) if open.contains(decision_id) => {}
-            Ok(_) => {
-                tracing::info!(
-                    decision = %decision_id,
-                    "the approval branch already ended: the notice settles and admits nothing"
-                );
-                return Some(ApprovalConsentDeliveryState::Failed {
-                    reason: "the approval branch had already ended".to_owned(),
-                });
-            }
+            Ok(_) => return self.branch_ended(decision_id, request).await,
             Err(_) => return None,
         }
         let Some(branch) = approval_branch_principal(grantee, decision_id) else {
@@ -484,6 +485,47 @@ impl ApprovalGrants {
         })
     }
 
+    /// The branch the execution of `decision_id` opened ended before its
+    /// notice's receipt was recorded (its work ran and the receipt was lost,
+    /// or its window passed while the origin could not be told): nothing is
+    /// forked again, and the origin is told how its request ended, from the
+    /// decision's own reply fact, with no content. A settled reply is the
+    /// answer the approved work gave the requester, so the origin learns the
+    /// request was approved; with none, no answer is coming, and it learns
+    /// the request was refused. The notice settles with the origin's
+    /// receipt, and stays owed while the origin cannot be told.
+    async fn branch_ended(
+        &self,
+        decision_id: &DecisionId,
+        request: &GrantChildRequest,
+    ) -> Option<ApprovalConsentDeliveryState> {
+        let replied = match self.0.decisions.get(decision_id) {
+            Ok(decision) => decision.state.reply_digest.is_some(),
+            Err(error) => {
+                tracing::warn!(
+                    decision = %decision_id,
+                    %error,
+                    "the decision cannot be read now; its notice waits for a later pass"
+                );
+                return None;
+            }
+        };
+        let outcome = if replied {
+            AccessOutcome::Approved
+        } else {
+            AccessOutcome::Refused
+        };
+        tracing::info!(
+            decision = %decision_id,
+            outcome = outcome.as_str(),
+            "the approval branch already ended: its origin is told how the request ended"
+        );
+        self.0
+            .replies
+            .notify_origin(&request.origin, decision_id, outcome)
+            .await
+    }
+
     /// Tell the origin of an ended decision that executed nothing how it
     /// ended, once what its execution created is undone: its notice settles
     /// after its cleanup, so a cleanup left now is asked for again with the
@@ -505,9 +547,24 @@ impl ApprovalGrants {
 
     /// Whether the cleanup of `decision` is due, read from its decision
     /// (`branch_open`: whether the host lists its branch open, `None` when
-    /// the host could not list its branches now).
-    fn cleanup_due(&self, decision: &DecisionId, branch_open: Option<bool>) -> Due {
+    /// the host could not list its branches now; `controller_unrevoked`:
+    /// whether its branch controller grant is unrevoked, `None` when the
+    /// grant owner could not say now).
+    fn cleanup_due(
+        &self,
+        decision: &DecisionId,
+        branch_open: Option<bool>,
+        controller_unrevoked: Option<bool>,
+    ) -> Due {
         match self.0.decisions.get(decision) {
+            // Undone and settled: a branch its host would not retire stays
+            // listed, and nothing more is done or reported for it.
+            Ok(row)
+                if row.state.cleanup == DecisionCleanup::Settled
+                    && controller_unrevoked == Some(false) =>
+            {
+                Due::Settled
+            }
             Ok(row) => match row.state.phase {
                 // Its execution may be in flight, or run again.
                 DecisionPhase::Open | DecisionPhase::Approved => Due::NotYet,
@@ -564,25 +621,37 @@ impl ApprovalGrants {
     /// each, one read of its decision. A branch whose decision may still
     /// execute, or whose work may still run within its window, is kept; for
     /// every other one the branch is retired, its controller grant revoked
-    /// and its decision's cleanup fact settled. Each step that cannot be
+    /// and its decision's cleanup fact settled. A decision whose cleanup is
+    /// settled and whose controller grant is revoked is left as it is: a
+    /// branch its host would not retire stays listed, and its cleanup is
+    /// reported once, by the pass that settled it. Each step that cannot be
     /// taken now is left for the next pass. The loop runs it at each pass
     /// ([`DecisionExecutor::sweep`]).
     pub(crate) async fn sweep(&self) -> Vec<(DecisionId, DecisionPassOutcome)> {
         let inner = &self.0;
         let mut hits = BTreeSet::new();
-        match inner
+        // The decisions whose branch controller grant is unrevoked, when the
+        // grant owner can say now.
+        let unrevoked = match inner
             .grants
             .unrevoked_grants(|id| decision_of_branch_controller(id).is_some())
         {
-            Ok(grants) => hits.extend(
+            Ok(grants) => Some(
                 grants
                     .iter()
-                    .filter_map(|grant| decision_of_branch_controller(&grant.grant_id)),
+                    .filter_map(|grant| decision_of_branch_controller(&grant.grant_id))
+                    .collect::<BTreeSet<_>>(),
             ),
-            Err(refusal) => tracing::warn!(
-                %refusal,
-                "the grant owner cannot list the branch controller grants now"
-            ),
+            Err(refusal) => {
+                tracing::warn!(
+                    %refusal,
+                    "the grant owner cannot list the branch controller grants now"
+                );
+                None
+            }
+        };
+        if let Some(unrevoked) = &unrevoked {
+            hits.extend(unrevoked.iter().cloned());
         }
         let open = match inner.branches.open_branches().await {
             Ok(open) => Some(open.into_iter().collect::<BTreeSet<_>>()),
@@ -597,8 +666,11 @@ impl ApprovalGrants {
         let mut outcomes = Vec::new();
         for decision in hits {
             let branch_open = open.as_ref().map(|open| open.contains(&decision));
-            let outcome = match self.cleanup_due(&decision, branch_open) {
-                Due::NotYet => continue,
+            let controller_unrevoked = unrevoked
+                .as_ref()
+                .map(|unrevoked| unrevoked.contains(&decision));
+            let outcome = match self.cleanup_due(&decision, branch_open, controller_unrevoked) {
+                Due::NotYet | Due::Settled => continue,
                 Due::Unknown => DecisionPassOutcome::Deferred(DecisionDeferral::CleanupUnsettled),
                 Due::Now => match self.clean_up(&decision).await {
                     Cleanup::Done => DecisionPassOutcome::CleanupSettled,

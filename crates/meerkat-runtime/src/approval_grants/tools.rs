@@ -38,12 +38,16 @@ struct ReplyArguments {
 /// same payload whether it is refused when its plan resolves, when its plan
 /// dispatches or at its effect: `{"refusal": "not_governed_work"}` outside
 /// governed work of one original, `{"refusal": "not_an_approved_work"}` for
-/// a reply outside an approved work, `{"refusal": "reply_already_delivered"}`
+/// a reply outside an approved work, `{"refusal": "reply_already_settled"}`
 /// for a reply with another text than the settled one, and an access
 /// offer's refusal kind with its reason ([`AccessOfferRefusal`], for example
 /// `{"refusal": "no_child_approval_rule", "reason": "no_parent_grant"}`). A
-/// grant owner that cannot answer now fails the call as the retryable
-/// `tool_unavailable` ([`meerkat_core::ToolUnavailableReason::TemporarilyUnavailable`]).
+/// reply is settled before the host's route delivers it, so a delivery the
+/// route cannot make now fails as `execution_failed` with
+/// `{"refusal": "reply_route_unavailable", "retry": "same_text"}`: the
+/// settled text is the one to send again. A grant owner that cannot answer
+/// now fails the call as the retryable `tool_unavailable`
+/// ([`meerkat_core::ToolUnavailableReason::TemporarilyUnavailable`]).
 pub struct DecisionsToolDispatcher {
     grants: ApprovalGrants,
     tool_defs: Arc<[Arc<ToolDef>]>,
@@ -172,11 +176,26 @@ fn not_approved() -> Refusal {
     }
 }
 
-/// The approved work already replied with another text.
-fn already_replied() -> Refusal {
+/// Another reply is settled for the approved work, delivered or not: the
+/// work replies once, with that text.
+fn another_reply_settled() -> Refusal {
     Refusal {
-        message: "this approved work already replied with another text".to_owned(),
-        data: serde_json::json!({"refusal": "reply_already_delivered"}),
+        message: "another reply is settled for this approved work: it replies once, with that \
+                  text, and a delivery of it that failed is retried with exactly that text"
+            .to_owned(),
+        data: serde_json::json!({"refusal": "reply_already_settled"}),
+    }
+}
+
+/// The reply is settled, and the host's route could not deliver it now:
+/// only the same text is ever delivered.
+fn not_delivered_now(reason: &str) -> Refusal {
+    Refusal {
+        message: format!(
+            "the reply is settled and was not delivered now ({reason}): retry with exactly the \
+             same text"
+        ),
+        data: serde_json::json!({"refusal": "reply_route_unavailable", "retry": "same_text"}),
     }
 }
 
@@ -339,7 +358,7 @@ impl DecisionsToolDispatcher {
             Err(DecisionError::Refused {
                 refusal: DecisionRefusal::NotOwed,
                 ..
-            }) => return Err(already_replied().tool_error()),
+            }) => return Err(another_reply_settled().tool_error()),
             Err(error) => {
                 return Err(ToolError::ExecutionFailed {
                     message: error.to_string(),
@@ -362,10 +381,12 @@ impl DecisionsToolDispatcher {
                 });
                 Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
             }
-            Err(ReplyRouteError::AlreadyDelivered) => Err(already_replied().tool_error()),
-            Err(error) => Err(ToolError::ExecutionFailed {
-                message: error.to_string(),
-            }),
+            // The route holds another text for this reply id: its own guard
+            // answers as the decision does.
+            Err(ReplyRouteError::AlreadyDelivered) => Err(another_reply_settled().tool_error()),
+            Err(ReplyRouteError::Unavailable(reason)) => {
+                Err(not_delivered_now(&reason).tool_error())
+            }
         }
     }
 }

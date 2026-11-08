@@ -8,7 +8,7 @@ use meerkat_core::approval::consent::ConsentEligibilityAnswer;
 use crate::decision::{DecisionApproverCurrentness, DurableDecisionService};
 
 /// The host's [`DecisionApproverCurrentness`] answer, asked again at each use
-/// of an approval-carried grant (review P2-16): the decision the grant
+/// of an approval-carried grant: the decision the grant
 /// carries is read from its owner, and the host answers for the person who
 /// decided it, as it answers when the decision's execution is authorized.
 /// A decision that cannot be read now, or an answer the host cannot give

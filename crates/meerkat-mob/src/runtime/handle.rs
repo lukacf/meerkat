@@ -12645,12 +12645,37 @@ impl MobHandle {
     /// List members currently eligible for runtime work dispatch.
     ///
     /// Excludes retiring, completed, broken, or unknown members even if they
-    /// still appear in the public operational projection.
+    /// still appear in the public operational projection, and every open
+    /// approval branch (by its recorded creation source): a branch runs only
+    /// its decision's approved work, so no role-addressed dispatch (a flow
+    /// step, its target provisioning, a supervisor escalation) selects it.
     pub(crate) async fn list_runnable_members(&self) -> Vec<MobMemberListEntry> {
-        self.list_members()
-            .await
+        // One read of the roster for the projection and the branches.
+        let (entries_by_identity, branches) = {
+            let roster = self.roster.read().await;
+            let branches: BTreeSet<AgentIdentity> = roster
+                .list_all()
+                .filter(|entry| entry.approval_branch().is_some())
+                .map(|entry| entry.agent_identity.clone())
+                .collect();
+            let entries: BTreeMap<AgentIdentity, RosterEntry> = roster
+                .list_all()
+                .cloned()
+                .map(|entry| (entry.agent_identity.clone(), entry))
+                .collect();
+            (entries, branches)
+        };
+        // Watch-borrow discipline: the guard stays inside this block and
+        // never crosses an await.
+        let entries = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            self.project_member_list_entries_from_machine_state(entries_by_identity, &machine_state)
+        };
+        entries
             .into_iter()
-            .filter(|entry| entry.status == MobMemberStatus::Active)
+            .filter(|entry| {
+                entry.status == MobMemberStatus::Active && !branches.contains(&entry.agent_identity)
+            })
             .collect()
     }
 

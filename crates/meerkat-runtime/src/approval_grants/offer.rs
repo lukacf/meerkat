@@ -149,8 +149,9 @@ pub enum AccessOfferRefusalKind {
     UsesOverPolicy,
     /// A longer window than the host's policy allows.
     WindowOverPolicy,
-    /// The offering grant's window ends before the requested window would:
-    /// the grant could never be issued with the presented terms.
+    /// The offering grant's window ends before the requested window would,
+    /// or with it, leaving no time to decide: the grant could never be
+    /// issued with the presented terms.
     WindowOverParent,
     /// The offering grant's bounds exclude the approved work: its processor
     /// (the approval branch) or its audience (the requester).
@@ -588,6 +589,25 @@ impl ApprovalGrants {
                 AccessOfferRefusalKind::WindowOverParent,
             )));
         }
+        // The decision is due by the last moment the grant can still be
+        // issued with the presented terms: the offering grant's window end
+        // less the requested window, when that comes before the host's
+        // decision window ends. An approval after it could only end
+        // `terms_changed`, so the decision expires first; an offer that
+        // leaves no time to decide is never held.
+        let mut deadline_at_ms = now_ms.saturating_add(policy.decision_window_ms);
+        if let LifetimeBound::Window {
+            expires_at_ms: parent_end,
+            ..
+        } = parent.restrictions.lifetime.bound()
+        {
+            deadline_at_ms = deadline_at_ms.min(parent_end.saturating_sub(duration_ms));
+        }
+        if deadline_at_ms <= now_ms {
+            return Err(AccessOfferError::Refused(AccessOfferRefusal::of(
+                AccessOfferRefusalKind::WindowOverParent,
+            )));
+        }
         let outside = |reason| {
             AccessOfferError::Refused(AccessOfferRefusal::because(
                 AccessOfferRefusalKind::OutsideParentBounds,
@@ -658,7 +678,7 @@ impl ApprovalGrants {
             body,
             requester,
             rule.approver_id,
-            now_ms.saturating_add(policy.decision_window_ms),
+            deadline_at_ms,
             rendering,
             inner.renderer.clone(),
         );

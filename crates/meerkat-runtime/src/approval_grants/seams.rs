@@ -207,9 +207,14 @@ pub enum ApprovalBranchError {
 /// - [`Self::retire`] retires the branch of `decision` through the ordinary
 ///   member retire path; retiring a retired or never opened branch succeeds.
 /// - [`Self::open_branches`] lists every branch open now, by its decision,
-///   from the hosts' rosters as they stand: it wakes no dormant member and
-///   no dormant mob. Core's sweep reads it at each pass
-///   ([`super::ApprovalGrants::sweep_branches`]).
+///   from the hosts' rosters as they stand, dormant members and dormant mobs
+///   included: it wakes none of them. Core reads a branch missing from the
+///   list as ended (its notice admits nothing, and the sweep retires the
+///   branch and revokes its controller grant), so the list is whole or not
+///   given: a host that cannot list every open branch now without waking a
+///   member or a mob answers [`ApprovalBranchError::Unavailable`], never a
+///   partial list, and Core asks again at a later pass. Core's sweep reads
+///   it at each pass ([`super::ApprovalGrants::sweep_branches`]).
 #[async_trait]
 pub trait ApprovalBranchHost: Send + Sync {
     fn grantee_basis(&self, grantee: &PrincipalRef) -> Option<ApprovalGranteeBasis>;

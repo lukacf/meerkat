@@ -558,8 +558,9 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
                 ("MeerkatMachineEffect", "RuntimeEffectFact"),
                 ("RuntimeEffectKind", "CancelAfterBoundary"),
                 ("RuntimeEffectKind", "StopRuntimeExecutor"),
+                ("MeerkatMachineEffect", "ExactRunBoundaryCancel"),
             ],
-            label: "runtime shell files must not construct RuntimeEffectFact literals",
+            label: "runtime shell files must not construct runtime effect literals",
             findings,
         };
         visitor.visit_file(&parsed);

@@ -274,14 +274,15 @@ them.
   `CancelAfterBoundaryAttached` still emits that fact. An exhaustive match
   needs the new arm.
 
-- Behaviour-only (not measured by the gate): `meerkat-runtime`: a boundary
-  cancel taken while a run is current reaches that run only through the
-  executor's `CoreExecutor::boundary_handle`; the runtime no longer also
-  calls the executor-wide `CoreExecutor::cancel_after_boundary` once that
-  run has ended. The executor-wide call now serves only a cancel taken
-  while no run is current, and an implementation returns `Ok` when no run
-  is active (the trait's documented contract): an error there stops the
-  session's runtime loop.
+- Behaviour-only (not measured by the gate): `meerkat-core`,
+  `meerkat-runtime`: a boundary cancel taken while a run is current reaches
+  that run only through the executor's `CoreExecutor::boundary_handle`; the
+  runtime no longer also calls the executor-wide
+  `CoreExecutor::cancel_after_boundary` once that run has ended. The
+  executor-wide call now serves only a cancel taken while no run is
+  current, and an implementation returns `Ok` when no run is active (the
+  trait's documented contract): an error there stops the session's runtime
+  loop.
 
 ### Added
 

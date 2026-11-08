@@ -233,16 +233,17 @@ impl MeerkatMachine {
     ///   reload: the reload refusal too. The run's inputs keep their
     ///   committed terminals, so the reloaded registration keeps no run, and
     ///   the tail is left to the session's durable-tail recovery;
-    /// - another writer took the session store's fence, or an unregister
-    ///   ended the run first: the refusal of a session that leaves this
-    ///   process ([`RuntimeDriverError::UnregisterInProgress`] while it
-    ///   drains, the unregister's own refusal while one is owed,
-    ///   [`RuntimeDriverError::NotReady`] once it is gone). A store that
-    ///   refuses this writer from the takeover on (a host store realm
-    ///   refuses its every read and write until it is reopened) keeps the
-    ///   registration from recording its unregister, so it needs a reload
-    ///   that no reload in this process can make: the call answers
-    ///   [`RuntimeDriverError::StaleAuthority`], never the reload refusal.
+    /// - the session's store realm lost its fence (another writer took it,
+    ///   or the realm stopped itself), or an unregister ended the run first:
+    ///   the refusal of a session that leaves this process
+    ///   ([`RuntimeDriverError::UnregisterInProgress`] while it drains, the
+    ///   unregister's own refusal while one is owed,
+    ///   [`RuntimeDriverError::NotReady`] once it is gone). A realm that lost
+    ///   its fence refuses this writer's every read and write until it is
+    ///   opened again, so the registration cannot record its unregister and
+    ///   needs a reload that no reload in this process can make: a settle
+    ///   answers [`RuntimeDriverError::StaleAuthority`] every time, never
+    ///   the reload refusal.
     ///   An unregister that keeps queued work (a mob Shutdown's default)
     ///   ends the run's inputs `Abandoned { Stopped }`, whatever each
     ///   input's state; one that stops ends them `Abandoned { Cancelled }`.
@@ -279,8 +280,8 @@ impl MeerkatMachine {
     /// durability reload, the refusal of one whose unregister is owed or
     /// running, and those refusals for a settlement that did not commit.
     /// [`RuntimeDriverError::StaleAuthority`] when the registration needs a
-    /// durability reload while another writer holds the session store's
-    /// fence. [`RuntimeDriverError::InputTerminalNotYetReadable`] when the
+    /// durability reload while the session's store realm has lost its fence.
+    /// [`RuntimeDriverError::InputTerminalNotYetReadable`] when the
     /// registration no longer keeps the run but an input bound to it reads
     /// no committed terminal.
     pub async fn settle_retained_run(
@@ -435,11 +436,11 @@ impl MeerkatMachine {
 
     /// The session's durability-ready mutation gate, for
     /// [`Self::settle_retained_run`]. A registration that needs a durability
-    /// reload while another writer holds the store's fence refuses as a
-    /// session that leaves this process,
-    /// [`RuntimeDriverError::StaleAuthority`]: such a store refuses this
-    /// writer until it is reopened, the reload's reads included, so the
-    /// retained run is the new owner's.
+    /// reload while the store realm has lost its fence (another writer took
+    /// it, or the realm stopped itself) refuses as a session that leaves this
+    /// process, [`RuntimeDriverError::StaleAuthority`]: the realm refuses
+    /// this writer until it is opened again, the reload's reads included, so
+    /// no reload here can serve the session.
     async fn lock_retained_run_settle_gate(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -453,8 +454,9 @@ impl MeerkatMachine {
             {
                 Err(RuntimeDriverError::StaleAuthority {
                     reason: format!(
-                        "another writer holds the store fence of session {session_id}; the run \
-                         it retained is not settled in this process"
+                        "the store realm of session {session_id} lost its fence and refuses \
+                         this writer until it is opened again; the run it retained is not \
+                         settled in this process"
                     ),
                 })
             }

@@ -43,8 +43,8 @@ pub enum RetainedRunSettlement {
     /// a reset or a retire that ended the run first ended its inputs with its
     /// own reason (a stop's `Cancelled`, a reset's `Reset`, a retire's
     /// `Retired`). The call never answers `Settled` when the settlement did
-    /// not commit (its write failed, or another writer took the session
-    /// store's fence), when the settle's tail repair left the run's tail
+    /// not commit (its write failed, or the session's store realm lost its
+    /// fence), when the settle's tail repair left the run's tail
     /// standing, or when an unregister ended the run first: it answers the
     /// registration's refusal instead. An unregister that ends the run ends
     /// its inputs `Abandoned { reason: Stopped }` when it keeps queued work

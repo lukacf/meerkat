@@ -1894,6 +1894,7 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    mod close_custody;
     mod service_parent_controls;
     use super::*;
     use meerkat_toolkit::host_lifetime::control::{HostCloseScope, HostComponentState};
@@ -2073,6 +2074,8 @@ mod tests {
         joining: Arc<AtomicUsize>,
         wake: Arc<Notify>,
         fail_host_loss: bool,
+        // Final custody releases this owner received.
+        released: Arc<AtomicUsize>,
     }
     impl ProbeOwner {
         fn new(settled: bool) -> Self {
@@ -2090,6 +2093,7 @@ mod tests {
                 joining: Arc::new(AtomicUsize::new(0)),
                 wake: Arc::new(Notify::new()),
                 fail_host_loss: false,
+                released: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn observation(&self) -> HostCloseObservation {

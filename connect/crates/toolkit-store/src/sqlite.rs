@@ -135,6 +135,19 @@ impl SqliteStore {
         .map_err(|_| StoreError::Worker)
     }
 
+    /// Test-only: a copy of the physical owner file's descriptor while this
+    /// store holds its custody. It shares the owner's open file description.
+    #[cfg(test)]
+    fn owner_descriptor_copy(&self) -> Option<File> {
+        self.connection
+            .lock()
+            .ok()?
+            .as_ref()?
+            ._physical_owner
+            .try_clone()
+            .ok()
+    }
+
     fn open_mode(
         path: &Path,
         create: bool,

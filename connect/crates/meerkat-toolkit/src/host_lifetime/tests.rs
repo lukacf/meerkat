@@ -1382,12 +1382,26 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
     store.release();
 }
 
-/// The settled activation close ends the bound native grant owner's custody
-/// while a task of the closed host still holds the owner: that reference can
-/// no longer use or change the owner, and the same grant store restores at
-/// once in this process, with every acknowledged grant.
+/// Stand-in until the lifetime's final custody release exists: it releases
+/// nothing. The change that adds the release removes it.
+trait FinalCustodyRelease {
+    async fn release_native_custody(&self) -> Result<()>;
+}
+impl FinalCustodyRelease for NativeHostLifetime {
+    async fn release_native_custody(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A settled join of the host's close leaves the bound native grant owner in
+/// custody: work the host admitted before its close that still holds the
+/// owner keeps using and changing it. The close's final release, taken once
+/// every join that can still touch the owner has returned, ends that custody
+/// while the reference is still held: it can no longer use or change the
+/// owner, and the same grant store restores at once in this process, with
+/// every acknowledged grant.
 #[tokio::test]
-async fn settled_close_releases_the_bound_grant_owner_while_a_reference_is_held() {
+async fn a_settled_join_keeps_the_bound_grant_owner_until_the_final_release() {
     use meerkat_authorization::{
         clock::HostAuthorizationClock,
         grants::{
@@ -1444,24 +1458,42 @@ async fn settled_close_releases_the_bound_grant_owner_while_a_reference_is_held(
         );
     }
     f.open();
-    // Stands in for a task of the host that outlives its close; the host's
-    // own reference is gone.
+    // Stands in for work the host admitted before its close and that
+    // outlives it; the host's own reference is gone.
     let straggler = Arc::clone(&grants);
     drop(grants);
 
-    let closing = f.owner.host_lost().unwrap();
-    straggler
-        .resolve_lineage(std::slice::from_ref(&kept), &application, None)
-        .expect("custody holds until the close settles");
-    assert!(
-        matches!(restore(), Err(GrantDurabilityError::StoreUnavailable)),
-        "the lease is held until the close settles"
-    );
+    let closing = f
+        .owner
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
     assert_eq!(
         f.owner.join_close(&closing.handle).await.unwrap().state,
         HostCloseState::Settled
     );
+    assert!(
+        straggler
+            .resolve_lineage(std::slice::from_ref(&kept), &application, None)
+            .is_ok(),
+        "admitted work still uses the owner after the settled join"
+    );
+    let admitted = straggler.issue_root(
+        &root,
+        id("admitted"),
+        application.clone(),
+        None,
+        ExecutionRestrictions::unrestricted(),
+    );
+    assert!(
+        admitted.is_ok(),
+        "admitted work still changes the owner after the settled join"
+    );
+    assert!(
+        matches!(restore(), Err(GrantDurabilityError::StoreUnavailable)),
+        "the lease is held until the final release"
+    );
 
+    f.owner.release_native_custody().await.unwrap();
     assert!(matches!(
         straggler.resolve_lineage(std::slice::from_ref(&kept), &application, None),
         Err(GrantRefusal::Unavailable)
@@ -1476,10 +1508,12 @@ async fn settled_close_releases_the_bound_grant_owner_while_a_reference_is_held(
         ),
         Err(GrantRefusal::Unavailable)
     );
-    let successor = restore().expect("the settled close handed the lease back");
-    successor
-        .resolve_lineage(std::slice::from_ref(&kept), &application, None)
-        .expect("the successor keeps every acknowledged grant");
+    let successor = restore().expect("the final release handed the lease back");
+    for grant in [kept, admitted.unwrap()] {
+        successor
+            .resolve_lineage(std::slice::from_ref(&grant), &application, None)
+            .expect("the successor keeps every acknowledged grant");
+    }
     drop(straggler);
 }
 
@@ -1499,10 +1533,28 @@ mod store_custody {
     }
 
     pub(super) fn key() -> StoreKey {
+        key_for("record")
+    }
+
+    pub(super) fn key_for(id: &str) -> StoreKey {
         StoreKey {
             realm: "realm".into(),
             owner: "owner".into(),
-            id: "record".into(),
+            id: id.into(),
+        }
+    }
+
+    pub(super) fn record(id: &str) -> AdmissionRequest {
+        AdmissionRequest {
+            key: key_for(id),
+            admission_key: id.into(),
+            data: RecordData {
+                schema: "test.close".into(),
+                version: 1,
+                body: serde_json::json!({ "value": 1 }),
+            },
+            events: vec![],
+            effects: vec![],
         }
     }
 
@@ -1510,31 +1562,21 @@ mod store_custody {
     /// published store: with exclusive physical custody.
     pub(super) async fn published(path: &std::path::Path) -> SqliteStore {
         let initial = SqliteStore::open(path).unwrap();
-        initial
-            .admit(AdmissionRequest {
-                key: key(),
-                admission_key: "record".into(),
-                data: RecordData {
-                    schema: "test.close".into(),
-                    version: 1,
-                    body: serde_json::json!({ "value": 1 }),
-                },
-                events: vec![],
-                effects: vec![],
-            })
-            .await
-            .unwrap();
+        initial.admit(record("record")).await.unwrap();
         drop(initial);
         SqliteStore::open_existing_published(path, std::sync::Arc::new(Publication)).unwrap()
     }
 }
 
-/// The settled activation close ends the bound native store's custody while
-/// a task of the closed host still holds the store: that reference can no
-/// longer read or change it, and the same database opens again at once, with
-/// every committed record.
+/// A settled join of the host's close leaves the bound native store in
+/// custody: work the host admitted before its close that still holds the
+/// store keeps reading and changing it. The close's final release, taken
+/// once every join that can still touch the store has returned, ends that
+/// custody while the reference is still held: it can no longer read or change
+/// the store, and the same database opens again at once, with every
+/// committed record.
 #[tokio::test]
-async fn settled_close_releases_the_bound_store_while_a_reference_is_held() {
+async fn a_settled_join_keeps_the_bound_store_until_the_final_release() {
     use toolkit_store::{SqliteStore, StoreError, ToolkitStore};
 
     let mut f = Fixture::new();
@@ -1545,47 +1587,93 @@ async fn settled_close_releases_the_bound_store_while_a_reference_is_held() {
         .bind_native_store_custody(&store)
         .unwrap();
     f.open();
-    // Stands in for a task of the host that outlives its close; the host's
-    // own reference is gone.
+    // Stands in for work the host admitted before its close and that
+    // outlives it; the host's own reference is gone.
     let straggler = Arc::clone(&store);
     drop(store);
 
-    let closing = f.owner.host_lost().unwrap();
+    let closing = f
+        .owner
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
+    assert_eq!(
+        f.owner.join_close(&closing.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+    assert!(
+        matches!(straggler.get(&store_custody::key()).await, Ok(Some(_))),
+        "admitted work still reads the store after the settled join"
+    );
     assert!(
         straggler
-            .get(&store_custody::key())
+            .admit(store_custody::record("admitted"))
             .await
-            .unwrap()
-            .is_some(),
-        "custody holds until the close settles"
+            .is_ok(),
+        "admitted work still changes the store after the settled join"
     );
     assert!(
         matches!(
             SqliteStore::open_existing(&path),
             Err(StoreError::OwnerUnavailable)
         ),
-        "the store stays held until the close settles"
-    );
-    assert_eq!(
-        f.owner.join_close(&closing.handle).await.unwrap().state,
-        HostCloseState::Settled
+        "the store is held until the final release"
     );
 
+    f.owner.release_native_custody().await.unwrap();
     assert!(matches!(
         straggler.get(&store_custody::key()).await,
         Err(StoreError::OwnerUnavailable)
     ));
     let successor =
-        SqliteStore::open_existing(&path).expect("the settled close handed the store back");
-    assert!(
-        successor
-            .get(&store_custody::key())
-            .await
-            .unwrap()
-            .is_some(),
-        "the successor reads every committed record"
-    );
+        SqliteStore::open_existing(&path).expect("the final release handed the store back");
+    for id in ["record", "admitted"] {
+        assert!(
+            successor
+                .get(&store_custody::key_for(id))
+                .await
+                .unwrap()
+                .is_some(),
+            "the successor reads every committed record"
+        );
+    }
     drop(straggler);
+}
+
+/// The store custody a host binds covers every clone of the bound store: a
+/// value clone that work of the closed host keeps, after every reference to
+/// the bound allocation is gone, loses its custody at the final release too.
+#[tokio::test]
+async fn the_final_release_ends_the_store_for_a_value_clone() {
+    use toolkit_store::{SqliteStore, StoreError, ToolkitStore};
+
+    let mut f = Fixture::new();
+    let path = f._directory.path().join("value-clone-originals.sqlite3");
+    let store = Arc::new(store_custody::published(&path).await);
+    Arc::get_mut(&mut f.owner)
+        .unwrap()
+        .bind_native_store_custody(&store)
+        .unwrap();
+    f.open();
+    let clone = SqliteStore::clone(&store);
+    drop(store);
+
+    let closing = f
+        .owner
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
+    assert_eq!(
+        f.owner.join_close(&closing.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+    f.owner.release_native_custody().await.unwrap();
+    assert!(
+        matches!(
+            clone.get(&store_custody::key()).await,
+            Err(StoreError::OwnerUnavailable)
+        ),
+        "the final release ends the custody of a value clone"
+    );
+    SqliteStore::open_existing(&path).expect("the same database opens again at once");
 }
 
 #[tokio::test]

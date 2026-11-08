@@ -303,10 +303,12 @@ them.
   failure").
 
 - Behaviour-only (not measured by the gate): `meerkat-runtime`: a store that
-  answers a grant at or below the installed token now loses the realm (fail
-  closed). The contract already required every grant to answer a token
-  above every earlier grant of the realm; Core now holds a re-acquire's
-  grant to it, the takeover of the writer's own recorded lease included. A
+  answers a grant at or below the installed token, or at or below a grant of
+  the writer's own whose listing failed (an earlier grant of the realm), now
+  loses the realm (fail closed). The contract already required every grant
+  to answer a token above every earlier grant of the realm; Core now holds a
+  re-acquire's grant to it, the takeover of the writer's own recorded lease
+  included. A
   grant that breaks the store's token order poisons the realm with a cause
   that names the store, not another writer. Before, the writer installed the
   token again and resumed, so two writers could carry one token. A store

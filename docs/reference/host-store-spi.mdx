@@ -500,7 +500,8 @@ The store relies on Core keeping these rules:
   with its own token, or with the token of its own last grant whose listing
   failed (Core installs a granted token only once the listing passed).
 - **Token order.** Core checks that a re-acquire's grant answers a token
-  above the one it holds. A grant at or below it breaks the order every
+  above the one it holds, and above a grant of its own whose listing
+  failed. A grant at or below either breaks the order every
   grant must keep (`acquire_fence` above): two writers could carry one
   token, or a later writer a lower one. The realm stops until it is opened
   again, and its cause names your store's broken token order, not another

@@ -412,7 +412,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   every other one serves, and the readiness probe stays ready and names the
   scope with its cause in `HostStoreReadiness::quarantined_scopes` (new).
   Repair the scope in the store, then restart: a restart alone quarantines
-  it again.
+  it again. A conflict on a scope of the root mob storage, which holds every
+  mob Meta hosts, still fails the build, typed (the boot cannot open its
+  mobs), so Meta does not start and readiness never runs: repair the scope,
+  then restart.
 
 ### Fixed
 

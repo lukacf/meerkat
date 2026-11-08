@@ -203,6 +203,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &valid).as_public_str(),
@@ -216,6 +217,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
@@ -229,6 +231,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &machine_expired).as_public_str(),
@@ -242,6 +245,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),

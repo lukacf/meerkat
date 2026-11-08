@@ -310,7 +310,16 @@ pub fn marker_relation_for_tokens_and_snapshot(
         return AuthLeaseDurableMarkerRelation::Invalid;
     }
     if !snapshot.credential_present {
-        return AuthLeaseDurableMarkerRelation::TokenStale;
+        // A lease that withdrew its credential takes a record published
+        // strictly after the withdrawn publication (a later login elsewhere);
+        // a record published at or before it, or any record while the lease
+        // knows no withdrawn publication, is stale.
+        return match snapshot.released_publication_at_millis {
+            Some(released_at) if marker.credential_published_at_millis > released_at => {
+                AuthLeaseDurableMarkerRelation::TokenNewer
+            }
+            _ => AuthLeaseDurableMarkerRelation::TokenStale,
+        };
     }
     // The equal branches compare the record with the generation the lease
     // records for its current publication's marker: the marker generation of

@@ -1670,6 +1670,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(1),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert!(durable_marker::marker_payload_valid_for_tokens(
@@ -1717,6 +1718,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         let status = project_published_auth_status(now, None, &snapshot);

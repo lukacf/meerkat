@@ -25,6 +25,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `oauth_outstanding_flow_count`: `u64`
 - `release_draining`: `Bool`
 - `adopted_marker_generation`: `Option<u64>`
+- `released_publication_at_millis`: `Option<u64>`
 
 ## Inputs
 - `Acquire`(expires_at_ts: Option<u64>, credential_published_at_millis: u64, credential_material_fingerprint: Option<String>)
@@ -53,7 +54,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Runtime-Internal Inputs
 - `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>)
-- `RestoreCredentialLifecycleSnapshot`(lifecycle_phase: Option<AuthLifecyclePhase>, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>, restored_oauth_membership_observed: Bool, adopted_marker_generation: Option<u64>)
+- `RestoreCredentialLifecycleSnapshot`(lifecycle_phase: Option<AuthLifecyclePhase>, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>, restored_oauth_membership_observed: Bool, adopted_marker_generation: Option<u64>, released_publication_at_millis: Option<u64>)
 - `RestoreOAuthBrowserFlow`(flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64>)
 - `RestoreOAuthDeviceFlow`(flow_id: String, provider: Option<String>, expires_at_millis: Option<u64>)
 - `RestoreOAuthDevicePoll`(flow_id: String)
@@ -77,6 +78,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `released_oauth_membership_drained`
 - `released_not_release_draining`
 - `adopted_marker_generation_below_credential_generation`
+- `released_publication_only_without_credential`
 
 ## Transitions
 ### `Acquire`
@@ -351,7 +353,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotValid`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - ``
   - `restore_adopted_marker_generation_below_generation`
@@ -360,7 +362,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotExpiring`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - ``
   - `restore_adopted_marker_generation_below_generation`
@@ -369,7 +371,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotRefreshing`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - ``
   - `restore_adopted_marker_generation_below_generation`
@@ -378,7 +380,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotExpired`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - ``
   - `restore_adopted_marker_generation_below_generation`
@@ -387,7 +389,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotReauthRequired`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - ``
   - `restore_adopted_marker_generation_below_generation`
@@ -396,7 +398,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotNoCredentialWithOAuth`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - `restore_snapshot_has_no_credential`
   - `restore_oauth_membership_present`
@@ -405,7 +407,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RestoreCredentialLifecycleSnapshotNoCredentialWithoutOAuth`
 - From: `Valid`, `Expiring`, `Expired`, `Refreshing`, `ReauthRequired`, `Released`
-- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation)
+- On: `RestoreCredentialLifecycleSnapshot`(lifecycle_phase, expires_at, last_refresh, refresh_attempt, credential_present, credential_generation, credential_published_at_millis, restored_oauth_membership_observed, adopted_marker_generation, released_publication_at_millis)
 - Guards:
   - `restore_snapshot_has_no_credential`
   - `restore_oauth_membership_absent`

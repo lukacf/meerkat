@@ -154,6 +154,15 @@ macro_rules! auth_catalog_machine_dsl {
                 // compares a record with it. None when the marker carries
                 // credential_generation, and while no credential is present.
                 adopted_marker_generation: Option<u64>,
+                // The publication time of the credential the lease last
+                // withdrew (a release or a clear while it held one). A
+                // durable record published strictly after it is a later
+                // publication the lease takes; one published at or before
+                // it is not. A release or clear with no credential held
+                // keeps it, so a repeated release never drops the bound; a
+                // publication, or a restore with a credential, clears it.
+                // None while a credential is present.
+                released_publication_at_millis: Option<u64>,
             }
 
             init(Valid) {
@@ -175,6 +184,7 @@ macro_rules! auth_catalog_machine_dsl {
                 oauth_outstanding_flow_count = 0,
                 release_draining = false,
                 adopted_marker_generation = None,
+                released_publication_at_millis = None,
             }
 
             terminal [Released]
@@ -237,6 +247,8 @@ macro_rules! auth_catalog_machine_dsl {
                     // The captured snapshot's adopted_marker_generation:
                     // below credential_generation when present.
                     adopted_marker_generation: Option<u64>,
+                    // The captured snapshot's released_publication_at_millis.
+                    released_publication_at_millis: Option<u64>,
                 },
                 RestoreOAuthBrowserFlow { flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64> },
                 RestoreOAuthDeviceFlow { flow_id: String, provider: Option<String>, expires_at_millis: Option<u64> },
@@ -416,6 +428,16 @@ macro_rules! auth_catalog_machine_dsl {
                 }
             }
 
+            // The bound a withdrawn publication leaves is kept only while no
+            // credential is present.
+            invariant released_publication_only_without_credential {
+                if self.credential_present {
+                    self.released_publication_at_millis == None
+                } else {
+                    true
+                }
+            }
+
             // --- Transitions ---
 
             // A publication that names its credential value never publishes
@@ -450,6 +472,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
                     self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -675,6 +698,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = None;
                     self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -826,6 +850,11 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
                     self.adopted_marker_generation = None;
@@ -846,6 +875,11 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
                     self.adopted_marker_generation = None;
@@ -867,6 +901,11 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
                     self.adopted_marker_generation = None;
@@ -943,6 +982,11 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
                     self.adopted_marker_generation = None;
@@ -975,7 +1019,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Valid) && credential_present && credential_published_at_millis != None }
                 guard "restore_adopted_marker_generation_below_generation" {
@@ -1003,6 +1048,7 @@ macro_rules! auth_catalog_machine_dsl {
                             None
                         }
                     };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1028,7 +1074,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Expiring) && credential_present && credential_published_at_millis != None }
                 guard "restore_adopted_marker_generation_below_generation" {
@@ -1056,6 +1103,7 @@ macro_rules! auth_catalog_machine_dsl {
                             None
                         }
                     };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1081,7 +1129,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Refreshing) && credential_present && credential_published_at_millis != None }
                 guard "restore_adopted_marker_generation_below_generation" {
@@ -1109,6 +1158,7 @@ macro_rules! auth_catalog_machine_dsl {
                             None
                         }
                     };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1134,7 +1184,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Expired) && credential_present && credential_published_at_millis != None }
                 guard "restore_adopted_marker_generation_below_generation" {
@@ -1162,6 +1213,7 @@ macro_rules! auth_catalog_machine_dsl {
                             None
                         }
                     };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1187,7 +1239,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::ReauthRequired) && credential_present && credential_published_at_millis != None }
                 guard "restore_adopted_marker_generation_below_generation" {
@@ -1215,6 +1268,7 @@ macro_rules! auth_catalog_machine_dsl {
                             None
                         }
                     };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1240,7 +1294,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
                 guard "restore_oauth_membership_present" { self.oauth_outstanding_flow_count > 0 || restored_oauth_membership_observed }
@@ -1250,6 +1305,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.refresh_attempt = 0;
                     self.credential_present = false;
                     self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = released_publication_at_millis;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1275,7 +1331,8 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation,
                     credential_published_at_millis,
                     restored_oauth_membership_observed,
-                    adopted_marker_generation
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
                 guard "restore_oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 && restored_oauth_membership_observed == false }
@@ -1286,6 +1343,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.refresh_attempt = 0;
                     self.credential_present = false;
                     self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = released_publication_at_millis;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1336,6 +1394,11 @@ macro_rules! auth_catalog_machine_dsl {
                     } else {
                         None
                     };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1376,6 +1439,11 @@ macro_rules! auth_catalog_machine_dsl {
                         Some(credential_generation)
                     } else {
                         None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
                     };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
@@ -1418,6 +1486,11 @@ macro_rules! auth_catalog_machine_dsl {
                     } else {
                         None
                     };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1459,6 +1532,11 @@ macro_rules! auth_catalog_machine_dsl {
                     } else {
                         None
                     };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1499,6 +1577,11 @@ macro_rules! auth_catalog_machine_dsl {
                         Some(credential_generation)
                     } else {
                         None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
                     };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
@@ -2301,6 +2384,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
                     self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -2322,6 +2406,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
                     self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {

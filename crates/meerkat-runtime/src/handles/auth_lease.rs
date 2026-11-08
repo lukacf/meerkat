@@ -157,6 +157,7 @@ fn restore_credential_lifecycle_snapshot_input(
     credential_published_at_millis: Option<u64>,
     restored_oauth_membership_observed: bool,
     adopted_marker_generation: Option<u64>,
+    released_publication_at_millis: Option<u64>,
 ) -> auth_dsl::AuthMachineInput {
     auth_dsl::AuthMachineInput::RestoreCredentialLifecycleSnapshot {
         lifecycle_phase,
@@ -168,6 +169,7 @@ fn restore_credential_lifecycle_snapshot_input(
         credential_published_at_millis,
         restored_oauth_membership_observed,
         adopted_marker_generation,
+        released_publication_at_millis,
     }
 }
 
@@ -362,6 +364,7 @@ fn restore_state_with_oauth_sources_to_registry(
             lifecycle_state.credential_published_at_millis,
             restore_oauth_membership_observed(oauth_sources),
             lifecycle_state.adopted_marker_generation,
+            lifecycle_state.released_publication_at_millis,
         ),
         oauth_inputs,
         context,
@@ -1602,6 +1605,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 snapshot.credential_published_at_millis,
                 false,
                 snapshot.adopted_marker_generation,
+                snapshot.released_publication_at_millis,
             ),
             "AuthLeaseHandle::restore_auth_lifecycle_snapshot",
         )?;
@@ -1961,6 +1965,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                         .credential_present
                         .then_some(state.adopted_marker_generation)
                         .flatten(),
+                    released_publication_at_millis: state.released_publication_at_millis,
                 }
             }
             None => AuthLeaseSnapshot {
@@ -1970,6 +1975,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 generation: 0,
                 credential_published_at_millis: None,
                 adopted_marker_generation: None,
+                released_publication_at_millis: None,
             },
         }
     }
@@ -3247,6 +3253,7 @@ mod tests {
                 state.credential_published_at_millis,
                 false,
                 adopted,
+                state.released_publication_at_millis,
             )
         }
         let recorded = |authority: &auth_dsl::AuthMachineAuthority| {
@@ -3321,6 +3328,106 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recorded(&released), (2, None));
+    }
+
+    /// The publication time a lease keeps after withdrawing its credential:
+    /// a release or a clear while a credential is held records it, a release
+    /// with none held keeps it, a publication or a restore with a credential
+    /// clears it, and a rollback to a captured snapshot with no credential
+    /// restores the captured one.
+    #[test]
+    fn releases_keep_the_withdrawn_publication_time_until_a_publication() {
+        fn apply(
+            authority: &mut auth_dsl::AuthMachineAuthority,
+            input: auth_dsl::AuthMachineInput,
+        ) {
+            auth_dsl::AuthMachineMutator::apply(authority, input).expect("scenario input applies");
+        }
+        fn acquire(published_at: u64) -> auth_dsl::AuthMachineInput {
+            auth_dsl::AuthMachineInput::Acquire {
+                expires_at_ts: Some(100),
+                credential_published_at_millis: published_at,
+                credential_material_fingerprint: None,
+            }
+        }
+        let bound = |authority: &auth_dsl::AuthMachineAuthority| {
+            (
+                authority.state().credential_present,
+                authority.state().released_publication_at_millis,
+            )
+        };
+
+        // A release while a credential is held records its publication time;
+        // a release with none held keeps it.
+        let mut lease = auth_dsl::AuthMachineAuthority::new();
+        apply(&mut lease, acquire(7));
+        assert_eq!(bound(&lease), (true, None));
+        apply(
+            &mut lease,
+            auth_dsl::AuthMachineInput::ReleaseCredentialLifecycle,
+        );
+        assert_eq!(bound(&lease), (false, Some(7)));
+        let released = lease.state().clone();
+        apply(&mut lease, auth_dsl::AuthMachineInput::BeginRelease);
+        apply(&mut lease, auth_dsl::AuthMachineInput::Release);
+        assert_eq!(
+            bound(&lease),
+            (false, Some(7)),
+            "a repeated release keeps the bound"
+        );
+
+        // A clear while a credential is held records it too.
+        let mut cleared = auth_dsl::AuthMachineAuthority::new();
+        apply(&mut cleared, acquire(9));
+        apply(
+            &mut cleared,
+            auth_dsl::AuthMachineInput::ClearCredentialLifecycle,
+        );
+        assert_eq!(bound(&cleared), (false, Some(9)));
+
+        // A restore of a record with a credential clears it.
+        let mut restored =
+            auth_dsl::AuthMachineAuthority::recover_from_state(released.clone()).unwrap();
+        apply(
+            &mut restored,
+            restore_input_from_lifecycle(
+                auth_dsl::AuthLifecyclePhase::Valid,
+                Some(100),
+                None,
+                0,
+                true,
+                1,
+                Some(8),
+            ),
+        );
+        assert_eq!(bound(&restored), (true, None));
+
+        // A publication clears it; a rollback to the captured released
+        // snapshot restores the captured bound.
+        let mut login =
+            auth_dsl::AuthMachineAuthority::recover_from_state(released.clone()).unwrap();
+        apply(&mut login, acquire(10));
+        assert_eq!(bound(&login), (true, None));
+        apply(
+            &mut login,
+            auth_dsl::AuthMachineInput::ReleaseCredentialLifecycle,
+        );
+        apply(
+            &mut login,
+            restore_credential_lifecycle_snapshot_input(
+                None,
+                None,
+                None,
+                0,
+                false,
+                released.credential_generation,
+                None,
+                false,
+                None,
+                released.released_publication_at_millis,
+            ),
+        );
+        assert_eq!(bound(&login), (false, Some(7)));
     }
 
     #[test]

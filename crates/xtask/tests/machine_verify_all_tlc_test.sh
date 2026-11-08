@@ -606,16 +606,18 @@ fi
 # and two invariants (the classifier's verdict is Publish exactly when an
 # Acquire arm naming the value is enabled; a MarkPublicationRefused arm
 # withdraws the lease exactly when the refusal names the publication the
-# lease carries in a live phase). It requires its eight witnesses reached (a
+# lease carries in a live phase). It requires its nine witnesses reached (a
 # refusal and a logout healed by another value, a run-out window renewing
 # the same value, a refused and a logged-out value whose Acquire is disabled
 # while another's is enabled, a newer publication a late refusal of the
 # earlier one leaves valid, a refusal of the current publication withdrawing
-# it, a lease that records a marker generation below its own). Its --mutants
+# it, a lease that records a marker generation below its own, a lease that
+# withdrew its credential and keeps its publication time). Its --mutants
 # mode (by hand) refuses the Acquire guard removed, the renewal arms
 # AcquireFromExpiring and AcquireFromExpired disabled, the refusal's
-# correlation guard removed, and a restore that takes the record's
-# generation. 3 steps reach every witness.
+# correlation guard removed, a restore that takes the record's generation,
+# and a publication that keeps the withdrawn publication time. 4 steps reach
+# every witness.
 source_credential_publication_audit="${workspace_root}/specs/machines/auth/source_credential_publication_audit.sh"
 if [[ ! -x "${source_credential_publication_audit}" ]]; then
   echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2

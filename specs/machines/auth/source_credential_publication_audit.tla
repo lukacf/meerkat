@@ -53,15 +53,18 @@
 \* that ran out renewing the same value, a refused and a logged-out value
 \* whose Acquire is disabled while another value's is enabled, a newer
 \* publication that a late refusal of the earlier one leaves valid, a
-\* refusal of the current publication that withdraws it, and a lease that
-\* records a marker generation below its own. With --mutants the runner seeds
-\* four defects into copies of the generated model and requires TLC to refuse
+\* refusal of the current publication that withdraws it, a lease that
+\* records a marker generation below its own, and a lease that withdrew its
+\* credential and keeps its publication time. With --mutants the runner seeds
+\* five defects into copies of the generated model and requires TLC to refuse
 \* each: Acquire without its guard (refused by the action property),
 \* the renewal arms AcquireFromExpiring and AcquireFromExpired disabled
 \* (refused by AuditVerdictMatchesAcquire), MarkPublicationRefusedFromValid
-\* without its correlation guard (refused by AuditRefusalCorrelated), and
+\* without its correlation guard (refused by AuditRefusalCorrelated),
 \* RestoreAuthoritySnapshotValid taking the record's generation (refused by
-\* AuditGenerationNeverDecreases).
+\* AuditGenerationNeverDecreases), and Acquire keeping the withdrawn
+\* publication time (refused by the generated invariant
+\* released_publication_only_without_credential).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* source_credential_publication_audit.sh. Run a deeper bound by hand with:
@@ -237,6 +240,12 @@ AuditWitnessAdoptedBelowLease ==
         /\ adopted_marker_generation = Some(g)
         /\ g < credential_generation
 
+\* A lease that withdrew its credential and keeps the withdrawn
+\* publication's time (the bound a later login elsewhere is ordered by).
+AuditWitnessReleasedBound ==
+    /\ ~credential_present
+    /\ \E t \in NatValues : released_publication_at_millis = Some(t)
+
 NotAuditWitnessRefusalHealed == ~AuditWitnessRefusalHealed
 NotAuditWitnessLogoutHealed == ~AuditWitnessLogoutHealed
 NotAuditWitnessWindowRenewed == ~AuditWitnessWindowRenewed
@@ -245,4 +254,5 @@ NotAuditWitnessLoggedOutValueBlocked == ~AuditWitnessLoggedOutValueBlocked
 NotAuditWitnessLateRefusalLeavesNewer == ~AuditWitnessLateRefusalLeavesNewer
 NotAuditWitnessCurrentRefusalWithdraws == ~AuditWitnessCurrentRefusalWithdraws
 NotAuditWitnessAdoptedBelowLease == ~AuditWitnessAdoptedBelowLease
+NotAuditWitnessReleasedBound == ~AuditWitnessReleasedBound
 ====

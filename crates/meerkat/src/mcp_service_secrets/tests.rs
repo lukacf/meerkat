@@ -413,6 +413,7 @@ fn explicit_publication() -> meerkat_core::handles::CredentialLeasePublication {
             generation: 7,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         },
     )
     .expect("a lease that holds a credential has a publication")

@@ -1080,11 +1080,20 @@ async fn restore_marked_token_lifecycle_if_absent(
     loaded: &PersistedTokens,
 ) -> Result<(), ProviderAuthError> {
     let snapshot = auth_lease.snapshot(lease_key);
-    if snapshot.phase.is_some()
-        || snapshot.credential_present
-        || snapshot.generation != 0
-        || snapshot.credential_published_at_millis.is_some()
-    {
+    let absent = snapshot.phase.is_none()
+        && !snapshot.credential_present
+        && snapshot.generation == 0
+        && snapshot.credential_published_at_millis.is_none();
+    // A lease that withdrew its credential takes a record published after
+    // the withdrawn publication (another process's later login): the rule the
+    // MCP and connector reads follow for a newer record.
+    let later_than_withdrawn = !snapshot.credential_present
+        && durable_marker::marker_relation_for_tokens_and_snapshot(
+            loaded,
+            &snapshot,
+            &TokenKey::from_credential_identity(binding.credential_identity()),
+        ) == durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer;
+    if !(absent || later_than_withdrawn) {
         return Ok(());
     }
     let restored = if let Some(guard) = guard {
@@ -3107,6 +3116,7 @@ mod tests {
                 generation: 0,
                 credential_published_at_millis: None,
                 adopted_marker_generation: None,
+                released_publication_at_millis: None,
             })
         }
 
@@ -3401,6 +3411,7 @@ mod tests {
                 generation: 1,
                 credential_published_at_millis: None,
                 adopted_marker_generation: None,
+                released_publication_at_millis: None,
             });
             let env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -4076,6 +4087,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -4180,6 +4192,7 @@ mod tests {
                 generation: 1,
                 credential_published_at_millis: None,
                 adopted_marker_generation: None,
+                released_publication_at_millis: None,
             },
         );
         let env = ResolverEnvironment::testing()
@@ -4246,6 +4259,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(requested_previous_snapshot);
         let previous_snapshot = auth_lease.snapshot(&lease_key);
@@ -4298,6 +4312,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(matching_published_at),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert_eq!(
@@ -4351,6 +4366,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(snapshot_published_at),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert_eq!(
@@ -4397,6 +4413,7 @@ mod tests {
                 &same_time_longer,
             )),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4420,6 +4437,7 @@ mod tests {
                 &same_time_shorter,
             )),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4445,6 +4463,7 @@ mod tests {
                 &same_time_same_expiry_future_generation,
             )),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4473,6 +4492,7 @@ mod tests {
                 &stale_same_time,
             )),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert_eq!(
@@ -4499,6 +4519,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(marker_credential_published_at_for_test(record)),
             adopted_marker_generation: Some(1),
+            released_publication_at_millis: None,
         }
     }
 
@@ -4553,6 +4574,62 @@ mod tests {
         }
     }
 
+    /// A lease that withdrew its credential takes a record published after
+    /// the withdrawn publication, and no other: a record published at or
+    /// before it stays stale, and so does every record while the lease knows
+    /// no withdrawn publication.
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_after_a_release_takes_only_a_later_record() {
+        let mut tokens = chatgpt_oauth_tokens("released-record-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let record = mark_tokens_lifecycle_published_for_test(&tokens, 1);
+        let published_at = marker_credential_published_at_for_test(&record);
+        let released = |bound: Option<u64>| AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: false,
+            generation: 2,
+            credential_published_at_millis: None,
+            adopted_marker_generation: None,
+            released_publication_at_millis: bound,
+        };
+
+        for (bound, expected, case) in [
+            (
+                Some(published_at - 1),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer,
+                "a record published after the withdrawn publication is newer",
+            ),
+            (
+                Some(published_at),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenStale,
+                "the withdrawn publication's own time is not newer",
+            ),
+            (
+                Some(published_at + 1),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenStale,
+                "a record published before the withdrawn publication is stale",
+            ),
+            (
+                None,
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenStale,
+                "with no withdrawn publication known every record is stale",
+            ),
+        ] {
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &record,
+                    &released(bound),
+                    &default_test_token_key()
+                ),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -4567,6 +4644,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: None,
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         let marker = mark_tokens_lifecycle_published_for_test(&tokens, 1);
 
@@ -4599,6 +4677,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(requested_initial_snapshot);
         let initial_snapshot = auth_lease.snapshot(&lease_key);
@@ -4665,6 +4744,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let before_refresh = auth_lease.snapshot(&lease_key);
         let previous_tokens =
@@ -4880,6 +4960,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(1),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let marked_a = publisher.mark_tokens_lifecycle_published_for_test(&raw_a);
         store
@@ -5083,6 +5164,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5137,6 +5219,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5192,6 +5275,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let tokens = auth_lease.mark_tokens_lifecycle_published_for_test(&expired_tokens);
         store
@@ -5251,6 +5335,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5341,6 +5426,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5426,6 +5512,7 @@ mod tests {
             generation: 2,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5684,6 +5771,7 @@ mod tests {
             generation: 1,
             credential_published_at_millis: Some(2_000),
             adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let previous_tokens =
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_previous_tokens);

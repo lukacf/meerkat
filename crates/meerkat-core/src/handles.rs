@@ -2181,6 +2181,13 @@ impl std::fmt::Display for LeaseKey {
 /// generations. `None` when the marker carries `generation`, and while no
 /// credential is present. [`AuthLeaseSnapshot::marker_generation`] reads the
 /// one a marker carries.
+/// `released_publication_at_millis` is the publication time of the credential
+/// the lease last withdrew (a release or a clear while it held one), kept
+/// while no credential is present: a durable record published strictly after
+/// it is a later publication the lease takes (another process's login after
+/// this process's logout); one published at or before it is not. A release
+/// or clear with no credential held keeps it; a publication, or a restore with
+/// a credential, clears it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
@@ -2189,6 +2196,7 @@ pub struct AuthLeaseSnapshot {
     pub generation: u64,
     pub credential_published_at_millis: Option<u64>,
     pub adopted_marker_generation: Option<u64>,
+    pub released_publication_at_millis: Option<u64>,
 }
 
 impl AuthLeaseSnapshot {

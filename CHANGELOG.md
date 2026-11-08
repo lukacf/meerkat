@@ -382,6 +382,39 @@ them.
   exhaustive match needs the new arms, or a wildcard arm, and a struct
   literal of either state type needs the new fields.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`: GrantAuthorityMachine
+  (version 3) ends a grant owner's custody at its host's close or after an
+  append whose outcome is unknown (see Added). The catalog's
+  `catalog::dsl::grant_authority::GrantAuthorityPhase` (meerkat-machine-schema)
+  and the kernel `generated::grant_authority::Phase` gain `Released` and
+  `Uncertain`. `GrantAuthorityInput` and `GrantAuthorityInputVariant`
+  (meerkat-machine-schema), and the kernel `Input` and `InputKind`, gain
+  `ReleaseCustody` and `RecordUncertainAppend`. `GrantAuthorityEffect` and
+  `GrantAuthorityEffectVariant` (meerkat-machine-schema), and the kernel
+  `Effect` and `EffectKind`, gain `CustodyReleased` and `CustodyUncertain`.
+  The kernel `generated::grant_authority::TransitionId` gains
+  `ReleaseCustody`, `RecordUncertainAppend`, `ReleaseUncertainCustody` and
+  `ReleaseCustodyAgain`. Every new variant is appended last, so no existing
+  variant's implicit discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm.
+
+- Behaviour-only (not measured by the gate): `meerkat-session`,
+  `meerkat-runtime`: `PersistentSessionService::try_shutdown` and `shutdown`,
+  once the shutdown completes, end the custody of the grant owner a governed
+  realm's open restored (`MeerkatMachine::release_realm_custody`, see Added).
+  From then on that owner refuses every change and use as
+  `GrantRefusal::Unavailable`, so the closed realm's machine serves no more
+  governed work; open the realm again to continue. A machine without such an
+  owner (an ungoverned realm, or a grant owner a host supplied) is unchanged.
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`:
+  `LocalGrantAuthority::reconstruct` of an owner whose custody ended (its
+  host's close, or an append whose outcome is unknown) answers
+  `GrantReconstructionError::RestartRequired`. Before, an owner with an
+  uncertain append reconstructed and stayed unavailable; it is unusable
+  either way.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -768,6 +801,24 @@ them.
   (the published machine state and the runtime's hold registry, with no
   actor command and no wake; the `List` scope). A member the mob does not
   seat, a placed member and a mob without the runtime adapter hold none.
+
+- `meerkat-authorization`: `LocalGrantAuthority::release_custody` ends a
+  grant owner's custody at its host's close, as the generated
+  `GrantAuthorityMachine` input `ReleaseCustody` (into the terminal phase
+  `Released`). From then on every change and use of that owner is refused as
+  `GrantRefusal::Unavailable`, whoever still holds a reference to it, and
+  every earlier observation of it fails its final currentness check. A
+  durable owner hands its store's lease back after any append in flight, so
+  a successor in the same process restores the same owner at once. A second
+  call changes nothing. An append whose outcome is unknown now ends the
+  custody in the machine too (`RecordUncertainAppend`, into `Uncertain`),
+  and the owner's close then releases its lease. `reconstruct` answers
+  `RestartRequired` for an owner whose custody ended.
+  `MeerkatMachine::install_realm_grant_custody` (`meerkat-runtime`,
+  `local-authorization`) names the grant owner a governed realm's open
+  restored, and `MeerkatMachine::release_realm_custody` ends its custody;
+  `PersistentSessionService::try_shutdown` and `shutdown` call it once the
+  shutdown completes.
 
 ### Changed
 
@@ -1329,6 +1380,15 @@ them.
   on an open channel as after the channel closed, and their delivery is
   recorded once a worker started with them, or as not delivered when the
   request is retired. Affects 0.8.50 through 0.9.10.
+
+- `meerkat`: a governed realm closed and reopened in one process (its
+  session service's `try_shutdown`, then a new open of the same realm) could
+  open with its governed work and configured MCP attachments unavailable
+  ("governed realm's grant owner did not restore"), and an administrative
+  restore of its grant owner could be refused, while a task of the closed
+  realm still held the realm's grant owner. The realm's terminal shutdown
+  now ends the custody of the grant owner its open restored, so the reopen
+  restores it at once.
 
 ### Security
 

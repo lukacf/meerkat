@@ -194,6 +194,32 @@ impl MeerkatMachine {
     ) -> Result<Self, RuntimeDriverError> {
         self.install_native_work_authorization(|machine| local_grant_host(configuration, machine))
     }
+
+    /// Record `grants` as the grant owner this machine's realm open
+    /// restored, so the realm's terminal close
+    /// ([`MeerkatMachine::release_realm_custody`]) ends its custody. The
+    /// realm composition installs the grant owner of the configuration it
+    /// installed, once, before any session is registered. A grant owner a
+    /// host supplied is never installed here: that host's own close ends its
+    /// custody.
+    ///
+    /// # Errors
+    /// Unavailable when it is installed already or a session is registered.
+    pub fn install_realm_grant_custody(
+        &self,
+        grants: Arc<LocalGrantAuthority>,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self
+            .sessions
+            .try_read()
+            .map_err(|_| crate::input_authority::unavailable())?;
+        if !sessions.is_empty() {
+            return Err(crate::input_authority::unavailable());
+        }
+        self.realm_grant_custody
+            .set(grants)
+            .map_err(|_| crate::input_authority::unavailable())
+    }
 }
 
 impl super::StagedMeerkatMachine {

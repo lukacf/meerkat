@@ -420,6 +420,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
 # witnesses violated, and with --mutants each seeded defect's invariant
 # violated.
+# custody_end_audit.sh (grant_authority) requires its four witnesses
+# violated, and with --mutants each seeded defect's target invariant or
+# action property violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -1131,6 +1134,15 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessDeleteDropsEarlierAck is violated."' \
   'echo "Error: Invariant AuditAckSetAnswersTheLatestSupersession is violated."' \
   'echo "Error: Invariant AuditLatestSupersessionAcksAreKept is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedAfterIssuance is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainThenReleased is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedTwice is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainAfterRevocation is violated."' \
+  'echo "Error: Invariant AuditReleaseEndsInReleased is violated."' \
+  'echo "Error: Invariant AuditUncertainAppendEndsCustody is violated."' \
+  'echo "Error: Invariant AuditEndedOwnerAcceptsNothing is violated."' \
+  'echo "Error: Action property AuditCustodyEndLatches is violated."' \
+  'echo "Error: Action property AuditCustodyEndKeepsTheFacts is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

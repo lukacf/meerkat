@@ -146,6 +146,21 @@ impl Driver {
             }
         }
     }
+    /// The close's final release of the installed host's native custody, once
+    /// every join that can still touch it has returned. Without an installed
+    /// host there is none.
+    async fn release_native_custody(&self) -> Result<(), GatewayHostError> {
+        let host = self
+            .publication
+            .lock()
+            .map_err(|_| GatewayHostError::Unavailable)?
+            .installed
+            .clone();
+        match host {
+            Some(host) => host.release_native_custody().await,
+            None => Ok(()),
+        }
+    }
 }
 
 struct LiveRoster(Arc<ApplicationSetupCompilation>);
@@ -483,12 +498,13 @@ impl GatewayHostComposition for Driver {
         };
         // Meta calls this after native transport shutdown. A failed host lookup
         // cannot abandon either the selected source task or local guard owner.
-        let (host_result, source_result, local_result) = tokio::join!(
-            host_close,
+        join_driver_close(
+            toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND,
             self.runtime.join_custody_close(),
-            self.join_local_round()
-        );
-        host_result.and(source_result).and(local_result)
+            host_close,
+            self.join_local_round(),
+        )
+        .await
     }
     async fn wait_closed(&self) {
         let mut changed = self.closed.subscribe();
@@ -509,6 +525,46 @@ struct RunningPrivate {
     private: PrivateHostConnection,
     presenters: Vec<tokio::task::JoinHandle<Result<(), crate::ConnectError>>>,
 }
+
+/// The driver's close order. The selected source's custody recovery drains
+/// first, its final round after stop included, within `bound`, the bound
+/// the gateway gives its own recovery join: a recovery that does not finish
+/// in time stays retained for a later join, and the close reports itself
+/// incomplete. The installed host's close is then joined beside the local
+/// round, whatever the recovery returned. Neither join ends the native
+/// custody: the process's close releases it after every join.
+async fn join_driver_close(
+    bound: Duration,
+    recovery: impl std::future::Future<Output = Result<(), GatewayHostError>>,
+    host_close: impl std::future::Future<Output = Result<(), GatewayHostError>>,
+    local_round: impl std::future::Future<Output = Result<(), GatewayHostError>>,
+) -> Result<(), GatewayHostError> {
+    let recovery = tokio::time::timeout(bound, recovery)
+        .await
+        .unwrap_or(Err(GatewayHostError::SettlementIncomplete));
+    let (host, local) = tokio::join!(host_close, local_round);
+    host.and(recovery).and(local)
+}
+
+/// The last steps of a Toolkit process's close, shared by the gateway
+/// binary and the application driver once Meta's run, with its join of the
+/// host, has returned: `joins`, the private host's finish and its
+/// presenters' joins, within `bound`; then `release`, the close's final
+/// release of the native custody, whichever way the joins ended. The release
+/// follows every join that can still touch the custody, so work admitted
+/// before the close finishes first; joins still running when the bound
+/// expires are left behind, and their work then fails closed. The joins'
+/// output is `None` when the bound expired.
+pub async fn finish_then_release<T, R>(
+    bound: Duration,
+    joins: impl std::future::Future<Output = T>,
+    release: impl std::future::Future<Output = R>,
+) -> (Option<T>, R) {
+    let joined = tokio::time::timeout(bound, joins).await.ok();
+    let released = release.await;
+    (joined, released)
+}
+
 impl RunningPrivate {
     async fn finish(self) -> Result<(), String> {
         let mut failures = Vec::new();
@@ -957,11 +1013,25 @@ pub async fn run(
     });
     let native = run_persistent_with_host(control, driver.clone()).await;
     let closing = driver.begin_close(GatewayHostCloseReason::Shutdown);
-    let private = match actor.await {
-        Ok(Ok(running)) => running.finish().await,
-        Ok(Err(error)) => Err(error),
-        Err(error) => Err(error.to_string()),
+    // The private host's admitted work and its presenters join first, within
+    // the host close's join bound; only then does the close end the custody
+    // of the native grant owner and store they used.
+    let joins = async {
+        match actor.await {
+            Ok(Ok(running)) => running.finish().await,
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(error.to_string()),
+        }
     };
+    let (private, custody) = finish_then_release(
+        toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND,
+        joins,
+        driver.release_native_custody(),
+    )
+    .await;
+    let private = private.unwrap_or_else(|| {
+        Err("private host cleanup did not finish within the close bound".into())
+    });
     let mut failures = Vec::new();
     if let Err(error) = native {
         failures.push(error.to_string());
@@ -971,6 +1041,9 @@ pub async fn run(
     }
     if let Err(error) = private {
         failures.push(error);
+    }
+    if let Err(error) = custody {
+        failures.push(error.to_string());
     }
     if failures.is_empty() {
         Ok(())
@@ -987,6 +1060,139 @@ fn retain_presenter_channel(
     console: bool,
 ) -> bool {
     selected.is_none() || terminal || console
+}
+
+#[cfg(test)]
+mod close_order_tests {
+    use super::*;
+
+    /// The driver joins its custody recovery before the installed host:
+    /// while a recovery read is held, the host's join has not started; once
+    /// the read returns, the host is joined and the close completes.
+    #[tokio::test]
+    async fn driver_close_joins_recovery_before_the_host() {
+        let (release, held) = oneshot::channel::<()>();
+        let host_started = Arc::new(AtomicBool::new(false));
+        let started = host_started.clone();
+        let mut closing = tokio::spawn(join_driver_close(
+            Duration::from_secs(30),
+            async move { held.await.map_err(|_| GatewayHostError::Unavailable) },
+            async move {
+                started.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            async { Ok(()) },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut closing)
+                .await
+                .is_err(),
+            "the close waits for the held recovery read"
+        );
+        assert!(
+            !host_started.load(Ordering::SeqCst),
+            "the installed host's join waits for the recovery"
+        );
+        release.send(()).unwrap();
+        assert_eq!(closing.await.unwrap(), Ok(()));
+        assert!(host_started.load(Ordering::SeqCst));
+    }
+
+    /// A recovery that does not finish within the bound leaves the close
+    /// incomplete, and the installed host is joined anyway.
+    #[tokio::test]
+    async fn driver_close_bounds_its_recovery_join() {
+        let host_joined = Arc::new(AtomicBool::new(false));
+        let joined = host_joined.clone();
+        let closed = tokio::time::timeout(
+            Duration::from_secs(10),
+            join_driver_close(
+                Duration::from_millis(50),
+                std::future::pending(),
+                async move {
+                    joined.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                async { Ok(()) },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(closed, Ok(Err(GatewayHostError::SettlementIncomplete))),
+            "the recovery join is bounded and the close reports itself incomplete"
+        );
+        assert!(
+            host_joined.load(Ordering::SeqCst),
+            "the installed host is joined after the bound"
+        );
+    }
+
+    /// The shipping close tail ends the native custody only after the
+    /// private host's finish and the presenters' joins: while a join is held
+    /// nothing is released, and once the joins return the release follows.
+    #[tokio::test]
+    async fn the_close_tail_releases_after_the_private_finish_and_presenters() {
+        let (finish, held) = oneshot::channel::<()>();
+        let joined = Arc::new(AtomicBool::new(false));
+        let release_saw_joined = Arc::new(Mutex::new(None::<bool>));
+        let joins_done = joined.clone();
+        let seen = release_saw_joined.clone();
+        let mut closing = tokio::spawn(finish_then_release(
+            Duration::from_secs(30),
+            async move {
+                held.await.unwrap();
+                joins_done.store(true, Ordering::SeqCst);
+                "joined"
+            },
+            async move {
+                *seen.lock().unwrap() = Some(joined.load(Ordering::SeqCst));
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut closing)
+                .await
+                .is_err(),
+            "the close tail waits for the held join"
+        );
+        assert_eq!(
+            *release_saw_joined.lock().unwrap(),
+            None,
+            "nothing is released while a join is held"
+        );
+        finish.send(()).unwrap();
+        let (joins, ()) = closing.await.unwrap();
+        assert_eq!(joins, Some("joined"));
+        assert_eq!(
+            *release_saw_joined.lock().unwrap(),
+            Some(true),
+            "the release follows the joins"
+        );
+    }
+
+    /// When the joins outlast their bound, the release follows anyway, and
+    /// the joins' output is absent.
+    #[tokio::test]
+    async fn the_close_tail_releases_when_its_join_bound_expires() {
+        let released = Arc::new(AtomicBool::new(false));
+        let seen = released.clone();
+        let tail = tokio::time::timeout(
+            Duration::from_secs(10),
+            finish_then_release(
+                Duration::from_millis(50),
+                std::future::pending::<()>(),
+                async move { seen.store(true, Ordering::SeqCst) },
+            ),
+        )
+        .await;
+        assert!(
+            matches!(tail, Ok((None, ()))),
+            "the join bound expires and the close tail completes"
+        );
+        assert!(
+            released.load(Ordering::SeqCst),
+            "the release follows the expired bound"
+        );
+    }
 }
 
 #[cfg(test)]

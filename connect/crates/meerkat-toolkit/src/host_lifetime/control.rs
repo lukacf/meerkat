@@ -143,6 +143,13 @@ pub trait PrivateHostLifetimeControl: Send + Sync {
         &self,
         handle: &HostCloseHandle,
     ) -> Result<HostCloseObservation, HostLifetimeError>;
+    /// The close's final release: end the custody of the native owners bound
+    /// to this host, its grant owner and its store, once its activation
+    /// close has settled. No join releases them: the caller takes this once
+    /// every join that can still touch them has returned, or at once on a
+    /// host loss. `NotSettled` before the activation close settled; a second
+    /// release changes nothing.
+    async fn release_native_custody(&self) -> Result<(), HostLifetimeError>;
     /// Synchronous irreversible admission closure on lost private endpoints.
     /// The returned observation can remain Closing or Uncertain, never inferred
     /// Settled merely because the host can no longer send another command.

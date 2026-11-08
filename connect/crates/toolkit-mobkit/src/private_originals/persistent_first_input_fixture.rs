@@ -136,16 +136,6 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             configuration(&first.scope.realm)
         }));
         let session = first.session.clone();
-        // The restore below takes the grant store's lease, which the first
-        // owners hold until their last reference drops. Their close settles
-        // the host, but tasks of the closed runtime can still hold them for a
-        // few milliseconds after the drops below, so they are watched.
-        let first_grants = Arc::downgrade(&first.source.owner.grants());
-        let first_owner = Arc::downgrade(&first.source.owner);
-        let first_source = Arc::downgrade(&first.source);
-        let first_machine = Arc::downgrade(&first.machine);
-        let first_service = Arc::downgrade(&first.service);
-        let first_store = Arc::downgrade(&first.store);
         let closed = first.close_durable_owners().await;
         drop(continuation);
         drop(history);
@@ -154,24 +144,6 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             closed.is_ok(),
             "initial persistent owners must settle: {closed:?}"
         );
-        let held = || {
-            first_grants.strong_count()
-                + first_owner.strong_count()
-                + first_source.strong_count()
-                + first_machine.strong_count()
-                + first_service.strong_count()
-                + first_store.strong_count()
-        };
-        // A host close does not yet guarantee that the grant store's lease is released at once.
-        let deadline = tokio::time::Instant::now() + WAIT;
-        while held() > 0 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the initial owners must drop once their close settled: {} references held",
-                held()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
         let config = match config {
             Ok(config) => config,
             Err(payload) => std::panic::resume_unwind(payload),
@@ -222,11 +194,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         use meerkat_toolkit::host_lifetime::control::{
             HostCloseReason, HostCloseState, PrivateHostLifetimeControl,
         };
+        // The product's close order: custody recovery stops as the close
+        // begins, and its last round is joined, within the product's bound,
+        // before the native join and the final release. A test that joins
+        // the recovery itself checks its result; the close only waits for it.
+        self.source.stop_custody_recovery();
         let close = self
             ._lifetime
             .begin_close_activation(HostCloseReason::Shutdown)
             .map_err(|error| error.to_string());
         let native = self.shutdown().await;
+        let _recovery = tokio::time::timeout(
+            crate::host_gateway::CLOSE_JOIN_BOUND,
+            self.source.join_custody_recovery(),
+        )
+        .await;
         let local = match close {
             Ok(close) => self
                 ._lifetime
@@ -240,7 +222,13 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         if local.state != HostCloseState::Settled {
             return Err(format!("host close: {local:?}"));
         }
-        Ok(())
+        // Every join of this host returned, its custody recovery's, its
+        // native runtime's and its lifetime's: the close's final release
+        // ends the native custody.
+        self._lifetime
+            .release_native_custody()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub(super) async fn publish_fixture_controller(

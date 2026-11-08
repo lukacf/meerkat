@@ -1635,7 +1635,10 @@ mod tests {
                 namespace: EvidenceId::new("native-grants").unwrap(),
                 generation: 1,
             },
-            Arc::new(FileGrantOwnerStore::new(directory.join("grants.jsonl"))),
+            Arc::new(FileGrantOwnerStore::new(
+                directory.join("grants.jsonl"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+            )),
             Arc::new(HostAuthorizationClock),
             native.ingress_domain.clone(),
         )
@@ -1644,6 +1647,7 @@ mod tests {
         let parent = source
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("application-parent").unwrap(),
                 native.grant_administrator.clone(),

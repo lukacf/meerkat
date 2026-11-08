@@ -222,6 +222,7 @@ of this full catalog.
 | `mob/list_members_matching` | Mob | `MobListMembersMatchingParams` | `MobListMembersMatchingResult` | Label-filtered member listing with server-side filter (mob feature) |
 | `mob/spawn_helper` | Mob | `MobSpawnHelperParams` | `MobHelperResult` | Spawn a helper member and wait for its result (mob feature) |
 | `mob/fork_helper` | Mob | `MobForkHelperParams` | `MobHelperResult` | Fork a helper from an existing member and wait for its result (mob feature) |
+| `mob/fork_member` | Mob | `MobForkMemberParams` | `MobForkMemberResult` | Fork a member's session at a message boundary into a new member (mob feature) |
 | `mob/force_cancel` | Mob | `MobMemberParams` | `MobForceCancelResult` | Force-cancel a member's active work (mob feature) |
 | `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a mob member by identity (mob feature) |
 | `mob/member_status` | Mob | `MobMemberParams` | `MobMemberStatusResult` | Read canonical status for a specific member (mob feature) |
@@ -1101,6 +1102,8 @@ Create a new idle session whose transcript is the source session prefix ending b
 
 `running_behavior` currently supports `"reject"`, which returns `SESSION_BUSY` if the source session has active work.
 
+`session/fork_at`, `session/fork_replace`, `session/rewrite_transcript` and `session/restore_transcript_revision` refuse a mob member's session with `INVALID_PARAMS` (-32602), since the member's mob owns its transcript; fork a member at a message boundary with `mob/fork_member` (below).
+
 `inherited_instructions` decides what the child does with the instruction activations it copies from the prefix. The child is not materialized, so nobody can activate it before its first turn: with the field absent or `"require_explicit_activation"` (the default), and with `"refuse"`, a prefix that carries activation rows is refused before anything is committed with `FORK_INSTRUCTION_REFUSED` (-32037), whose `data` carries `kind: "fork_instruction_refused"` and the typed `fork_instruction_refusal` (`cause`, `keys`). `"reactivate_inherited"` appends the child's own activation of every key that was effective in the source; the result's `reactivated_instruction_count` counts those rows, which `message_count` includes. Under it, a prefix whose last row of a key is one whose body a compaction of the source retired (a later row of that key, past the prefix, superseded it) is refused with cause `head_body_retired`; a fork at a later boundary copies the superseding row, with its body. A prefix without activation rows forks the same way under every value.
 
 ### session/fork_replace
@@ -1160,6 +1163,65 @@ The child does not inherit:
 The child's first turn continues the transcript prefix, System message included; it does not write a second System message from the inherited instructions.
 
 A fork derives the child's build state from its source's. A source with session metadata but no build state is refused before anything is committed, with `INVALID_PARAMS` (-32602) and data `{"kind": "fork_source_build_state_missing", "source_session_id": "<source id>"}`. A child forked by Meerkat 0.9.3 or earlier that never ran a turn has no build state: its `turn/start` fails with `INTERNAL_ERROR` (-32603) "turn abandoned: persisted session `<id>` is missing session build state". Fork its source again instead.
+
+### mob/fork_member
+
+Fork a mob member's session at a message boundary into a new member: the
+member counterpart of `session/fork_at`. The new member `agent_identity` is
+seated on a committed fork of `source_member_id`'s session whose transcript is
+the source's messages before `message_index` (the source's committed end when
+it is absent), System message included. Requires the `mob` feature.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "mob/fork_member",
+  "params": {
+    "mob_id": "team",
+    "source_member_id": "main",
+    "agent_identity": "main-branch",
+    "message_index": 3
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "result": {
+    "agent_identity": "main-branch",
+    "member_ref": "...",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000011",
+    "source_session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "message_count": 3
+  }
+}
+```
+
+The new member takes the source member's profile and runtime mode unless
+`profile` or `runtime_mode` names others, runs with the source's tool
+restrictions, and records the source session as its fork source; the source
+member keeps its session and transcript. The host's fork instruction policy
+decides what the child does with the instruction activations it inherits, as
+for every member fork. A source that runs under the host's tool dispatch
+admission is forked only when the host's spawn customizer installs one for
+the child too, and the child then runs its tool calls under it; otherwise the
+call is refused with `-32602` and `data.kind` `dispatch_admission_required`
+(`member_id`), and nothing is forked. A source whose turn is in flight, or
+that owes queued work, is refused with `SESSION_BUSY` and `data.kind`
+`fork_source_unavailable` (`source_member_id`, `cause` `running`), and
+nothing is seated: fork it again once it is idle. A source without a session
+(`cause` `no_session`) is refused with `-32602` and the same `data.kind`. An
+`agent_identity` that is already a member is refused with `-32602` before
+anything is forked. A fork that committed but could not seat its member is
+refused with `data.kind` `fork_member_provision_failed`, whose
+`fork_session_id` names the committed child session (`recovery`
+`resume_committed_fork_session`); a member seated under `agent_identity`
+between that check and the fork's own seat is answered this way. That
+session is bound to `agent_identity`: resume it under that identity once the
+identity is free, or archive it.
 
 ### session/list
 
@@ -1321,7 +1383,8 @@ Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
 `session/stream_open` subscription, or reads only the run result, sends it so
 each event reaches it once. Absent or `true` keeps them. A turn that also
-carries the input of another request that wants them still writes them.
+carries the input of another request that wants them still writes them, to
+that request's connection (see [Notifications](#notifications)).
 `session/create` (for its first turn) and `mob/turn_start` take the same
 field. A server before 0.9.5 refuses it on `turn/start` and `mob/turn_start`,
 so the Python and TypeScript SDKs send it, from calls that do not stream
@@ -2171,19 +2234,21 @@ no method loads, registers or wakes the session or the member.
 - **`tool_grants/list`** answers the subject's grants, each due one settled as
   `expired` first. Ended grants (`expired`, `revoked`, `run_ended`) are listed
   only with `include_ended`; `unreadable` names any stored grant this server
-  cannot read (written by a newer version, or damaged), which opens nothing.
-  For a member identity in the roster it also answers the member's `gate`:
-  `running`, what its live build gates (its gated names under `tools`, with
-  its gated servers and `unconfigured_mcp_servers`) and the names it ignored
-  as not mounted, or `null` when no build of the member is live here; and
-  `next_build`, the gate its next build resolves, split the same way.
-  Advisory, like `applies`. On a server that keeps durable decisions the
-  subject's grant requests follow its grants: each open or approved one as
-  `requested`, and with `include_ended` each rejected, expired, withdrawn or
-  refused one whose deadline is within the grant policy's maximum lifetime of
-  now as `declined` (its `ended_at_ms` when it ended; an older one stays
-  readable through `decision/list`). A request whose grant was issued is
-  listed as that grant only.
+  cannot read (written by a newer version, or damaged), which opens nothing,
+  and any grant a host store quarantined (the store reports a conflict for
+  its scope, so its session and tools are unknown), whatever session it was
+  granted to. For a member identity in the roster it also answers the
+  member's `gate`: `running`, what its live build gates (its gated names
+  under `tools`, with its gated servers and `unconfigured_mcp_servers`) and
+  the names it ignored as not mounted, or `null` when no build of the member
+  is live here; and `next_build`, the gate its next build resolves, split the
+  same way. Advisory, like `applies`. On a server that keeps durable
+  decisions the subject's grant requests follow its grants: each open or
+  approved one as `requested`, and with `include_ended` each rejected,
+  expired, withdrawn or refused one whose deadline is within the grant
+  policy's maximum lifetime of now as `declined` (its `ended_at_ms` when it
+  ended; an older one stays readable through `decision/list`). A request
+  whose grant was issued is listed as that grant only.
 - **`tool_grants/audit`** answers a page of the subject's audit log, `granted`
   (with the grant's `scope`), `expired` (with the `driver` that observed it:
   `timer`, `boundary`, `dispatch`, `read`, `revoke`, `build` (a build reading
@@ -2398,7 +2463,14 @@ with `data.kind = "no_decision_store"`.
   refused, never read as no filter.
 - **`decision/get`** reads one decision, and records its expiry when its
   deadline passed. `include_request: true` adds the held request. A row this
-  server cannot read answers `decision_unreadable`.
+  server cannot read answers `decision_unreadable`. An executed `grant.child`
+  decision carries `effect`, what its execution did: `{"grant_id": ...}`, the
+  id of the approval-carried grant it issued. A decision that is not
+  executed, and a decision of any other kind, carries no `effect`. Every
+  answer that carries a decision carries it alike: `decision/list`,
+  `decision/present`, `decision/withdraw` and the host adapter's
+  `decision/decide`. A later version may add fields to `effect`: read it
+  tolerantly.
 - **`decision/rendering`** returns the one canonical rendering of the held
   request, its renderer and subject digest, and its canonical parts for
   `max_part_bytes` (one part when absent): consecutive byte ranges on character
@@ -2409,9 +2481,14 @@ with `data.kind = "no_decision_store"`.
   `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
   "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
   size and the parts shown, the channel and message references, and the host
-  clock reading `at_ms`. It counts only when it shows every canonical part of
-  the held rendering to the party that decides now; a presentation at 0 is no
-  reading of when it was shown and is refused.
+  clock reading `at_ms`. A surface with a size limit that showed a summary
+  saying it is shortened records it with the `link` the summary carried to
+  the full presentation: `{"reference": ..., "served_digest": ...}`, the
+  digest of the rendering that link served. It counts only when it shows
+  every canonical part of the held rendering, or its link served the held
+  rendering (its served digest is the subject digest), to the party that
+  decides now; a presentation at 0 is no reading of when it was shown and is
+  refused. A decision's `presentations` carry each recorded link.
 - **`decision/withdraw`** withdraws an open decision as the host.
 
 A failed call is a JSON-RPC error. The answers the decision methods type
@@ -2617,6 +2694,12 @@ while that session's first turn has never started, and then once. Otherwise the
 resume runs no kickoff and does not deliver `initial_message`; a first turn that
 started and was interrupted is not re-run. A placed member follows the same rule;
 a resume on a member host of 0.9.4 or earlier still runs the first turn.
+
+A resume of a session that is bound to another member (its member binding, or
+the comms name it was created under, names another mob or member) is refused
+with `-32602` and `data.kind` `resume_session_bound_to_another_member`
+(`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`), and nothing is
+seated.
 
 ### workgraph/get
 
@@ -3754,6 +3837,22 @@ Inspect `params.event.payload.type` and (for text deltas)
 `source`, `seq`, and `timestamp_ms` belong to the envelope; optional `mob_id`
 is envelope metadata.
 
+A turn's `session/event` notifications go to the connection whose request
+started it (`turn/start`, `session/create`, `mob/turn_start`, `help/ask`),
+unless that request sent `"session_events": false`; a turn that carries the
+inputs of several requests goes to each of their connections. A turn no
+request waits on (queued work such as `session/external_event`, comms,
+schedules, a resumed run) goes to the connection that holds the session: the
+one that created it (`session/create`, `help/ask`) or forked it
+(`session/fork_at`, `session/fork_replace`) or, once that one is gone, the
+next one that starts a turn on it. While the holder is gone the notifications
+are written nowhere; read the turn back with `session/history`, or watch the
+session with `session/stream_open`. No other connection receives them. On a
+TCP server (`--tcp`), a session no connection holds (one the host or a mob
+created, or one from before a restart, that no connection has started a turn
+on) has its turns written to no connection; a stdio server writes them to its
+one client.
+
 Event types match the `AgentEvent` enum in `crates/meerkat-core/src/event.rs`
 (`agent_event_type` assigns each variant its stable wire name) and its schema
 projection in `artifacts/schemas/events.json`. New variants must appear in
@@ -3951,7 +4050,10 @@ then raise `EventSubscriptionError` when the terminal contains an error. The
 error retains the raw terminal, including unknown server codes, and the last
 delivered RPC and envelope sequence values. Error-free `remote_end` and
 `explicit_close` still end iteration normally. Subscription failure does not
-itself establish that the agent's run failed or stopped.
+itself establish that the agent's run failed or stopped. On a mob member
+stream the subscription also reports the last event's `epoch`
+(`last_event_epoch`, `lastEventEpoch`); with its envelope sequence it is the
+`cursor` that resumes the stream (see `mob/stream_event` below).
 
 ### mob/stream_event notifications
 
@@ -3964,12 +4066,57 @@ When a mob event stream is open (via `mob/stream_open`), the server emits `mob/s
   "params": {
     "stream_id": "550e8400-e29b-41d4-a716-446655440000",
     "sequence": 1,
+    "epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a",
     "event": { "...": "..." }
   }
 }
 ```
 
 For mob-wide streams the event is an `AttributedEvent` (`source` member identity + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`. Runtime incarnation ids and fence tokens are bridge-internal and are not part of public stream payloads.
+
+A member stream's events also carry `epoch`: the sequence space of the
+envelope's `event.seq`. `epoch` and `event.seq` together are the event's
+position in the member's event sequence. The epoch changes whenever the
+member's sequence space restarts: after a runtime restart, when the member
+moves to another session, or when a placed member moves to a new host
+binding. Mob-wide events interleave several members' sequences and carry no
+`epoch`.
+
+A member stream opened without `cursor` is live: it delivers only events
+published after it opens. To continue a member stream after a disconnect,
+open it again with `cursor` set to the position of the last event received:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "mob/stream_open",
+  "params": {
+    "mob_id": "team",
+    "agent_identity": "w1",
+    "cursor": { "epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a", "seq": 19 }
+  }
+}
+```
+
+The new stream first replays the events the member still retains after that
+position (each member keeps its latest 1024 events and 4 MiB by default),
+then streams live, with nothing delivered twice or skipped between the two.
+If the member is live when the stream opens and its retained events no
+longer reach back to the position, the replay starts with a
+`stream_truncated` event (`reason: {"kind":"stream_lagged","dropped":N}`). A
+`stream_truncated` event does not move the position a client resumes from. A
+cursor of another sequence space, or one ahead of the space's newest event,
+replays the current space from its earliest retained event instead; its
+events carry the current `epoch`, so the client sees the change. A member
+that is dormant when the stream opens (seated, but not materialized in this
+runtime) is not woken by it: the stream attaches when the member wakes and
+replays from the woken member's first event, whatever the cursor. The events
+the member published after the cursor and before it went dormant are not
+replayed, and no `stream_truncated` event marks them: a client that resumes a
+dormant member reads them from its history (`mob/member_history`). A
+`cursor` without `agent_identity`, or one whose `epoch` is not a UUID, is
+refused with `-32602` (invalid params).
 
 ### mob/stream_end notifications
 
@@ -3995,7 +4142,9 @@ As with session streams, `outcome` is `"remote_end"`, `"terminal_error"`, or
 `"explicit_close"`; `mob/stream_close` selects explicit-close termination.
 Conditional `error` contains `code` (`"stream_queue_overflow"` or
 `"stream_receiver_gone"`) and `message`; it is absent without an error.
-Stop using the terminated handle and reopen/reconcile as appropriate.
+Stop using the terminated handle and reopen/reconcile as appropriate. A
+member stream reopened with the last event's `cursor` continues after it (see
+`mob/stream_event` above).
 Transport disconnection can prevent delivery of this final notification.
 Neither stream-end notification is a callable RPC method.
 
@@ -4039,6 +4188,8 @@ and `data`, never on the message text.
 | -32035 | Approval commit unknown | The store cannot confirm the commit; reconcile from the store, never resend |
 | -32036 | Stale delivery scope | A scope-bound mob submit named a session that is no longer the member's; re-capture the delivery scope |
 | -32037 | Fork instruction refused | A fork was refused before commit because its child would inherit activated instructions that the fork instruction policy does not carry into it; `data.fork_instruction_refusal` names the cause and keys. Nothing was committed |
+| -32038 | Admission in progress | A realm admission fence the request needs is held, by an admission or another fenced write, beyond the request's bound: `config/set` and `config/patch` (with or without a config runtime). Nothing started and nothing was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts, so an immediate retry is not promised to succeed |
+| -32039 | Admission fence unavailable | A realm admission fence the request needs could not be opened, created, locked or identity-checked. Nothing started and nothing was written (fail closed) |
 
 ### comms/send error data
 
@@ -4071,7 +4222,7 @@ variant also carries a `message`.
 | `materialization_lost` | The member was woken, but its inbox was gone again before the hand-off | yes |
 | `non_authoritative_composition` | The member belongs to a candidate composition, which never materializes members | no |
 | `host_preparation_pending` | The member's host has preparation pending for it | yes |
-| `resume_gate_unavailable` | The member's durable resume gate was unavailable | yes |
+| `resume_gate_unavailable` | The member's durable resume gate was unavailable, or its session could not be built now for a cause that clears on its own (for example a provider credential whose source or store cannot answer: `source_unavailable`, `credential_store_unavailable`, `credential_access_pending`) | yes |
 | `host_owned` | The member is placed on a member host, which owns its materialization | no |
 | `lifecycle_origin_fenced` | The member's mob is quiescing its lifecycle | no |
 | `sender_waking` | The sender is itself being woken (it sent from inside its own build) and the recipient was not live; the send is refused instead of waiting on another wake | yes, once the sender is live |

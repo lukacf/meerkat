@@ -2862,6 +2862,45 @@ pub struct MobForkHelperParams {
     pub backend: Option<WireMobBackendKind>,
 }
 
+/// Request payload for `mob/fork_member`: fork a member's session at a
+/// message boundary and seat the fork as a new member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobForkMemberParams {
+    pub mob_id: String,
+    /// The member whose session is forked.
+    pub source_member_id: String,
+    /// The new member's identity.
+    pub agent_identity: String,
+    /// Where the copied prefix ends, as on `session/fork_at`: the new
+    /// member's transcript is the source's messages before this index.
+    /// Absent takes the source's committed transcript end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
+    /// The new member's profile. Absent takes the source member's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The new member's runtime mode. Absent takes the source member's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<WireMobRuntimeMode>,
+}
+
+/// Response payload for `mob/fork_member`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobForkMemberResult {
+    pub agent_identity: String,
+    pub member_ref: WireMemberRef,
+    /// The new member's session: the committed fork.
+    pub session_id: String,
+    /// The session the fork was cut from.
+    pub source_session_id: String,
+    /// Messages in the new member's transcript after the fork, as
+    /// `session/fork_at` counts them.
+    pub message_count: usize,
+}
+
 /// Typed terminal/truncation state for a bounded helper projection.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -3721,6 +3760,24 @@ pub struct MobStreamOpenParams {
     pub mob_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_identity: Option<String>,
+    /// Resume the member stream `agent_identity` names right after this
+    /// position: the events the member still retains after it are replayed,
+    /// then the stream is live. Absent opens the stream live. A mob-wide
+    /// stream (no `agent_identity`) takes no cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<MobStreamCursor>,
+}
+
+/// A position in a mob member's event sequence: the `epoch` a member
+/// `mob/stream_event` names and the `seq` of its event (`event.seq`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobStreamCursor {
+    /// The sequence space of the position (a UUID).
+    pub epoch: String,
+    /// The last envelope sequence the client received in that space.
+    pub seq: u64,
 }
 
 /// Response payload for `mob/stream_open`.

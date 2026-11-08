@@ -1035,14 +1035,14 @@ const MACHINE_SPECS = [
         },
         {
           id: "notice",
-          title: "Owed Requester Notice",
-          note: "Ended decisions owe one notice; its receipt settles it, and a replayed receipt is idempotent.",
+          title: "Owed Notice, Cleanup + Reply",
+          note: "Ended decisions owe one notice; its receipt settles it, and a replayed receipt is idempotent. An owner opens a cleanup under its permit and settles it after the end; an executed decision settles one reply by digest.",
           x: 1220,
           y: 730,
           w: 540,
           columns: 1,
-          anchors: ["Rejected", "Expired", "Withdrawn", "Executed", "ExecutionRefused"],
-          triggers: ["SettleNotice"],
+          anchors: ["Approved", "Rejected", "Expired", "Withdrawn", "Executed", "ExecutionRefused"],
+          triggers: ["SettleNotice", "OweCleanup", "SettleCleanup", "SettleReply"],
         },
       ],
     },
@@ -1106,6 +1106,7 @@ const POSTER_COVERAGE_KNOWN_GAPS = new Set([
   "dsl_forked_participant_lifecycle_machine",
   "dsl_temporary_council_lifecycle_machine",
   "dsl_mob_store_restore_lifecycle_machine",
+  "dsl_host_store_writer_fence_machine",
 ]);
 
 // `--check` drift gate, part 1 (COVERAGE): every canonical machine must be

@@ -122,6 +122,8 @@ async fn connect() -> (McpConnection, Seen, tokio::task::JoinHandle<()>) {
         oauth_target: None,
         attempt: None,
         account: Arc::new(meerkat_core::OperationAccount::Unavailable),
+        service_secret_launch: None,
+        credential_source: None,
     };
     (connection, seen, server_task)
 }

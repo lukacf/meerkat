@@ -535,6 +535,23 @@ secret_env = ["SEARCH_API_KEY"]
 - Setting values is Rust-only in 0.9.0: `meerkat::set_mcp_service_secret` and
   `remove_mcp_service_secret` (and `_entered` variants with an administrative
   entry check); no `rkat`, RPC, REST or SDK method sets them.
+- Every write is named. A set returns its `McpServiceSecretWitness` (realm,
+  server, slot, launch meaning and a write identity drawn from OS entropy,
+  never derived from the value; nonsecret and serializable).
+  `RealmMcpServiceSecrets::observe` reports each slot's current witness. A
+  launch records the witness of each value it injected for the connection's
+  lifetime: `McpConnection::service_secret_launch`, a callable
+  `McpOperationObservation`, and the `McpCallTarget` a host's call
+  preparation receives for every call, so each call names the writes that
+  serve it. Later, `RealmMcpServiceSecrets::recheck(&witness)` answers from
+  the realm configuration and the credential store, returning no value:
+  `Current`, `Rotated` (a newer write), `Removed`, or `DefinitionChanged`
+  (another definition or defining realm, or uninstalled).
+- Values stored by earlier versions carry no witness: they launch as before,
+  and every witness rechecks against them as `Rotated` until the next write.
+  Earlier versions do not read values stored with a witness (they report
+  them not stored), so upgrade every process that launches from a realm's
+  credential store before setting values.
 - `rkat run` launches realm-defined servers with their stored secrets. Servers
   from `mcp.toml`, host-supplied configs or live `mcp/add` that declare
   `secret_env` are refused (`NoOwner` or `NoCustody`).
@@ -543,6 +560,13 @@ secret_env = ["SEARCH_API_KEY"]
 
 - MCP OAuth credentials are per realm (0.9): log in once per realm with
   `rkat mcp login <name>`; pre-0.9 credentials are left unused.
+- Each call and resource read over an MCP OAuth connection names the lease
+  publication of the credential its requests carry
+  (`McpCallTarget::credential_publication`, read when the call is prepared):
+  the auth lease, the generation that publication advanced it to and its
+  publication time, never a value. A different current publication later
+  means the credential changed, also when another process logged out and in
+  again and the lease kept its generation.
 - Token, refresh and device-code exchanges follow no redirects;
   credential-bearing MCP HTTP and HTTP skill requests follow only same-origin
   redirects.

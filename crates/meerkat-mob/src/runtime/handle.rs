@@ -2971,9 +2971,17 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::IdentityMember { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
+        // An approval branch's reserved identity or label: refused to every
+        // spawn but the branch's own opening, like an identity entry's name.
+        MobError::ApprovalBranchReserved { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
         // An identity change is not a spawn; its typed refusal is the same
-        // family as the machine refusing the requested transition.
-        MobError::IdentityChangeRefused { .. } | MobError::IdentityArchived { .. } => {
+        // family as the machine refusing the requested transition, and so is
+        // a plain unwire's refusal of an owned edge.
+        MobError::IdentityChangeRefused { .. }
+        | MobError::IdentityArchived { .. }
+        | MobError::OwnedIdentityEdge { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {
@@ -2995,6 +3003,12 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::SpawnMemberAdmissionDenied { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
+        // MobMachine refused a member build whose lineage runs under a tool
+        // dispatch admission the host derived none for: the same family, the
+        // machine refusing the requested build.
+        MobError::DispatchAdmissionRequired { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
         // Bridge reply deadline: transport-class (matches
         // `MobError::failure_class`), folded with the comms transport lane.
         MobError::BridgeRequestTimedOut { .. } => {
@@ -3013,6 +3027,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // The resumed session's live actor runs another auth binding: the
         // SESSION could not serve this resume - session-class failure.
         MobError::MemberAuthBindingConflict { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SessionError
+        }
+        // The resumed session is bound to another member: the SESSION could
+        // not serve this resume - session-class failure.
+        MobError::ResumeSessionBoundToAnotherMember { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
         // Process-incarnation provisioning terminals are not a public
@@ -5785,6 +5804,11 @@ pub struct ForkMemberResult {
     pub agent_identity: AgentIdentity,
     pub session_id: meerkat_core::SessionId,
     pub cache_inheritance: meerkat_core::ForkCacheInheritance,
+    /// The session the fork was cut from.
+    pub source_session_id: meerkat_core::SessionId,
+    /// Messages in the child's transcript after the fork, as
+    /// [`meerkat_core::SessionForkResult::message_count`] counts them.
+    pub message_count: usize,
     #[serde(skip)]
     pub(crate) agent_runtime_id: AgentRuntimeId,
     #[serde(skip)]
@@ -7049,8 +7073,13 @@ impl ResumedMemberView {
 ///
 /// # Which spawns ask it
 ///
-/// - Every fresh spawn, helper, batch item, flow provisioning, policy spawn,
-///   respawn and fork request: [`customize_spawn`](Self::customize_spawn).
+/// - Every fresh spawn, helper, batch item, flow provisioning, respawn and
+///   fork request: [`customize_spawn`](Self::customize_spawn).
+/// - A policy spawn (`SpawnSource::PolicySpawn`):
+///   [`customize_spawn`](Self::customize_spawn), for its
+///   [`SpawnMemberSpec::tool_dispatch_admission`] alone. The rest of its
+///   build is the spawn policy's material MobMachine recorded, and nothing
+///   else the answer installs is applied.
 /// - Rebuilding an ordinary member on its durable session (process-restart
 ///   restore and [`MobHandle::resume`]):
 ///   [`customize_resume`](Self::customize_resume), with what the session
@@ -7072,12 +7101,37 @@ impl ResumedMemberView {
 ///   participant seated with its source's [`super::ForkBuildInheritance`],
 ///   and every later rebuild of such a fork-derived member: those repeat the
 ///   member's first build from its own durable records. A provider-params
-///   migration for them happens at their source.
+///   migration for them happens at their source. They ask it only for a tool
+///   dispatch admission (below).
 ///
 /// Where the rebuild of a fork-derived member takes its per-spawn overlay
 /// from its own identity, the customizer is asked a `SpawnSource::Resume`
 /// request for the member through `customize_spawn` and only its
 /// `external_tools` is used.
+///
+/// # Tool dispatch admission of forks
+///
+/// A [`SpawnMemberSpec::tool_dispatch_admission`] is process-local and never
+/// inherited. When a member is forked from a source whose build runs under
+/// one (a `fork_off` child, a child of [`MobHandle::fork_member`] and its
+/// siblings, a local temporary-council branch, a live-delegation worker), the
+/// customizer is asked through `customize_spawn` for the child (in
+/// `SpawnSource::PersistedForkResume`, or `SpawnSource::AttachedForkedParticipant`
+/// for a council branch) before the child is seated (for a handle fork,
+/// before anything is forked; a council branch's source is forked for it
+/// first), and only the
+/// `tool_dispatch_admission` of its answer is used; every later build of such
+/// a member asks again (a fork-derived member's as above, with a
+/// `SpawnSource::Resume` request; any other through `customize_resume`). A
+/// prompt-context fork of such a source (`SpawnSource::Fork`) is asked as
+/// any spawn is, and its answer must install an admission too. A build for
+/// which it installs none is refused with
+/// [`MobError::DispatchAdmissionRequired`]: such a member never runs without
+/// an admission. Install the admission on these requests as on any other to
+/// keep forks of gated members. A fork-derived member whose spawn row
+/// records no lineage (one an earlier release seated) is asked the same way
+/// on each rebuild and runs under the admission the answer installs, or
+/// under none when it installs none.
 pub trait SpawnMemberCustomizer: Send + Sync {
     fn customize_spawn(
         &self,
@@ -7210,7 +7264,10 @@ pub struct SpawnMemberSpec {
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// Process-local final dispatch admission for provisional executions.
     /// This authority is forwarded to AgentFactory's outermost dispatcher
-    /// gate and is never persisted or serialized for remote placement.
+    /// gate and is never persisted or serialized for remote placement. A fork
+    /// of a member built with one never copies it: the host's spawn
+    /// customizer installs the fork's own, or the fork is refused (see
+    /// [`SpawnMemberCustomizer`]).
     pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
     /// Administrative per-category overrides carried by durable identity intent.
     pub tool_category_overrides: meerkat_core::ToolCategoryOverrides,
@@ -7383,6 +7440,23 @@ pub struct SpawnMemberSpec {
     /// takes only that entry's name, never another's, and keeps its member a
     /// store-owned entry. An agent-lane request never carries it.
     pub(crate) created_custody: bool,
+    /// The decision whose approval branch this spawn seats: the member's
+    /// typed creation source, recorded on its `MemberSpawned` row and roster
+    /// entry. Set only by [`MobHandle::open_approval_branch`] (and by the
+    /// restore of a member that records it); never taken from
+    /// caller-supplied arguments. Every other spawn, ensure, respawn and
+    /// fork is refused the approval branch identity prefix and label
+    /// ([`crate::MobError::ApprovalBranchReserved`]).
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+    /// Whether the member is seated from a lineage that runs under a tool
+    /// dispatch admission: a fork whose source's build carries one, as
+    /// MobMachine's verdict on the fork seat found
+    /// ([`crate::machines::mob_machine::MemberDispatchAdmissionVerdict::Inherit`]).
+    /// Persisted with the member's spawn row, so every later build of the
+    /// member, after a restart too, derives an admission from the host or is
+    /// refused. Set only by the fork seat's resolution; never taken from
+    /// caller-supplied arguments.
+    pub(crate) dispatch_admission_lineage: bool,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7441,6 +7515,11 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field(
                 "inherited_operator_authority_bound",
                 &self.inherited_operator_authority_bound,
+            )
+            .field("approval_branch", &self.approval_branch)
+            .field(
+                "dispatch_admission_lineage",
+                &self.dispatch_admission_lineage,
             )
             .finish()
     }
@@ -7516,6 +7595,8 @@ impl SpawnMemberSpec {
             history_unavailable: None,
             fresh_life: false,
             created_custody: false,
+            approval_branch: None,
+            dispatch_admission_lineage: false,
         }
     }
 
@@ -12891,12 +12972,37 @@ impl MobHandle {
     /// List members currently eligible for runtime work dispatch.
     ///
     /// Excludes retiring, completed, broken, or unknown members even if they
-    /// still appear in the public operational projection.
+    /// still appear in the public operational projection, and every open
+    /// approval branch (by its recorded creation source): a branch runs only
+    /// its decision's approved work, so no role-addressed dispatch (a flow
+    /// step, its target provisioning, a supervisor escalation) selects it.
     pub(crate) async fn list_runnable_members(&self) -> Vec<MobMemberListEntry> {
-        self.list_members()
-            .await
+        // One read of the roster for the projection and the branches.
+        let (entries_by_identity, branches) = {
+            let roster = self.roster.read().await;
+            let branches: BTreeSet<AgentIdentity> = roster
+                .list_all()
+                .filter(|entry| entry.approval_branch().is_some())
+                .map(|entry| entry.agent_identity.clone())
+                .collect();
+            let entries: BTreeMap<AgentIdentity, RosterEntry> = roster
+                .list_all()
+                .cloned()
+                .map(|entry| (entry.agent_identity.clone(), entry))
+                .collect();
+            (entries, branches)
+        };
+        // Watch-borrow discipline: the guard stays inside this block and
+        // never crosses an await.
+        let entries = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            self.project_member_list_entries_from_machine_state(entries_by_identity, &machine_state)
+        };
+        entries
             .into_iter()
-            .filter(|entry| entry.status == MobMemberStatus::Active)
+            .filter(|entry| {
+                entry.status == MobMemberStatus::Active && !branches.contains(&entry.agent_identity)
+            })
             .collect()
     }
 
@@ -15319,6 +15425,16 @@ impl MobHandle {
         if spec.entry_custody {
             return Err(worker_reconcile_refuses_entry_custody(&identity));
         }
+        // An approval branch is never ensured, open or not: only its opening
+        // takes its identity or label.
+        if spec.approval_branch.is_some()
+            || super::approval_branch::takes_approval_branch_reservation(
+                &identity,
+                spec.labels.as_ref(),
+            )
+        {
+            return Err(MobError::ApprovalBranchReserved { identity });
+        }
         // One ready-wait budget for the whole convergence, decisions included.
         let started = Instant::now();
         loop {
@@ -15467,6 +15583,19 @@ impl MobHandle {
         // identity entry is refused before anything is reconciled.
         if let Some(spec) = desired.iter().find(|spec| spec.entry_custody) {
             return Err(worker_reconcile_refuses_entry_custody(&spec.identity));
+        }
+        // Nor does it reconcile an approval branch: only its opening takes
+        // its identity or label.
+        if let Some(spec) = desired.iter().find(|spec| {
+            spec.approval_branch.is_some()
+                || super::approval_branch::takes_approval_branch_reservation(
+                    &spec.identity,
+                    spec.labels.as_ref(),
+                )
+        }) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: spec.identity.clone(),
+            });
         }
         // MobMachine owns the membership decision: `ReconcileRunning` recomputes
         // `members_to_spawn`/`members_to_retire`/`desired_members` from its own
@@ -17746,6 +17875,7 @@ impl MobHandle {
         {
             MobMachineCommandResult::Unit => {
                 self.reseat_owed_created_entries().await;
+                self.realize_owned_identity_edges().await;
                 Ok(())
             }
             _ => Err(MobError::Internal(
@@ -19094,6 +19224,15 @@ impl MobHandle {
     /// session) and a committed end that is still an unanswered input
     /// boundary are refused the same way. The refusal answers at once; it
     /// never queues behind the source's turn.
+    ///
+    /// A source whose build runs under a host's tool dispatch admission is
+    /// forked only when the host's spawn customizer installs one for the
+    /// child too: the child runs under it, and otherwise the fork is refused
+    /// with [`MobError::DispatchAdmissionRequired`] before anything is forked
+    /// (see [`SpawnMemberCustomizer`]). The same holds for
+    /// [`Self::fork_member_at_turn_boundary`],
+    /// [`Self::fork_member_then_run_bounded`] and
+    /// [`Self::fork_member_then_run_detached`].
     pub async fn fork_member(
         &self,
         source_identity: &AgentIdentity,
@@ -19105,6 +19244,32 @@ impl MobHandle {
             member,
             message_count,
             meerkat_core::DurableForkSourceAdmission::Quiescent,
+            meerkat_core::ActivationWindow::HostDriven,
+        )
+        .await
+    }
+
+    /// Fork `source_identity` at an empty prefix and seat the child as a new
+    /// member through the ordinary resume pipeline: the child has none of
+    /// the source's messages and the build of the source's last committed
+    /// snapshot (its [`super::ForkBuildInheritance`]).
+    ///
+    /// The source is admitted as
+    /// [`meerkat_core::DurableForkSourceAdmission::EmptyPrefix`]: a source
+    /// whose turn is running is neither refused nor waited for, since an
+    /// empty prefix observes nothing that turn could extend, and the fork
+    /// never writes the source. The host has an activation window on the
+    /// child before its first turn, as for [`Self::fork_member`].
+    pub async fn fork_member_at_empty_prefix(
+        &self,
+        source_identity: &AgentIdentity,
+        member: SpawnMemberSpec,
+    ) -> Result<ForkMemberResult, MobError> {
+        self.fork_member_with_source_admission(
+            source_identity,
+            member,
+            Some(0),
+            meerkat_core::DurableForkSourceAdmission::EmptyPrefix,
             meerkat_core::ActivationWindow::HostDriven,
         )
         .await
@@ -19129,7 +19294,7 @@ impl MobHandle {
     pub async fn fork_member_at_turn_boundary(
         &self,
         source_identity: &AgentIdentity,
-        member: SpawnMemberSpec,
+        mut member: SpawnMemberSpec,
         message_count: Option<usize>,
         bound: Duration,
     ) -> Result<ForkMemberAtTurnBoundary, MobError> {
@@ -19143,6 +19308,22 @@ impl MobHandle {
                 meerkat_core::ActivationWindow::None,
             )
             .await?;
+        // The child carries no build inheritance, but its transcript is its
+        // source's: its tool dispatch admission is decided by MobMachine from
+        // the source's lineage before anything is forked, and composed with
+        // the admission the request carries (the live delegation's own gate).
+        let lineage = self
+            .observe_fork_source_dispatch_lineage(source_identity, &source_session_id)
+            .await?;
+        let spawner = member.spawned_by.clone();
+        self.resolve_seat_dispatch_admission(
+            lineage,
+            &member,
+            SpawnSource::PersistedForkResume,
+            spawner,
+        )
+        .await?
+        .apply_to(&mut member);
         let fork = self
             .session_service
             .fork_persisted_session_at_turn_boundary(
@@ -19192,6 +19373,12 @@ impl MobHandle {
         if &member.identity == source_identity {
             return Err(MobError::MemberAlreadyExists(member.identity.clone()));
         }
+        // An approval branch's identity and label are its opening's: refused
+        // to every other fork before anything is forked.
+        super::approval_branch::admit_approval_branch_reservation(
+            member,
+            SpawnSource::PersistedForkResume,
+        )?;
         if member.fork_build_inheritance.is_some() {
             return Err(MobError::WiringError(
                 "a durable member fork resolves its own source's build inheritance; the spawn \
@@ -19369,12 +19556,18 @@ impl MobHandle {
             self.capture_member_creation_source(source_session_id).await,
         )
         .into_admitted_witness("fork_member");
+        // What this mob observes of the source's tool dispatch admission
+        // lineage: the child's seat resolves its own admission from it.
+        let dispatch_admission_lineage = self
+            .observe_fork_source_dispatch_lineage(source_identity, source_session_id)
+            .await?;
         let mut inheritance = super::ForkBuildInheritance::new(
             source,
             app_context,
             labels,
             external_tools,
             external_tools_origin,
+            dispatch_admission_lineage,
         );
         inheritance.creation_source = Some(creation_source);
         Ok((inheritance, app_context_from_fork_child))
@@ -19431,6 +19624,8 @@ impl MobHandle {
             agent_runtime_id: entry.agent_runtime_id,
             fence_token: entry.fence_token,
             cache_inheritance: fork.cache_inheritance,
+            source_session_id: fork.source_session_id,
+            message_count: fork.message_count,
         })
     }
 
@@ -19575,17 +19770,34 @@ impl MobHandle {
         // verbatim), so the application context is then read back from the
         // committed child, under the same rule: a context the request states
         // wins.
-        let app_context_read =
-            if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn {
-                ForkSourceAppContextRead::SourceSessionOrForkChild
-            } else {
-                ForkSourceAppContextRead::SourceSession
-            };
+        let app_context_read = if matches!(
+            source_admission,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn
+                | meerkat_core::DurableForkSourceAdmission::EmptyPrefix
+        ) {
+            ForkSourceAppContextRead::SourceSessionOrForkChild
+        } else {
+            ForkSourceAppContextRead::SourceSession
+        };
         let context_requested = member.context.is_some();
         let (inheritance, app_context_from_fork_child) = self
             .resolve_fork_build_inheritance(source_identity, &source_session_id, app_context_read)
             .await?;
+        let dispatch_admission_lineage = inheritance.dispatch_admission_lineage();
         inheritance.apply_to(member);
+        // The child's tool dispatch admission, decided by MobMachine from the
+        // source's lineage before anything is forked: a source whose build
+        // runs under one has the host's spawn customizer asked for the
+        // child, and a child it derives none for is refused here.
+        let spawner = member.spawned_by.clone();
+        self.resolve_seat_dispatch_admission(
+            dispatch_admission_lineage,
+            member,
+            SpawnSource::PersistedForkResume,
+            spawner,
+        )
+        .await?
+        .apply_to(member);
         let fork = self
             .session_service
             .fork_persisted_session(
@@ -20438,6 +20650,42 @@ impl MobHandle {
     ) -> Result<Vec<crate::machines::mob_machine::MobMachineEffect>, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::ApplyMachineInputEffects {
             input: Box::new(input),
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// What this mob observes of `source_identity`'s tool dispatch admission
+    /// lineage, for a fork of its session `source_session_id`.
+    async fn observe_fork_source_dispatch_lineage(
+        &self,
+        source_identity: &AgentIdentity,
+        source_session_id: &meerkat_core::SessionId,
+    ) -> Result<crate::machines::mob_machine::MemberDispatchAdmissionLineage, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ObserveForkSourceDispatchLineage {
+            source_identity: source_identity.clone(),
+            source_session_id: source_session_id.clone(),
+            reply_tx,
+        })
+        .await?
+    }
+
+    /// The tool dispatch admission of one fork seat of `child`, decided by
+    /// MobMachine from its source's observed `lineage`, with the host's spawn
+    /// customizer asked for `child` (in `spawn_source`, by `spawner`) when
+    /// the machine says so.
+    async fn resolve_seat_dispatch_admission(
+        &self,
+        lineage: crate::machines::mob_machine::MemberDispatchAdmissionLineage,
+        child: &SpawnMemberSpec,
+        spawn_source: SpawnSource,
+        spawner: Option<AgentIdentity>,
+    ) -> Result<super::fork_build::SeatDispatchAdmission, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolveSeatDispatchAdmission {
+            lineage,
+            child: Box::new(child.clone()),
+            spawn_source,
+            spawner,
             reply_tx,
         })
         .await?
@@ -23382,6 +23630,8 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
+            dispatch_admission_lineage: false,
             direct_member_fence: None,
         }
     }

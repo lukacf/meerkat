@@ -644,6 +644,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   callback as structured data, and nothing matches the error's text. A
   callback that never completed stays the retryable failure it was.
 
+- A host store realm whose store reports a conflicted scope (two batches
+  at one of its versions, Core 0.9.11) opens with that scope quarantined,
+  where the open failed: the scope's document or member refuses typed,
+  every other one serves, and the readiness probe stays ready and names the
+  scope with its cause in `HostStoreReadiness::quarantined_scopes` (new).
+  Repair the scope in the store, then restart: a restart alone quarantines
+  it again. A conflict on a scope of the root mob storage, which holds every
+  mob Meta hosts, still fails the build, typed (the boot cannot open its
+  mobs), so Meta does not start and readiness never runs: repair the scope,
+  then restart.
+
 ### Fixed
 
 - `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
@@ -842,6 +853,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `applies`, and `meta/tool_grants/list` answers without the member's
   `gate`. Meerkat's own `tool_grants/grant` and `tool_grants/list` report
   both.
+
+- Members of an ephemeral mob spec keep the route they were built with for
+  `delegate`: after an in-place model, provider, endpoint or auth-binding
+  switch, the member's helper still runs on its build-time route and
+  resolves its credentials through the realm. Their session service keeps
+  no retained session metadata, which is where `delegate` reads the
+  current identity (Meerkat's known limitation for `EphemeralSessionService`).
+
 
 ## [0.9.10] - 2026-11-04
 

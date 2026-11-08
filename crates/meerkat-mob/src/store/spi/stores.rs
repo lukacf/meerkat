@@ -1117,9 +1117,12 @@ impl meerkat_runtime::RuntimeStoreWriteFence for SpiIdentityRuntimeWriteFence {
                 reason: "the identity authority has a host store commit in flight".to_string(),
             });
         };
-        if let Some(cause) = state.poison() {
+        if let Some(cause) = state.refusal() {
             return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Conflict {
-                reason: format!("the identity authority's host store scope is poisoned: {cause}"),
+                reason: format!(
+                    "the identity authority's host store scope refuses until the realm is \
+                     reopened: {cause}"
+                ),
             });
         }
         let outcome = self.inner.execute_if_current(operation);
@@ -1491,6 +1494,29 @@ impl MobIdentityMemberStore for SpiMobIdentityStore {
                 self.bundle
                     .identity
                     .observe_created_identity(mob_id, identity),
+            )
+            .await
+    }
+
+    /// I: the purge's rows and receipt, checked and applied in one locked
+    /// in-memory step and committed as one host batch (the intents scope's
+    /// rows the purge removed, and its receipt).
+    async fn purge_created_identity_rows(
+        &self,
+        write: &crate::store::CreatedRowsPurgeWrite,
+    ) -> Result<crate::store::CreatedRowsPurge, MobStoreError> {
+        let touch = Touch {
+            intents: true,
+            change_receipt: Some((
+                write.receipt.mob_id.clone(),
+                write.receipt.operation_id.clone(),
+            )),
+            ..Touch::default()
+        };
+        self.bundle
+            .write(
+                touch,
+                self.bundle.identity.purge_created_identity_rows(write),
             )
             .await
     }

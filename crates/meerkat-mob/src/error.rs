@@ -383,7 +383,8 @@ pub enum MemberWakeRefusal {
     /// session service could not serve it now (a store failure that clears
     /// on its own, a busy session, unavailable runtime authority, a hosting
     /// claim another owner holds, an external write authority that could not
-    /// be checked without waiting).
+    /// be checked without waiting, a provider credential whose source or
+    /// store cannot answer now or whose lookup is in flight).
     ResumeGateUnavailable,
     /// The mob's wake bound (`MobBuilder::with_member_wake_timeout`) ended
     /// before the member was ready. The member is dormant again.
@@ -694,6 +695,18 @@ pub enum MobError {
     #[error("mob member already exists: {0}")]
     MemberAlreadyExists(AgentIdentity),
 
+    /// An approval branch's reserved identity or label, taken by any path
+    /// but the branch's own opening ([`crate::MobHandle::open_approval_branch`],
+    /// which records the decision as the member's typed creation source), or
+    /// a wire, unwire or respawn of an open approval branch. Nothing was
+    /// changed.
+    #[error(
+        "approval_branch_reserved: '{identity}' is reserved for an approval branch: only the \
+         branch's own opening takes its identity or label, and nothing wires, unwires or \
+         respawns an open branch"
+    )]
+    ApprovalBranchReserved { identity: AgentIdentity },
+
     /// The member is an identity entry (see
     /// [`crate::runtime::IdentityEntryRead`]): a spawn without entry custody
     /// cannot take its name, and the agent lane does not act on it as a
@@ -715,6 +728,20 @@ pub enum MobError {
     /// it has no member until its unarchive, and nothing is delivered to it.
     #[error("identity '{member_id}' is archived: nothing is delivered to it until its unarchive")]
     IdentityArchived { member_id: AgentIdentity },
+
+    /// The edge between `local` and `peer` is an owned edge (0.9.11): an
+    /// identity's change declared it, `owner`'s, and a plain unwire does not
+    /// end it. Only its owner's change, the host's policy reload that denies
+    /// it, the removal of either end and the mob's destroy end it.
+    #[error(
+        "the edge between '{local}' and '{peer}' is owned by '{owner}': only its owner's change, \
+         a policy reload, the removal of an end or the destroy ends it"
+    )]
+    OwnedIdentityEdge {
+        local: AgentIdentity,
+        peer: AgentIdentity,
+        owner: AgentIdentity,
+    },
 
     /// A spawn that had not reached custody (still preparing, or staged and
     /// provisioning) was canceled by a lifecycle transition (stop, complete,
@@ -2077,6 +2104,44 @@ pub enum MobError {
         class: MobQuarantineClass,
         cause: Arc<MobError>,
     },
+
+    /// A resume of member `member_id` named session `session_id`, which is
+    /// durably bound to another member: its mob member binding, or the comms
+    /// name it was created under, names member `bound_member_id` of mob
+    /// `bound_mob_id`. The session stays that member's, and nothing is
+    /// seated. Structured data: `kind`
+    /// `resume_session_bound_to_another_member`, `session_id`, `member_id`,
+    /// `bound_mob_id` and `bound_member_id`.
+    #[error(
+        "session '{session_id}' is bound to member '{bound_member_id}' of mob '{bound_mob_id}', so member '{member_id}' cannot resume it"
+    )]
+    ResumeSessionBoundToAnotherMember {
+        session_id: meerkat_core::SessionId,
+        member_id: AgentIdentity,
+        bound_mob_id: MobId,
+        bound_member_id: AgentIdentity,
+    },
+
+    /// A build of member `member_id` was refused because it would run
+    /// without the tool dispatch admission its lineage runs under: the member
+    /// is forked from a source whose build runs under one (a `fork_off`
+    /// child, a fork from [`crate::MobHandle::fork_member`] and its siblings,
+    /// a local temporary-council branch, a live-delegation fork, a
+    /// prompt-context fork), or it is such a fork being rebuilt (a wake, a
+    /// restore, a reload, an explicit resume) or respawned, and the host's
+    /// spawn customizer derived no admission for the build. MobMachine
+    /// decides it
+    /// ([`crate::machines::mob_machine::MemberDispatchAdmissionVerdict::Refused`]).
+    /// A refused fork seats nothing, and a refused handle fork forks nothing
+    /// either (a council branch's source is forked for it before it is
+    /// seated, and the council's cleanup removes that fork); a refused
+    /// rebuild leaves the member unbuilt, and a refused respawn retires
+    /// nothing. Have the host's customizer install the admission for the
+    /// member too, as it does for its source.
+    #[error(
+        "member '{member_id}' would run without the tool dispatch admission its lineage runs under: the host's spawn customizer derived none for its build"
+    )]
+    DispatchAdmissionRequired { member_id: AgentIdentity },
 }
 
 /// Why a member's operator authority ceiling was refused
@@ -2577,6 +2642,18 @@ impl std::fmt::Display for ForkSourceUnavailableCause {
     }
 }
 
+impl ForkSourceUnavailableCause {
+    /// The cause's wire name in a refusal's data: `no_session`, `running`
+    /// or `remote_read_unavailable`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSession => "no_session",
+            Self::Running => "running",
+            Self::RemoteReadUnavailable => "remote_read_unavailable",
+        }
+    }
+}
+
 fn held_cleanup_suffix(cleanup: Option<&MobError>) -> String {
     match cleanup {
         None => String::new(),
@@ -2926,6 +3003,30 @@ impl MobError {
                 "max_bytes": max_bytes,
                 "required_bytes": required_bytes,
             })),
+            Self::ResumeSessionBoundToAnotherMember {
+                session_id,
+                member_id,
+                bound_mob_id,
+                bound_member_id,
+            } => Some(serde_json::json!({
+                "kind": "resume_session_bound_to_another_member",
+                "session_id": session_id.to_string(),
+                "member_id": member_id.as_str(),
+                "bound_mob_id": bound_mob_id.as_str(),
+                "bound_member_id": bound_member_id.as_str(),
+            })),
+            Self::ForkSourceUnavailable {
+                source_member_id,
+                cause,
+            } => Some(serde_json::json!({
+                "kind": "fork_source_unavailable",
+                "source_member_id": source_member_id,
+                "cause": cause.as_str(),
+            })),
+            Self::DispatchAdmissionRequired { member_id } => Some(serde_json::json!({
+                "kind": "dispatch_admission_required",
+                "member_id": member_id.as_str(),
+            })),
             // A restore failure that IS a typed resume hold projects the hold
             // under meerkat's own key, so a wire caller classifies the Broken
             // member exactly as it classifies meerkat's -32013 refusal.
@@ -3041,6 +3142,11 @@ impl MobError {
                 "member_id": member_id.as_str(),
                 "retryable": false,
             })),
+            Self::ApprovalBranchReserved { identity } => Some(serde_json::json!({
+                "kind": "approval_branch_reserved",
+                "member_id": identity.as_str(),
+                "retryable": false,
+            })),
             Self::IdentityChangeRefused { refusal } => Some(serde_json::json!({
                 "kind": "identity_change_refused",
                 "refusal": refusal.kind(),
@@ -3049,6 +3155,13 @@ impl MobError {
             Self::IdentityArchived { member_id } => Some(serde_json::json!({
                 "kind": "identity_archived",
                 "member_id": member_id.as_str(),
+                "retryable": false,
+            })),
+            Self::OwnedIdentityEdge { local, peer, owner } => Some(serde_json::json!({
+                "kind": "owned_identity_edge",
+                "local": local.as_str(),
+                "peer": peer.as_str(),
+                "owner": owner.as_str(),
                 "retryable": false,
             })),
             Self::MemberRegistrationRefused {
@@ -3441,6 +3554,16 @@ impl MobError {
                 Self::ForkContextTooLarge { .. } => {
                     Some(meerkat_contracts::ErrorCode::InvalidParams)
                 }
+                // The caller named a session another member owns.
+                Self::ResumeSessionBoundToAnotherMember { .. } => {
+                    Some(meerkat_contracts::ErrorCode::InvalidParams)
+                }
+                // A fork source that owes work is busy: fork it again once
+                // it is idle.
+                Self::ForkSourceUnavailable {
+                    cause: ForkSourceUnavailableCause::Running,
+                    ..
+                } => Some(meerkat_contracts::ErrorCode::SessionBusy),
                 // The caller named a binding the session's live actor does
                 // not run.
                 Self::MemberAuthBindingConflict { .. } => {

@@ -12833,7 +12833,7 @@ mod tests {
                 coordinator
                     .with_exclusive_mutation(
                         key,
-                        Box::new(move || {
+                        Box::new(move |_fence| {
                             Box::pin(async move {
                                 let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                                 max_in_flight.fetch_max(current, Ordering::SeqCst);
@@ -14240,7 +14240,11 @@ mod tests {
         )
         .expect("fixture token must carry the durable lifecycle marker");
         token_store
-            .save(&token_key, &committed_tokens)
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &token_key,
+                &committed_tokens,
+            )
             .await
             .unwrap();
 

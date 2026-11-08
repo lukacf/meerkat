@@ -8,7 +8,7 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-use super::{parse_params, parse_session_id_for_runtime};
+use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 
 use meerkat_contracts::{
     CommsPeerUnreachableReason, CommsPeersResult, CommsSendErrorData, CommsSendResult,
@@ -98,7 +98,7 @@ pub async fn handle_send(
 ) -> RpcResponse {
     let params: CommsSendParams = match parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return resp.with_id(id),
     };
 
     let session_id = match parse_session_id_for_runtime(id.clone(), params.session_id(), runtime) {
@@ -177,7 +177,7 @@ pub async fn handle_peers(
 ) -> RpcResponse {
     let params: CommsPeersParams = match parse_params(params) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(resp) => return resp.with_id(id),
     };
 
     let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {

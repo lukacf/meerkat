@@ -198,6 +198,19 @@ impl CopilotModelDiscoveryError {
         )
     }
 
+    /// Whether the listing could not answer now and a later one may, with no
+    /// change to the token or the account: GitHub rate limited it, or the
+    /// failure is worth an immediate retry ([`Self::worth_an_immediate_retry`]).
+    fn clears_on_its_own(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                rate_limited: true,
+                ..
+            }
+        ) || self.worth_an_immediate_retry()
+    }
+
     fn retry_delay(&self) -> StdDuration {
         match self {
             Self::Http {
@@ -310,6 +323,16 @@ struct CopilotExchangeUnavailable {
     /// the outage answers in place of the exchange, when the exchange sent
     /// `Retry-After` ([`exchange_not_before`]).
     not_before: Option<DateTime<Utc>>,
+}
+
+impl CopilotExchangeUnavailable {
+    /// The outage as a resolution sees it: a credential source that cannot
+    /// answer now, which clears on its own.
+    fn source_unavailable(&self) -> ProviderAuthError {
+        ProviderAuthError::Auth(AuthError::SourceUnavailable {
+            reason: self.message.clone(),
+        })
+    }
 }
 
 #[async_trait]
@@ -1172,10 +1195,14 @@ impl CopilotRoutedClient {
     /// A Copilot authorization failure as a turn sees it: while the account's
     /// token exchange is temporarily unavailable and no token is left to
     /// serve, the exchange failure's retryable class; otherwise the
-    /// authorizer's own error.
+    /// authorizer's own error. The authorizer reports that outage as
+    /// `SourceUnavailable`, and any other failure it cannot type as
+    /// `RefreshFailed`.
     fn authorization_error(&self, error: AuthError) -> meerkat_llm_core::LlmError {
-        if matches!(error, AuthError::RefreshFailed(_))
-            && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
+        if matches!(
+            error,
+            AuthError::RefreshFailed(_) | AuthError::SourceUnavailable { .. }
+        ) && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
         {
             return retryable;
         }
@@ -1782,6 +1809,8 @@ struct CopilotRefreshOutcome {
 enum CopilotTokenError {
     /// The token exchange failed transiently and no valid token is left. The
     /// account recorded the outage; the next use tries the exchange again.
+    /// Carries the outage as `AuthError::SourceUnavailable`, a kind that
+    /// clears on its own.
     ExchangeUnavailable(ProviderAuthError),
     /// Every other failure, an account action included.
     Failed(ProviderAuthError),
@@ -1814,6 +1843,14 @@ struct CachedCopilotToken {
     generation: u64,
     token: String,
     source_generation: u64,
+    /// The publication time of the source credential's publication this
+    /// entry serves: with `source_generation` it names that publication. In
+    /// token mode it is the account lease publication's; for the device
+    /// sign-in, the stored sign-in record marker's. A lease that takes
+    /// another process's stored record keeps its own generation when the
+    /// record's is not above it, so the generation alone can name another
+    /// record's publication.
+    source_published_at_millis: Option<u64>,
     /// The expiry of the source credential's publication this entry serves,
     /// which the authorizer reports (`HttpAuthorizer::expires_at`): the
     /// device sign-in's GitHub token expiry, or in token mode the expiry
@@ -1845,6 +1882,10 @@ impl std::fmt::Debug for CachedCopilotToken {
             .field("generation", &self.generation)
             .field("token", &"<redacted>")
             .field("source_generation", &self.source_generation)
+            .field(
+                "source_published_at_millis",
+                &self.source_published_at_millis,
+            )
             .field("source_expires_at", &self.source_expires_at)
             .field("refresh_at", &self.refresh_at)
             .field("expires_at", &self.expires_at)
@@ -1877,6 +1918,7 @@ impl CachedCopilotToken {
     fn awaiting_first_token(
         generation: u64,
         source_generation: u64,
+        source_published_at_millis: Option<u64>,
         source_expires_at: Option<DateTime<Utc>>,
         exchange_unavailable: CopilotExchangeUnavailable,
     ) -> Self {
@@ -1884,6 +1926,7 @@ impl CachedCopilotToken {
             generation,
             token: String::new(),
             source_generation,
+            source_published_at_millis,
             source_expires_at,
             refresh_at: DateTime::<Utc>::MIN_UTC,
             expires_at: DateTime::<Utc>::MIN_UTC,
@@ -1975,23 +2018,42 @@ impl CopilotAuthorizer {
                         )
                     })?;
                     let now = (self.env.now)();
-                    if let Some(cached) = self.fresh_cached(source_generation, now) {
+                    let source_published_at_millis = Self::device_source_published_at(&source);
+                    if let Some(cached) =
+                        self.fresh_cached(source_generation, source_published_at_millis, now)
+                    {
                         if cached.model_discovery_due {
-                            self.refresh_models_off_the_request_path(&cached, source_generation)
-                                .await;
+                            self.refresh_models_off_the_request_path(
+                                &cached,
+                                source_generation,
+                                source_published_at_millis,
+                            )
+                            .await;
                         }
                         return Ok(cached);
                     }
-                    if let Some(outage) = self.outage_before_its_retry(source_generation, now) {
+                    if let Some(outage) = self.outage_before_its_retry(
+                        source_generation,
+                        source_published_at_millis,
+                        now,
+                    ) {
                         return Err(outage);
                     }
                     (source_generation, LeaderTask::Device(source))
                 }
                 CopilotCredentialMode::OperatorToken => match self.observe_operator_lease()? {
-                    OperatorObservation::Cached { cached, generation } => {
+                    OperatorObservation::Cached {
+                        cached,
+                        generation,
+                        published_at_millis,
+                    } => {
                         if cached.model_discovery_due {
-                            self.refresh_models_off_the_request_path(&cached, generation)
-                                .await;
+                            self.refresh_models_off_the_request_path(
+                                &cached,
+                                generation,
+                                published_at_millis,
+                            )
+                            .await;
                         }
                         return Ok(cached);
                     }
@@ -2066,11 +2128,17 @@ impl CopilotAuthorizer {
         source_generation: u64,
     ) -> Result<CachedTokenView, CopilotTokenError> {
         let now = (self.env.now)();
-        if let Some(cached) = self.fresh_cached(source_generation, now) {
+        let source_published_at_millis = Self::device_source_published_at(source);
+        if let Some(cached) = self.fresh_cached(source_generation, source_published_at_millis, now)
+        {
             // Another flight minted the token this caller waited for.
             if cached.model_discovery_due {
-                self.refresh_models_off_the_request_path(&cached, source_generation)
-                    .await;
+                self.refresh_models_off_the_request_path(
+                    &cached,
+                    source_generation,
+                    source_published_at_millis,
+                )
+                .await;
             }
             return Ok(cached);
         }
@@ -2099,12 +2167,13 @@ impl CopilotAuthorizer {
             }
             Err(CopilotTokenExchangeError::Unavailable(unavailable)) => unavailable,
         };
+        let source_published_at_millis = Self::device_source_published_at(source);
         let now = (self.env.now)();
         // Recorded below only when no token is left to serve.
         unavailable.not_before = unavailable
             .retry_after
             .map(|retry_after| exchange_not_before(now, retry_after));
-        let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
+        let error = unavailable.source_unavailable();
         let mut cache = self.state.cache.write();
         let Some(cached) = cache.as_mut() else {
             // No token was minted for this account yet. The outage is kept on
@@ -2120,12 +2189,15 @@ impl CopilotAuthorizer {
             *cache = Some(CachedCopilotToken::awaiting_first_token(
                 self.state.next_generation.fetch_add(1, Ordering::Relaxed),
                 source_generation,
+                source_published_at_millis,
                 source.expires_at,
                 unavailable,
             ));
             return Err(CopilotTokenError::ExchangeUnavailable(error));
         };
-        if cached.source_generation == source_generation && now < cached.expires_at {
+        let same_source = cached.source_generation == source_generation
+            && cached.source_published_at_millis == source_published_at_millis;
+        if same_source && now < cached.expires_at {
             cached.refresh_at = exchange_retry_at(now, unavailable.retry_after, cached.expires_at);
             tracing::warn!(
                 credential_identity = %self.binding.credential_identity(),
@@ -2146,13 +2218,14 @@ impl CopilotAuthorizer {
             retryable = %unavailable.retryable,
             "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
         );
-        if cached.source_generation != source_generation {
+        if !same_source {
             // The entry's token was minted from an earlier sign-in. The entry
             // now speaks for the current one, so a build admitted during the
             // outage publishes the current sign-in's expiry, and the earlier
             // sign-in's token is refused so it never serves this one.
             cached.refuse();
             cached.source_generation = source_generation;
+            cached.source_published_at_millis = source_published_at_millis;
             cached.source_expires_at = source.expires_at;
         }
         cached.exchange_unavailable = Some(unavailable);
@@ -2227,6 +2300,7 @@ impl CopilotAuthorizer {
             generation,
             token: token.token,
             source_generation,
+            source_published_at_millis: Self::device_source_published_at(source),
             source_expires_at: source.expires_at,
             refresh_at,
             expires_at,
@@ -2241,34 +2315,45 @@ impl CopilotAuthorizer {
 
     /// The account's recorded exchange outage, while it answers in place of
     /// the exchange: no token is left to serve, the outage was recorded for
-    /// the current sign-in, and the instant its exchange's `Retry-After`
-    /// named is still ahead. Every request until then fails with the
-    /// outage's retryable class without calling the exchange.
+    /// the current sign-in (its record's generation `source_generation`,
+    /// published at `source_published_at_millis`), and the instant its
+    /// exchange's `Retry-After` named is still ahead. Every request until
+    /// then fails with the outage's retryable class without calling the
+    /// exchange.
     fn outage_before_its_retry(
         &self,
         source_generation: u64,
+        source_published_at_millis: Option<u64>,
         now: DateTime<Utc>,
     ) -> Option<CopilotTokenError> {
         let cache = self.state.cache.read();
         let cached = cache.as_ref()?;
         let unavailable = cached.exchange_unavailable.as_ref()?;
         (cached.source_generation == source_generation
+            && cached.source_published_at_millis == source_published_at_millis
             && now >= cached.expires_at
             && unavailable
                 .not_before
                 .is_some_and(|not_before| now < not_before))
-        .then(|| {
-            CopilotTokenError::ExchangeUnavailable(ProviderAuthError::SourceResolutionFailed(
-                unavailable.message.clone(),
-            ))
-        })
+        .then(|| CopilotTokenError::ExchangeUnavailable(unavailable.source_unavailable()))
     }
 
-    fn fresh_cached(&self, source_generation: u64, now: DateTime<Utc>) -> Option<CachedTokenView> {
+    /// The cached token, while it is fresh and was built for the source
+    /// credential's publication `source_generation`, published at
+    /// `source_published_at_millis` (the account lease publication's time in
+    /// token mode, the sign-in record marker's for the device sign-in).
+    fn fresh_cached(
+        &self,
+        source_generation: u64,
+        source_published_at_millis: Option<u64>,
+        now: DateTime<Utc>,
+    ) -> Option<CachedTokenView> {
         let cache = self.state.cache.read();
         let cached = cache.as_ref()?;
-        (cached.source_generation == source_generation && now < cached.refresh_at).then(|| {
-            CachedTokenView {
+        (cached.source_generation == source_generation
+            && cached.source_published_at_millis == source_published_at_millis
+            && now < cached.refresh_at)
+            .then(|| CachedTokenView {
                 generation: cached.generation,
                 token: cached.token.clone(),
                 api_base: cached.api_base.clone(),
@@ -2276,8 +2361,17 @@ impl CopilotAuthorizer {
                     .model_discovery_refresh_at
                     .is_some_and(|refresh_at| now >= refresh_at),
                 identity: cached.identity.clone(),
-            }
-        })
+            })
+    }
+
+    /// The publication time of the device sign-in record `source`, from its
+    /// durable marker: with the marker generation it names the sign-in. Two
+    /// processes each publish their own sign-in under their own lease, so two
+    /// records can carry the same marker generation, and a lease that takes
+    /// another process's later sign-in can keep its generation.
+    fn device_source_published_at(source: &PersistedTokens) -> Option<u64> {
+        meerkat_core::tokens_lifecycle_publication(source)
+            .and_then(|publication| publication.credential_published_at_millis)
     }
 
     async fn load_source_tokens(&self) -> Result<PersistedTokens, ProviderAuthError> {
@@ -2312,9 +2406,10 @@ impl CopilotAuthorizer {
         let preparation_env = self.env.clone();
         let preparation_binding = self.binding.clone();
         let preparation: meerkat_auth_core::resolver::ManagedStoreOAuthRefreshPrepareFn =
-            Box::new(move |locked_baseline, mode| {
+            Box::new(move |fence, locked_baseline, mode| {
                 Box::pin(async move {
                     prepare_managed_store_oauth_refresh_under_lock(
+                        fence,
                         &preparation_env,
                         &preparation_binding,
                         managed,
@@ -2577,14 +2672,16 @@ impl CopilotAuthorizer {
     /// The fast path, with no I/O. A cache exists only after a flight
     /// published or restored the account lease, so without one the flight
     /// reads the source. With one the AuthMachine decides: `Authorized` uses
-    /// the cache built for the current lease generation (a model list that
-    /// is due is refreshed off the request path), and any other verdict has
-    /// the flight read the source again (through the paced check for a
-    /// source that runs something). `ReauthRequired` first drops the
-    /// cache built for the refused publication: the refusal may have come
-    /// from another account state on the same lease (another provider
-    /// registry, another credential store), and this one must still read its
-    /// source to heal when that source does.
+    /// the cache built for the lease's current publication (its generation
+    /// and its publication time: a lease that takes another process's stored
+    /// record can keep its generation; a model list that is due is refreshed
+    /// off the request path), and any other verdict has the flight read the
+    /// source again (through the paced check for a source that runs
+    /// something). `ReauthRequired` first drops the cache built for the
+    /// refused publication: the refusal may have come from another account
+    /// state on the same lease (another provider registry, another
+    /// credential store), and this one must still read its source to heal
+    /// when that source does.
     fn observe_operator_lease(&self) -> Result<OperatorObservation, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
@@ -2595,11 +2692,17 @@ impl CopilotAuthorizer {
         }
         let now = (self.env.now)();
         let disposition = observe_credential_use(auth_lease, &lease_key, now)?;
-        let generation = auth_lease.snapshot(&lease_key).generation;
+        let publication = auth_lease.snapshot(&lease_key);
+        let generation = publication.generation;
+        let published_at_millis = publication.credential_published_at_millis;
         match disposition {
             CredentialUseDisposition::Authorized => {
-                if let Some(cached) = self.fresh_cached(generation, now) {
-                    return Ok(OperatorObservation::Cached { cached, generation });
+                if let Some(cached) = self.fresh_cached(generation, published_at_millis, now) {
+                    return Ok(OperatorObservation::Cached {
+                        cached,
+                        generation,
+                        published_at_millis,
+                    });
                 }
             }
             CredentialUseDisposition::ReauthRequired => {
@@ -2627,13 +2730,20 @@ impl CopilotAuthorizer {
 
     async fn refresh_operator_token_as_leader(&self) -> Result<CachedTokenView, ProviderAuthError> {
         let material = self.load_operator_token().await?;
-        if let Some(cached) = self.fresh_cached(material.generation, (self.env.now)())
-            && cached.token == material.token
+        if let Some(cached) = self.fresh_cached(
+            material.generation,
+            material.published_at_millis,
+            (self.env.now)(),
+        ) && cached.token == material.token
         {
             // Another flight already built the account for this token.
             if cached.model_discovery_due {
-                self.refresh_models_off_the_request_path(&cached, material.generation)
-                    .await;
+                self.refresh_models_off_the_request_path(
+                    &cached,
+                    material.generation,
+                    material.published_at_millis,
+                )
+                .await;
             }
             return Ok(cached);
         }
@@ -2664,25 +2774,45 @@ impl CopilotAuthorizer {
         {
             return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
         }
-        let (resolved, stored_generation) = match source {
+        let (resolved, stored_publication) = match source {
             // A stored token names the publication it was stored under: its
             // record's durable marker. A store write publishes before it
             // saves, so a lease snapshot read after the value can already
-            // carry a newer token's publication.
+            // carry a newer token's publication. A refusal names that
+            // publication by its lease generation: the record's marker
+            // carries the marker generation the lease records for it, which
+            // is another generation for a publication the lease adopted from
+            // another process's record, so the lease snapshot taken with the
+            // record translates it when it carries exactly that publication.
+            // The marker's publication time completes the name.
             CredentialSourceSpec::ManagedStore => {
                 let managed =
                     load_managed_store_tokens_with_lifecycle(&self.env, &self.binding).await?;
                 if managed.lifecycle == ManagedStoreLifecycle::RefreshRequired {
                     return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
                 }
-                let generation =
-                    meerkat_core::tokens_lifecycle_published_generation(&managed.tokens);
+                let publication = meerkat_core::tokens_lifecycle_publication(&managed.tokens)
+                    .and_then(|marker| {
+                        let marker_generation = marker.generation?;
+                        let generation = match managed.lifecycle_snapshot.as_ref() {
+                            Some(lease)
+                                if lease.credential_present
+                                    && lease.marker_generation() == marker_generation
+                                    && lease.credential_published_at_millis
+                                        == marker.credential_published_at_millis =>
+                            {
+                                lease.generation
+                            }
+                            _ => marker_generation,
+                        };
+                        Some((generation, marker.credential_published_at_millis))
+                    });
                 let secret = managed.tokens.primary_secret.ok_or_else(|| {
                     ProviderAuthError::SourceResolutionFailed(
                         "managed_store credential has no primary_secret".to_string(),
                     )
                 })?;
-                (secret, generation)
+                (secret, publication)
             }
             _ => (
                 resolve_simple_secret(source, &self.env, &self.binding).await?,
@@ -2730,12 +2860,18 @@ impl CopilotAuthorizer {
         // A refusal of the token names this generation: the stored record's
         // publication for a managed store, else the publication the lease
         // carries now (a source this route reads publishes the value it read
-        // above, and the refusal also names the value's fingerprint).
+        // above, and the refusal also names the value's fingerprint). The
+        // account built for the token is keyed by that publication.
         let publication = auth_lease.snapshot(&lease_key);
+        let (generation, published_at_millis) = stored_publication.unwrap_or((
+            publication.generation,
+            publication.credential_published_at_millis,
+        ));
         Ok(OperatorTokenMaterial {
             token: token.to_string(),
             kind,
-            generation: stored_generation.unwrap_or(publication.generation),
+            generation,
+            published_at_millis,
             expires_at: publication.expires_at,
         })
     }
@@ -2868,9 +3004,7 @@ impl CopilotAuthorizer {
                 *self.state.pacing.identity_retry_at.lock() =
                     Some(operator_models_retry_at(error, discovery_now));
             }
-            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
-                "GitHub Copilot model listing failed: {error}"
-            ))));
+            return Err(operator_listing_failure(error));
         }
         let (models, model_discovery_refresh_at) = match models_result {
             Ok(snapshot) => (
@@ -2918,6 +3052,7 @@ impl CopilotAuthorizer {
             generation,
             token: material.token,
             source_generation: material.generation,
+            source_published_at_millis: material.published_at_millis,
             source_expires_at,
             refresh_at: DateTime::<Utc>::MAX_UTC,
             expires_at: DateTime::<Utc>::MAX_UTC,
@@ -3094,7 +3229,7 @@ impl CopilotAuthorizer {
             OperatorRefusal::RateLimited { until } => {
                 *self.state.pacing.identity_retry_at.lock() = Some(*until);
             }
-            OperatorRefusal::Refused(_) => {}
+            OperatorRefusal::Refused(_) | OperatorRefusal::Unavailable(_) => {}
         }
         refusal.into_provider_error()
     }
@@ -3200,8 +3335,9 @@ impl HttpAuthorizer for CopilotAuthorizer {
 
 impl CopilotAuthorizer {
     /// Start the account's due model discovery for `cached`, the token of
-    /// source generation `source_generation`, off the request path. One
-    /// request claims it (the next discovery then waits
+    /// the source publication `source_generation` published at
+    /// `source_published_at_millis`, off the request path. One request
+    /// claims it (the next discovery then waits
     /// [`MODEL_DISCOVERY_CLAIM_SECONDS`] while this one runs), and every
     /// request goes on with the token and the model list the account holds
     /// ([`BackgroundModelDiscovery`]). Without a Tokio runtime to run on, the
@@ -3210,6 +3346,7 @@ impl CopilotAuthorizer {
         &self,
         cached: &CachedTokenView,
         source_generation: u64,
+        source_published_at_millis: Option<u64>,
     ) {
         let now = (self.env.now)();
         {
@@ -3218,6 +3355,7 @@ impl CopilotAuthorizer {
                 return;
             };
             if current.source_generation != source_generation
+                || current.source_published_at_millis != source_published_at_millis
                 || current.token != cached.token
                 || current
                     .model_discovery_refresh_at
@@ -3236,6 +3374,7 @@ impl CopilotAuthorizer {
             env: self.env.clone(),
             credential_identity: self.binding.credential_identity().clone(),
             source_generation,
+            source_published_at_millis,
             token: cached.token.clone(),
             api_base: cached.api_base.clone(),
             installation: cached
@@ -3303,6 +3442,14 @@ fn auth_error_from_refresh(error: RefreshError) -> AuthError {
             disposition: meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
             ..
         } => AuthError::UserReauthRequired,
+        // AuthMachine judged the failure transient: GitHub's token endpoint
+        // cannot answer now, and a later refresh can succeed.
+        classified @ RefreshError::Classified {
+            disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+            ..
+        } => AuthError::SourceUnavailable {
+            reason: classified.to_string(),
+        },
         other => AuthError::RefreshFailed(other.to_string()),
     }
 }
@@ -3318,7 +3465,8 @@ struct CachedTokenView {
 
 /// One refresh of an account's model list that runs off the request path,
 /// for the token a request found fresh. Its answer applies only while the
-/// account still holds that token: a newer token's own mint listed its
+/// account still holds that token for the same source publication (its
+/// generation and publication time): a newer token's own mint listed its
 /// models.
 ///
 /// A list replaces the account's, and the next refresh is due five minutes
@@ -3335,6 +3483,7 @@ struct BackgroundModelDiscovery {
     env: ResolverEnvironment,
     credential_identity: AuthCredentialIdentity,
     source_generation: u64,
+    source_published_at_millis: Option<u64>,
     token: String,
     api_base: String,
     /// Token mode: the token is a GitHub App installation token.
@@ -3355,6 +3504,7 @@ impl BackgroundModelDiscovery {
         let current = match cache.as_mut() {
             Some(current)
                 if current.source_generation == self.source_generation
+                    && current.source_published_at_millis == self.source_published_at_millis
                     && current.token == self.token =>
             {
                 current
@@ -3414,11 +3564,13 @@ enum LeaderTask {
 
 /// What one pass of the operator-token fast path decided.
 enum OperatorObservation {
-    /// The cache is admitted for the current lease generation `generation`
-    /// and its token is fresh.
+    /// The cache is admitted for the current lease publication (generation
+    /// `generation`, published at `published_at_millis`) and its token is
+    /// fresh.
     Cached {
         cached: CachedTokenView,
         generation: u64,
+        published_at_millis: Option<u64>,
     },
     /// A flight must read the source token for the lease generation
     /// observed.
@@ -3432,6 +3584,10 @@ struct OperatorTokenMaterial {
     kind: GitHubTokenKind,
     /// The account lease generation the token was admitted under.
     generation: u64,
+    /// That publication's time, read with its generation: the two name the
+    /// publication, since a lease that takes another process's stored record
+    /// can keep its generation.
+    published_at_millis: Option<u64>,
     /// The expiry that publication declares (epoch seconds), read with its
     /// generation.
     expires_at: Option<u64>,
@@ -3448,6 +3604,10 @@ enum OperatorRefusal {
     Refused(String),
     /// GitHub rate limited the identity lookup until `until`.
     RateLimited { until: DateTime<Utc> },
+    /// GitHub could not answer the identity lookup now: a 5xx, a network
+    /// failure or a timeout. Not a credential fact, and nothing is paused:
+    /// the next request asks again.
+    Unavailable(String),
 }
 
 impl OperatorRefusal {
@@ -3456,7 +3616,7 @@ impl OperatorRefusal {
             Self::TokenRejected { status, message } => {
                 format!("GitHub refused this token ({status}): {message}")
             }
-            Self::Refused(detail) => detail.clone(),
+            Self::Refused(detail) | Self::Unavailable(detail) => detail.clone(),
             Self::RateLimited { until } => format!(
                 "GitHub rate limited the Copilot identity lookup until {}",
                 until.to_rfc3339()
@@ -3464,12 +3624,17 @@ impl OperatorRefusal {
         }
     }
 
+    /// A rate limit and an unavailable lookup clear on their own
+    /// (`source_unavailable`); a refusal of the identity needs the account
+    /// fixed (`refresh_failed`), and a refusal of the token a new token.
     fn into_provider_error(self) -> ProviderAuthError {
         match self {
             Self::TokenRejected { .. } => ProviderAuthError::Auth(AuthError::UserReauthRequired),
             Self::Refused(detail) => ProviderAuthError::Auth(AuthError::RefreshFailed(detail)),
-            refusal @ Self::RateLimited { .. } => {
-                ProviderAuthError::Auth(AuthError::RefreshFailed(refusal.detail()))
+            refusal @ (Self::RateLimited { .. } | Self::Unavailable(_)) => {
+                ProviderAuthError::Auth(AuthError::SourceUnavailable {
+                    reason: refusal.detail(),
+                })
             }
         }
     }
@@ -3503,7 +3668,15 @@ async fn lookup_operator_identity(
         .get(url.as_str(), headers)
         .await
         .map_err(|error| {
-            OperatorRefusal::Refused(format!("GitHub Copilot identity lookup failed: {error}"))
+            let detail = format!("GitHub Copilot identity lookup failed: {error}");
+            // A network failure or a timeout may pass; a refused redirect,
+            // an oversized answer or a missing HTTP client will not.
+            match error {
+                CopilotHttpTransportError::Request(_) | CopilotHttpTransportError::Timeout => {
+                    OperatorRefusal::Unavailable(detail)
+                }
+                _ => OperatorRefusal::Refused(detail),
+            }
         })?;
     if response.rate_limited {
         return Err(OperatorRefusal::RateLimited {
@@ -3544,6 +3717,13 @@ async fn lookup_operator_identity(
         status @ 400..=499 => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot refused this token ({status}): {}",
+                github_error_message(&response.body, token)
+            )));
+        }
+        // GitHub unavailable: the next request asks again.
+        status @ 500..=599 => {
+            return Err(OperatorRefusal::Unavailable(format!(
+                "GitHub Copilot identity lookup failed ({status}): {}",
                 github_error_message(&response.body, token)
             )));
         }
@@ -3904,14 +4084,24 @@ async fn verify_operator_token_with(
     match fetch_copilot_models(transport, config, &identity.api_base, token).await {
         Ok(_) => Ok(identity),
         Err(error) => Err(models_refusal(&error, identity.installation).map_or_else(
-            || {
-                ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
-                    "GitHub Copilot model listing failed: {error}"
-                )))
-            },
+            || operator_listing_failure(&error),
             OperatorRefusal::into_provider_error,
         )),
     }
+}
+
+/// A required model listing of an operator token that failed without
+/// refusing the token: one that may answer later (a rate limit, a 408, 502,
+/// 503 or 504, a network failure or a timeout) is a credential source that
+/// cannot answer now, which clears on its own; any other failure is
+/// `refresh_failed`.
+fn operator_listing_failure(error: &CopilotModelDiscoveryError) -> ProviderAuthError {
+    let reason = format!("GitHub Copilot model listing failed: {error}");
+    ProviderAuthError::Auth(if error.clears_on_its_own() {
+        AuthError::SourceUnavailable { reason }
+    } else {
+        AuthError::RefreshFailed(reason)
+    })
 }
 
 /// A Copilot API base: an `https` URL without user information.
@@ -4132,7 +4322,7 @@ async fn refresh_github_tokens(
     let key = meerkat_core::auth::TokenKey::from_credential_identity(&credential_identity);
     let refresh_key = key.clone();
     let preparation_for_refresh = preparation.clone();
-    let refresh_fn: RefreshFn = Box::new(move || {
+    let refresh_fn: RefreshFn = Box::new(move |fence| {
         let token_store = token_store.clone();
         let key = refresh_key.clone();
         let preparation = preparation_for_refresh.clone();
@@ -4148,7 +4338,10 @@ async fn refresh_github_tokens(
                         "Copilot source credential disappeared before refresh".to_string(),
                     )
                 })?;
-            match preparation.claim_refresh_owner(current.clone()).await? {
+            match preparation
+                .claim_refresh_owner(fence, current.clone())
+                .await?
+            {
                 LockedManagedStoreOAuthRefresh::UseCached(cached) => Ok(cached),
                 LockedManagedStoreOAuthRefresh::Refresh(transaction) => {
                     let refresh_token = match current.refresh_token.clone() {
@@ -4892,6 +5085,7 @@ mod tests {
         .expect("mark source token");
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &meerkat_core::auth::TokenKey::from_credential_identity(&identity),
                 &marked,
             )
@@ -4903,6 +5097,17 @@ mod tests {
                 .with_auth_lease_handle(auth_lease.clone()),
             auth_lease,
         )
+    }
+
+    /// The publication time of the device sign-in record
+    /// [`resolver_environment`] stores, which its lease published: a cache
+    /// entry built for that record carries it.
+    fn stored_record_published_at(
+        auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Option<u64> {
+        auth_lease
+            .snapshot(&LeaseKey::from_credential_identity(&account_identity()))
+            .credential_published_at_millis
     }
 
     #[test]
@@ -5078,7 +5283,7 @@ mod tests {
     async fn routed_client_requires_reprojection_after_route_change() {
         let runtime = Arc::new(CopilotRuntime::new());
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -5106,6 +5311,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5222,7 +5428,7 @@ mod tests {
 
         let runtime = CopilotRuntime::new();
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -5250,6 +5456,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5366,7 +5573,7 @@ mod tests {
     async fn a_routed_client_states_its_routes_account_limits() {
         let runtime = Arc::new(CopilotRuntime::new());
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -5401,6 +5608,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5515,6 +5723,7 @@ mod tests {
             generation: 2,
             token: token.to_string(),
             source_generation: 1,
+            source_published_at_millis: None,
             source_expires_at: None,
             refresh_at: now + Duration::hours(1),
             expires_at: now + Duration::hours(2),
@@ -5544,6 +5753,7 @@ mod tests {
             env,
             credential_identity,
             source_generation: 1,
+            source_published_at_millis: None,
             token: "older".to_string(),
             api_base: "https://copilot.example.test".to_string(),
             installation: false,
@@ -5578,6 +5788,7 @@ mod tests {
             env,
             credential_identity,
             source_generation: 1,
+            source_published_at_millis: None,
             token: "derived".to_string(),
             api_base: "https://copilot.example.test".to_string(),
             installation: false,
@@ -5609,7 +5820,7 @@ mod tests {
 
         let runtime = Arc::new(CopilotRuntime::new());
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -5645,6 +5856,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -6043,6 +6255,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: None,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -6101,6 +6314,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
+            source_published_at_millis: None,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -6636,6 +6850,118 @@ mod tests {
             .await
             .expect("a waiter can lead the replacement flight");
         assert_eq!(transport.inner.request_count(), 2);
+    }
+
+    /// A device sign-in record the lease takes at its own generation is
+    /// another sign-in: the account does not serve the token derived from the
+    /// earlier one. This lease publishes the first sign-in; another process
+    /// signs in later at its own generation 1, and a status read takes that
+    /// record into the lease, which keeps generation 1 and the later
+    /// publication time. The next use derives a token from the later sign-in.
+    #[tokio::test]
+    async fn a_device_record_taken_at_the_same_generation_is_not_served_from_the_cache() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, auth_lease) =
+            resolver_environment_with_token(&auth_binding, "github-first").await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-first"),
+            models_response(),
+            token_response("derived-later"),
+            models_response(),
+        ]));
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        let authorizer = CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding,
+            env: env.clone(),
+            transport: transport.clone(),
+        };
+        let cached_token = || state.cache.read().as_ref().map(|cache| cache.token.clone());
+        authorizer
+            .prime()
+            .await
+            .expect("the first sign-in derives a token");
+        assert_eq!(cached_token().as_deref(), Some("derived-first"));
+
+        // Another process signs in later under its own lease.
+        std::thread::sleep(StdDuration::from_millis(5));
+        let identity = account_identity();
+        let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+        let lease_key = LeaseKey::from_credential_identity(&identity);
+        let later = PersistedTokens {
+            auth_mode: PersistedAuthMode::GithubCopilotOauth,
+            primary_secret: Some("github-later".to_string()),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: Some(Utc::now()),
+            scopes: vec!["read:user".to_string()],
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+            &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+            &lease_key,
+            meerkat_core::persisted_token_expires_at_epoch_secs(&later),
+        )
+        .expect("another process publishes");
+        assert_eq!(transition.generation(), 1);
+        let later =
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &later, &transition)
+                .expect("mark the later sign-in");
+        let store = env
+            .provider_auth_persistence()
+            .expect("provider-auth persistence")
+            .token_store();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &later)
+            .await
+            .expect("store the later sign-in");
+        // A status read takes the later record into the lease.
+        let before = auth_lease.snapshot(&lease_key);
+        meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+            store.as_ref(),
+            &auth_lease,
+            &identity,
+            PersistedAuthMode::GithubCopilotOauth,
+            Utc::now(),
+        )
+        .await
+        .expect("the status read answers")
+        .expect("the later record is stored");
+        let after = auth_lease.snapshot(&lease_key);
+        assert_eq!(
+            (after.generation, after.adopted_marker_generation),
+            (before.generation, None),
+            "the lease takes the later record at its own generation"
+        );
+        assert_ne!(
+            after.credential_published_at_millis, before.credential_published_at_millis,
+            "under the later publication"
+        );
+
+        authorizer
+            .prime()
+            .await
+            .expect("the later sign-in derives a token");
+        assert_eq!(
+            cached_token().as_deref(),
+            Some("derived-later"),
+            "the account serves the token derived from the later sign-in, not the earlier one's"
+        );
+        let requests = transport.requests.lock();
+        assert_eq!(requests.len(), 4, "an exchange and a listing per sign-in");
+        assert_eq!(
+            requests[2]
+                .1
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("token github-later"),
+            "the exchange sends the later sign-in's GitHub token"
+        );
     }
 
     #[tokio::test]
@@ -7476,6 +7802,15 @@ mod tests {
             match error {
                 ProviderAuthError::Auth(AuthError::RefreshFailed(detail)) => detail,
                 other => panic!("expected refresh_failed, got {other:?}"),
+            }
+        }
+
+        /// The reason of a resolution that failed because GitHub cannot
+        /// answer now (a rate limit, an outage), which clears on its own.
+        fn source_unavailable(error: ProviderAuthError) -> String {
+            match error {
+                ProviderAuthError::Auth(AuthError::SourceUnavailable { reason }) => reason,
+                other => panic!("expected source_unavailable, got {other:?}"),
             }
         }
 
@@ -8455,7 +8790,7 @@ mod tests {
             ]);
             let source = token_file_command(directory.path());
             let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8466,7 +8801,7 @@ mod tests {
 
             harness.operator.advance(60);
             for _ in 0..3 {
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     resolve()
                         .await
                         .err()
@@ -8491,7 +8826,7 @@ mod tests {
         /// GitHub's secondary rate limit, a 403 whose message says so and that
         /// may carry no `Retry-After` and no rate-limit header, pauses the
         /// account's identity lookup like any rate limit, read through the
-        /// production transport: requests fail as `refresh_failed` without
+        /// production transport: requests fail as `source_unavailable` without
         /// asking GitHub again or running the token's command, for the minute
         /// GitHub asks for at least, and the lookup runs again after it. It
         /// is no refusal of the token.
@@ -8523,7 +8858,7 @@ mod tests {
             );
             let resolve = || runtime.resolve(&binding, &operator.env);
 
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8535,7 +8870,7 @@ mod tests {
 
             operator.advance(59);
             for _ in 0..3 {
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     resolve()
                         .await
                         .err()
@@ -8585,7 +8920,7 @@ mod tests {
             let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
             resolve().await.expect("the token resolves");
             // A later account state's identity lookup is rate limited.
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8599,7 +8934,7 @@ mod tests {
                 .auth_lease
                 .release_lease(&lease_key())
                 .expect("log out");
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8883,6 +9218,218 @@ mod tests {
             assert_eq!(operator.lease().generation, 2);
         }
 
+        /// A refusal of a stored token the lease took from another process's
+        /// later record names the publication by the lease's own generation,
+        /// so it withdraws the token. This lease published twice and withdrew
+        /// its credential (a logout); another process then stored a token at
+        /// its own generation 1, which this lease takes (it keeps generation
+        /// 2 and records the record's 1); GitHub refuses the token.
+        #[tokio::test]
+        async fn a_refusal_of_a_stored_token_from_another_process_withdraws_it() {
+            let harness = Harness::new([Ok(json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            ))]);
+            let store = harness
+                .operator
+                .env
+                .provider_auth_persistence()
+                .expect("provider-auth persistence")
+                .token_store();
+            let identity = account_identity();
+            let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+            let stored = |token: String| PersistedTokens {
+                auth_mode: PersistedAuthMode::StaticBearer,
+                primary_secret: Some(token),
+                refresh_token: None,
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: Vec::new(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            for label in ["stored-first", "stored-second"] {
+                meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                    &harness.operator.auth_lease,
+                    &identity,
+                    &stored(user_token(label)),
+                )
+                .expect("this lease publishes");
+            }
+            harness
+                .operator
+                .auth_lease
+                .release_lease(&lease_key())
+                .expect("and withdraws its credential");
+            // Another process stores a later token under its own lease.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let elsewhere = stored(user_token("stored-elsewhere"));
+            let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+                &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+                &lease_key(),
+                meerkat_core::persisted_token_expires_at_epoch_secs(&elsewhere),
+            )
+            .expect("another process publishes");
+            assert_eq!(transition.generation(), 1);
+            let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &elsewhere,
+                &transition,
+            )
+            .expect("mark the other process's token");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+                .await
+                .expect("store the other process's token");
+
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .err();
+            assert!(refused.is_some(), "GitHub refuses the token");
+            let lease = harness.operator.lease();
+            assert_eq!(
+                (lease.generation, lease.adopted_marker_generation),
+                (2, Some(1)),
+                "the lease took the other process's record and kept its generation"
+            );
+            assert_eq!(
+                lease.phase,
+                Some(AuthLeasePhase::ReauthRequired),
+                "the refusal withdraws the token the lease took"
+            );
+        }
+
+        /// A record the lease takes at its own generation is another
+        /// publication: the account does not serve the token cached for the
+        /// earlier one. This lease publishes a stored token; another process
+        /// stores a later token at its own generation 1, and a status read
+        /// takes that record into the lease, which keeps generation 1 and the
+        /// later publication time. The next use serves the later token.
+        #[tokio::test]
+        async fn a_record_taken_at_the_same_generation_is_not_served_from_the_cache() {
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let store = harness
+                .operator
+                .env
+                .provider_auth_persistence()
+                .expect("provider-auth persistence")
+                .token_store();
+            let identity = account_identity();
+            let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+            let stored = |token: String| PersistedTokens {
+                auth_mode: PersistedAuthMode::StaticBearer,
+                primary_secret: Some(token),
+                refresh_token: None,
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: Vec::new(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            let first = stored(user_token("stored-first"));
+            let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                &harness.operator.auth_lease,
+                &identity,
+                &first,
+            )
+            .expect("this lease publishes");
+            let first = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &first,
+                &transition,
+            )
+            .expect("mark the first token");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &first)
+                .await
+                .expect("store the first token");
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .expect("the first token serves");
+            let (_, bearer) = authorize_once(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(bearer, format!("Bearer {}", user_token("stored-first")));
+
+            // Another process stores a later token under its own lease.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let later = stored(user_token("stored-later"));
+            let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+                &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+                &lease_key(),
+                meerkat_core::persisted_token_expires_at_epoch_secs(&later),
+            )
+            .expect("another process publishes");
+            assert_eq!(transition.generation(), 1);
+            let later = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &later,
+                &transition,
+            )
+            .expect("mark the later token");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &later)
+                .await
+                .expect("store the later token");
+            // A status read takes the later record into the lease.
+            let before = harness.operator.lease();
+            meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+                store.as_ref(),
+                &harness.operator.auth_lease,
+                &identity,
+                PersistedAuthMode::StaticBearer,
+                Utc::now(),
+            )
+            .await
+            .expect("the status read answers")
+            .expect("the later record is stored");
+            let after = harness.operator.lease();
+            assert_eq!(
+                (after.generation, after.adopted_marker_generation),
+                (before.generation, None),
+                "the lease takes the later record at its own generation"
+            );
+            assert_ne!(
+                after.credential_published_at_millis, before.credential_published_at_millis,
+                "under the later publication"
+            );
+
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .expect("the later token serves");
+            let (_, bearer) = authorize_once(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(
+                bearer,
+                format!("Bearer {}", user_token("stored-later")),
+                "the account serves the later token, not the one cached for the earlier publication"
+            );
+        }
+
         /// A refusal of a stored token names the publication the token was
         /// stored under (its record's durable marker), not a lease snapshot
         /// read after the value. A newer token being stored meanwhile (its
@@ -8936,7 +9483,7 @@ mod tests {
             };
             let earlier = publish(stored(user_token("stored-earlier")));
             store
-                .save(&key, &earlier)
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &earlier)
                 .await
                 .expect("store the earlier token");
             let newer = publish(stored(user_token("stored-newer")));
@@ -8961,7 +9508,7 @@ mod tests {
             );
 
             store
-                .save(&key, &newer)
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &newer)
                 .await
                 .expect("the newer token's record is saved");
             let resolved = harness
@@ -9385,8 +9932,8 @@ mod tests {
         /// after an identity lookup that did not answer the token, which
         /// pauses that token for a minute; chat disabled) is a typed
         /// `refresh_failed` that does not touch the lease, and the same token
-        /// works once that is fixed. A rate limit pauses the identity lookup
-        /// until GitHub's stated time.
+        /// works once that is fixed. A rate limit (a `source_unavailable`)
+        /// pauses the identity lookup until GitHub's stated time.
         #[tokio::test]
         async fn copilot_refusal_is_typed_and_not_sticky() {
             let harness = Harness::new([
@@ -9461,7 +10008,7 @@ mod tests {
                 env: operator.env.clone(),
                 transport: transport.clone(),
             };
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 authorizer
                     .prime()
                     .await
@@ -9469,7 +10016,7 @@ mod tests {
             );
             assert!(detail.contains("rate limited"), "{detail}");
             operator.advance(119);
-            refresh_failure(
+            source_unavailable(
                 authorizer
                     .prime()
                     .await
@@ -9503,7 +10050,7 @@ mod tests {
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("paced"));
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9513,7 +10060,7 @@ mod tests {
             assert!(detail.contains("rate limited"), "{detail}");
 
             harness.operator.advance(60);
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::Anthropic)
                     .await
@@ -9552,7 +10099,7 @@ mod tests {
             let other_store = OperatorEnv::new();
             other_store.set("COPILOT_GITHUB_TOKEN", &token);
             *other_store.clock.lock() = *harness.operator.clock.lock();
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9561,7 +10108,7 @@ mod tests {
             );
             assert!(detail.contains("rate limited"), "{detail}");
 
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .runtime
                     .resolve(
@@ -9578,6 +10125,73 @@ mod tests {
                 1,
                 "no request before GitHub's stated time"
             );
+        }
+
+        /// A real connection failure: a request to a local port nothing
+        /// listens on.
+        async fn refused_connection() -> reqwest::Error {
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = closed.local_addr().unwrap();
+            drop(closed);
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/user"))
+                .send()
+                .await
+                .expect_err("nothing listens on a closed port")
+        }
+
+        /// GitHub unavailable: an identity lookup that answers a 5xx, times
+        /// out or cannot connect fails the resolution as `source_unavailable`,
+        /// which clears on its own: the lease stays valid, nothing pauses the
+        /// account, and the next resolution looks the account up again. A
+        /// lookup answer that refuses the token stays `refresh_failed`.
+        #[tokio::test]
+        async fn an_unavailable_identity_lookup_fails_as_source_unavailable() {
+            let failures: Vec<(&str, Outcome)> = vec![
+                (
+                    "server error",
+                    Ok(json_response(
+                        503,
+                        serde_json::json!({"message": "unavailable"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+                (
+                    "cannot connect",
+                    Err(CopilotHttpTransportError::Request(
+                        refused_connection().await,
+                    )),
+                ),
+            ];
+            for (label, failure) in failures {
+                let harness = Harness::new([failure, Ok(svc_bot()), Ok(models_response())]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("github-down"));
+                let detail = source_unavailable(
+                    harness
+                        .resolve(CopilotProviderRoute::OpenAi)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| panic!("{label}: the identity lookup failed")),
+                );
+                assert!(
+                    detail.contains("identity lookup failed"),
+                    "{label}: {detail}"
+                );
+                assert_eq!(
+                    harness.operator.lease().phase,
+                    Some(AuthLeasePhase::Valid),
+                    "{label}: an outage marks nothing on the token"
+                );
+                if let Err(error) = harness.resolve(CopilotProviderRoute::OpenAi).await {
+                    panic!("{label}: the next resolution looks the account up again: {error:?}");
+                }
+                assert_eq!(harness.transport.request_count(), 3, "{label}");
+            }
         }
 
         /// A rate-limited model listing (a 403 with `Retry-After`, GitHub's
@@ -10256,8 +10870,8 @@ mod tests {
 
         /// A token the identity lookup does not answer never serves without
         /// its model list: a listing that fails (a server error, a timeout, a
-        /// rate limit) fails the request as `refresh_failed` and leaves the
-        /// lease valid, and a rate limit pauses the lookup until GitHub's
+        /// rate limit) fails the request as `source_unavailable` and leaves
+        /// the lease valid, and a rate limit pauses the lookup until GitHub's
         /// stated time.
         #[tokio::test]
         async fn an_unanswered_lookup_never_serves_without_a_model_list() {
@@ -10293,7 +10907,7 @@ mod tests {
                     1 + attempts,
                     "{label}: the model list was asked"
                 );
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     failed.unwrap_or_else(|| panic!("{label}: no route without the model list")),
                 );
                 assert!(detail.contains("model listing failed"), "{label}: {detail}");
@@ -10313,7 +10927,7 @@ mod tests {
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-paced"));
-            refresh_failure(
+            source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -10321,7 +10935,7 @@ mod tests {
                     .expect("the model listing is rate limited"),
             );
             harness.operator.advance(119);
-            refresh_failure(
+            source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -10339,6 +10953,37 @@ mod tests {
                 .await
                 .expect("the lookup and the listing run again after the wait");
             assert_eq!(harness.transport.request_count(), 4);
+        }
+
+        /// A required model listing that fails for a cause a later listing
+        /// would meet again (a 500 or a 400: neither rate limited nor worth an
+        /// immediate second attempt) stays `refresh_failed`: only a listing
+        /// failure that clears on its own answers `source_unavailable`.
+        #[tokio::test]
+        async fn a_listing_failure_that_does_not_clear_stays_refresh_failed() {
+            for status in [500, 400] {
+                let harness = Harness::new([
+                    Ok(unanswered_lookup(404)),
+                    Ok(json_response(
+                        status,
+                        serde_json::json!({"message": "listing failed"}),
+                    )),
+                ]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-broken"));
+                let detail = refresh_failure(
+                    harness
+                        .resolve(CopilotProviderRoute::OpenAi)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| panic!("{status}: no route without the model list")),
+                );
+                assert!(
+                    detail.contains("model listing failed"),
+                    "{status}: {detail}"
+                );
+            }
         }
 
         /// T9: the token never goes to an API host outside
@@ -11970,7 +12615,7 @@ mod tests {
                     .provider_auth_persistence()
                     .expect("test persistence")
                     .token_store()
-                    .save(&key, &marked)
+                    .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
                     .await
                     .expect("store the new sign-in");
             }
@@ -12813,11 +13458,13 @@ mod tests {
                     "a build that needs the account's limits must fail while the exchange is down"
                 );
             };
+            // The outage is typed as one that clears on its own, so a caller
+            // (a mob seat's first create) can try again later.
             assert!(
                 matches!(
                     &error,
-                    ProviderAuthError::SourceResolutionFailed(message)
-                        if message.contains("returned 503")
+                    ProviderAuthError::Auth(AuthError::SourceUnavailable { reason })
+                        if reason.contains("returned 503")
                 ),
                 "{error:?}"
             );
@@ -13054,8 +13701,8 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    ProviderAuthError::SourceResolutionFailed(message)
-                        if message.contains("returned 503")
+                    ProviderAuthError::Auth(AuthError::SourceUnavailable { reason })
+                        if reason.contains("returned 503")
                 ),
                 "{error:?}"
             );
@@ -13080,4 +13727,40 @@ fn ce_stale_refresh_remains_stale_credential() {
         auth_error_from_refresh(RefreshError::StalePreparation),
         AuthError::StaleCredential
     ));
+}
+
+/// AuthMachine's verdict on a refresh failure of the sign-in's GitHub token
+/// decides its kind: a transient verdict is a credential source that cannot
+/// answer now, which clears on its own; a permanent one needs a new sign-in.
+/// A failure the machine did not classify stays `refresh_failed`: the
+/// mapper never reads the provider's answer itself.
+#[cfg(test)]
+#[test]
+fn a_classified_source_refresh_failure_maps_by_its_verdict() {
+    let classified = |disposition| RefreshError::Classified {
+        message: "token endpoint answered 503".to_string(),
+        observation: meerkat_core::RefreshFailureObservation::http_status(503),
+        disposition,
+    };
+    let transient = auth_error_from_refresh(classified(
+        meerkat_core::auth::RefreshFailureDisposition::Transient,
+    ));
+    assert!(
+        matches!(
+            &transient,
+            AuthError::SourceUnavailable { reason } if reason.contains("token endpoint answered 503")
+        ),
+        "{transient:?}"
+    );
+    let permanent = auth_error_from_refresh(classified(
+        meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
+    ));
+    assert_eq!(permanent, AuthError::UserReauthRequired);
+    let unclassified = auth_error_from_refresh(RefreshError::Refresh(
+        "token endpoint answered 503".to_string(),
+    ));
+    assert!(
+        matches!(&unclassified, AuthError::RefreshFailed(_)),
+        "{unclassified:?}"
+    );
 }

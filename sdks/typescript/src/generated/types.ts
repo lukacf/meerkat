@@ -1875,10 +1875,16 @@ export interface WireCanonicalPart {
   part_digest: string;
 }
 
+export interface WirePresentationLink {
+  reference: string;
+  served_digest: string;
+}
+
 export interface WirePresentationRecord {
   at_ms: number;
   audience: WirePresentationAudience;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -1890,12 +1896,17 @@ export interface WireDecisionOutcome {
   tier: WireDecisionTier;
 }
 
+export interface WireDecisionEffect {
+  grant_id?: string | null;
+}
+
 export interface WireDecision {
   approver_id: string;
   created_at_ms: number;
   deadline_at_ms: number;
   decided_at_ms?: number | null;
   decision_id: string;
+  effect?: WireDecisionEffect | null;
   ended_at_ms?: number | null;
   execution_refusal?: string | null;
   first_presented_to_approver_at_ms?: number | null;
@@ -1926,6 +1937,7 @@ export interface DecisionPresentationRequest {
   at_ms: number;
   audience: DecisionAudienceRequest;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -2315,7 +2327,7 @@ export interface MobCreateResult {
 export interface WireQuarantinedMob {
   attempts?: number;
   class: WireMobQuarantineClass;
-  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | "ADMISSION_IN_PROGRESS" | "ADMISSION_FENCE_UNAVAILABLE" | null;
   message: string;
   mob_id: string;
   retryable: boolean;
@@ -2330,7 +2342,7 @@ export interface MobListResult {
 
 export interface WireMobLifecycleFailure {
   cause: MobSpawnManyFailureCause;
-  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | "ADMISSION_IN_PROGRESS" | "ADMISSION_FENCE_UNAVAILABLE" | null;
   message: string;
   structured_data?: unknown;
 }
@@ -2880,6 +2892,23 @@ export interface MobHelperResult {
   usage: Record<string, unknown>;
 }
 
+export interface MobForkMemberParams {
+  agent_identity: string;
+  message_index?: number | null;
+  mob_id: string;
+  profile?: string | null;
+  runtime_mode?: WireMobRuntimeMode | null;
+  source_member_id: string;
+}
+
+export interface MobForkMemberResult {
+  agent_identity: string;
+  member_ref: WireMemberRef;
+  message_count: number;
+  session_id: string;
+  source_session_id: string;
+}
+
 export interface MobForceCancelResult {
   cancelled: boolean;
 }
@@ -3069,6 +3098,7 @@ export interface MobProfileDeleteResult {
 
 export interface MobStreamOpenParams {
   agent_identity?: string | null;
+  cursor?: MobStreamCursor | null;
   mob_id: string;
 }
 
@@ -3638,6 +3668,11 @@ export interface WireProviderParamsOverride {
   top_p?: number | null;
 }
 
+export interface MobStreamCursor {
+  epoch: string;
+  seq: number;
+}
+
 export interface AttentionBindingRequest {
   binding_id: string;
   namespace?: string | null;
@@ -4149,7 +4184,7 @@ export interface WireFlowTurnOutcomeInteractionFailed {
 
 export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
 
-export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable";
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "source_unavailable";
 
 export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
 
@@ -7584,7 +7619,12 @@ export interface WireAuthErrorCredentialStoreUnavailable {
   kind: "credential_store_unavailable";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable;
+export interface WireAuthErrorSourceUnavailable {
+  detail: string;
+  kind: "source_unavailable";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 

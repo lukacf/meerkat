@@ -3339,7 +3339,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -22632,6 +22633,17 @@
             "description": "Where the rendering was shown.",
             "type": "string"
           },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary a surface with a size limit showed, the link it\ncarried to the full presentation and the digest of the rendering\nthat link served."
+          },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when it presented one part.",
             "format": "uint32",
@@ -22692,11 +22704,30 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "`decision/present` parameters: record what a host presenter showed. It\ncounts only when it shows every canonical part of the held rendering to\nthe party that decides now.",
+    "description": "`decision/present` parameters: record what a host presenter showed. It\ncounts only when it shows every canonical part of the held rendering, or\nis a summary whose link served the held rendering, to the party that\ndecides now.",
     "properties": {
       "decision_id": {
         "type": "string"
@@ -22782,6 +22813,25 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -22800,6 +22850,17 @@
       "channel_ref": {
         "description": "Where the rendering was shown.",
         "type": "string"
+      },
+      "link": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePresentationLink"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For a summary a surface with a size limit showed, the link it\ncarried to the full presentation and the digest of the rendering\nthat link served."
       },
       "max_part_bytes": {
         "description": "The presenter's part size; absent when it presented one part.",
@@ -33491,6 +33552,67 @@
     "title": "MobForkHelperParams",
     "type": "object"
   },
+  "MobForkMemberParams": {
+    "$defs": {
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/fork_member`: fork a member's session at a\nmessage boundary and seat the fork as a new member.",
+    "properties": {
+      "agent_identity": {
+        "description": "The new member's identity.",
+        "type": "string"
+      },
+      "message_index": {
+        "description": "Where the copied prefix ends, as on `session/fork_at`: the new\nmember's transcript is the source's messages before this index.\nAbsent takes the source's committed transcript end.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "profile": {
+        "description": "The new member's profile. Absent takes the source member's.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "runtime_mode": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobRuntimeMode"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The new member's runtime mode. Absent takes the source member's."
+      },
+      "source_member_id": {
+        "description": "The member whose session is forked.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "source_member_id",
+      "agent_identity"
+    ],
+    "title": "MobForkMemberParams",
+    "type": "object"
+  },
   "MobGrantScopesParams": {
     "$defs": {
       "WireControlScope": {
@@ -40293,7 +40415,53 @@
     "title": "MobStreamCloseParams",
     "type": "object"
   },
+  "MobStreamCursor": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A position in a mob member's event sequence: the `epoch` a member\n`mob/stream_event` names and the `seq` of its event (`event.seq`).",
+    "properties": {
+      "epoch": {
+        "description": "The sequence space of the position (a UUID).",
+        "type": "string"
+      },
+      "seq": {
+        "description": "The last envelope sequence the client received in that space.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "epoch",
+      "seq"
+    ],
+    "title": "MobStreamCursor",
+    "type": "object"
+  },
   "MobStreamOpenParams": {
+    "$defs": {
+      "MobStreamCursor": {
+        "additionalProperties": false,
+        "description": "A position in a mob member's event sequence: the `epoch` a member\n`mob/stream_event` names and the `seq` of its event (`event.seq`).",
+        "properties": {
+          "epoch": {
+            "description": "The sequence space of the position (a UUID).",
+            "type": "string"
+          },
+          "seq": {
+            "description": "The last envelope sequence the client received in that space.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch",
+          "seq"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "description": "Request payload for `mob/stream_open`.",
@@ -40303,6 +40471,17 @@
           "string",
           "null"
         ]
+      },
+      "cursor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobStreamCursor"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Resume the member stream `agent_identity` names right after this\nposition: the events the member still retains after it are replayed,\nthen the stream is live. Absent opens the stream live. A mob-wide\nstream (no `agent_identity`) takes no cursor."
       },
       "mob_id": {
         "type": "string"

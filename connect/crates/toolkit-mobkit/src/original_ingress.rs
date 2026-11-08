@@ -511,6 +511,7 @@ impl ToolkitOriginalOwner {
     ) -> Result<Self, GrantDurabilityError> {
         let publication = LocalAuthorizationPublication::new();
         let grants = LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             configuration,
             store,
             publication.clone(),
@@ -744,6 +745,7 @@ impl ToolkitOriginalOwner {
             invocation,
             operation_owner,
             retained_resume,
+            kept_original: None,
         }
         .into_configuration()
     }
@@ -889,6 +891,7 @@ impl ToolkitOriginalOwner {
         let child = self
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 authenticated_grant_issuer,
                 parent,
                 child_id,
@@ -2359,7 +2362,12 @@ impl ToolkitOriginalOwner {
             .last()
             .ok_or(OriginalWriterError::UnsupportedMandate)?;
         self.grants
-            .revoke(authenticated_caller, child, custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                authenticated_caller,
+                child,
+                custody,
+            )
             .map_err(OriginalWriterError::Grant)
     }
 

@@ -235,6 +235,7 @@ impl Fixture {
                 invocation: crate::meerkat_machine::ScopedInvocation::from_policy(mandate),
                 operation_owner: servers.clone(),
                 retained_resume: None,
+                kept_original: None,
             }
             .into_configuration()
         } else {
@@ -324,6 +325,7 @@ impl Fixture {
         use meerkat_authorization_contracts::constraints::{DomainRestriction, ExactRestriction};
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &self.root,
                 EvidenceId::new(id).expect("id"),
                 self.executor.clone(),
@@ -710,6 +712,7 @@ async fn the_scoped_composition_resolves_the_attachment_mandate() {
         })),
         operation_owner: Arc::clone(&configuration.operation_owner),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let control = fixture.control();
@@ -812,7 +815,12 @@ async fn a_per_agent_host_attaches_only_the_agents_selected_server() {
             .expect("custody");
         fixture
             .grants
-            .revoke(&fixture.root, &granted, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &fixture.root,
+                &granted,
+                &mut custody,
+            )
             .expect("revoke the selected lineage");
     }
     assert_eq!(
@@ -874,7 +882,12 @@ async fn a_generic_per_agent_host_attaches_only_the_agents_selected_server() {
             .expect("custody");
         fixture
             .grants
-            .revoke(&fixture.root, &granted, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &fixture.root,
+                &granted,
+                &mut custody,
+            )
             .expect("revoke the selected lineage");
     }
     assert_eq!(

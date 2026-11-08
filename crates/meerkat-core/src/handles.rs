@@ -2195,6 +2195,22 @@ impl std::fmt::Display for LeaseKey {
 /// after credential rollback.
 /// `credential_published_at_millis` advances only when credential material is
 /// acquired/refreshed.
+/// `adopted_marker_generation` is the generation the durable lifecycle marker
+/// of the current publication carries when it is not `generation`: the lease
+/// took the publication from a durable record published at a lower generation
+/// (another process's login or refresh), or a rollback restored a publication
+/// the lease's own later publication had passed. `generation` never goes back,
+/// so the marker and the lease can name one publication by different
+/// generations. `None` when the marker carries `generation`, and while no
+/// credential is present. [`AuthLeaseSnapshot::marker_generation`] reads the
+/// one a marker carries.
+/// `released_publication_at_millis` is the publication time of the credential
+/// the lease last withdrew (a release or a clear while it held one), kept
+/// while no credential is present: a durable record published strictly after
+/// it is a later publication the lease takes (another process's login after
+/// this process's logout); one published at or before it is not. A release
+/// or clear with no credential held keeps it; a publication, or a restore with
+/// a credential, clears it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
@@ -2202,6 +2218,69 @@ pub struct AuthLeaseSnapshot {
     pub credential_present: bool,
     pub generation: u64,
     pub credential_published_at_millis: Option<u64>,
+    pub adopted_marker_generation: Option<u64>,
+    pub released_publication_at_millis: Option<u64>,
+}
+
+impl AuthLeaseSnapshot {
+    /// The generation the durable lifecycle marker of the current publication
+    /// carries: `adopted_marker_generation` when the lease records one, else
+    /// `generation`. A stored record's marker names this publication only with
+    /// this generation; a refusal or a [`CredentialLeasePublication`] names it
+    /// with `generation`.
+    pub fn marker_generation(&self) -> u64 {
+        self.adopted_marker_generation.unwrap_or(self.generation)
+    }
+}
+
+/// One publication of credential material to an auth lease, as a call
+/// records the credential it is served by: the lease, the generation that
+/// publication advanced it to, and its publication time
+/// ([`AuthLeaseSnapshot::credential_published_at_millis`]). The generation
+/// counts this process's publications: it advances with each one and never
+/// goes back, and a rollback after a failed durable write restores the
+/// material under the current generation. A lease that adopts a credential
+/// another process published (a newer durable row, after that process's own
+/// login or refresh) keeps the larger of the two generations, so two
+/// credentials can share a generation in one process. Their publication
+/// times tell them apart: the lease's durable lifecycle marker orders
+/// publications by that time. A recorded publication that differs from the
+/// lease's current one means the lease has published or adopted credential
+/// material since. Nonsecret: it names no credential value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CredentialLeasePublication {
+    lease: LeaseKey,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+}
+
+impl CredentialLeasePublication {
+    /// The publication `snapshot` of `lease` holds, or `None` when the lease
+    /// holds no credential material.
+    pub fn of(lease: LeaseKey, snapshot: &AuthLeaseSnapshot) -> Option<Self> {
+        snapshot.credential_present.then_some(Self {
+            lease,
+            generation: snapshot.generation,
+            credential_published_at_millis: snapshot.credential_published_at_millis,
+        })
+    }
+
+    /// The lease the credential was published to.
+    pub fn lease(&self) -> &LeaseKey {
+        &self.lease
+    }
+
+    /// The lease generation the publication advanced it to.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The publication time the lease records, in milliseconds since the
+    /// Unix epoch: for a credential the lease adopted from another process,
+    /// the time that process published it.
+    pub fn credential_published_at_millis(&self) -> Option<u64> {
+        self.credential_published_at_millis
+    }
 }
 
 /// Opaque token for restoring a previously captured auth lease snapshot.
@@ -2259,6 +2338,9 @@ impl AuthLeaseRestoreSnapshot {
 /// that published it without taking a later snapshot.
 /// `credential_published_at_millis` is the durable credential publication
 /// timestamp attached to acquired/refreshed credential material.
+/// `adopted_marker_generation` is the lease's
+/// [`AuthLeaseSnapshot::adopted_marker_generation`] after the transition: a
+/// durable marker written for it carries that generation when present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     lease_key: LeaseKey,
@@ -2266,6 +2348,7 @@ pub struct AuthLeaseTransition {
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 }
 
 impl AuthLeaseTransition {
@@ -2289,6 +2372,20 @@ impl AuthLeaseTransition {
         self.credential_published_at_millis
     }
 
+    /// The marker generation the lease records for the publication, when it
+    /// is not [`Self::generation`] (see
+    /// [`AuthLeaseSnapshot::adopted_marker_generation`]).
+    pub fn adopted_marker_generation(&self) -> Option<u64> {
+        self.adopted_marker_generation
+    }
+
+    /// The generation a durable lifecycle marker written for this transition
+    /// carries: [`Self::adopted_marker_generation`] when present, else
+    /// [`Self::generation`].
+    pub fn marker_generation(&self) -> u64 {
+        self.adopted_marker_generation.unwrap_or(self.generation)
+    }
+
     #[cfg_attr(
         any(not(meerkat_internal_generated_authority_bridge), test),
         allow(dead_code)
@@ -2299,6 +2396,7 @@ impl AuthLeaseTransition {
         expires_at: u64,
         generation: u64,
         credential_published_at_millis: Option<u64>,
+        adopted_marker_generation: Option<u64>,
     ) -> Self {
         Self {
             lease_key,
@@ -2306,6 +2404,7 @@ impl AuthLeaseTransition {
             expires_at,
             generation,
             credential_published_at_millis,
+            adopted_marker_generation,
         }
     }
 }
@@ -2382,7 +2481,7 @@ unsafe extern "Rust" {
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
-    "__meerkat_core_runtime_generated_auth_lease_transition_build_v1_",
+    "__meerkat_core_runtime_generated_auth_lease_transition_build_v2_",
     env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
 ))]
 pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
@@ -2392,6 +2491,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 ) -> Result<AuthLeaseTransition, String> {
     validate_runtime_generated_authority_bridge_token(token)?;
     Ok(
@@ -2401,6 +2501,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
             expires_at,
             generation,
             credential_published_at_millis,
+            adopted_marker_generation,
         ),
     )
 }

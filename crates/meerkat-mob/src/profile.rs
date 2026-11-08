@@ -307,6 +307,23 @@ pub struct Profile {
     /// `[self_hosted.models]` entry in the host config.
     #[serde(default)]
     pub self_hosted_server_id: Option<String>,
+    /// The realm auth binding this profile's members resolve their
+    /// credentials through.
+    ///
+    /// A spawn that names its own binding wins over it. `None` (the default)
+    /// leaves the member on the binding its realm resolves for the provider.
+    /// A named binding is an explicit build input, so a resumed member builds
+    /// on it too, not on the binding its session recorded. The implicit
+    /// delegation mob records its owner session's current binding here, so a
+    /// `delegate` helper authenticates as the session does. A placed member
+    /// resolves its credentials on its member host and does not carry this
+    /// binding there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Host-set: the adaptive layer-decision schema (the one schema built from
+    // this type) does not offer it, and an adaptive layer refuses a profile
+    // that names one.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
     /// Configured default provider for `Auto` image-generation targets.
     ///
     /// Overrides the mob-level default. When neither is set, `Auto` resolves
@@ -463,6 +480,7 @@ impl Profile {
         "model",
         "provider",
         "self_hosted_server_id",
+        "auth_binding",
         "image_generation_provider",
         "auto_compact_threshold",
         "resume_overrides",
@@ -768,6 +786,7 @@ mod tests {
             model: "claude-opus-4-8".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -810,6 +829,7 @@ mod tests {
             model: "gpt-5.2".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -1111,6 +1131,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
                 model: String::new(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1206,6 +1227,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),

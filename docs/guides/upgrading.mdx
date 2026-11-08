@@ -214,6 +214,113 @@ identity the roster lists that Core holds unseated, so that Core seats it;
 an identity left unseated is seated again by the first roster pass after the
 next upgrade.
 
+### Host store implementers: token order and conflicted scopes
+
+Two rules of the host store SPI are new or newly enforced in 0.9.11, each
+with a row of the host store chapter in `meerkat-store-conformance`:
+
+- **Token order** (the `token_order` row). Every grant answers a token
+  above every earlier grant of the realm, in either acquire mode and to any
+  caller, a takeover of the caller's own recorded lease included. Core now
+  holds a re-acquire's grant to it: a grant at or below the token the
+  writer holds loses the realm until it is reopened, with a cause that
+  names your store's token order, not another writer.
+- **Conflicted scopes** (the `a_conflicted_scope_is_listed_typed` row). A
+  store that meets obligation 4 by failing a scope's load with a typed
+  conflict (two batches at one of its versions) reports that scope per
+  scope in its listings: `list_heads` answers it in `HeadPage::conflicts`
+  as `ScopeConflict::new(name, version, commit_ids)`, with the version that
+  holds the two batches (the `current` the load's `Conflict` names) and
+  their commit ids, ascending, without repeats and the same each time, or
+  none. It is never listed among the heads and never fails the page, and a
+  page holds at most `limit` entries across both lists. A page the store
+  cannot decide yet (a pending acquire cut) answers `Unavailable`, never a
+  conflict. Core quarantines such a scope and opens the rest of the realm
+  (see [A Conflicted Scope](/reference/host-store-spi#a-conflicted-scope));
+  a store that still fails the page keeps the realm from opening.
+  `HeadPage` is `#[non_exhaustive]`: a struct literal no longer compiles.
+
+**Do:**
+
+- Build each listing page with `HeadPage::new(heads, next)`, and add the
+  conflicted scopes with `HeadPage::with_conflicts`.
+- Answer every grant with a token above every earlier one.
+- Run the host store chapter against your store before you upgrade. A
+  store that decides between two batches for one version only when it
+  folds them implements `HostStoreFactory::fold_now`, so the conflict row
+  sees what its loads and listings show once it folded.
+- To lift a quarantine, repair the scope in your store (keep one of the two
+  batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines
+  the scope again.
+
+### The downgrade cycle of store-owned identities
+
+A release before 0.9.9 does not read a mob's rows of schema version 2 and
+later: the rows of store-owned identities (present, pending their host's
+preparation or archived) and the tombstones of removed names
+(`IdentityRecordCensus::created_rows`, and the `identity-store-rows`
+finding of `rkat storage doctor`). A downgrade of a mob that holds any to
+such a release is supported through this cycle only, and a host's downgrade
+tooling refuses while the census counts any row. A downgrade to 0.9.9 or
+0.9.10 needs no cycle: they read the rows.
+
+1. Hold the mob's identity changes (`MobHandle::set_identity_changes_held`).
+2. Settle every identity awaiting its host's preparation
+   (`preparations_open`) and every held construction (`constructions_held`),
+   or remove the identity.
+3. Bring each stale seat up to date (`seats_stale`), or remove its identity.
+4. Export the set: `MobHandle::export_created_identities` answers a
+   `CreatedIdentitySetExport` (schema `meerkat.identity.created_set.v1`)
+   that holds every row as sealed, with each identity's session reference
+   (its member's session, or its archived session), sealed with a digest.
+   Keep it: the import needs it. Session contents, memory and decisions are
+   not in it.
+5. Purge: `MobHandle::purge_created_identities` with the export's digest,
+   as the host operator. One store transaction removes every row of the
+   set, and nothing else (no session, journal row or host-adopted intent),
+   only while the rows are still the export's. The mob then refuses every
+   identity change (`purged`) until it restarts. A purge or an import
+   commits at most 256 identities (`IDENTITY_CHANGE_BATCH_MAX`, tombstones
+   included): a mob with more rows is refused `batch_too_large`, with
+   nothing removed, and has no supported downgrade below 0.9.9 in this
+   release.
+6. Downgrade.
+7. After the roll-forward, import the export:
+   `MobHandle::import_created_identities`, as the host operator, under
+   imported consent. A retry of its operation replays it.
+
+Under the older release, after the purge, an adopted identity that its
+host's roster still lists is a roster identity again, on its session. The
+other store-owned members are plain members: its roster pass, a
+`retire_stale` reconcile or a former spawner's retirement may retire them,
+archiving their sessions. The names of removed identities are free there,
+and a roster may seat one.
+
+Rolled forward, a start reads each store-owned identity whose row was purged
+as unreadable: its name is reserved, nothing acts on it and nothing seats it
+until the import restores its row. The import re-creates each record and
+re-binds its session: a member seated under its name is bound in place, on
+its session, a plain member only when it is bound to the session the record
+names (a member on another session, a new worker the older release seated
+or the identity's own on a session the export does not name, is reported
+`name_taken_meanwhile` and left as it is: adopt it to take it into store
+custody); an identity with no member is seated again, Dormant, on its
+archived session, or on a fresh session with the history unavailable notice
+when the session store no longer holds it; pending, archived and removed
+names are restored as recorded; and an adopted identity whose roster
+declared it again returns to store custody by the adoption's step. A name
+another holder keeps (a roster or a member seated on it meanwhile, or
+another row) is left as that holder has it, and the import's receipt reports
+it (`name_taken_meanwhile`). A re-import under a new operation reports a
+record whose restored row differs from it (the import left out an owned edge
+another identity held, or the identity changed since) as
+`name_taken_meanwhile` too: the identity is store-owned already, its row is
+left as it is, and a retry under the import's own operation replays its
+receipt.
+
 ### Tool grant run scopes and grant requests
 
 A grant can be scoped to one run of its subject (a session, or the session a
@@ -1172,7 +1279,8 @@ store-owned identity's pending preparation, so the paragraph above applies to
 every mob that holds one. This release has no step that deletes these rows:
 a removal writes the name's tombstone and an archive keeps its row, so a mob
 that holds any (`IdentityRecordCensus::created_rows` above zero) has no
-supported downgrade before the export and purge steps.
+supported downgrade before the export and purge steps, which 0.9.11 adds
+([the downgrade cycle](#the-downgrade-cycle-of-store-owned-identities)).
 `MobHandle::identity_record_census()` counts the rows and what a downgrade
 must settle first: the mob's rows (`created_rows`, the archived ones, the
 tombstones and the unreadable ones), the identities awaiting their host's

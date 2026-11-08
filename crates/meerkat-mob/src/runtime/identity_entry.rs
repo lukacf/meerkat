@@ -511,10 +511,12 @@ pub struct IdentityTombstonePage {
 pub struct IdentityRecordCensus {
     /// Every v2 row of the mob: store-owned identities present, pending
     /// their host's preparation or archived, removed names of either
-    /// custody (tombstones), and rows this build cannot read. This build has
-    /// no step that deletes one (a removal writes its name's tombstone, an
-    /// archive keeps its row): a mob that holds any has no supported
-    /// downgrade before the export and purge steps.
+    /// custody (tombstones), and rows this build cannot read. A removal
+    /// writes its name's tombstone and an archive keeps its row, so only the
+    /// downgrade cycle's purge deletes them
+    /// ([`super::MobHandle::purge_created_identities`]): a mob that holds
+    /// any has no supported downgrade to a release before 0.9.9 but through
+    /// that cycle.
     pub created_rows: usize,
     /// Rows of archived store-owned identities.
     pub archived: usize,

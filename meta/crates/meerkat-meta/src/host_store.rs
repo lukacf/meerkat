@@ -48,7 +48,7 @@ use meerkat_mob::store::SpiMobStoreHost;
 use meerkat_runtime::store::spi::{SpiError, SpiRealm, SpiRuntimeStore, SpiSessionStore};
 
 pub use meerkat_core::host_store::{AcquireMode, FenceTiming, FenceToken, HostStore};
-pub use meerkat_runtime::store::spi::{PoisonedScope, SpiRealmConfig};
+pub use meerkat_runtime::store::spi::{PoisonedScope, QuarantinedScope, SpiRealmConfig};
 
 use crate::blob_store::{Base64BlobStoreAdapter, BinaryBlobStore};
 use crate::console_aggregator::{ConsoleLogStore, InMemoryConsoleLogStore};
@@ -199,12 +199,15 @@ fn open_error(error: SpiError) -> HostStoreOpenError {
 /// realm keeps serving every other member and document, so the probe stays
 /// ready and names the scope ([`Self::poisoned_scopes`]). The members and
 /// documents of the named scopes are degraded; the host restarts when
-/// convenient (after a drain) to recover them, not at once. Meta heals
-/// neither in place. Neither does it heal what the build over the realm
-/// found at its start: restored members whose comms identity is missing on
-/// this host, and members Core restored broken. A restart does not heal
-/// those either unless the comms identity directory comes back, so a host
-/// does not tie them to automatic restarts.
+/// convenient (after a drain) to recover them, not at once. A scope the
+/// store reports conflicted (two batches at one of its versions) is
+/// quarantined: it refuses the same way and is named too
+/// ([`Self::quarantined_scopes`]), but only a repair in the store, then a
+/// restart, recovers it. Meta heals none of them in place. Neither does it
+/// heal what the build over the realm found at its start: restored members
+/// whose comms identity is missing on this host, and members Core restored
+/// broken. A restart does not heal those either unless the comms identity
+/// directory comes back, so a host does not tie them to automatic restarts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HostStoreReadiness {
@@ -219,6 +222,12 @@ pub struct HostStoreReadiness {
     /// are tagged `mb`, `mbi`, `mbr` and `mbs`; Meta's documents are tagged
     /// `mx`, and its mob announcements `mxa`.
     pub poisoned_scopes: Vec<PoisonedScope>,
+    /// Every quarantined scope, in scope order: the store reports a
+    /// conflict for it (two batches at one of its versions), and it refuses
+    /// every call that needs it until it is repaired in the store and the
+    /// realm is reopened. Its cause names each conflicted incarnation and
+    /// the repair.
+    pub quarantined_scopes: Vec<QuarantinedScope>,
     /// Whether this writer's self-fence window is open now. A closed window
     /// is not a failure by itself: the next write or renew re-acquires the
     /// fence, and poisons the realm only when another writer holds it.
@@ -244,6 +253,7 @@ impl HostStoreReadiness {
             realm_poisoned: realm.realm_poisoned(),
             scope_poisoned: realm.has_poisoned_scopes(),
             poisoned_scopes,
+            quarantined_scopes: realm.quarantined_scopes(),
             lease_live: realm.lease_is_live(),
             comms_identity_degraded: parts.comms_identity_degraded.load(Ordering::SeqCst),
             broken_members: parts
@@ -256,9 +266,10 @@ impl HostStoreReadiness {
 
     /// Whether the realm serves: it is not poisoned, no restored member's
     /// comms identity is missing, and no member was restored broken. A
-    /// poisoned scope alone leaves it ready: the realm serves every call
-    /// that does not need that scope, and [`Self::poisoned_scopes`] names
-    /// what is degraded.
+    /// poisoned or quarantined scope alone leaves it ready: the realm serves
+    /// every call that does not need that scope, and
+    /// [`Self::poisoned_scopes`] and [`Self::quarantined_scopes`] name what
+    /// is degraded.
     pub fn is_ready(&self) -> bool {
         self.realm_poisoned.is_none()
             && !self.comms_identity_degraded

@@ -186,6 +186,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `run_stop_requested`: `Option<RunId>`
 - `run_start_holds`: `Set<RunStartHoldReason>`
 - `input_controller_holds`: `Set<String>`
+- `resumed_run_admission_hold`: `Option<RunId>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `registration_live_input_seen`: `Bool`
 - `op_statuses`: `Map<String, OperationStatus>`
@@ -921,6 +922,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `SettleRetainedRun`(run_id: Option<RunId>)
+- `HoldResumedRunForAdmission`(run_id: RunId)
+- `ReleaseResumedRunAdmission`(run_id: RunId)
 - `ExtendToolGrantGate`(server: String, gated: Set<ToolName>)
 - `SurfaceStageGatedAdd`(surface_id: String, now_ms: u64)
 
@@ -1199,6 +1202,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 - `InputControllerReleased`
 - `RetainedRunSettleResolved`(verdict: RetainedRunSettleVerdict, run_id: Option<RunId>)
+- `ExactRunBoundaryCancel`(run_id: RunId, reason: String)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1330,7 +1334,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `MarkRunResumableInitializing`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableIdle`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableAttached`: `no_current_run`, `no_other_resumable_run`
-  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_not_stopped`, `run_inputs_not_controller_held`, `resumed_run_destination_attached`
+  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_not_stopped`, `run_inputs_not_controller_held`, `run_admission_not_held`, `resumed_run_destination_attached`
 - Command Effects: `ResumableRunMarked`, `ResumedRunAuthorized`
 - Emitted By Transitions: `ResumableRunMarked`, `ResumedRunAuthorized`
 
@@ -1525,6 +1529,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `staged_inputs_are_not_queued`
 - `staged_inputs_have_run_association`
 - `input_controller_holds_are_kept_unstaged_governed_inputs`
+- `resumed_run_admission_hold_names_the_marked_run`
 - `live_boundary_delivery_only_for_queued_steer`
 - `live_boundary_join_maps_lockstep`
 - `live_boundary_join_bound_to_current_run`
@@ -1952,6 +1957,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_is_resumable`
   - `run_not_stopped`
   - `run_inputs_not_controller_held`
+  - `run_admission_not_held`
   - `resumed_run_destination_attached`
 - Emits: `ResumedRunAuthorized`
 - To: `Running`
@@ -5842,7 +5848,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `not_retiring`
   - `no_dispatch_outstanding`
-- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- Emits: `RequestCancellationAtBoundary`, `ExactRunBoundaryCancel`
 - To: `Running`
 
 ### `CancelAfterBoundaryAttachedAlreadyPending`
@@ -5869,7 +5875,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
   - `turn_cancellable`
   - `no_dispatch_outstanding`
-- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- Emits: `RequestCancellationAtBoundary`, `ExactRunBoundaryCancel`
 - To: `Running`
 
 ### `CancelAfterBoundaryForRunRetired`
@@ -5879,7 +5885,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
   - `turn_cancellable`
   - `no_dispatch_outstanding`
-- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- Emits: `RequestCancellationAtBoundary`, `ExactRunBoundaryCancel`
 - To: `Retired`
 
 ### `CancelAfterBoundaryForRunRunningAlreadyPending`
@@ -29604,6 +29610,81 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SettleRetainedRun`(run_id)
 - Emits: `RetainedRunSettleResolved`
 - To: `Destroyed`
+
+### `HoldResumedRunForAdmissionIdle`
+- From: `Idle`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Idle`
+
+### `HoldResumedRunForAdmissionAttached`
+- From: `Attached`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Attached`
+
+### `HoldResumedRunForAdmissionRunning`
+- From: `Running`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Running`
+
+### `HoldResumedRunForAdmissionRetired`
+- From: `Retired`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Retired`
+
+### `HoldResumedRunForAdmissionStopped`
+- From: `Stopped`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Stopped`
+
+### `ReleaseResumedRunAdmissionIdle`
+- From: `Idle`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Idle`
+
+### `ReleaseResumedRunAdmissionAttached`
+- From: `Attached`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Attached`
+
+### `ReleaseResumedRunAdmissionRunning`
+- From: `Running`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Running`
+
+### `ReleaseResumedRunAdmissionRetired`
+- From: `Retired`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Retired`
+
+### `ReleaseResumedRunAdmissionStopped`
+- From: `Stopped`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

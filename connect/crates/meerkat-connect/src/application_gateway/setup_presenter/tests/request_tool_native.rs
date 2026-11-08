@@ -143,13 +143,22 @@ impl TokenStore for Tokens {
         self.read_fault(key).await?;
         self.inner.observe_status(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await
@@ -528,7 +537,7 @@ fn schedule(mode: Schedule) -> Pin<Box<dyn Future<Output = ()>>> {
             Arc::new(meerkat_store::MemoryBlobStore::new()), configuration).unwrap();
         let tokens = Arc::new(Tokens::new(&root.path().join("credentials")));
         let provider = ProviderAuthPersistence::new(tokens.clone(),
-            Arc::new(FileLockCoordinator::new(root.path().join("locks"))));
+            Arc::new(FileLockCoordinator::new(root.path().join("credentials").join("refresh-locks"))));
         let (mut startup, auth, control) = connector_fixture_with_owners(
             root.path(), &origin, storage.clone(), provider, Some(persistence)).await;
         let (factory, reviews) = channel(root.path().to_owned());

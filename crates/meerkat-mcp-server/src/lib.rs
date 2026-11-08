@@ -1058,6 +1058,18 @@ fn map_config_runtime_error(err: ConfigRuntimeError) -> ToolCallError {
             error @ (meerkat_core::ConfigError::RealmMcpServerEnvReference(_)
             | meerkat_core::ConfigError::Validation(_)),
         ) => ToolCallError::invalid_params(format!("Invalid config: {error}")),
+        // A held or unusable admission fence: the write did not start and
+        // wrote nothing; typed, never an internal error.
+        refused @ ConfigRuntimeError::AdmissionInProgress => ToolCallError::new(
+            meerkat_contracts::ErrorCode::AdmissionInProgress.jsonrpc_code(),
+            refused.to_string(),
+            Some(json!({ "type": "admission_in_progress" })),
+        ),
+        refused @ ConfigRuntimeError::AdmissionFenceUnavailable(_) => ToolCallError::new(
+            meerkat_contracts::ErrorCode::AdmissionFenceUnavailable.jsonrpc_code(),
+            refused.to_string(),
+            Some(json!({ "type": "admission_fence_unavailable" })),
+        ),
         other => ToolCallError::new(
             -32603,
             other.to_string(),
@@ -8462,6 +8474,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -8514,6 +8527,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -8807,6 +8821,24 @@ mod tests {
         assert_eq!(invalid.code, -32602);
         let io = map_config_runtime_error(ConfigRuntimeError::Io(std::io::Error::other("disk")));
         assert_eq!(io.code, -32603);
+    }
+
+    /// A config write an admission fence refused keeps its typed code on the
+    /// MCP config tool (-32038 held, -32039 unusable), never an internal
+    /// error.
+    #[test]
+    fn test_config_admission_refusals_keep_their_codes() {
+        let held = map_config_runtime_error(ConfigRuntimeError::AdmissionInProgress);
+        assert_eq!(held.code, -32038, "{}", held.message);
+        assert_eq!(held.data, Some(json!({ "type": "admission_in_progress" })));
+        let unusable = map_config_runtime_error(ConfigRuntimeError::AdmissionFenceUnavailable(
+            "unopenable".to_string(),
+        ));
+        assert_eq!(unusable.code, -32039, "{}", unusable.message);
+        assert_eq!(
+            unusable.data,
+            Some(json!({ "type": "admission_fence_unavailable" }))
+        );
     }
 
     #[test]

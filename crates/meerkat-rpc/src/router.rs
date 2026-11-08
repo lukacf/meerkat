@@ -356,6 +356,10 @@ struct ScopedSessionStreamEventNotificationParams<'a> {
 struct MobStreamEventNotificationParams<'a> {
     stream_id: String,
     sequence: u64,
+    /// The sequence space of a member event's `event.seq`; absent on a
+    /// mob-wide stream, whose events come from several members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<String>,
     event: &'a serde_json::Value,
 }
 
@@ -374,6 +378,16 @@ impl NotificationSink {
     pub fn noop() -> Self {
         let (tx, _rx) = mpsc::channel(1);
         Self::new(tx)
+    }
+
+    /// Whether `other` writes to the same connection as this sink.
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
+    /// True once the connection this sink writes to is gone.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
 
     /// Emit one notification of `method` with `params`, best effort and
@@ -528,16 +542,19 @@ impl NotificationSink {
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
     /// For mob-wide streams the event is an [`AttributedEvent`] (source + profile + envelope).
-    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
+    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`], and
+    /// `epoch` names the sequence space of its `seq`.
     async fn emit_mob_stream_event(
         &self,
         stream_id: &StreamRef,
         sequence: u64,
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
         let params = MobStreamEventNotificationParams {
             stream_id: stream_id.as_string(),
             sequence,
+            epoch: epoch.map(|epoch| epoch.to_string()),
             event,
         };
         let notification = match RpcNotification::try_new_with_admission(
@@ -1221,6 +1238,92 @@ async fn close_session_stream(
     close
 }
 
+/// Where a `mob/stream_open` member stream starts: live without a cursor,
+/// else right after the cursor's position. A cursor names one member's
+/// sequence space, so a mob-wide stream takes none, and its epoch is the
+/// UUID a member `mob/stream_event` named.
+#[cfg(feature = "mob")]
+fn member_stream_cursor(
+    cursor: Option<&meerkat_contracts::MobStreamCursor>,
+    member_stream: bool,
+) -> Result<meerkat_core::comms::SessionEventCursor, String> {
+    let Some(cursor) = cursor else {
+        return Ok(meerkat_core::comms::SessionEventCursor::Live);
+    };
+    if !member_stream {
+        return Err(
+            "Invalid params: a cursor resumes a member stream and needs agent_identity; \
+             a mob-wide stream has no single sequence space"
+                .to_string(),
+        );
+    }
+    let epoch = cursor
+        .epoch
+        .parse::<meerkat_core::comms::SessionEventEpoch>()
+        .map_err(|_| "Invalid params: the cursor epoch is not a UUID".to_string())?;
+    Ok(meerkat_core::comms::SessionEventCursor::After {
+        epoch,
+        seq: cursor.seq,
+    })
+}
+
+/// Subscribe to a member's agent events for `mob/stream_open` from `cursor`.
+///
+/// A position the member's current sequence space cannot resume from (one
+/// of another epoch, after a runtime restart or a move to a new host
+/// binding, or one ahead of the space's newest event) replays the current
+/// space from its earliest retained event instead; the stream's events then
+/// name the current epoch, so the client sees the change.
+#[cfg(feature = "mob")]
+async fn subscribe_member_events_resuming(
+    mob_state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &meerkat_mob::MobId,
+    identity: &meerkat_mob::AgentIdentity,
+    cursor: meerkat_core::comms::SessionEventCursor,
+) -> Result<meerkat_mob::AgentEventSubscription, meerkat_mob::MobError> {
+    match mob_state
+        .subscribe_agent_events_from(mob_id, identity, cursor)
+        .await
+    {
+        Err(meerkat_mob::MobError::AgentEventCursorRejected { .. })
+            if matches!(
+                cursor,
+                meerkat_core::comms::SessionEventCursor::After { .. }
+            ) =>
+        {
+            mob_state
+                .subscribe_agent_events_from(
+                    mob_id,
+                    identity,
+                    meerkat_core::comms::SessionEventCursor::Earliest,
+                )
+                .await
+        }
+        result => result,
+    }
+}
+
+/// The sequence space a member stream's events belong to: the one its
+/// subscription named or, for a member that was not materialized when the
+/// stream opened, the one its woken actor names at the attach, which is set
+/// before the stream's first event.
+#[cfg(feature = "mob")]
+struct MemberStreamEpoch {
+    named: Option<meerkat_core::comms::SessionEventEpoch>,
+    attached: Option<Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>>,
+}
+
+#[cfg(feature = "mob")]
+impl MemberStreamEpoch {
+    fn current(&self) -> Option<meerkat_core::comms::SessionEventEpoch> {
+        self.named.or_else(|| {
+            self.attached
+                .as_ref()
+                .and_then(|attached| attached.get().copied().flatten())
+        })
+    }
+}
+
 async fn resolve_mob_stream_open_authority(
     authority: &RpcStreamAuthority,
     stream_id: &StreamRef,
@@ -1648,6 +1751,18 @@ impl RoutedRpcResponse {
     fn into_response(self) -> RpcResponse {
         self.response
     }
+
+    /// This response as the answer to the request `request_id` names. A
+    /// handler that refuses before it reads the request's id (the params
+    /// refusal of `handlers::parse_params`, a shared helper's error) builds
+    /// its response with no id; it gets the request's id here. An id the
+    /// handler set is kept.
+    fn answering(mut self, request_id: Option<crate::protocol::RpcId>) -> Self {
+        if self.response.id.is_none() {
+            self.response.id = request_id;
+        }
+        self
+    }
 }
 
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
@@ -1716,15 +1831,47 @@ pub struct MethodRouter {
 
 use meerkat_runtime::stack_relief::box_in_own_frame as routed_arm;
 
+/// Whether a router's connection becomes its runtime's process-default
+/// `session/event` route ([`SessionRuntime::set_notification_sink`]): the
+/// one that takes the copies of a turn of a session no connection holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessDefaultRoute {
+    /// The server's only client (stdio, a single-client embedding).
+    Install,
+    /// One of several connections a shared runtime serves (TCP): never.
+    Leave,
+}
+
 impl MethodRouter {
     /// Create a new method router.
     ///
     /// Reuses existing mob state from the runtime if available, otherwise
-    /// creates a default. Also spawns schedule host startup.
+    /// creates a default. Also spawns schedule host startup. The router's
+    /// connection becomes the runtime's process-default `session/event`
+    /// route, as the only client of a single-client server: build one router
+    /// per runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`], whose connections never become it.
     pub fn new(
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        Self::new_on_connection(
+            runtime,
+            config_store,
+            notification_sink,
+            ProcessDefaultRoute::Install,
+        )
+    }
+
+    /// [`Self::new`] for one connection of a server that may hold several
+    /// on the same runtime: `default_route` says whether the connection also
+    /// becomes the runtime's process-default `session/event` route.
+    pub(crate) fn new_on_connection(
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        notification_sink: NotificationSink,
+        default_route: ProcessDefaultRoute,
     ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         let runtime_adapter = runtime.runtime_adapter();
         // Reuse the runtime's existing mob state if one was pre-configured
@@ -1758,9 +1905,15 @@ impl MethodRouter {
         if let Err(error) = runtime.start_tool_grant_request_executor() {
             tracing::warn!(%error, "failed to start the tool grant request executor");
         }
-        // Ensure the runtime's notification sink is up-to-date so that
-        // executors created lazily read the current sink at apply time.
-        runtime.set_notification_sink(notification_sink.clone());
+        // A turn writes its session/event copies to the connections of the
+        // requests that admitted its inputs, and a turn no request waits on
+        // to the connection holding its session (see
+        // `SessionRuntime::turn_session_event_sinks`). Only the turns of a
+        // session no connection holds go to the runtime's process default:
+        // a single-client server's connection, never one of several.
+        if default_route == ProcessDefaultRoute::Install {
+            runtime.set_notification_sink(notification_sink.clone());
+        }
         runtime.arm_runtime_delivery_owner();
         Ok(Self {
             #[cfg(feature = "local-authorization")]
@@ -2314,7 +2467,10 @@ impl MethodRouter {
     /// Create a new method router with an explicit mob state.
     ///
     /// The mob state is registered on the runtime. Also spawns schedule host
-    /// startup and updates the notification sink.
+    /// startup and, as [`Self::new`] does, makes the router's connection the
+    /// runtime's process-default `session/event` route: build one router per
+    /// runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     #[cfg(feature = "mob")]
     pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
@@ -2342,8 +2498,8 @@ impl MethodRouter {
         if let Err(error) = runtime.start_tool_grant_request_executor() {
             tracing::warn!(%error, "failed to start the tool grant request executor");
         }
-        // Ensure the runtime's notification sink is up-to-date so that
-        // executors created lazily read the current sink at apply time.
+        // The single-client server's connection is the runtime's
+        // process-default session/event route (see `Self::new`).
         runtime.set_notification_sink(notification_sink.clone());
         Self {
             #[cfg(feature = "local-authorization")]
@@ -2672,8 +2828,22 @@ impl MethodRouter {
             .await
     }
 
-    #[allow(clippy::if_not_else)]
+    /// Route `request` and answer it under its own id. JSON-RPC answers a
+    /// request under the request's id, so a response its handler built with
+    /// none gets the request's id here, once for every route.
     async fn dispatch_routed_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RoutedRpcResponse> {
+        let request_id = request.id.clone();
+        routed_arm(|| self.route_request(request, request_context))
+            .await
+            .map(|routed| routed.answering(request_id))
+    }
+
+    #[allow(clippy::if_not_else)]
+    async fn route_request(
         &self,
         request: RpcRequest,
         request_context: Option<RequestContext>,
@@ -3206,6 +3376,10 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/fork_helper" => {
                 routed_arm(|| handlers::mob::handle_fork_helper(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/fork_member" => {
+                routed_arm(|| handlers::mob::handle_fork_member(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
             "mob/force_cancel" => {
@@ -4512,6 +4686,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });
@@ -4573,6 +4753,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });
@@ -5286,6 +5472,11 @@ impl MethodRouter {
         };
 
         let mob_id = meerkat_mob::MobId::from(params.mob_id.as_str());
+        let cursor =
+            match member_stream_cursor(params.cursor.as_ref(), params.agent_identity.is_some()) {
+                Ok(cursor) => cursor,
+                Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+            };
 
         let stream_id = StreamRef::mint();
         let notification_sink = self.notification_sink.clone();
@@ -5304,18 +5495,23 @@ impl MethodRouter {
             }
         };
         let opened = if let Some(agent_identity) = params.agent_identity {
-            // Per-member stream: subscribe to a specific member's agent events.
+            // Per-member stream: subscribe to a specific member's agent events,
+            // live or right after the client's cursor.
             let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
-            let stream: meerkat_core::comms::EventStream = match self
-                .mob_state
-                .subscribe_agent_events(&mob_id, &identity)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    return handlers::mob::mob_error_response(id, &e);
-                }
+            let subscription =
+                match subscribe_member_events_resuming(&self.mob_state, &mob_id, &identity, cursor)
+                    .await
+                {
+                    Ok(subscription) => subscription,
+                    Err(e) => {
+                        return handlers::mob::mob_error_response(id, &e);
+                    }
+                };
+            let epoch = MemberStreamEpoch {
+                named: subscription.epoch,
+                attached: subscription.attached_epoch,
             };
+            let stream = subscription.stream;
 
             let open_authority =
                 match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
@@ -5385,6 +5581,7 @@ impl MethodRouter {
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            epoch.current(),
                                             &event_json,
                                         )
                                         .await;
@@ -5495,10 +5692,13 @@ impl MethodRouter {
                                             break;
                                         }
                                     };
+                                    // A mob-wide stream interleaves several members'
+                                    // sequence spaces, so its events name no epoch.
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            None,
                                             &event_json,
                                         )
                                         .await;
@@ -6372,6 +6572,22 @@ mod tests {
         ) -> Result<Config, meerkat_core::ConfigError> {
             Err(meerkat_core::ConfigError::Validation("boom".to_string()))
         }
+
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
+
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _delta: meerkat_core::ConfigDelta,
+        ) -> Result<Config, meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
     }
 
     async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
@@ -6399,9 +6615,15 @@ mod tests {
         )
         .expect("compose the RPC session runtime");
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+        // A document's generation sidecar lies beside it, under the same
+        // admission fence; a store without a document keeps it here.
+        let state_path = config_store.admission_fence().map_or_else(
+            || temp.path().join("config_state.json"),
+            |fence| fence.directory().join("config_state.json"),
+        );
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
-            temp.path().join("config_state.json"),
+            state_path,
         )));
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
@@ -10450,6 +10672,44 @@ mod tests {
             );
         }
 
+        /// A host's adoption of a declared identity ends the identity's
+        /// entry, not the identity: the identity continues under the host's
+        /// intent and keeps its scoped tool grants. An operator's grant to
+        /// the declared identity before the adoption still admits the member
+        /// the reconciler materializes under the host's intent, and the list
+        /// reads it active.
+        #[tokio::test]
+        async fn a_host_adoption_of_a_declared_identity_keeps_its_grants() {
+            let mut rig = rig().await;
+            create_mob(&rig, "adopt-grants", shell_gated_role()).await;
+            declare_entry(&rig, "adopt-grants", "entry-1").await;
+            let grant = grant_identity_shell(&rig, "adopt-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+
+            adopt_identity(&rig, "adopt-grants", "entry-1", None).await;
+            let handle = mob_handle(&rig, "adopt-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            assert!(
+                matches!(
+                    handle.identity_entry(&entry),
+                    Ok(meerkat_mob::IdentityEntryRead::NotAnEntry { .. })
+                ),
+                "the adoption ended the identity's entry: {:?}",
+                handle.identity_entry(&entry)
+            );
+            let listed = list_identity(&rig, "adopt-grants", "entry-1", false).await;
+            assert_eq!(listed.len(), 1, "the identity keeps its grant: {listed:?}");
+            assert_eq!(listed[0]["grant_id"], grant["grant_id"], "{listed:?}");
+            assert_eq!(listed[0]["status"], "active", "{listed:?}");
+            let adopted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            assert_eq!(
+                adopted.grant_refusal(),
+                None,
+                "the grant admits the member the host's intent materialized: {adopted:?}"
+            );
+        }
+
         /// A complete roster's seal ends every unseated entry it does not
         /// list in its one step, and their grants with them, before the
         /// step commits. When no entry's grant end succeeds (the grant
@@ -12505,6 +12765,10 @@ mod tests {
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     impl meerkat_core::authorization::WorkAuthorization for ConsentRequiredWork {
@@ -12988,6 +13252,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -13049,6 +13314,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -16636,7 +16902,12 @@ mod tests {
             .map(|_| admission.try_admit(1).expect("data permit"))
             .collect();
         let emit = sink
-            .emit_mob_stream_event(&stream_id, 1, &serde_json::json!({"type": "synthetic"}))
+            .emit_mob_stream_event(
+                &stream_id,
+                1,
+                None,
+                &serde_json::json!({"type": "synthetic"}),
+            )
             .await;
         assert_eq!(emit, StreamEmitStatus::Overflow);
         let (observation, detail) = terminal_observation_from_emit_status(emit).unwrap();
@@ -17602,11 +17873,13 @@ mod tests {
         });
 
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 1, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 1, None, &event)
+                .await,
             StreamEmitStatus::Delivered
         );
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 2, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 2, None, &event)
+                .await,
             StreamEmitStatus::Overflow
         );
 
@@ -17666,7 +17939,9 @@ mod tests {
             }
         });
 
-        let emit_status = sink.emit_mob_stream_event(&stream_id, 1, &event).await;
+        let emit_status = sink
+            .emit_mob_stream_event(&stream_id, 1, None, &event)
+            .await;
         assert_eq!(emit_status, StreamEmitStatus::ReceiverGone);
         let (observation, detail) = terminal_observation_from_emit_status(emit_status)
             .expect("closed receiver should lower into a terminal observation");
@@ -18087,6 +18362,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -22679,6 +22955,94 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(error_code(&set_resp), error::INVALID_PARAMS);
     }
 
+    /// The RPC router over `config_store` with no config runtime: config
+    /// writes go straight to the store.
+    async fn test_router_without_config_runtime(
+        config_store: Arc<dyn ConfigStore>,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime = SessionRuntime::new(
+            factory,
+            anthropic_test_config(),
+            10,
+            runtime_backed_persistence(store),
+            NotificationSink::noop(),
+        )
+        .expect("compose the RPC session runtime");
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let router = MethodRouter::new(
+            Arc::new(runtime),
+            config_store,
+            NotificationSink::new(notif_tx),
+        )
+        .expect("construct runtime authority");
+        (router, notif_rx)
+    }
+
+    /// While an admission holds the realm document's fence, `config/set` and
+    /// `config/patch` refuse with the admission code (-32038) and write
+    /// nothing, through the config runtime and on the path without one.
+    #[tokio::test]
+    async fn config_writes_refuse_admission_in_progress_with_its_code() {
+        const ADMISSION_IN_PROGRESS: i32 = -32038;
+        let temp = tempfile::tempdir().unwrap();
+        let document = temp.path().join("realm").join("config.toml");
+        tokio::fs::create_dir_all(document.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&document, "max_tokens = 100\n")
+            .await
+            .unwrap();
+        let store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::FileConfigStore::new(
+            document.clone(),
+            meerkat_models::canonical(),
+        ));
+        let (with_runtime, _rx) = test_router_with_config_store(Arc::clone(&store)).await;
+        let (without_runtime, _rx2) = test_router_without_config_runtime(Arc::clone(&store)).await;
+        let get = with_runtime
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let mut replaced = result_value(&get)["config"].clone();
+        replaced["max_tokens"] = serde_json::json!(200);
+
+        let fence = store.admission_fence().unwrap();
+        fence.ensure_exists().unwrap();
+        let mut held = meerkat_core::AdmissionHold::try_acquire(vec![fence]).unwrap();
+        let set = || {
+            make_request(
+                "config/set",
+                serde_json::json!({ "config": replaced.clone() }),
+            )
+        };
+        let patch = || {
+            make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 300 } }),
+            )
+        };
+        let (runtime_set, runtime_patch, store_set, store_patch) = tokio::join!(
+            with_runtime.dispatch(set()),
+            with_runtime.dispatch(patch()),
+            without_runtime.dispatch(set()),
+            without_runtime.dispatch(patch()),
+        );
+        for response in [runtime_set, runtime_patch, store_set, store_patch] {
+            assert_eq!(error_code(&response.unwrap()), ADMISSION_IN_PROGRESS);
+        }
+        assert_eq!(
+            tokio::fs::read_to_string(&document).await.unwrap(),
+            "max_tokens = 100\n"
+        );
+        held.release();
+
+        let patched = with_runtime.dispatch(patch()).await.unwrap();
+        assert_eq!(result_value(&patched)["config"]["max_tokens"], 300);
+    }
+
     /// 12. `config/patch` merges a delta.
     #[tokio::test]
     async fn config_patch_merges_delta() {
@@ -24107,9 +24471,14 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         );
     }
 
-    #[tokio::test]
-    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
-        let (router, _notif_rx) = test_router().await;
+    /// The router the catalog sweeps dispatch to, and the catalog options
+    /// that describe exactly what it serves.
+    async fn catalog_sweep_router() -> (
+        MethodRouter,
+        mpsc::Receiver<RpcNotification>,
+        meerkat_contracts::RpcMethodCatalogOptions,
+    ) {
+        let (router, notif_rx) = test_router().await;
         // Wire a live transport so the `live/*` catalog methods are
         // dispatchable exactly as the catalog advertises them
         // (`runtime_available` => live surface present).
@@ -24161,6 +24530,12 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             // receives them.
             decision_notices_enabled: false,
         };
+        (router, notif_rx, options)
+    }
+
+    #[tokio::test]
+    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
+        let (router, _notif_rx, options) = catalog_sweep_router().await;
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {
             id += 1;
@@ -24197,6 +24572,59 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             .expect("unknown method must produce a response");
         let err = response.error.expect("unknown method must be an error");
         assert_eq!(err.code, error::METHOD_NOT_FOUND);
+    }
+
+    /// Every catalog method answers a request under that request's id, its
+    /// refusal of params it cannot read included: a client that matches
+    /// answers by id never receives an answer with another id. The params
+    /// are a bare number, which no method's params type reads, so every
+    /// method that declares params refuses them as invalid params.
+    #[tokio::test]
+    async fn catalog_methods_answer_unreadable_params_under_the_request_id() {
+        let (router, _notif_rx, options) = catalog_sweep_router().await;
+        let mut other_id = Vec::new();
+        let mut not_refused = Vec::new();
+        for (index, method) in meerkat_contracts::rpc_method_catalog(options)
+            .into_iter()
+            .enumerate()
+        {
+            // Number and string ids alike.
+            let request_id = if index % 2 == 0 {
+                RpcId::Num(i64::try_from(index).expect("catalog index fits i64") + 1)
+            } else {
+                RpcId::Str(format!("request-{index}"))
+            };
+            let response = router
+                .dispatch(RpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    method: method.name.to_string(),
+                    params: Some(RawValue::from_string("42".to_string()).expect("static JSON")),
+                    id: Some(request_id.clone()),
+                })
+                .await
+                .unwrap_or_else(|| panic!("catalog method `{}` produced no response", method.name));
+            if response.id.as_ref() != Some(&request_id) {
+                other_id.push(format!("{} answered id {:?}", method.name, response.id));
+            }
+            if method.params_type.is_some()
+                && response.error.as_ref().map(|error| error.code) != Some(error::INVALID_PARAMS)
+            {
+                not_refused.push(format!(
+                    "{} answered {:?}",
+                    method.name,
+                    response.error.as_ref().map(|error| error.code)
+                ));
+            }
+        }
+        assert!(
+            other_id.is_empty(),
+            "every catalog method answers under the request's id: {other_id:#?}"
+        );
+        assert!(
+            not_refused.is_empty(),
+            "every method that declares params refuses unreadable ones as invalid params: \
+             {not_refused:#?}"
+        );
     }
 
     #[cfg(feature = "openai-live")]

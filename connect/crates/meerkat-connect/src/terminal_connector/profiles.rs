@@ -19,7 +19,6 @@ use std::{
     future::Future,
     io::{self, Write},
     pin::Pin,
-    sync::Arc,
 };
 use tokio::sync::oneshot;
 
@@ -379,13 +378,9 @@ pub(super) async fn prepare<F: Future<Output = io::Result<()>> + Send, W: Write>
         .resolution_provider_auth_persistence()
         .map_err(|_| unavailable("The original native credential persistence is unavailable."))?
         .ok_or_else(|| unavailable("The original native credential persistence is unavailable."))?;
-    let path = crate::realm::config_source(storage)?.config_doc_path(save_realm);
-    let store = Arc::new(meerkat_core::FileConfigStore::new(
-        path,
-        meerkat_models::canonical(),
-    ));
+    let documents = crate::realm::config_source(storage)?;
     let updating =
-        meerkat::put_connector_client(store, &persistence, save_realm, id, client, secret);
+        meerkat::put_connector_client(documents, &persistence, save_realm, id, client, secret);
     let cancelled = async {
         tokio::select! { biased;
             signal = interrupt.as_mut() => signal.map(|()| Stop::Requested),

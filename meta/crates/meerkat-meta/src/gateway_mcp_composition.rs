@@ -2160,7 +2160,7 @@ mod tests {
                 .with_exclusive_mutation_for(
                     key,
                     meerkat_core::auth::TokenStoreAccess::Interactive,
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         Box::pin(async move {
                             let _ = holding.send(());
                             let _ = released.await;

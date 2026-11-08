@@ -33254,6 +33254,10 @@ mod console_human_currentness_tests {
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// R3 is never model-reviewed.

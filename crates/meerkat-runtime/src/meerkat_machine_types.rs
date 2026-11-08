@@ -1383,6 +1383,12 @@ meerkat_machine_runtime_internal_inputs!(
     RunExecutionLifecycle => [
         SettleRetainedRun,
     ],
+    // The run marked resumable whose resumed-run admission could not decide,
+    // held until a later answer releases it.
+    RunExecutionLifecycle => [
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
+    ],
     // The scoped tool grant gate's server gate: each model-request
     // boundary's extension of the gate by the names a gated MCP server
     // provides, applied by the visibility owner.

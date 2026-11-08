@@ -3,9 +3,21 @@
 //! This wraps a [`ConfigStore`] and maintains a monotonic generation counter in
 //! a sidecar state file. Writes support expected-generation checks so clients
 //! can do optimistic concurrency control across surfaces.
+//!
+//! Every write is fenced ([`crate::realm_admission`]): it takes the admission
+//! fences of its document and its sidecar EXCLUSIVE before its config
+//! custody, and settles the document and generation writes together on an
+//! owned task that owns the guard. A held fence refuses the write with
+//! [`ConfigRuntimeError::AdmissionInProgress`] and nothing written. The
+//! runtime's in-process lock is taken before the fences, so writers of one
+//! runtime queue in process instead of refusing one another; a waiter there
+//! waits at most for one writer's fence and custody bounds (5 s each).
 
-use crate::config::{Config, ConfigDelta, ConfigError};
+use crate::config::{Config, ConfigDelta, ConfigError, ConfigWarning};
 use crate::config_store::{ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata};
+use crate::realm_admission::{
+    AdmissionFence, AdmissionGuard, AdmissionRefusal, INTERACTIVE_FENCE_WAIT,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use serde::{Deserialize, Serialize};
@@ -13,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -81,8 +93,11 @@ impl From<ConfigSnapshot> for ConfigEnvelope {
 /// Errors returned by [`ConfigRuntime`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigRuntimeError {
+    /// The store's own error. A store's admission refusal is reported as
+    /// [`Self::AdmissionInProgress`] or [`Self::AdmissionFenceUnavailable`]
+    /// instead.
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(ConfigError),
     #[error("generation conflict: expected {expected}, current {current}")]
     GenerationConflict { expected: u64, current: u64 },
     #[error("io error: {0}")]
@@ -91,6 +106,62 @@ pub enum ConfigRuntimeError {
     Json(#[from] serde_json::Error),
     #[error("timed out acquiring config lock")]
     LockTimeout,
+    /// The admission fence of the document or its generation sidecar is
+    /// held, by an admission or another fenced write, beyond the write's
+    /// bound. The write did not start and nothing was written. It may be
+    /// retried, though an admission's hold can last until the process
+    /// holding it restarts.
+    #[error(
+        "an admission is in progress for this config document; nothing was written; retry \
+         later (an admission's hold may last until its process restarts)"
+    )]
+    AdmissionInProgress,
+    /// An admission fence of the write could not be opened, created, locked
+    /// or identity-checked, or the caller's guard does not hold it. The write
+    /// did not start and nothing was written; it fails closed.
+    #[error("the config document's admission fence is unavailable; nothing was written: {0}")]
+    AdmissionFenceUnavailable(String),
+}
+
+impl From<ConfigError> for ConfigRuntimeError {
+    fn from(error: ConfigError) -> Self {
+        match error {
+            ConfigError::AdmissionInProgress => Self::AdmissionInProgress,
+            ConfigError::AdmissionFenceUnavailable(reason) => {
+                Self::AdmissionFenceUnavailable(reason)
+            }
+            error => Self::Config(error),
+        }
+    }
+}
+
+impl From<AdmissionRefusal> for ConfigRuntimeError {
+    fn from(refusal: AdmissionRefusal) -> Self {
+        ConfigError::from(refusal).into()
+    }
+}
+
+impl From<ConfigRuntimeError> for ConfigError {
+    /// A runtime error as a store reports it ([`ConfigStore`]'s own fenced
+    /// writes run through a [`ConfigRuntime`]).
+    fn from(error: ConfigRuntimeError) -> Self {
+        match error {
+            ConfigRuntimeError::Config(error) => error,
+            ConfigRuntimeError::Io(error) => Self::Io(error),
+            ConfigRuntimeError::Json(error) => Self::Json(error),
+            ConfigRuntimeError::LockTimeout => Self::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out acquiring config lock",
+            )),
+            ConfigRuntimeError::AdmissionInProgress => Self::AdmissionInProgress,
+            ConfigRuntimeError::AdmissionFenceUnavailable(reason) => {
+                Self::AdmissionFenceUnavailable(reason)
+            }
+            error @ ConfigRuntimeError::GenerationConflict { .. } => {
+                Self::InternalError(error.to_string())
+            }
+        }
+    }
 }
 
 /// Why an admitted config write ([`ConfigRuntime::patch_entered`]) did not
@@ -160,29 +231,43 @@ impl ConfigRuntime {
     /// A full replace (see [`ConfigStore::set`]): in a realm document every
     /// field becomes an explicit override of the parent realm. Use
     /// [`Self::patch`] to change individual keys.
+    ///
+    /// The write takes its admission fences ([`Self::admission_fences`]),
+    /// waiting up to the interactive bound, and settles on an owned task
+    /// (see the module documentation).
     pub async fn set(
         &self,
         config: Config,
         expected_generation: Option<u64>,
     ) -> Result<ConfigSnapshot, ConfigRuntimeError> {
-        let _guard = self.process_lock.lock().await;
-        let _file_lock = self.acquire_file_lock().await?;
-        let current = self.read_generation().await?;
-        if let Some(expected) = expected_generation
-            && expected != current
-        {
-            return Err(ConfigRuntimeError::GenerationConflict { expected, current });
-        }
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        let guard = self.acquire_fences().await?;
+        let custody = self.take_custody(process, expected_generation).await?;
+        let (snapshot, _) = self
+            .settle(custody, guard, DocumentWrite::Set(config), None)
+            .await?;
+        Ok(snapshot)
+    }
 
-        self.store.set(config.clone()).await?;
-        let next = current.saturating_add(1);
-        self.write_generation(next).await?;
-
-        Ok(ConfigSnapshot {
-            config,
-            generation: next,
-            metadata: self.store.metadata(),
-        })
+    /// [`Self::set`] for an operation that already holds `guard`, whose
+    /// fences must include every fence of [`Self::admission_fences`]: it
+    /// takes no fence of its own. A guard that does not hold them is refused
+    /// with nothing locked or written
+    /// ([`ConfigRuntimeError::AdmissionFenceUnavailable`]). The write keeps
+    /// its own reference to `guard` until it has settled.
+    pub async fn set_under(
+        &self,
+        guard: &Arc<AdmissionGuard>,
+        config: Config,
+        expected_generation: Option<u64>,
+    ) -> Result<ConfigSnapshot, ConfigRuntimeError> {
+        self.require_covered(guard)?;
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        let custody = self.take_custody(process, expected_generation).await?;
+        let (snapshot, _) = self
+            .settle(custody, Arc::clone(guard), DocumentWrite::Set(config), None)
+            .await?;
+        Ok(snapshot)
     }
 
     /// The config [`Self::patch`] would commit for `delta`, without writing
@@ -197,45 +282,78 @@ impl ConfigRuntime {
     /// Apply JSON merge patch with optional generation check.
     ///
     /// Only the keys the patch names are written (see [`ConfigStore::patch`]).
+    /// Fenced and settled as [`Self::set`].
     pub async fn patch(
         &self,
         delta: ConfigDelta,
         expected_generation: Option<u64>,
     ) -> Result<ConfigSnapshot, ConfigRuntimeError> {
-        let _guard = self.process_lock.lock().await;
-        let _file_lock = self.acquire_file_lock().await?;
-        let current = self.read_generation().await?;
-        if let Some(expected) = expected_generation
-            && expected != current
-        {
-            return Err(ConfigRuntimeError::GenerationConflict { expected, current });
-        }
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        let guard = self.acquire_fences().await?;
+        let custody = self.take_custody(process, expected_generation).await?;
+        let (snapshot, _) = self
+            .settle(custody, guard, DocumentWrite::Patch(delta), None)
+            .await?;
+        Ok(snapshot)
+    }
 
-        let updated = self.store.patch(delta).await?;
-        let next = current.saturating_add(1);
-        self.write_generation(next).await?;
+    /// [`Self::patch`] for an operation that already holds `guard`, as
+    /// [`Self::set_under`].
+    pub async fn patch_under(
+        &self,
+        guard: &Arc<AdmissionGuard>,
+        delta: ConfigDelta,
+        expected_generation: Option<u64>,
+    ) -> Result<ConfigSnapshot, ConfigRuntimeError> {
+        self.require_covered(guard)?;
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        let custody = self.take_custody(process, expected_generation).await?;
+        let (snapshot, _) = self
+            .settle(
+                custody,
+                Arc::clone(guard),
+                DocumentWrite::Patch(delta),
+                None,
+            )
+            .await?;
+        Ok(snapshot)
+    }
 
-        Ok(ConfigSnapshot {
-            config: updated,
-            generation: next,
-            metadata: self.store.metadata(),
-        })
+    /// [`Self::patch`], returning the store's typed load warnings to the
+    /// caller instead of the store's own report: a store's own fenced patch
+    /// ([`ConfigStore::patch_with_warnings`]) runs through this.
+    pub(crate) async fn patch_with_warnings(
+        &self,
+        delta: ConfigDelta,
+        expected_generation: Option<u64>,
+    ) -> Result<(ConfigSnapshot, Vec<ConfigWarning>), ConfigRuntimeError> {
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        let guard = self.acquire_fences().await?;
+        let custody = self.take_custody(process, expected_generation).await?;
+        self.settle(
+            custody,
+            guard,
+            DocumentWrite::PatchWithWarnings(delta),
+            None,
+        )
+        .await
     }
 
     /// [`Self::patch`], admitted by `entry` at the write's entry: after the
-    /// process lock, the document's file lock and the generation check,
-    /// immediately before the document is written. A refusal there writes
-    /// nothing.
+    /// process lock, the admission fences, the document's file lock and the
+    /// generation check, immediately before the document is written. A
+    /// refusal there writes nothing.
     ///
-    /// Once admitted, the write is settled by an owned task that holds both
-    /// locks and the entered admission through the document write and the
-    /// generation publication, and releases them only then: a caller that
-    /// stops waiting neither releases them between the two nor abandons the
-    /// settlement. Any failure after the admission is
-    /// [`EnteredConfigWriteError::OutcomeUnknown`]. An admission that states
-    /// its administrator is recorded by that task when it releases it
-    /// ([`crate::EnteredAdministration::administered_by`]): the patch and
-    /// the generation it publishes, committed or unknown.
+    /// Once admitted, the write is settled by an owned task that holds the
+    /// fences, both locks and the entered admission through the document
+    /// write and the generation publication, and releases them only then: a
+    /// caller that stops waiting neither releases them between the two nor
+    /// abandons the settlement. Any failure after the admission is
+    /// [`EnteredConfigWriteError::OutcomeUnknown`]; a held or unavailable
+    /// fence is [`EnteredConfigWriteError::NotWritten`]. An admission that
+    /// states its administrator is recorded by that task when it releases it
+    /// ([`crate::EnteredAdministration::administered_by`]): the patch and the
+    /// generation it publishes, committed or unknown.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn patch_entered(
         &self,
@@ -243,23 +361,53 @@ impl ConfigRuntime {
         expected_generation: Option<u64>,
         entry: &dyn crate::AdministrationEntry,
     ) -> Result<ConfigSnapshot, EnteredConfigWriteError> {
-        let process_guard = Arc::clone(&self.process_lock).lock_owned().await;
-        let file_lock = self
-            .acquire_file_lock()
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        let guard = self
+            .acquire_fences()
             .await
             .map_err(EnteredConfigWriteError::NotWritten)?;
-        let current = self
-            .read_generation()
+        self.patch_entered_held(process, guard, delta, expected_generation, entry)
+            .await
+    }
+
+    /// [`Self::patch_entered`] for an operation that already holds `guard`,
+    /// as [`Self::set_under`]: a guard that does not hold every fence of
+    /// [`Self::admission_fences`] is [`EnteredConfigWriteError::NotWritten`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn patch_entered_under(
+        &self,
+        guard: &Arc<AdmissionGuard>,
+        delta: ConfigDelta,
+        expected_generation: Option<u64>,
+        entry: &dyn crate::AdministrationEntry,
+    ) -> Result<ConfigSnapshot, EnteredConfigWriteError> {
+        self.require_covered(guard)
+            .map_err(EnteredConfigWriteError::NotWritten)?;
+        let process = Arc::clone(&self.process_lock).lock_owned().await;
+        self.patch_entered_held(
+            process,
+            Arc::clone(guard),
+            delta,
+            expected_generation,
+            entry,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn patch_entered_held(
+        &self,
+        process: OwnedMutexGuard<()>,
+        guard: Arc<AdmissionGuard>,
+        delta: ConfigDelta,
+        expected_generation: Option<u64>,
+        entry: &dyn crate::AdministrationEntry,
+    ) -> Result<ConfigSnapshot, EnteredConfigWriteError> {
+        let custody = self
+            .take_custody(process, expected_generation)
             .await
             .map_err(EnteredConfigWriteError::NotWritten)?;
-        if let Some(expected) = expected_generation
-            && expected != current
-        {
-            return Err(EnteredConfigWriteError::NotWritten(
-                ConfigRuntimeError::GenerationConflict { expected, current },
-            ));
-        }
-        let next = current.saturating_add(1);
+        let next = custody.current.saturating_add(1);
         // The record names the store's realm as a realm id; a store that
         // names none, or a name that is no realm id, names no realm.
         let realm = self
@@ -274,53 +422,136 @@ impl ConfigRuntime {
                 realm,
                 generation: next,
             });
-
         // No await between the admission and handing the custody to its
         // settling owner.
-        let store = Arc::clone(&self.store);
-        let state_path = self.state_path.clone();
-        let settlement = tokio::spawn(async move {
-            let mut custody = (process_guard, file_lock, entered);
-            let written = async {
-                let updated = store.patch(delta).await?;
-                write_generation_at(&state_path, next).await?;
-                Ok::<_, ConfigRuntimeError>((updated, next))
-            }
-            .await;
-            custody.2.settle(if written.is_ok() {
-                crate::AdministrationOutcome::Committed
-            } else {
-                crate::AdministrationOutcome::Unknown
-            });
-            written
-        });
-        let (config, generation) = settlement
+        self.settle(custody, guard, DocumentWrite::Patch(delta), Some(entered))
             .await
-            .map_err(|_| {
-                EnteredConfigWriteError::OutcomeUnknown(ConfigRuntimeError::Io(
-                    std::io::Error::other("the admitted config write did not run to its end"),
-                ))
-            })?
-            .map_err(EnteredConfigWriteError::OutcomeUnknown)?;
+            .map(|(snapshot, _)| snapshot)
+            .map_err(EnteredConfigWriteError::OutcomeUnknown)
+    }
 
-        Ok(ConfigSnapshot {
-            config,
-            generation,
-            metadata: self.store.metadata(),
+    /// The admission fences a write of this runtime takes
+    /// ([`crate::realm_admission`]): the fence of each file it writes. That is
+    /// the fence of its store's document ([`ConfigStore::admission_fence`])
+    /// and, when its generation sidecar lies in another directory, that
+    /// directory's fence too. A store with no document (in memory) has only
+    /// its sidecar's. A sidecar directory whose name is a realm id is named
+    /// by kind, as the realm fence R of that realm with the directory's
+    /// parent as the state root, and paired with the document's fence in the
+    /// global order: a host's runtime of the `global` realm is such a pair,
+    /// the user document fence of its user-global document and R of the
+    /// `global` realm's own directory, where its sidecar lies. A sidecar in
+    /// any other directory has only the fence beside it, which cannot share
+    /// a set, so such a write refuses as outside the global order.
+    pub fn admission_fences(&self) -> Vec<AdmissionFence> {
+        let sidecar = AdmissionFence::beside(&self.state_path);
+        match self.store.admission_fence() {
+            None => vec![sidecar],
+            Some(document) if document.path() == sidecar.path() => vec![document],
+            Some(document) => {
+                let realm = realm_directory_fence(sidecar.directory())
+                    .filter(|realm| realm.path() == sidecar.path());
+                vec![document, realm.unwrap_or(sidecar)]
+            }
+        }
+    }
+
+    /// Take this runtime's admission fences, waiting up to the interactive
+    /// bound for an admission or another fenced write.
+    async fn acquire_fences(&self) -> Result<Arc<AdmissionGuard>, ConfigRuntimeError> {
+        Ok(AdmissionGuard::acquire(self.admission_fences(), INTERACTIVE_FENCE_WAIT).await?)
+    }
+
+    /// Refuse a guard that does not hold every fence of this runtime's
+    /// writes, before anything is locked or written.
+    fn require_covered(&self, guard: &AdmissionGuard) -> Result<(), ConfigRuntimeError> {
+        for fence in self.admission_fences() {
+            guard.covers(&fence)?;
+        }
+        Ok(())
+    }
+
+    /// The document's config custody after the process lock, and the
+    /// generation check under it.
+    async fn take_custody(
+        &self,
+        process: OwnedMutexGuard<()>,
+        expected_generation: Option<u64>,
+    ) -> Result<WriteCustody, ConfigRuntimeError> {
+        let file = self.acquire_file_lock().await?;
+        let current = read_generation_at(&self.state_path).await?;
+        if let Some(expected) = expected_generation
+            && expected != current
+        {
+            return Err(ConfigRuntimeError::GenerationConflict { expected, current });
+        }
+        Ok(WriteCustody {
+            _process: process,
+            _file: file,
+            current,
         })
     }
 
-    async fn read_generation(&self) -> Result<u64, ConfigRuntimeError> {
-        if !tokio::fs::try_exists(&self.state_path).await? {
-            return Ok(0);
-        }
-        let raw = tokio::fs::read_to_string(&self.state_path).await?;
-        let state: RuntimeState = serde_json::from_str(&raw)?;
-        Ok(state.generation)
+    /// Settle `write` on an owned task that owns `custody`, `guard` and the
+    /// entered admission: the document write, then the generation
+    /// publication, and only then their release. A caller that stops
+    /// waiting releases nothing before both returned. The task states the
+    /// write's outcome on the entered admission, committed or unknown,
+    /// before it releases it.
+    async fn settle(
+        &self,
+        custody: WriteCustody,
+        guard: Arc<AdmissionGuard>,
+        write: DocumentWrite,
+        entered: Option<crate::EnteredAdministration>,
+    ) -> Result<(ConfigSnapshot, Vec<ConfigWarning>), ConfigRuntimeError> {
+        let store = Arc::clone(&self.store);
+        let state_path = self.state_path.clone();
+        let next = custody.current.saturating_add(1);
+        let held = Arc::clone(&guard);
+        let settled = crate::realm_admission::settle_entered(guard, async move {
+            let mut custody = (custody, entered);
+            let written = async {
+                let written = match write {
+                    DocumentWrite::Set(config) => {
+                        store.set_held(&held, config.clone()).await?;
+                        (config, Vec::new())
+                    }
+                    DocumentWrite::Patch(delta) => {
+                        (store.patch_held(&held, delta).await?, Vec::new())
+                    }
+                    DocumentWrite::PatchWithWarnings(delta) => {
+                        store.patch_held_with_warnings(&held, delta).await?
+                    }
+                };
+                write_generation_at(&held, &state_path, next).await?;
+                Ok::<_, ConfigRuntimeError>(written)
+            }
+            .await;
+            if let Some(entered) = custody.1.as_mut() {
+                entered.settle(if written.is_ok() {
+                    crate::AdministrationOutcome::Committed
+                } else {
+                    crate::AdministrationOutcome::Unknown
+                });
+            }
+            written
+        })
+        .await
+        .map_err(|lost| ConfigRuntimeError::Io(std::io::Error::other(lost.to_string())))?;
+        let (config, warnings) = settled?;
+        Ok((
+            ConfigSnapshot {
+                config,
+                generation: next,
+                metadata: self.store.metadata(),
+            },
+            warnings,
+        ))
     }
 
-    async fn write_generation(&self, generation: u64) -> Result<(), ConfigRuntimeError> {
-        write_generation_at(&self.state_path, generation).await
+    async fn read_generation(&self) -> Result<u64, ConfigRuntimeError> {
+        read_generation_at(&self.state_path).await
     }
 
     async fn acquire_file_lock(&self) -> Result<ConfigWriterLock, ConfigRuntimeError> {
@@ -328,9 +559,53 @@ impl ConfigRuntime {
     }
 }
 
+/// What a write of the document does.
+enum DocumentWrite {
+    Set(Config),
+    Patch(ConfigDelta),
+    /// A patch whose typed load warnings go back to the caller rather than
+    /// to the store's own report.
+    PatchWithWarnings(ConfigDelta),
+}
+
+/// The custody a write holds from before its generation check until it has
+/// settled: the runtime's in-process lock, the document's config custody,
+/// and the generation read under them.
+struct WriteCustody {
+    _process: OwnedMutexGuard<()>,
+    _file: ConfigWriterLock,
+    current: u64,
+}
+
+/// The realm fence, by kind, of `directory` when it is a realm's own
+/// directory under its parent, the state root: its name is a realm id.
+fn realm_directory_fence(directory: &Path) -> Option<AdmissionFence> {
+    let state_root = directory.parent()?;
+    let realm = crate::connection::RealmId::parse(directory.file_name()?.to_str()?).ok()?;
+    AdmissionFence::realm(state_root, &realm).ok()
+}
+
+/// The generation the sidecar at `state_path` publishes; 0 when there is
+/// none.
+pub(crate) async fn read_generation_at(state_path: &Path) -> Result<u64, ConfigRuntimeError> {
+    if !tokio::fs::try_exists(state_path).await? {
+        return Ok(0);
+    }
+    let raw = tokio::fs::read_to_string(state_path).await?;
+    let state: RuntimeState = serde_json::from_str(&raw)?;
+    Ok(state.generation)
+}
+
 /// Publish `generation` to the sidecar at `state_path` (a temporary file
-/// renamed over it).
-async fn write_generation_at(state_path: &Path, generation: u64) -> Result<(), ConfigRuntimeError> {
+/// renamed over it), under `guard`, which must hold the admission fence of
+/// the sidecar's directory: a guard that does not is refused with nothing
+/// written.
+pub(crate) async fn write_generation_at(
+    guard: &AdmissionGuard,
+    state_path: &Path,
+    generation: u64,
+) -> Result<(), ConfigRuntimeError> {
+    guard.covers(&AdmissionFence::beside(state_path))?;
     if let Some(parent) = state_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -878,7 +1153,27 @@ tier = \"r2\"\n";
         }
 
         async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-            let patched = self.inner.patch(delta).await?;
+            self.inner.patch(delta).await
+        }
+
+        fn admission_fence(&self) -> Option<AdmissionFence> {
+            self.inner.admission_fence()
+        }
+
+        async fn set_held(
+            &self,
+            guard: &AdmissionGuard,
+            config: Config,
+        ) -> Result<(), ConfigError> {
+            self.inner.set_held(guard, config).await
+        }
+
+        async fn patch_held(
+            &self,
+            guard: &AdmissionGuard,
+            delta: ConfigDelta,
+        ) -> Result<Config, ConfigError> {
+            let patched = self.inner.patch_held(guard, delta).await?;
             let published = self.published.lock().unwrap().take();
             if let Some(published) = published {
                 let _ = published.send(());
@@ -1209,5 +1504,270 @@ tier = \"r2\"\n";
                 "the store names {named:?}"
             );
         }
+    }
+
+    /// `fences` held SHARED by a holder in this process: a separate open
+    /// description, as another process's hold would be.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hold(fences: Vec<AdmissionFence>) -> crate::realm_admission::AdmissionHold {
+        for fence in &fences {
+            fence.ensure_exists().unwrap();
+        }
+        crate::realm_admission::AdmissionHold::try_acquire(fences).unwrap()
+    }
+
+    /// While an admission holds the document's fence, every write entry
+    /// refuses typed after its bounded wait, with nothing written: the
+    /// runtime's full replace, patch and admitted patch (whose entry is never
+    /// consulted), and the store's own public writes. Once the hold ends,
+    /// the same write lands and moves the generation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn document_writes_refuse_admission_in_progress_with_nothing_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let document = temp.path().join("config.toml");
+        tokio::fs::write(&document, "max_tokens = 100\n")
+            .await
+            .unwrap();
+        let store = Arc::new(crate::config_store::FileConfigStore::new(
+            document.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        ));
+        let runtime = ConfigRuntime::new(
+            Arc::clone(&store) as Arc<dyn ConfigStore>,
+            temp.path().join("config_state.json"),
+        );
+        let before = runtime.get().await.unwrap();
+        let mut held = hold(runtime.admission_fences());
+
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entry = HeldAdmission(Arc::clone(&entered));
+        let mut replaced = before.config.clone();
+        replaced.max_tokens = Some(200);
+        let (set, patch, admitted, store_set, store_patch) = tokio::join!(
+            runtime.set(replaced.clone(), None),
+            runtime.patch(ConfigDelta(json!({ "max_tokens": 300 })), None),
+            runtime.patch_entered(ConfigDelta(json!({ "max_tokens": 400 })), None, &entry),
+            store.set(replaced.clone()),
+            store.patch(ConfigDelta(json!({ "max_tokens": 500 }))),
+        );
+        assert!(
+            matches!(set, Err(ConfigRuntimeError::AdmissionInProgress)),
+            "{set:?}"
+        );
+        assert!(
+            matches!(patch, Err(ConfigRuntimeError::AdmissionInProgress)),
+            "{patch:?}"
+        );
+        assert!(
+            matches!(
+                admitted,
+                Err(EnteredConfigWriteError::NotWritten(
+                    ConfigRuntimeError::AdmissionInProgress
+                ))
+            ),
+            "{admitted:?}"
+        );
+        assert!(
+            !entered.load(std::sync::atomic::Ordering::SeqCst),
+            "the entry is never consulted"
+        );
+        assert!(
+            matches!(store_set, Err(ConfigError::AdmissionInProgress)),
+            "{store_set:?}"
+        );
+        assert!(
+            matches!(store_patch, Err(ConfigError::AdmissionInProgress)),
+            "{store_patch:?}"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&document).await.unwrap(),
+            "max_tokens = 100\n"
+        );
+        assert_eq!(runtime.get().await.unwrap().generation, before.generation);
+
+        held.release();
+        let written = runtime
+            .patch(
+                ConfigDelta(json!({ "max_tokens": 300 })),
+                Some(before.generation),
+            )
+            .await
+            .unwrap();
+        assert_eq!(written.generation, before.generation + 1);
+        assert_eq!(written.config.max_tokens, Some(300));
+    }
+
+    /// A held fence stops writers only: the runtime's read and the store's
+    /// read answer at once, with the current document.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_readers_are_not_blocked_by_a_held_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let document = temp.path().join("config.toml");
+        tokio::fs::write(&document, "max_tokens = 100\n")
+            .await
+            .unwrap();
+        let store = Arc::new(crate::config_store::FileConfigStore::new(
+            document,
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        ));
+        let runtime = ConfigRuntime::new(
+            Arc::clone(&store) as Arc<dyn ConfigStore>,
+            temp.path().join("config_state.json"),
+        );
+        let mut held = hold(runtime.admission_fences());
+        let (from_runtime, from_store) = tokio::time::timeout(Duration::from_secs(1), async {
+            (runtime.get().await, store.get().await)
+        })
+        .await
+        .expect("a read never waits for a held fence");
+        assert_eq!(from_runtime.unwrap().config.max_tokens, Some(100));
+        assert_eq!(from_store.unwrap().max_tokens, Some(100));
+        held.release();
+    }
+
+    /// The chain's other documents: none.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct NoOtherDocuments;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl crate::config_store::RealmConfigSource for NoOtherDocuments {
+        async fn config_for_realm(
+            &self,
+            _realm: &crate::connection::RealmId,
+        ) -> Result<Option<Config>, ConfigError> {
+            Ok(None)
+        }
+    }
+
+    /// A host's runtime of the `global` realm writes the user-global
+    /// document and its own generation sidecar in the realm's directory, so
+    /// a write holds both fences, named by kind and taken in the global
+    /// order: the user document fence, then the realm's. The sidecar beside
+    /// the user document is not this runtime's.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_global_realm_runtime_write_holds_the_user_document_and_global_realm_fences() {
+        use crate::connection::RealmId;
+        use crate::realm_admission::AdmissionHold;
+        let temp = tempfile::tempdir().unwrap();
+        let user_root = temp.path().join("home").join(".rkat");
+        let state_root = temp.path().join("realms");
+        std::fs::create_dir_all(&user_root).unwrap();
+        let (published, on_published) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let store = Arc::new(HeldAfterPublish {
+            inner: crate::config_store::FileConfigStore::new(
+                user_root.join("config.toml"),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )
+            .with_realm_chain(RealmId::global(), Arc::new(NoOtherDocuments)),
+            published: std::sync::Mutex::new(Some(published)),
+            release: std::sync::Mutex::new(Some(released)),
+        });
+        let sidecar = state_root.join("global").join("config_state.json");
+        let runtime = Arc::new(ConfigRuntime::new(store, sidecar.clone()));
+        let user = AdmissionFence::user_document(&user_root);
+        let realm = AdmissionFence::realm(&state_root, &RealmId::global()).unwrap();
+        assert_eq!(
+            runtime.admission_fences(),
+            vec![user.clone(), realm.clone()]
+        );
+
+        let writer = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .patch(ConfigDelta(json!({ "max_tokens": 512 })), None)
+                    .await
+            }
+        });
+        on_published.await.unwrap();
+        for fence in [&user, &realm] {
+            assert!(
+                matches!(
+                    AdmissionHold::try_acquire(vec![fence.clone()]),
+                    Err(AdmissionRefusal::InProgress)
+                ),
+                "the write holds {}",
+                fence.path().display()
+            );
+        }
+        let _ = release.send(());
+        let written = writer.await.unwrap().unwrap();
+        assert_eq!(written.generation, 1);
+        assert_eq!(read_generation_at(&sidecar).await.unwrap(), 1);
+        assert!(
+            !user_root.join("config_state.json").exists(),
+            "the host's runtime moves its own sidecar only"
+        );
+        let mut free = AdmissionHold::try_acquire(vec![user, realm]).unwrap();
+        free.release();
+    }
+
+    /// A guard that holds only part of a runtime's fence set is refused
+    /// before anything is locked or written: a host's runtime of the
+    /// `global` realm given a guard over the user document fence alone
+    /// refuses `patch_under` and `set_under`, and the user document, the
+    /// realm's sidecar and any sidecar beside the document are unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_guard_over_part_of_the_set_is_refused_before_anything_is_written() {
+        use crate::connection::RealmId;
+        let temp = tempfile::tempdir().unwrap();
+        let user_root = temp.path().join("home").join(".rkat");
+        let state_root = temp.path().join("realms");
+        std::fs::create_dir_all(&user_root).unwrap();
+        let document = user_root.join("config.toml");
+        std::fs::write(&document, "max_tokens = 100\n").unwrap();
+        let store = Arc::new(
+            crate::config_store::FileConfigStore::new(
+                document.clone(),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )
+            .with_realm_chain(RealmId::global(), Arc::new(NoOtherDocuments)),
+        );
+        let sidecar = state_root.join("global").join("config_state.json");
+        let runtime = ConfigRuntime::new(store, sidecar.clone());
+        let partial = crate::realm_admission::AdmissionGuard::try_acquire(vec![
+            AdmissionFence::user_document(&user_root),
+        ])
+        .unwrap();
+        let before = std::fs::read(&document).unwrap();
+
+        let patched = runtime
+            .patch_under(&partial, ConfigDelta(json!({ "max_tokens": 200 })), None)
+            .await;
+        assert!(
+            matches!(
+                patched,
+                Err(ConfigRuntimeError::AdmissionFenceUnavailable(_))
+            ),
+            "{patched:?}"
+        );
+        let set = runtime
+            .set_under(
+                &partial,
+                Config {
+                    max_tokens: Some(300),
+                    ..Config::default()
+                },
+                None,
+            )
+            .await;
+        assert!(
+            matches!(set, Err(ConfigRuntimeError::AdmissionFenceUnavailable(_))),
+            "{set:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(&document).unwrap(),
+            before,
+            "the document is unchanged"
+        );
+        assert!(!sidecar.exists(), "no generation was published");
+        assert!(!user_root.join("config_state.json").exists());
     }
 }

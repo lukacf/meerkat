@@ -59,7 +59,8 @@ use meerkat_core::authorization::ControllerReadinessFailure;
 use meerkat_core::{OperationRefusalKind, OperationRefused, PrincipalRef};
 
 use super::local_authorization::{
-    NativeGrantWorkConfiguration, NativeIngressCheck, NativeRetainedResumeCheck,
+    NativeGrantWorkConfiguration, NativeIngressCheck, NativeKeptOriginalCheck,
+    NativeRetainedResumeCheck,
 };
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input::Input;
@@ -358,7 +359,10 @@ pub fn original_operation_grant(
         .map(Some)
         .map_err(|refusal| match refusal {
             GrantRefusal::Denied => denied(),
-            GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
+            GrantRefusal::ControllerInUse
+            | GrantRefusal::Duplicate
+            | GrantRefusal::Unavailable
+            | GrantRefusal::AdmissionFence => {
                 meerkat_core::OperationAuthorizationError::Unavailable
             }
         })
@@ -421,7 +425,10 @@ fn contributor_operation_ceiling(
             }
             LineageResolutionRefusal::Refused(GrantRefusal::Denied) => denied(),
             LineageResolutionRefusal::Refused(
-                GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable,
+                GrantRefusal::ControllerInUse
+                | GrantRefusal::Duplicate
+                | GrantRefusal::Unavailable
+                | GrantRefusal::AdmissionFence,
             ) => meerkat_core::OperationAuthorizationError::Unavailable,
         })
 }
@@ -559,6 +566,9 @@ pub struct ScopedGrantComposition {
     pub invocation: ScopedInvocation,
     pub operation_owner: Arc<dyn OperationPolicyOwner>,
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    /// Owner of a kept governed input's controller
+    /// ([`NativeGrantWorkConfiguration::kept_original`]).
+    pub kept_original: Option<Arc<NativeKeptOriginalCheck>>,
 }
 
 impl ScopedGrantComposition {
@@ -581,6 +591,7 @@ impl ScopedGrantComposition {
             invocation_owner,
             operation_owner: self.operation_owner,
             retained_resume: self.retained_resume,
+            kept_original: self.kept_original,
             require_scoped_destination: true,
             configured_mcp_attachment: None,
         }
@@ -1478,7 +1489,10 @@ fn lineage_refusal(refusal: LineageResolutionRefusal) -> NativeAdmissionError {
 fn grant_refusal(refusal: GrantRefusal) -> NativeAdmissionError {
     match refusal {
         GrantRefusal::Denied => refused(OperationRefusalKind::Denied),
-        GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
+        GrantRefusal::ControllerInUse
+        | GrantRefusal::Duplicate
+        | GrantRefusal::Unavailable
+        | GrantRefusal::AdmissionFence => {
             NativeAdmissionError::Readiness(ControllerReadinessFailure::PolicyUnavailable)
         }
     }

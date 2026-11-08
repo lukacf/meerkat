@@ -1796,6 +1796,10 @@ pub(crate) mod tests {
                     .push((self.refreshed, event));
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
         struct ContextProbe(Mutex<Vec<ToolDispatchContext>>);
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -3290,6 +3294,10 @@ pub(crate) mod tests {
                 }
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         /// A leaf that makes its single consuming effect entry with the
@@ -3834,6 +3842,10 @@ pub(crate) mod tests {
                 if let OperationObservation::Entry(boundary) = event {
                     self.0.entries.lock().unwrap().push(boundary);
                 }
+                Ok(())
+            }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
                 Ok(())
             }
         }

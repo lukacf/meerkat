@@ -267,6 +267,12 @@ const externalAuthFailure: ExternalAuthFailure = {
   kind: 'refresh_failed',
   detail: 'browser refresh token revoked',
 };
+const sourceUnavailableExternalAuthFailure: ExternalAuthFailure = {
+  kind: 'source_unavailable',
+  detail: 'identity provider unreachable',
+};
+// @ts-expect-error a source_unavailable rejection carries its detail.
+const detaillessSourceUnavailable: ExternalAuthFailure = { kind: 'source_unavailable' };
 const typedExternalAuthResolver: ExternalAuthResolver = async () => externalAuthLease;
 const externalAuthResult: ExternalAuthResolverResult = externalAuthLease;
 // @ts-expect-error bare bearer strings are not structured auth envelopes.

@@ -90,6 +90,7 @@ impl MobActor {
                     DeclaredChangeKind::StoreOwnedUpdate {
                         spec,
                         expected_spec_digest,
+                        ..
                     },
                 ..
             }) => {
@@ -251,6 +252,52 @@ impl MobActor {
                 }),
             });
         }
+        // A store-owned update's edges, decided on this authority after its
+        // identity's verdict: the peers it removes end (its own edges only),
+        // the peers it adds are declared, and its row holds the result. The
+        // ended edges are unwired, and the declared ones wired, once the
+        // step committed.
+        let mut ended_edges = Vec::new();
+        let mut edge_owner = None;
+        let update_row = match (update_row, change.as_deref()) {
+            (
+                Some((identity, from, row)),
+                Some(DeclaredChangeWrite {
+                    kind:
+                        DeclaredChangeKind::StoreOwnedUpdate {
+                            peers_add,
+                            peers_remove,
+                            ..
+                        },
+                    ..
+                }),
+            ) if !peers_add.is_empty() || !peers_remove.is_empty() => {
+                Self::end_owned_edges_by_owner(&mut authority, &identity, peers_remove)?;
+                let declared = Self::declare_owned_edges(&mut authority, &identity, peers_add)?;
+                let crate::store::CreatedIdentityRowWrite { record, expected } = row;
+                let edges = record
+                    .owned_edges
+                    .iter()
+                    .filter(|edge| !peers_remove.contains(&edge.peer))
+                    .cloned()
+                    .chain(declared)
+                    .collect();
+                let record = record.with_owned_edges(edges).map_err(|error| {
+                    MobError::Internal(format!("a store-owned update's owned edges: {error}"))
+                })?;
+                ended_edges = peers_remove
+                    .iter()
+                    .map(|peer| (identity.clone(), peer.clone()))
+                    .collect::<Vec<_>>();
+                edge_owner = Some(identity.clone());
+                Some((
+                    identity,
+                    from,
+                    crate::store::CreatedIdentityRowWrite { record, expected },
+                ))
+            }
+            (update_row, _) => update_row,
+        };
         let prepared = PreparedDslInput {
             authority,
             effects,
@@ -388,6 +435,10 @@ impl MobActor {
             }
         })
         .await?;
+        if let Some(owner) = edge_owner {
+            Box::pin(self.unwire_ended_owned_edges(&ended_edges)).await;
+            Box::pin(self.realize_owned_edges_of(std::slice::from_ref(&owner))).await;
+        }
         if let Some((identity, context, instructions)) = seat_inputs
             && super::super::boot_plan::domain_member_seat_session_unborn(
                 self.dsl_authority.state(),

@@ -560,3 +560,55 @@ describe("Mob console wrappers (phase 7)", () => {
     });
   });
 });
+
+describe("member fork at a message boundary", () => {
+  it("issues mob/fork_member with the boundary and validates the fork", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    const fork = {
+      agent_identity: "main-branch",
+      member_ref: "ref-1",
+      session_id: "child-session",
+      source_session_id: "source-session",
+      message_count: 3,
+    };
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return structuredClone(fork);
+    };
+    assert.deepEqual(
+      await client.forkMobMember("mob-1", "main", "main-branch", { messageIndex: 3 }),
+      fork,
+    );
+    await new Mob(client, "mob-1").forkMember("main", "main-branch", {
+      profile: "worker",
+      runtimeMode: "turn_driven",
+    });
+    assert.deepEqual(calls, [
+      {
+        method: "mob/fork_member",
+        params: {
+          mob_id: "mob-1",
+          source_member_id: "main",
+          agent_identity: "main-branch",
+          message_index: 3,
+        },
+      },
+      {
+        method: "mob/fork_member",
+        params: {
+          mob_id: "mob-1",
+          source_member_id: "main",
+          agent_identity: "main-branch",
+          profile: "worker",
+          runtime_mode: "turn_driven",
+        },
+      },
+    ]);
+    client.request = async () => ({ agent_identity: "main-branch" });
+    await assert.rejects(
+      client.forkMobMember("mob-1", "main", "main-branch"),
+      /Invalid mob\/fork_member response/,
+    );
+  });
+});

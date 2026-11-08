@@ -1692,6 +1692,7 @@ mod host_original {
         fixture
             .grants
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 &fixture.invocation,
                 &mut AnyCustody,
@@ -1719,6 +1720,7 @@ mod host_original {
         fixture
             .grants
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 &fixture.controller,
                 &mut AnyCustody,

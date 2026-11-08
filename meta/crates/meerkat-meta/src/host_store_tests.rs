@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use meerkat_core::host_store::{
-    CommitBatch, FenceGrant, HeadPage, HostStoreError, Row, RowIndex, ScopeKind, ScopeName,
-    ScopeRef, ScopeVersion, VersionedHead,
+    CommitBatch, FenceGrant, HeadPage, HostStoreError, Row, RowIndex, ScopeConflict, ScopeKind,
+    ScopeName, ScopeRef, ScopeVersion, VersionedHead,
 };
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::LogicalRuntimeId;
@@ -130,6 +130,11 @@ struct TestHost {
     /// The store's one slow writer: a slowed commit lands only after the
     /// slowed commits before it.
     slow_writer: tokio::sync::Mutex<()>,
+    /// The name prefixes of the scopes this process's store reports
+    /// conflicted (two batches at their visible version, obligation 4 met
+    /// at load): their loads answer `Conflict` at that version, and a
+    /// listing reports them per scope.
+    conflicted: StdMutex<Vec<String>>,
 }
 
 /// Whether `rows` carry `text`.
@@ -171,6 +176,34 @@ impl TestHost {
             slow_session_creations: AtomicUsize::new(0),
             slow_session_creation: StdMutex::new(Duration::ZERO),
             slow_writer: tokio::sync::Mutex::new(()),
+            conflicted: StdMutex::new(Vec::new()),
+        }
+    }
+
+    /// The scopes whose names start with `prefix` are reported conflicted
+    /// from now on.
+    fn conflict(&self, prefix: &str) {
+        lock(&self.conflicted).push(prefix.to_string());
+    }
+
+    fn is_conflicted(&self, name: &ScopeName) -> bool {
+        lock(&self.conflicted)
+            .iter()
+            .any(|prefix| name.as_str().starts_with(prefix.as_str()))
+    }
+
+    /// The typed conflict a load of `scope` answers when it is reported
+    /// conflicted and visible: at its visible version.
+    async fn conflict_of(&self, scope: &ScopeRef) -> Result<(), HostStoreError> {
+        if !self.is_conflicted(&scope.name) {
+            return Ok(());
+        }
+        match self.store.load_head(scope).await? {
+            Some(head) => Err(HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(head.version),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -251,6 +284,7 @@ impl HostStore for TestHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        self.conflict_of(scope).await?;
         self.store.load_head(scope).await
     }
 
@@ -260,7 +294,16 @@ impl HostStore for TestHost {
         after: Option<&ScopeName>,
         limit: usize,
     ) -> Result<HeadPage, HostStoreError> {
-        self.store.list_heads(kind, after, limit).await
+        let page = self.store.list_heads(kind, after, limit).await?;
+        let (conflicted, heads): (Vec<_>, Vec<_>) = page
+            .heads
+            .into_iter()
+            .partition(|scope| self.is_conflicted(&scope.name));
+        let conflicts = conflicted
+            .into_iter()
+            .map(|scope| ScopeConflict::new(scope.name, scope.head.version, Vec::new()))
+            .collect();
+        Ok(HeadPage::new(heads, page.next).with_conflicts(conflicts))
     }
 
     async fn read_rows(
@@ -269,6 +312,7 @@ impl HostStore for TestHost {
         from: RowIndex,
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
+        self.conflict_of(scope).await?;
         self.store.read_rows(scope, from, limit).await
     }
 
@@ -1649,10 +1693,15 @@ async fn a_failed_document_batch_refuses_that_document_until_the_realm_reopens()
             .write("cursor/mob-a", Some(b"second".to_vec()))
             .await
             .expect_err("the store fails the batch");
+        // Its outcome stays unknown past the retry budget: the typed stop,
+        // whose last answer is the store's.
         assert!(
             matches!(
                 failed.spi(),
-                Some(SpiError::Host(HostStoreError::Unavailable(_)))
+                Some(SpiError::UnsettledPastRetryBudget {
+                    last: HostStoreError::Unavailable(_),
+                    ..
+                })
             ),
             "{failed}"
         );
@@ -1699,6 +1748,63 @@ async fn a_failed_document_batch_refuses_that_document_until_the_realm_reopens()
         .await
         .expect("the document is written again");
     assert!(provider.readiness().is_ready());
+}
+
+/// A Meta document the store reports conflicted (two batches at one of its
+/// versions) is quarantined at the open: the realm opens, the document
+/// refuses typed, every other document serves, and the readiness probe
+/// names it and stays ready. A reopen alone quarantines it again.
+#[tokio::test]
+async fn a_conflicted_document_is_quarantined_and_named_by_readiness() {
+    let fixture = Fixture::new();
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let documents = provider.realm.documents();
+        for key in ["cursor/mob-a", "cursor/mob-b"] {
+            documents
+                .write(key, Some(b"first".to_vec()))
+                .await
+                .expect("the first write");
+        }
+    }
+
+    for _ in 0..2 {
+        fixture.lapse();
+        let host = fixture.process();
+        host.conflict("mx:rcursor/mob-a~");
+        let provider = fixture
+            .open(&host)
+            .await
+            .expect("the realm opens beside the conflicted document");
+        let documents = provider.realm.documents();
+        let refused = documents
+            .read("cursor/mob-a")
+            .await
+            .expect_err("the quarantined document refuses");
+        assert!(
+            matches!(refused.spi(), Some(SpiError::ScopeQuarantined { .. })),
+            "{refused}"
+        );
+        let other = documents
+            .read("cursor/mob-b")
+            .await
+            .expect("another document reads");
+        assert_eq!(other.as_deref().map(Vec::as_slice), Some(&b"first"[..]));
+        let readiness = provider.readiness();
+        assert!(
+            readiness.is_ready() && !readiness.scope_poisoned,
+            "a quarantined document leaves the realm ready: {readiness:?}"
+        );
+        assert_eq!(
+            readiness
+                .quarantined_scopes
+                .iter()
+                .map(|scope| scope.scope.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mx:cursor/mob-a"],
+            "the probe names the quarantined document: {readiness:?}"
+        );
+    }
 }
 
 /// A realm a newer Meta wrote refuses to open, typed.

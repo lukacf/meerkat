@@ -109,6 +109,38 @@ pub(crate) fn name_tag(name: &ScopeName) -> Option<&str> {
     name.as_str().split_once(':').map(|(tag, _)| tag)
 }
 
+/// The key the realm classifies the scope of family `tag` for `key` under
+/// (quarantined or poisoned): every incarnation's name without its
+/// incarnation, `<tag>:<key part>`.
+pub(crate) fn scope_key(tag: &str, key: &str) -> String {
+    format!("{tag}:{}", key_part(key))
+}
+
+/// The key the realm classifies a listed name under: a journaled scope's
+/// name without its incarnation (the text before its last `~`, since an
+/// incarnation never holds one), a chunk's name (a chunk has no logical key
+/// of its own) or any other name in full.
+pub(crate) fn name_key(name: &ScopeName) -> String {
+    let text = name.as_str();
+    match name_tag(name) {
+        Some(tag) if tag != CHUNK_TAG => text
+            .rsplit_once('~')
+            .map_or(text, |(key, _)| key)
+            .to_string(),
+        _ => text.to_string(),
+    }
+}
+
+/// The logical key of family `tag` that a classification key holds when its
+/// key part keeps the key verbatim; `None` for a hashed key part, whose key
+/// only the scope's head names.
+pub(crate) fn plain_key<'a>(scope_key: &'a str, tag: &str) -> Option<&'a str> {
+    scope_key
+        .strip_prefix(tag)?
+        .strip_prefix(':')?
+        .strip_prefix('r')
+}
+
 /// A reference to a chunk scope holding one value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChunkRef {
@@ -543,6 +575,25 @@ mod tests {
         // A plain key that looks like a hash never meets a hashed key.
         let lookalike = format!("h{}", hex(&sha256(long.as_bytes())));
         assert_ne!(key_part(&lookalike), key_part(&long));
+    }
+
+    #[test]
+    fn every_incarnation_of_a_scope_is_classified_under_one_key() {
+        let long = "k".repeat(1000);
+        for key in ["abc", "a~b", long.as_str()] {
+            let first = scope_name("rt", key, "w.1").expect("first");
+            let second = scope_name("rt", key, "w.2").expect("second");
+            assert_eq!(name_key(&first), scope_key("rt", key));
+            assert_eq!(name_key(&second), scope_key("rt", key));
+        }
+        assert_eq!(plain_key(&scope_key("rt", "a~b"), "rt"), Some("a~b"));
+        assert_eq!(plain_key(&scope_key("rt", &long), "rt"), None);
+        assert_eq!(plain_key(&scope_key("rt", "abc"), "ck"), None);
+        // A chunk is classified by its full name: its key part holds its
+        // owner's name.
+        let owner = scope_name("rt", "abc", "w.1").expect("owner");
+        let chunk = scope_name(CHUNK_TAG, owner.as_str(), "w.2").expect("chunk");
+        assert_eq!(name_key(&chunk), chunk.as_str());
     }
 
     // Unrun until the candidate's validation.

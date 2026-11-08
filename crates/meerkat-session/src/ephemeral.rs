@@ -12247,6 +12247,19 @@ async fn session_task<A: SessionAgent>(
                         Ok(()) => (result, false),
                         Err(error) => (Err(error), true),
                     };
+                // The settlement publishes a fallback it committed on the
+                // agent's channel after the drain above: forward it with this
+                // turn, so it does not wait in the channel for the next one.
+                while let Ok(event) = agent_event_rx.try_recv() {
+                    let envelope = stamp_event_envelope(&next_seq, &source, event);
+                    control.publish_session_event(envelope.clone()).await;
+                    if event_stream_open
+                        && let Some(ref tx) = event_tx
+                        && tx.send(envelope).await.is_err()
+                    {
+                        event_stream_open = false;
+                    }
+                }
                 // A suspended run keeps its uncommitted compaction stages, as a
                 // crash keeps them: the next start reconciles them with the
                 // run's provisional tail.
@@ -12422,6 +12435,15 @@ async fn session_task<A: SessionAgent>(
                 let result = agent
                     .reconcile_runtime_compaction_projections(&intents)
                     .await;
+                // The runtime reconciles between turns, when no turn reads
+                // the agent's event channel: forward what the agent queued
+                // (a finalized compaction's `CompactionCompleted`) to the
+                // session's event stream before the runtime hears back, so
+                // it neither waits for the next turn nor ends with the actor.
+                while let Ok(event) = agent_event_rx.try_recv() {
+                    let envelope = stamp_event_envelope(&next_seq, &source, event);
+                    control.publish_session_event(envelope).await;
+                }
                 let _ = reply_tx.send(result);
             }
             SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
@@ -17551,6 +17573,9 @@ mod tool_application_custody_tests;
 
 #[cfg(test)]
 mod staged_prompt_lowering_tests;
+
+#[cfg(test)]
+mod settled_fallback_event_tests;
 
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 mod operator_instruction_tests;

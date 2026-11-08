@@ -1035,6 +1035,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobHelperResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/fork_member",
+                "Fork a member's session at a message boundary into a new member",
+                "MobForkMemberParams",
+                "MobForkMemberResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/force_cancel",
                 "Force-cancel a mob member",
                 "MobMemberParams",
@@ -2069,6 +2075,11 @@ mod tests {
                 "mob/fork_helper",
                 Some("MobForkHelperParams"),
                 Some("MobHelperResult"),
+            ),
+            (
+                "mob/fork_member",
+                Some("MobForkMemberParams"),
+                Some("MobForkMemberResult"),
             ),
             (
                 "mob/force_cancel",

@@ -917,6 +917,32 @@ impl SurfaceOwner {
     }
 }
 
+/// The digest of `call`'s exact request on the MCP operation `target`
+/// resolves it to ([`meerkat_core::mcp_request_digest`] over the target's
+/// server, its raw operation and the call's arguments), or `None` for a
+/// target of no MCP server, and for arguments that are not JSON or have no
+/// canonical form.
+pub(crate) fn call_request_digest(
+    target: &meerkat_core::ToolOperationTarget,
+    call: ToolCallView<'_>,
+) -> Option<meerkat_core::approval::decision::Sha256Digest> {
+    let (meerkat_core::ToolOperationTarget::McpServerOperation {
+        server,
+        raw_operation,
+        ..
+    }
+    | meerkat_core::ToolOperationTarget::CheckedMcpServerOperation {
+        server,
+        raw_operation,
+        ..
+    }) = target
+    else {
+        return None;
+    };
+    let arguments: Value = serde_json::from_str(call.args.get()).ok()?;
+    meerkat_core::mcp_request_digest(server, raw_operation, &arguments)
+}
+
 /// Release exactly `held`'s lineages on `handle`. The surface clears
 /// whichever staged, pending or active slot still carries exactly that
 /// lineage and refuses the rest. Releasing an active slot can also cancel a
@@ -1775,6 +1801,7 @@ impl McpRouter {
                         account: binding.account.clone(),
                     }
                 }),
+                service_secret_launch: connection.service_secret_launch().cloned(),
             };
         }
         let Some(snapshot) = self.surface_owner.surface_snapshot(server) else {
@@ -4735,10 +4762,15 @@ impl McpRouter {
             &self.progress,
         );
         let result = async {
+            // One reading for the whole read: every target it states names the
+            // same publication.
+            let credential_publication = connection.credential_publication();
             let target = || crate::McpResourceTarget {
                 config: connection.config(),
                 connection_id: connection.connection_id(),
                 uri,
+                service_secret_launch: connection.service_secret_launch(),
+                credential_publication: credential_publication.clone(),
             };
             let prepared = if let Some(work) = context.work_authorization() {
                 let target = self
@@ -4958,6 +4990,8 @@ impl McpRouter {
                                 connection_id: conn.connection_id(),
                                 raw_operation: &route.raw_operation,
                                 origin: &origin,
+                                service_secret_launch: conn.service_secret_launch(),
+                                credential_publication: conn.credential_publication(),
                             },
                             call,
                             context,

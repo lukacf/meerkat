@@ -687,7 +687,10 @@ fn identity_store_rows_are_counted_per_mob_database() {
         "{message}"
     );
     assert!(
-        message.contains("a downgrade of this mob to such a release is not supported"),
+        message.contains(
+            "a downgrade of this mob to such a release is supported only through the downgrade \
+             cycle (export, purge, and import after the roll-forward), and not while any remain"
+        ),
         "{message}"
     );
     assert_eq!(

@@ -14,8 +14,10 @@
 # otherwise. With the counters left out the reachable space is finite,
 # so each run explores all of it, with no step bound. It checks two runs over
 # their whole space with TLC coverage:
-# - the lifecycle run (AuditSpec) with its four action properties and the two
-#   invariants that check the reasons of its not-covered list;
+# - the lifecycle run (AuditSpec) with its four action properties, the two
+#   invariants that check the reasons of its not-covered list and the
+#   invariant that the replay of a respawn's abandonment of a generation the
+#   identity has moved past is answered once (AuditStaleAbandonmentAnsweredOnce);
 # - the scope run (AuditScopeSpec) with its two RetireAtScope invariants, its
 #   RetireAbsent invariant and the two destroy action properties.
 # Each run must finish without an error, reach at least its floor of distinct
@@ -25,7 +27,7 @@
 # space once per reachability witness, with that witness's negation as an
 # extra invariant (a state goal) or action property (a step goal), and
 # requires TLC to report exactly that violation, so the properties are not
-# vacuous. With --mutants it then seeds twelve defects into a copy of the
+# vacuous. With --mutants it then seeds fourteen defects into a copy of the
 # generated model and requires TLC to refuse each: a progress arm without its
 # observation_monotonic guard (AuditObservationMonotonic); the same guard
 # rendered as a plain `<=` between option records, which TLC cannot evaluate
@@ -47,7 +49,12 @@
 # (AuditRuntimeDestroyedRemovesOnlyItsRuntime); a completed mob without its
 # RetireAbsent arm, which leaves the retire of an absent identity to the
 # shell, and that arm without its identity_absent guard, which answers it
-# for a mapped identity (AuditRetireAbsentAnsweredInEveryPhase).
+# for a mapped identity (AuditRetireAbsentAnsweredInEveryPhase); and the
+# stale abandonment arm dropped, which leaves the replay of a respawn's
+# abandonment after a later incarnation ended unanswered (every resume of
+# such a mob failed), and that arm without its later_generation_recorded
+# guard, which answers a marker of a generation the identity never reached
+# (AuditStaleAbandonmentAnsweredOnce).
 # An anchor this script
 # expects but cannot find fails the run. Each TLC run is held to the
 # canonical lane's per-run cap (tlc_run_cap.sh) and fails closed as TLC
@@ -106,6 +113,7 @@ covered_actions=(
   RecoverRosterMemberRetirementStartedPreservingBinding
   RecoverRosterMemberRetirementStartedPeerOnly
   RecoverRosterMemberAddressabilityRunning
+  ObserveRespawnTopologyAbandonedStaleEndedSuccessor
   ObserveRuntimeRetired
   ObserveRuntimeRetiredStopped
   ObserveRuntimeDestroyed
@@ -262,7 +270,8 @@ write_cfg() {
   AuditDestroyedOnlyThroughAnAdmittedDestroy${properties}
 INVARIANTS
   AuditPlacementAbsent
-  AuditRetiringRuntimeMapped${invariants}" "${cfg}"
+  AuditRetiringRuntimeMapped
+  AuditStaleAbandonmentAnsweredOnce${invariants}" "${cfg}"
       ;;
     scope)
       replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditScopeSpec" "${cfg}"
@@ -380,6 +389,7 @@ check_space scope "${min_scope_distinct_states}" "${scope_states}" "${scope_cove
 for witness in "lifecycle:Invariant:Bound" "lifecycle:Action property:ObservationAdvances" \
   "lifecycle:Invariant:Retiring" "lifecycle:Invariant:Archived" \
   "lifecycle:Action property:Successor" "lifecycle:Action property:StaleIncarnation" \
+  "lifecycle:Action property:StaleAbandonment" \
   "scope:Invariant:RetiringScopeCurrent" \
   "scope:Invariant:CurrentRuntimeGone"; do
   run="${witness%%:*}"
@@ -639,6 +649,41 @@ lines = block.group(0).split("\n")
 guard = [i for i, line in enumerate(lines)
          if line == "    /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = FALSE)"]
 assert len(guard) == 1, "expected one identity_absent guard in RetireAbsentCompleted"
+del lines[guard[0]]
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  # The stale abandonment arm dropped, which leaves a respawn's abandonment
+  # of a generation the identity has moved past unanswered (every resume of
+  # such a mob failed), and that arm without its later_generation_recorded
+  # guard, which then answers a marker of a generation the identity never
+  # reached.
+  mutate lifecycle stale_abandonment_unanswered "Error: Invariant AuditStaleAbandonmentAnsweredOnce is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^ObserveRespawnTopologyAbandonedStaleEndedSuccessor\(.*?\n\n", text, re.S | re.M)
+assert block, "ObserveRespawnTopologyAbandonedStaleEndedSuccessor not found"
+lines = block.group(0).split("\n")
+phase = [i for i, line in enumerate(lines) if line == '    /\\ phase = "Running"']
+assert len(phase) == 1, "expected one Running phase guard in ObserveRespawnTopologyAbandonedStaleEndedSuccessor"
+lines[phase[0]] = "    /\\ FALSE"
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate lifecycle stale_abandonment_unordered "Error: Invariant AuditStaleAbandonmentAnsweredOnce is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^ObserveRespawnTopologyAbandonedStaleEndedSuccessor\(.*?\n\n", text, re.S | re.M)
+assert block, "ObserveRespawnTopologyAbandonedStaleEndedSuccessor not found"
+lines = block.group(0).split("\n")
+guard = [i for i, line in enumerate(lines)
+         if line.startswith("    /\\ ")
+         and "(identity_runtime_generations)[agent_identity] > generation" in line]
+assert len(guard) == 1, "expected one later_generation_recorded guard in ObserveRespawnTopologyAbandonedStaleEndedSuccessor"
 del lines[guard[0]]
 text = text[: block.start()] + "\n".join(lines) + text[block.end():]
 open(path, "w").write(text)

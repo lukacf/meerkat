@@ -33,7 +33,54 @@
 //! inputs are the source's: none of the standard mob member labels, which name
 //! a member (see [`crate::build::STANDARD_MOB_MEMBER_LABEL_KEYS`]), passes from
 //! the source to the child. A host's spawn customizer does not run on these
-//! seatings, so it cannot replace or wrap the inherited inputs.
+//! seatings, so it cannot replace or wrap the inherited inputs. The one thing
+//! a seating may ask it for is the child's tool dispatch admission (see
+//! below), and only that is taken from its answer.
+//!
+//! # Tool dispatch admission
+//!
+//! A host's tool dispatch admission (its approval gate,
+//! `SpawnMemberSpec::tool_dispatch_admission`) is process-local: it is never
+//! inherited and never persisted, so a fork child never copies its source's.
+//! Instead MobMachine decides each child's admission
+//! (`ResolveMemberDispatchAdmission`) from what the source's mob observes of
+//! the source's lineage: whether that mob's MobMachine records that the
+//! source's incarnation runs under one (`member_dispatch_admission_lineage`),
+//! whether the source's build in this process runs under one, or, for a
+//! source this process has not built, whether the host's answer for its next
+//! build carries one. A lineage
+//! that carries one has the host's spawn customizer asked for the child
+//! ([`customizer_dispatch_admission`]), and the child runs under the admission
+//! it derives, after any admission its request carries itself (a live
+//! delegation's gate); a child it derives none for is refused with
+//! [`MobError::DispatchAdmissionRequired`] before it is seated: a handle fork
+//! (`fork_off`, `MobHandle::fork_member` and its siblings, a live delegation)
+//! before anything is forked, and a local temporary-council branch when it
+//! is seated, after the council has forked its source for it (the council's
+//! cleanup removes that fork; nothing runs in it). This
+//! holds for every fork seat, live-delegation workers included, for a
+//! prompt-context fork (a spawn whose launch mode forks its source's
+//! history, which asks the customizer as any spawn does), and for a respawn
+//! successor of such a member.
+//!
+//! MobMachine records the child's incarnation as one whose lineage runs
+//! under an admission (`RecordMemberDispatchAdmissionLineage`) in the same
+//! step as its seat commit, and its spawn row persists that record
+//! (`MemberSpawnedEvent::dispatch_admission_lineage`), which the replay of the
+//! row records in MobMachine again after a restart. So every later build of
+//! it (a wake, a restore after a restart, a warm revival, an explicit resume)
+//! asks the host again ([`customizer_own_identity_dispatch_admission`] for a
+//! fork-derived member, the customizer's resume answer for any other) and is
+//! refused when the host derives none ([`rebuild_dispatch_admission`]): such a
+//! member never runs ungated. A record names one incarnation: a later
+//! incarnation of the identity that no seat recorded does not match it. A
+//! fork-derived member MobMachine holds no record for (a row an earlier
+//! release wrote replays so) has an unknown lineage:
+//! each rebuild of it asks the host the same way and runs under what it
+//! derives, as a fresh spawn the customizer answers does, and under none when
+//! it derives none, so a host without a customizer rebuilds it as before. An
+//! ordinary member's rebuild runs under the admission the customizer's
+//! resume answer carries.
 //!
 //! # Rebuilds
 //!
@@ -55,10 +102,11 @@
 //! resolves tools by labels and context, other tools and a lost cache prefix)
 //! from the one that was seated. Instructions and the system prompt are not
 //! among them: no resume rebuild re-authors those. The
-//! one thing a rebuild may take from the customizer is the per-spawn overlay
-//! for the child's own identity, and only where the overlay rule below asks
-//! for it ([`customizer_own_identity_overlay`]); everything else the customizer
-//! returns for that request is discarded.
+//! things a rebuild may take from the customizer are the per-spawn overlay
+//! for the child's own identity, only where the overlay rule below asks for
+//! it ([`customizer_own_identity_overlay`]), and the tool dispatch admission
+//! of a child whose lineage runs under one (see above); everything else the
+//! customizer returns for those requests is discarded.
 //!
 //! The per-spawn tool overlay is a process-local dispatcher and cannot be
 //! persisted. What is persisted is where the child's seated overlay came from
@@ -128,6 +176,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::MobError;
 use crate::ids::{AgentIdentity, MobId};
 use crate::machines::mob_machine as mob_dsl;
+use crate::machines::mob_machine::{
+    MemberDispatchAdmissionHostAnswer, MemberDispatchAdmissionLineage,
+    MemberDispatchAdmissionVerdict,
+};
 use crate::roster::RosterEntry;
 
 /// Where a fork-derived member's per-spawn tool overlay came from when it
@@ -299,6 +351,12 @@ pub(crate) struct RetainedOverlays {
     /// Members whose retained overlay (or retained absence of one) is
     /// [`RetainedOverlayOrigin::Inherited`]; every other member's is its own.
     inherited: BTreeSet<AgentIdentity>,
+    /// Whether the build of each member built in this process runs under a
+    /// tool dispatch admission. Process-local, like the admission itself: a
+    /// member with no entry has no build in this process, and a fork of it
+    /// observes its lineage from its records instead (see the actor's
+    /// `observe_fork_source_dispatch_lineage`).
+    dispatch_admissions: BTreeMap<AgentIdentity, bool>,
 }
 
 impl RetainedOverlays {
@@ -352,11 +410,24 @@ impl RetainedOverlays {
         }
     }
 
+    /// Record whether the build `identity` was (re)built with in this
+    /// process runs under a tool dispatch admission.
+    pub(crate) fn retain_dispatch_admission(&mut self, identity: &AgentIdentity, present: bool) {
+        self.dispatch_admissions.insert(identity.clone(), present);
+    }
+
+    /// Whether `identity`'s build in this process runs under a tool dispatch
+    /// admission; `None` when this process has not built it.
+    pub(crate) fn dispatch_admission(&self, identity: &AgentIdentity) -> Option<bool> {
+        self.dispatch_admissions.get(identity).copied()
+    }
+
     /// Forget `identity`'s overlay (its lifetime ended), releasing the host
     /// dispatcher.
     pub(crate) fn remove(&mut self, identity: &AgentIdentity) {
         self.tools.remove(identity);
         self.inherited.remove(identity);
+        self.dispatch_admissions.remove(identity);
     }
 }
 
@@ -383,6 +454,11 @@ pub struct ForkBuildInheritance {
     /// Where the source's retained overlay came from: what a child seated
     /// with it persists as its [`ForkOverlayOrigin`].
     external_tools_origin: RetainedOverlayOrigin,
+    /// What the source's mob observed of the source's tool dispatch
+    /// admission lineage when it minted this inheritance: the seat of the
+    /// child resolves its own admission from it with MobMachine
+    /// ([`MemberDispatchAdmissionLineage`]).
+    dispatch_admission_lineage: MemberDispatchAdmissionLineage,
 }
 
 impl ForkBuildInheritance {
@@ -391,12 +467,15 @@ impl ForkBuildInheritance {
     /// `agent_identity` is the source's durable identity), so a child that
     /// inherited them would claim to be its source. `external_tools` is the
     /// source's retained overlay, from `external_tools_origin`.
+    /// `dispatch_admission_lineage` is what the source's mob observed of the
+    /// source's tool dispatch admission lineage.
     pub(crate) fn new(
         source: ForkBuildSource,
         app_context: Option<serde_json::Value>,
         mut labels: BTreeMap<String, String>,
         external_tools: Option<Arc<dyn AgentToolDispatcher>>,
         external_tools_origin: RetainedOverlayOrigin,
+        dispatch_admission_lineage: MemberDispatchAdmissionLineage,
     ) -> Self {
         labels.retain(|key, _| !crate::build::is_standard_mob_member_label(key));
         Self {
@@ -406,6 +485,7 @@ impl ForkBuildInheritance {
             labels,
             external_tools,
             external_tools_origin,
+            dispatch_admission_lineage,
         }
     }
 
@@ -434,6 +514,12 @@ impl ForkBuildInheritance {
         self.external_tools.is_some()
     }
 
+    /// What the source's mob observed of the source's tool dispatch
+    /// admission lineage when it minted this inheritance.
+    pub(crate) fn dispatch_admission_lineage(&self) -> MemberDispatchAdmissionLineage {
+        self.dispatch_admission_lineage
+    }
+
     /// Whether this inheritance was minted for the fork of exactly
     /// `source_identity`'s session `source_session_id`.
     pub(crate) fn names_fork_of(
@@ -454,6 +540,9 @@ impl ForkBuildInheritance {
             labels,
             external_tools,
             external_tools_origin,
+            // The child's seat resolves its own admission from it with
+            // MobMachine before this inheritance is applied.
+            dispatch_admission_lineage: _,
         } = self;
         spec.fork_source = Some(source);
         spec.creation_origin = creation_source.map_or(
@@ -1248,7 +1337,348 @@ pub(crate) fn member_resume_spec(
     spec.spawned_by = entry.spawned_by.clone();
     spec.fork_job = entry.fork_job.clone();
     spec.definition_wiring = entry.definition_wiring;
+    // An approval branch is restored as the branch it is: its typed
+    // creation source admits its reserved identity and label.
+    spec.approval_branch = entry.approval_branch.clone();
     spec
+}
+
+// ---------------------------------------------------------------------------
+// Tool dispatch admission of a member build
+// ---------------------------------------------------------------------------
+//
+// A host's tool dispatch admission (its approval gate) is process-local: it
+// is never persisted, so every build of a member derives it again through the
+// host's spawn customizer. A member forked from a source whose build runs
+// under one (a `fork_off` child, a member fork, a local council branch, a
+// live-delegation fork) is never built without one: MobMachine decides each
+// such build's admission from the lineage it records for the member and the
+// shell's raw observations (`ResolveMemberDispatchAdmission`), and the
+// member's seat records its incarnation's lineage in MobMachine, which its
+// spawn row persists, so each later build (a wake, a restore, a reload, an
+// explicit resume) derives an admission again or is refused.
+
+/// The admission a fork seat resolved for its child: what the host's
+/// customizer derived (`None` when the lineage carries none), and whether the
+/// child's lineage carries an admission, which the seat's membership commit
+/// records in MobMachine and its spawn row persists.
+#[derive(Clone, Default)]
+pub(crate) struct SeatDispatchAdmission {
+    pub(crate) admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    pub(crate) lineage_required: bool,
+}
+
+impl SeatDispatchAdmission {
+    /// Put the resolved admission on the child's spawn request, together
+    /// with any admission the request carries itself (both must admit), and
+    /// record whether the child's lineage carries one.
+    pub(crate) fn apply_to(self, spec: &mut super::handle::SpawnMemberSpec) {
+        spec.tool_dispatch_admission =
+            compose_dispatch_admissions(spec.tool_dispatch_admission.take(), self.admission);
+        spec.dispatch_admission_lineage = self.lineage_required;
+    }
+}
+
+impl std::fmt::Debug for SeatDispatchAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeatDispatchAdmission")
+            .field("admission", &self.admission.is_some())
+            .field("lineage_required", &self.lineage_required)
+            .finish()
+    }
+}
+
+/// What a member's spawn carries of its tool dispatch admission to its
+/// activation: whether its lineage runs under one (`lineage`, which its spawn
+/// row records) and whether its build runs under one (`present`, which this
+/// process retains for a fork of it to observe).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SpawnDispatchAdmissionFacts {
+    pub(crate) lineage: bool,
+    pub(crate) present: bool,
+}
+
+/// One build's admission from a request's own admission and the one the
+/// host derived for its lineage: both, when both are present.
+pub(crate) fn compose_dispatch_admissions(
+    request: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    derived: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+) -> Option<Arc<dyn meerkat_core::ToolDispatchAdmission>> {
+    match (request, derived) {
+        (Some(first), Some(second)) => Some(Arc::new(BothDispatchAdmissions { first, second })),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
+    }
+}
+
+/// Two tool dispatch admissions a call must pass in turn: the request's own
+/// (a live delegation's gate, which holds the call until the live turn is
+/// final) and then the one the host derived for the member's lineage. A call
+/// the second refuses settles the first's admission as failed: it was not
+/// dispatched.
+struct BothDispatchAdmissions {
+    first: Arc<dyn meerkat_core::ToolDispatchAdmission>,
+    second: Arc<dyn meerkat_core::ToolDispatchAdmission>,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl meerkat_core::ToolDispatchAdmission for BothDispatchAdmissions {
+    async fn await_dispatch_admission(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: Option<&meerkat_core::ToolDispatchContext>,
+        effect_kind: meerkat_core::LiveBridgeEffectKind,
+    ) -> Result<(), meerkat_core::ToolError> {
+        self.first
+            .await_dispatch_admission(call, context, effect_kind)
+            .await?;
+        if let Err(error) = self
+            .second
+            .await_dispatch_admission(call, context, effect_kind)
+            .await
+        {
+            if let Err(settlement) = self
+                .first
+                .record_dispatch_outcome(
+                    call,
+                    context,
+                    effect_kind,
+                    meerkat_core::LiveBridgeEffectOutcome::Failed,
+                )
+                .await
+            {
+                tracing::warn!(
+                    tool = call.name,
+                    %settlement,
+                    "a call the host's admission refused could not settle the request's admission"
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn record_dispatch_outcome(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: Option<&meerkat_core::ToolDispatchContext>,
+        effect_kind: meerkat_core::LiveBridgeEffectKind,
+        outcome: meerkat_core::LiveBridgeEffectOutcome,
+    ) -> Result<(), meerkat_core::ToolError> {
+        let first = self
+            .first
+            .record_dispatch_outcome(call, context, effect_kind, outcome)
+            .await;
+        let second = self
+            .second
+            .record_dispatch_outcome(call, context, effect_kind, outcome)
+            .await;
+        first.and(second)
+    }
+}
+
+/// MobMachine's verdict among `effects` for the dispatch admission resolved
+/// from `lineage` and `host_answer`.
+pub(crate) fn dispatch_admission_verdict(
+    effects: &[mob_dsl::MobMachineEffect],
+    lineage: MemberDispatchAdmissionLineage,
+    host_answer: MemberDispatchAdmissionHostAnswer,
+) -> Result<MemberDispatchAdmissionVerdict, MobError> {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::MemberDispatchAdmissionResolved {
+                lineage: echoed_lineage,
+                host_answer: echoed_answer,
+                verdict,
+            } if *echoed_lineage == lineage && *echoed_answer == host_answer => Some(*verdict),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            MobError::Internal(
+                "MobMachine accepted a member dispatch admission observation but emitted no verdict"
+                    .to_string(),
+            )
+        })
+}
+
+/// MobMachine's verdict for `agent_identity`, `lineage` and `host_answer`,
+/// decided on `authority` (a member's own fork of the mob's authority, off
+/// the actor), which reads the lineage it records for the identity's current
+/// incarnation. The input is a classification: it changes no state.
+pub(crate) fn resolve_dispatch_admission_on(
+    authority: &mut mob_dsl::MobMachineAuthority,
+    agent_identity: &crate::ids::AgentIdentity,
+    lineage: MemberDispatchAdmissionLineage,
+    host_answer: MemberDispatchAdmissionHostAnswer,
+) -> Result<MemberDispatchAdmissionVerdict, MobError> {
+    let transition = mob_dsl::MobMachineMutator::apply(
+        authority,
+        mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            lineage,
+            host_answer,
+        },
+    )
+    .map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine refused a member dispatch admission observation: {error}"
+        ))
+    })?;
+    dispatch_admission_verdict(transition.effects(), lineage, host_answer)
+}
+
+/// How one member build's tool dispatch admission was decided.
+pub(crate) enum DerivedDispatchAdmission {
+    /// The lineage carries none, or is not known and the host derived none:
+    /// the build takes what its request carries.
+    NoneRequired,
+    /// The lineage carries one, or is not known, and the host derived it:
+    /// the build runs under it.
+    Inherit(Arc<dyn meerkat_core::ToolDispatchAdmission>),
+    /// The lineage carries one, and the host derived none: the build is
+    /// refused.
+    Refused,
+}
+
+/// Decide one member build's dispatch admission with MobMachine (`classify`):
+/// first from what the shell observed of the build's `lineage` alone, then,
+/// when the machine asks for the host, from the admission `ask` derives
+/// through the host's spawn customizer. The host is asked only when the
+/// machine says so.
+pub(crate) fn derive_member_dispatch_admission(
+    mut classify: impl FnMut(
+        MemberDispatchAdmissionLineage,
+        MemberDispatchAdmissionHostAnswer,
+    ) -> Result<MemberDispatchAdmissionVerdict, MobError>,
+    lineage: MemberDispatchAdmissionLineage,
+    ask: impl FnOnce() -> Result<Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>, MobError>,
+) -> Result<DerivedDispatchAdmission, MobError> {
+    match classify(lineage, MemberDispatchAdmissionHostAnswer::NotAsked)? {
+        MemberDispatchAdmissionVerdict::NoneRequired => {
+            return Ok(DerivedDispatchAdmission::NoneRequired);
+        }
+        MemberDispatchAdmissionVerdict::AskHost => {}
+        verdict => {
+            return Err(MobError::Internal(format!(
+                "MobMachine answered a dispatch admission the host was not asked for with {verdict:?}"
+            )));
+        }
+    }
+    let derived = ask()?;
+    let host_answer = if derived.is_some() {
+        MemberDispatchAdmissionHostAnswer::Derived
+    } else {
+        MemberDispatchAdmissionHostAnswer::NoneDerived
+    };
+    match (classify(lineage, host_answer)?, derived) {
+        (MemberDispatchAdmissionVerdict::Inherit, Some(admission)) => {
+            Ok(DerivedDispatchAdmission::Inherit(admission))
+        }
+        (MemberDispatchAdmissionVerdict::Refused, _) => Ok(DerivedDispatchAdmission::Refused),
+        // A lineage that is not known runs under none when the host derived
+        // none, as a fresh spawn the customizer answers does.
+        (MemberDispatchAdmissionVerdict::NoneRequired, None) => {
+            Ok(DerivedDispatchAdmission::NoneRequired)
+        }
+        (verdict, _) => Err(MobError::Internal(format!(
+            "MobMachine answered the host's dispatch admission answer {host_answer:?} with {verdict:?}"
+        ))),
+    }
+}
+
+/// The tool dispatch admission the host's spawn `customizer` derives for one
+/// build of `spec`, asked in `ctx`. Only the admission of its answer is
+/// used: the build's identity, binding and tool policy stay the member's
+/// own. The request carries no admission of its own when it is asked, so a
+/// customizer that installs none answers none. `None` without a customizer.
+pub(crate) fn customizer_dispatch_admission(
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    ctx: &super::handle::SpawnCustomizationContext,
+    spec: &super::handle::SpawnMemberSpec,
+) -> Result<Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>, MobError> {
+    let Some(customizer) = customizer else {
+        return Ok(None);
+    };
+    let mut request = spec.clone();
+    request.tool_dispatch_admission = None;
+    customizer.customize_spawn(ctx, &mut request)?;
+    Ok(request.tool_dispatch_admission)
+}
+
+/// The tool dispatch admission the host's spawn `customizer` derives for a
+/// rebuild of the fork-derived `entry` on its bound session `session_id`,
+/// asked exactly as its own-identity overlay is asked
+/// ([`customizer_own_identity_overlay`]). Only the admission is used.
+pub(crate) fn customizer_own_identity_dispatch_admission(
+    mob_id: &MobId,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    entry: &RosterEntry,
+    session_id: &SessionId,
+) -> Result<Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>, MobError> {
+    let spec = member_resume_spec(entry, session_id);
+    customizer_dispatch_admission(
+        customizer,
+        &resume_customization_context(mob_id, &spec),
+        &spec,
+    )
+}
+
+/// The dispatch admission a rebuild of `entry` on `session_id` runs under,
+/// given `restore_spec`, its rebuild request ([`rebuild_resume_spec`]), with
+/// MobMachine's verdict for the member's own identity decided by `classify`.
+/// MobMachine reads the lineage it records for the member's current
+/// incarnation; the shell observes only whether the member is fork-derived:
+///
+/// - a member whose incarnation MobMachine records runs under the admission
+///   the host derives for this build (an ordinary-roster member's resume
+///   request already asked the customizer; a fork-derived member's did not,
+///   so it is asked here, for the admission alone), or the rebuild is
+///   refused with [`MobError::DispatchAdmissionRequired`];
+/// - an ordinary member MobMachine holds no record for keeps what its
+///   request carries (the customizer's answer to its resume request);
+/// - a fork-derived member MobMachine holds no record for (a spawn row
+///   written before spawn rows recorded the lineage replays so: its lineage
+///   is not known) runs under the admission the host derives for this build,
+///   as a fresh spawn the customizer answers does, and under none when it
+///   derives none. It is never refused, so a host without a customizer
+///   rebuilds it as before.
+pub(crate) fn rebuild_dispatch_admission(
+    mob_id: &MobId,
+    customizer: Option<&Arc<dyn super::handle::SpawnMemberCustomizer>>,
+    entry: &RosterEntry,
+    session_id: &SessionId,
+    restore_spec: &super::handle::SpawnMemberSpec,
+    mut classify: impl FnMut(
+        &crate::ids::AgentIdentity,
+        MemberDispatchAdmissionLineage,
+        MemberDispatchAdmissionHostAnswer,
+    ) -> Result<MemberDispatchAdmissionVerdict, MobError>,
+) -> Result<Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>, MobError> {
+    let lineage = if entry.fork_source.is_some() {
+        MemberDispatchAdmissionLineage::Unknown
+    } else {
+        MemberDispatchAdmissionLineage::NoneRecorded
+    };
+    let derived = derive_member_dispatch_admission(
+        |lineage, host_answer| classify(&entry.agent_identity, lineage, host_answer),
+        lineage,
+        || {
+            if entry.fork_source.is_some() {
+                customizer_own_identity_dispatch_admission(mob_id, customizer, entry, session_id)
+            } else {
+                Ok(restore_spec.tool_dispatch_admission.clone())
+            }
+        },
+    )?;
+    match derived {
+        DerivedDispatchAdmission::NoneRequired => Ok(restore_spec.tool_dispatch_admission.clone()),
+        DerivedDispatchAdmission::Inherit(admission) => Ok(Some(admission)),
+        DerivedDispatchAdmission::Refused => Err(MobError::DispatchAdmissionRequired {
+            member_id: entry.agent_identity.clone(),
+        }),
+    }
 }
 
 impl std::fmt::Debug for ForkBuildInheritance {
@@ -1259,6 +1689,10 @@ impl std::fmt::Debug for ForkBuildInheritance {
             .field("labels", &self.labels)
             .field("external_tools", &self.external_tools.is_some())
             .field("external_tools_origin", &self.external_tools_origin)
+            .field(
+                "dispatch_admission_lineage",
+                &self.dispatch_admission_lineage,
+            )
             .finish()
     }
 }
@@ -1307,6 +1741,7 @@ mod tests {
             ]),
             tools,
             RetainedOverlayOrigin::Own,
+            MemberDispatchAdmissionLineage::NoneRecorded,
         )
     }
 
@@ -1479,6 +1914,7 @@ mod tests {
             source_labels,
             None,
             RetainedOverlayOrigin::Own,
+            MemberDispatchAdmissionLineage::NoneRecorded,
         );
         let app_labels = BTreeMap::from([
             ("domain".to_string(), "calendar".to_string()),
@@ -1535,6 +1971,8 @@ mod tests {
             fork_source,
             fork_overlay: ForkOverlayOrigin::Source,
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
+            dispatch_admission_lineage: false,
         });
         roster.get(&identity).cloned().expect("the entry is seated")
     }
@@ -1643,5 +2081,154 @@ mod tests {
         assert!(
             !inheritance.names_fork_of(&AgentIdentity::from("domain-calendar"), &SessionId::new())
         );
+    }
+
+    /// An admission that records each call it is asked about, and each
+    /// outcome it is told of, in one log a row shares between admissions.
+    struct LoggingAdmission {
+        name: &'static str,
+        refuse: bool,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl LoggingAdmission {
+        fn admission(
+            name: &'static str,
+            refuse: bool,
+            log: &Arc<std::sync::Mutex<Vec<String>>>,
+        ) -> Arc<dyn meerkat_core::ToolDispatchAdmission> {
+            Arc::new(Self {
+                name,
+                refuse,
+                log: Arc::clone(log),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::ToolDispatchAdmission for LoggingAdmission {
+        async fn await_dispatch_admission(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+            _context: Option<&meerkat_core::ToolDispatchContext>,
+            _effect_kind: meerkat_core::LiveBridgeEffectKind,
+        ) -> Result<(), meerkat_core::ToolError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("{}:admit:{}", self.name, call.id));
+            if self.refuse {
+                return Err(meerkat_core::ToolError::access_denied(call.name));
+            }
+            Ok(())
+        }
+
+        async fn record_dispatch_outcome(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+            _context: Option<&meerkat_core::ToolDispatchContext>,
+            _effect_kind: meerkat_core::LiveBridgeEffectKind,
+            outcome: meerkat_core::LiveBridgeEffectOutcome,
+        ) -> Result<(), meerkat_core::ToolError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("{}:{outcome:?}:{}", self.name, call.id));
+            Ok(())
+        }
+    }
+
+    fn call_args() -> Box<serde_json::value::RawValue> {
+        serde_json::value::RawValue::from_string("{}".to_string()).unwrap()
+    }
+
+    /// A request's own admission and the one the host derived for the
+    /// member's lineage are both consulted, the request's first, and both
+    /// hear the call's outcome.
+    #[tokio::test]
+    async fn a_composed_admission_asks_the_request_first_then_the_host() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let composed = compose_dispatch_admissions(
+            Some(LoggingAdmission::admission("live", false, &log)),
+            Some(LoggingAdmission::admission("host", false, &log)),
+        )
+        .expect("both admissions compose");
+        let args = call_args();
+        let call = meerkat_core::types::ToolCallView {
+            id: "call-1",
+            name: "host_tool",
+            args: &args,
+        };
+        composed
+            .await_dispatch_admission(call, None, meerkat_core::LiveBridgeEffectKind::ToolDispatch)
+            .await
+            .expect("both admit");
+        composed
+            .record_dispatch_outcome(
+                call,
+                None,
+                meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+                meerkat_core::LiveBridgeEffectOutcome::Committed,
+            )
+            .await
+            .expect("both settle");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "live:admit:call-1",
+                "host:admit:call-1",
+                "live:Committed:call-1",
+                "host:Committed:call-1",
+            ]
+        );
+    }
+
+    /// A call the host's admission refuses is refused, and the request's
+    /// admission, which admitted it first, hears it failed: it was never
+    /// dispatched.
+    #[tokio::test]
+    async fn a_call_the_host_refuses_settles_the_requests_admission_as_failed() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let composed = compose_dispatch_admissions(
+            Some(LoggingAdmission::admission("live", false, &log)),
+            Some(LoggingAdmission::admission("host", true, &log)),
+        )
+        .expect("both admissions compose");
+        let args = call_args();
+        let refused = composed
+            .await_dispatch_admission(
+                meerkat_core::types::ToolCallView {
+                    id: "call-2",
+                    name: "host_tool",
+                    args: &args,
+                },
+                None,
+                meerkat_core::LiveBridgeEffectKind::ToolDispatch,
+            )
+            .await;
+        assert!(refused.is_err(), "the host's refusal refuses the call");
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "live:admit:call-2",
+                "host:admit:call-2",
+                "live:Failed:call-2"
+            ]
+        );
+    }
+
+    /// One admission alone is the build's admission, unwrapped; none is none.
+    #[test]
+    fn a_single_admission_is_the_builds_own() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let host = LoggingAdmission::admission("host", false, &log);
+        let request = LoggingAdmission::admission("live", false, &log);
+        let only_host = compose_dispatch_admissions(None, Some(Arc::clone(&host)))
+            .expect("the host's admission");
+        assert!(Arc::ptr_eq(&only_host, &host));
+        let only_request = compose_dispatch_admissions(Some(Arc::clone(&request)), None)
+            .expect("the request's admission");
+        assert!(Arc::ptr_eq(&only_request, &request));
+        assert!(compose_dispatch_admissions(None, None).is_none());
     }
 }

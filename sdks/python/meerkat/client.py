@@ -154,6 +154,7 @@ from .generated.types import (
     MobMemberLiveOpenParams,
     MobMemberLiveStatusParams,
     MobMemberParams,
+    MobForkMemberResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
     MobRevokeScopesParams,
@@ -169,6 +170,7 @@ from .generated.types import (
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
     MobSpawnSpecParams,
+    MobStreamCursor,
     MobTurnStartParams,
     MobUnwireParams,
     MobWireParams,
@@ -2942,11 +2944,13 @@ class MeerkatClient:
         "approver_id": ...}`` or ``{"kind": "reviewer", "reviewer": ...}``),
         the ``subject_digest`` shown, the ``parts_shown``, the
         ``channel_ref`` and ``message_ref`` and the host clock reading
-        ``at_ms``. It counts only when it shows every canonical part to the
-        party that decides now. Returns ``{"decision": {...}}``. Needs a
-        Meerkat 0.9.11 or newer server: an older one answers method not
-        found (``-32601``), raised as a :class:`MeerkatError` that names the
-        method.
+        ``at_ms``; a summary a surface with a size limit showed adds the
+        ``link`` it carried (``{"reference": ..., "served_digest": ...}``).
+        It counts only when it shows every canonical part, or its link
+        served the held rendering, to the party that decides now. Returns
+        ``{"decision": {...}}``. Needs a Meerkat 0.9.11 or newer server: an
+        older one answers method not found (``-32601``), raised as a
+        :class:`MeerkatError` that names the method.
         """
         params: dict[str, Any] = {
             "decision_id": decision_id,
@@ -4829,6 +4833,58 @@ class MeerkatClient:
             "Invalid mob/fork_helper response",
         )
 
+    async def fork_mob_member(
+        self,
+        mob_id: str,
+        source_member_id: str,
+        agent_identity: str,
+        *,
+        message_index: int | None = None,
+        profile: str | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+    ) -> MobForkMemberResult:
+        """Fork a member's session at a message boundary into a new member.
+
+        The new member ``agent_identity`` holds the source's messages before
+        ``message_index`` (its committed end when ``None``) and takes the
+        source member's profile and runtime mode unless named. A source
+        whose turn is in flight is refused with ``SESSION_BUSY``, and
+        nothing is seated.
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "source_member_id": source_member_id,
+            "agent_identity": agent_identity,
+        }
+        for key, value in {
+            "message_index": message_index,
+            "profile": profile,
+            "runtime_mode": runtime_mode,
+        }.items():
+            if value is not None:
+                params[key] = value
+        result: MobForkMemberResult | dict[str, Any] = await self._request(
+            "mob/fork_member", params
+        )
+        if isinstance(result, MobForkMemberResult):
+            return result
+        context = "Invalid mob/fork_member response"
+        message_count = self._require_number_field(result, "message_count", context)
+        if not isinstance(message_count, int) or message_count < 0:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: message_count must be a non-negative integer",
+            )
+        return MobForkMemberResult(
+            agent_identity=self._require_string_field(result, "agent_identity", context),
+            member_ref=self._require_string_field(result, "member_ref", context),
+            session_id=self._require_string_field(result, "session_id", context),
+            source_session_id=self._require_string_field(
+                result, "source_session_id", context
+            ),
+            message_count=message_count,
+        )
+
     async def create_mob_profile(
         self, name: str, profile: MobProfile
     ) -> StoredMobProfile:
@@ -5186,11 +5242,27 @@ class MeerkatClient:
         )
 
     async def subscribe_mob_member_events(
-        self, mob_id: str, agent_identity: str
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
     ) -> EventSubscription:
+        """Subscribe to one mob member's events.
+
+        Without ``cursor`` the stream is live. With the ``epoch`` and ``seq``
+        of the last event received (``subscription.last_event_epoch`` and
+        ``subscription.last_event_seq``), it first replays the events the
+        member still retains after that position; a cursor of another
+        sequence space replays the current space from its earliest retained
+        event.
+        """
+        params: dict[str, Any] = {"mob_id": mob_id, "agent_identity": agent_identity}
+        if cursor is not None:
+            params["cursor"] = _wire_params(cursor)
         return await self._open_event_subscription(
             "mob/stream_open",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
+            params,
             "mob/stream_close",
             self._parse_agent_event_envelope,
         )

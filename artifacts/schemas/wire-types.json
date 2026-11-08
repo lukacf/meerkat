@@ -40004,7 +40004,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -43434,7 +43435,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -59881,7 +59883,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -84362,7 +84365,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -96141,7 +96145,7 @@
             "type": "object"
           },
           {
-            "description": "The member's durable resume gate was unavailable at the wake.",
+            "description": "The member's durable resume gate was unavailable at the wake, or its\nsession could not be built now for a cause that clears with no change\nto the member (for example a provider credential whose source or\nstore cannot answer now or whose lookup is in flight).",
             "properties": {
               "kind": {
                 "const": "resume_gate_unavailable",
@@ -99180,6 +99184,17 @@
             "description": "`decision:` and 64 lowercase hex digits.",
             "type": "string"
           },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
           "ended_at_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -99325,6 +99340,19 @@
             "type": "string"
           }
         ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
@@ -99666,6 +99694,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -99681,6 +99728,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -99896,6 +99954,17 @@
             "description": "`decision:` and 64 lowercase hex digits.",
             "type": "string"
           },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
           "ended_at_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -100041,6 +100110,19 @@
             "type": "string"
           }
         ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
@@ -100382,6 +100464,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -100397,6 +100498,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -119818,7 +119930,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -120843,7 +120956,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -121838,7 +121952,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -129938,6 +130053,47 @@
     "title": "MobForceCancelResult",
     "type": "object"
   },
+  "MobForkMemberResult": {
+    "$defs": {
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/fork_member`.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef"
+      },
+      "message_count": {
+        "description": "Messages in the new member's transcript after the fork, as\n`session/fork_at` counts them.",
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "description": "The new member's session: the committed fork.",
+        "type": "string"
+      },
+      "source_session_id": {
+        "description": "The session the fork was cut from.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_identity",
+      "member_ref",
+      "session_id",
+      "source_session_id",
+      "message_count"
+    ],
+    "title": "MobForkMemberResult",
+    "type": "object"
+  },
   "MobGrantScopesResult": {
     "$defs": {
       "WireControlScope": {
@@ -131677,6 +131833,16 @@
           {
             "const": "FORK_INSTRUCTION_REFUSED",
             "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
             "type": "string"
           }
         ]
@@ -140743,6 +140909,16 @@
             "const": "FORK_INSTRUCTION_REFUSED",
             "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
             "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
+            "type": "string"
           }
         ]
       },
@@ -141007,6 +141183,16 @@
           {
             "const": "FORK_INSTRUCTION_REFUSED",
             "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
             "type": "string"
           }
         ]
@@ -149059,6 +149245,17 @@
             "description": "`decision:` and 64 lowercase hex digits.",
             "type": "string"
           },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
           "ended_at_ms": {
             "format": "uint64",
             "minimum": 0,
@@ -149204,6 +149401,19 @@
             "type": "string"
           }
         ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
@@ -149545,6 +149755,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -149560,6 +149789,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -165485,6 +165725,23 @@
           "detail"
         ],
         "type": "object"
+      },
+      {
+        "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "source_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
       }
     ],
     "title": "WireAuthError"
@@ -166735,6 +166992,23 @@
               },
               "kind": {
                 "const": "credential_store_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "source_unavailable",
                 "type": "string"
               }
             },
@@ -168600,7 +168874,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -168871,6 +169146,19 @@
             "type": "string"
           }
         ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireDecisionEvidence": {
         "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
@@ -169212,6 +169500,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -169227,6 +169534,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -169293,6 +169611,17 @@
       "decision_id": {
         "description": "`decision:` and 64 lowercase hex digits.",
         "type": "string"
+      },
+      "effect": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionEffect"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
       },
       "ended_at_ms": {
         "format": "uint64",
@@ -169442,6 +169771,21 @@
       }
     ],
     "title": "WireDecisionAssurance"
+  },
+  "WireDecisionEffect": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+    "properties": {
+      "grant_id": {
+        "description": "The id of the grant the execution issued.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WireDecisionEffect",
+    "type": "object"
   },
   "WireDecisionErrorData": {
     "$defs": {
@@ -169931,6 +170275,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -169946,6 +170309,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -170673,6 +171047,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -170688,6 +171081,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -185635,7 +186039,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -194927,6 +195332,16 @@
             "const": "FORK_INSTRUCTION_REFUSED",
             "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
             "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
+            "type": "string"
           }
         ]
       },
@@ -197540,6 +197955,27 @@
     ],
     "title": "WirePresentationAudience"
   },
+  "WirePresentationLink": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+    "properties": {
+      "reference": {
+        "description": "Where the link points: the page or document that serves the full\npresentation.",
+        "type": "string"
+      },
+      "served_digest": {
+        "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "reference",
+      "served_digest"
+    ],
+    "title": "WirePresentationLink",
+    "type": "object"
+  },
   "WirePresentationRecord": {
     "$defs": {
       "WireCanonicalPart": {
@@ -197621,6 +198057,25 @@
             "type": "object"
           }
         ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -197638,6 +198093,17 @@
       "channel_ref": {
         "description": "Where the presentation was shown.",
         "type": "string"
+      },
+      "link": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePresentationLink"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
       },
       "max_part_bytes": {
         "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -198302,6 +198768,16 @@
           {
             "const": "FORK_INSTRUCTION_REFUSED",
             "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
             "type": "string"
           }
         ]

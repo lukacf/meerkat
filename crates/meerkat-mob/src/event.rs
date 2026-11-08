@@ -236,7 +236,13 @@ impl<'de> Deserialize<'de> for MemberRef {
 // internal `seat_rotation` and `seat_session`; the replay reads none of
 // them, and a reader that predates them ignores them. A cause, a rotation or
 // a seat rotation this build cannot read decodes as none, and an entry
-// origin it does not know keeps its token.
+// origin it does not know keeps its token. A stored `MemberSpawned` may also
+// carry the internal `approval_branch` decision of an approval branch's seat
+// (the member's typed creation source); a reader that predates it ignores
+// it, and the member reads there as an ordinary member. A stored
+// `MemberSpawned` may also carry the internal `dispatch_admission_lineage`
+// marker of a member whose lineage runs under a host's tool dispatch
+// admission; a reader that predates it ignores it.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1260,6 +1266,29 @@ pub struct MemberSpawnedEvent {
     /// journals written before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) seat_session: Option<SessionId>,
+    /// The decision whose approval branch this row seats: the member's typed
+    /// creation source, which only the branch's own opening records
+    /// (`MobHandle::open_approval_branch`). Replay records it on the roster
+    /// entry, so the branch stays private across a restart. Stored only by
+    /// the internal event codec; a reader that predates it ignores it, and
+    /// journals written before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+    /// Whether this incarnation's lineage runs under a host's tool dispatch
+    /// admission: a fork of a member whose build runs under one (a
+    /// `fork_off` child, a member fork, a local temporary-council branch, a
+    /// live-delegation fork), or the successor of such a member. The
+    /// admission itself is process-local and never persisted: every build of
+    /// the member, after a restart too, derives one through the host's spawn
+    /// customizer, and a build for which it derives none is refused
+    /// (MobMachine's `ResolveMemberDispatchAdmission`). It persists the
+    /// record MobMachine makes for this incarnation at its seat
+    /// (`member_dispatch_admission_lineage`), and the replay of the row
+    /// records it there again. Stored only by the
+    /// internal event codec; a reader that predates it ignores it, and
+    /// journals written before it decode it as `false`.
+    #[serde(skip, default)]
+    pub(crate) dispatch_admission_lineage: bool,
 }
 
 impl MemberSpawnedEvent {
@@ -1301,7 +1330,33 @@ impl MemberSpawnedEvent {
             history_unavailable: None,
             seat_rotation: None,
             seat_session: None,
+            approval_branch: None,
+            dispatch_admission_lineage: false,
         }
+    }
+
+    pub(crate) fn with_approval_branch(
+        mut self,
+        approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+    ) -> Self {
+        self.approval_branch = approval_branch;
+        self
+    }
+
+    /// The decision whose approval branch this row seats, when it records
+    /// one (its member's typed creation source).
+    pub(crate) fn approval_branch(&self) -> Option<&meerkat_core::approval::decision::DecisionId> {
+        self.approval_branch.as_ref()
+    }
+    pub(crate) fn with_dispatch_admission_lineage(mut self, lineage: bool) -> Self {
+        self.dispatch_admission_lineage = lineage;
+        self
+    }
+
+    /// Whether this incarnation's lineage runs under a host's tool dispatch
+    /// admission.
+    pub(crate) fn dispatch_admission_lineage(&self) -> bool {
+        self.dispatch_admission_lineage
     }
 
     pub(crate) fn with_history_unavailable(
@@ -2122,6 +2177,12 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert("seat_session_unborn".to_string(), Value::Bool(true));
     }
     if let Some(member_spawned) = event.kind.member_spawned()
+        && member_spawned.dispatch_admission_lineage()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert("dispatch_admission_lineage".to_string(), Value::Bool(true));
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
         && let Some(seat_build_inputs) = member_spawned.seat_build_inputs()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
@@ -2264,6 +2325,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
         kind.insert(
             "seat_session".to_string(),
             serde_json::to_value(seat_session)?,
+        );
+    }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(decision) = member_spawned.approval_branch()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "approval_branch".to_string(),
+            Value::String(decision.as_str().to_owned()),
         );
     }
     if let Some(facts) = event.kind.retired_facts()
@@ -2415,6 +2485,19 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .and_then(|kind| {
             if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
                 kind.remove("seat_session_unborn")
+            } else {
+                None
+            }
+        })
+        .map(serde_json::from_value::<bool>)
+        .transpose()?
+        .unwrap_or(false);
+    let spawned_dispatch_admission_lineage = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("dispatch_admission_lineage")
             } else {
                 None
             }
@@ -2650,6 +2733,24 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
             }
         })
         .and_then(|session| serde_json::from_value::<SessionId>(session).ok());
+    // The decision whose approval branch a MemberSpawned row seats (the
+    // member's typed creation source): a value this build cannot read reads
+    // as absent, so the member is no branch here and is never adopted as one.
+    let spawned_approval_branch = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("approval_branch")
+            } else {
+                None
+            }
+        })
+        .and_then(|decision| {
+            decision.as_str().and_then(|decision| {
+                meerkat_core::approval::decision::DecisionId::new(decision).ok()
+            })
+        });
     let retired_facts = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2701,6 +2802,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     }
     if spawned_seat_session_unborn && let Some(member_spawned) = event.kind.member_spawned_mut() {
         member_spawned.seat_session_unborn = true;
+    }
+    if spawned_dispatch_admission_lineage
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.dispatch_admission_lineage = true;
     }
     if let Some(seat_build_inputs) = spawned_seat_build_inputs
         && let Some(member_spawned) = event.kind.member_spawned_mut()
@@ -2767,6 +2873,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     {
         member_spawned.seat_session = Some(seat_session);
     }
+    if let Some(decision) = spawned_approval_branch
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.approval_branch = Some(decision);
+    }
     if let Some(facts) = retired_facts
         && let Some(stored) = event.kind.retired_facts_mut()
     {
@@ -2793,6 +2904,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -3334,6 +3446,77 @@ mod tests {
                 MobEventKind::MemberSessionBindingRecovered(recovered) => {
                     recovered.records_seat_session_born()
                 }
+                other => panic!("unexpected kind {other:?}"),
+            }
+        }
+    }
+
+    /// The dispatch admission lineage marker on a spawn row is internal:
+    /// stored by the event codec only, absent from the public event, and
+    /// decoded as `false` from a journal written before it; roster replay
+    /// reads it back onto the member's entry.
+    #[test]
+    fn test_stored_dispatch_admission_lineage_roundtrips_and_stays_internal() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("gated-fork-child");
+        let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
+        let spawned = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    runtime_id,
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+                .with_dispatch_admission_lineage(true),
+            ),
+        };
+        let marker = "dispatch_admission_lineage";
+        let public = serde_json::to_value(&spawned).expect("public event payload");
+        assert!(
+            public["kind"].get(marker).is_none(),
+            "the public event never carries {marker}"
+        );
+        let encoded = encode_stored_mob_event(&spawned).expect("encode");
+        let mut stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(
+            stored["event"]["kind"][marker],
+            serde_json::Value::Bool(true)
+        );
+        let decoded = decode_stored_mob_event(&encoded).expect("decode");
+        assert!(
+            lineage_set(&decoded.kind),
+            "{marker} survives the stored roundtrip"
+        );
+        let roster = crate::roster::Roster::project(std::slice::from_ref(&decoded));
+        assert!(
+            roster
+                .get(&identity)
+                .expect("the replayed member")
+                .dispatch_admission_lineage,
+            "roster replay keeps the member's lineage"
+        );
+        let removed = stored
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|kind| kind.remove(marker));
+        assert!(removed.is_some());
+        let legacy = serde_json::to_vec(&stored).expect("encode without the marker");
+        let decoded = decode_stored_mob_event(&legacy).expect("decode");
+        assert!(
+            !lineage_set(&decoded.kind),
+            "a journal written before {marker} decodes it as false"
+        );
+
+        fn lineage_set(kind: &MobEventKind) -> bool {
+            match kind {
+                MobEventKind::MemberSpawned(spawned) => spawned.dispatch_admission_lineage(),
                 other => panic!("unexpected kind {other:?}"),
             }
         }
@@ -4636,6 +4819,7 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),

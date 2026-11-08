@@ -171,6 +171,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "mob/flow_cancel": (Mob, "cancel_flow"),
     "mob/spawn_helper": (Mob, "spawn_helper"),
     "mob/fork_helper": (Mob, "fork_helper"),
+    "mob/fork_member": (Mob, "fork_member"),
     "mob/force_cancel": (Mob, "force_cancel"),
     "mob/member_status": (Mob, "member_status"),
     "mob/grant_scopes": (Mob, "grant_scopes"),

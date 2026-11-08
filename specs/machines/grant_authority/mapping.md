@@ -35,6 +35,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveUse`
   - anchors: `grant_authority`
   - scenarios: `grant-three-level-attenuation`, `grant-revoked-ancestor`, `grant-fresh-chain-lifetime`
+- `ConsumeUse`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeUseRefusedApproverRevoked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `Configured`
@@ -49,6 +55,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `UseResolved`
   - anchors: `grant_authority`
   - scenarios: `grant-three-level-attenuation`, `grant-fresh-chain-lifetime`
+- `UseConsumed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `configured_identity_is_present`
@@ -68,6 +77,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `revoked_records_remain_present`
   - anchors: `grant_authority`
+  - scenarios: (unclaimed)
+- `spent_only_for_approval_children`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `approval_children_are_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `approval_children_have_a_parent_rule`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `carried_decisions_match_records`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
 

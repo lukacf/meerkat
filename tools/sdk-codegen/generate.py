@@ -197,6 +197,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobSpawnHelperParams",
     "MobForkHelperParams",
     "MobHelperResult",
+    "MobForkMemberParams",
+    "MobForkMemberResult",
     "MobForceCancelResult",
     "MobTurnStartParams",
     "MobMemberStatusResult",
@@ -486,8 +488,10 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     # Durable decisions (`decision/*`). The records precede the params and
     # results that carry them.
     "WireCanonicalPart",
+    "WirePresentationLink",
     "WirePresentationRecord",
     "WireDecisionOutcome",
+    "WireDecisionEffect",
     "WireDecision",
     "WireUnreadableDecision",
     "DecisionPresentationRequest",
@@ -798,6 +802,8 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "WireGeminiThinkingConfig",
     "WireOpenAiPromptCacheOptions",
     "WireProviderParamsOverride",
+    # `MobStreamOpenParams.cursor`: the member stream resume position.
+    "MobStreamCursor",
 ]
 
 # Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed
@@ -7117,6 +7123,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "      'credential_interaction_required',",
             "      'credential_access_pending',",
             "      'credential_store_unavailable',",
+            "      'source_unavailable',",
             "    ],",
             "    `${path}.kind`,",
             "    'wire auth error kind',",

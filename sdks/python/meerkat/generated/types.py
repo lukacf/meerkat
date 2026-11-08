@@ -2341,6 +2341,17 @@ digest."""
 
 
 @dataclass
+class WirePresentationLink:
+    """The link a summary presentation carried to the full presentation of a
+decision's rendering, and the digest of the rendering that link served
+when it was followed. A surface with a size limit shows a summary that
+says it is shortened, with such a link; the summary counts as a complete
+presentation only when the link served the held rendering."""
+    reference: str
+    served_digest: str
+
+
+@dataclass
 class WirePresentationRecord:
     """One recorded presentation of a decision's rendering."""
     at_ms: int
@@ -2349,6 +2360,7 @@ class WirePresentationRecord:
     message_ref: str
     parts_shown: list[WireCanonicalPart]
     subject_digest: str
+    link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
 
 
@@ -2357,6 +2369,15 @@ class WireDecisionOutcome:
     """A decided decision's outcome: who decided, and the evidence."""
     evidence: WireDecisionEvidence
     tier: WireDecisionTier
+
+
+@dataclass
+class WireDecisionEffect:
+    """What an executed decision did, as its kind names it: each field names
+one thing its execution committed. An executed `grant.child` decision
+names the grant it issued. Read tolerantly: a field this version does
+not know is ignored."""
+    grant_id: Optional[str] = None
 
 
 @dataclass
@@ -2379,6 +2400,7 @@ class WireDecision:
     subject_digest: str
     subject_key: str
     decided_at_ms: Optional[int] = None
+    effect: Optional[WireDecisionEffect] = None
     ended_at_ms: Optional[int] = None
     execution_refusal: Optional[str] = None
     first_presented_to_approver_at_ms: Optional[int] = None
@@ -2405,6 +2427,7 @@ class DecisionPresentationRequest:
     message_ref: str
     parts_shown: list[WireCanonicalPart]
     subject_digest: str
+    link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
 
 
@@ -2467,8 +2490,9 @@ request and its canonical parts for the asked part size."""
 @dataclass
 class DecisionPresentParams:
     """`decision/present` parameters: record what a host presenter showed. It
-counts only when it shows every canonical part of the held rendering to
-the party that decides now."""
+counts only when it shows every canonical part of the held rendering, or
+is a summary whose link served the held rendering, to the party that
+decides now."""
     decision_id: str
     presentation: DecisionPresentationRequest
 
@@ -2939,7 +2963,7 @@ the `mob_quarantined` refusal this row carries (`message`, `code`,
     mob_id: str
     retryable: bool
     attempts: Optional[int] = None
-    code: Optional[Literal['SESSION_NOT_FOUND', 'SCHEDULE_NOT_FOUND', 'SESSION_BUSY', 'SESSION_NOT_RUNNING', 'REQUEST_CANCELLED', 'PROVIDER_ERROR', 'BUDGET_EXHAUSTED', 'HOOK_DENIED', 'AGENT_ERROR', 'CAPABILITY_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_RESOLUTION_FAILED', 'INVALID_PARAMS', 'INTERNAL_ERROR', 'DUPLICATE_INPUT', 'SUPERVISOR_ROTATION_INCOMPLETE'] | Literal['SCOPE_DENIED'] | Literal['HOST_UNAVAILABLE'] | Literal['STALE_CURSOR'] | Literal['STALE_FENCE'] | Literal['MEMBER_RELOAD_REQUIRED'] | Literal['INPUT_REFUSED'] | Literal['INPUT_NOT_READY'] | Literal['SESSION_RUNTIME_UNAVAILABLE'] | Literal['APPROVAL_STORE_UNAVAILABLE'] | Literal['APPROVAL_CONFLICT'] | Literal['APPROVAL_COMMIT_UNKNOWN'] | Literal['STALE_DELIVERY_SCOPE'] | Literal['FORK_INSTRUCTION_REFUSED']] = None
+    code: Optional[Literal['SESSION_NOT_FOUND', 'SCHEDULE_NOT_FOUND', 'SESSION_BUSY', 'SESSION_NOT_RUNNING', 'REQUEST_CANCELLED', 'PROVIDER_ERROR', 'BUDGET_EXHAUSTED', 'HOOK_DENIED', 'AGENT_ERROR', 'CAPABILITY_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_RESOLUTION_FAILED', 'INVALID_PARAMS', 'INTERNAL_ERROR', 'DUPLICATE_INPUT', 'SUPERVISOR_ROTATION_INCOMPLETE'] | Literal['SCOPE_DENIED'] | Literal['HOST_UNAVAILABLE'] | Literal['STALE_CURSOR'] | Literal['STALE_FENCE'] | Literal['MEMBER_RELOAD_REQUIRED'] | Literal['INPUT_REFUSED'] | Literal['INPUT_NOT_READY'] | Literal['SESSION_RUNTIME_UNAVAILABLE'] | Literal['APPROVAL_STORE_UNAVAILABLE'] | Literal['APPROVAL_CONFLICT'] | Literal['APPROVAL_COMMIT_UNKNOWN'] | Literal['STALE_DELIVERY_SCOPE'] | Literal['FORK_INSTRUCTION_REFUSED'] | Literal['ADMISSION_IN_PROGRESS'] | Literal['ADMISSION_FENCE_UNAVAILABLE']] = None
     retrying: Optional[bool] = None
     structured_data: Optional[Any] = None
 
@@ -2957,7 +2981,7 @@ class WireMobLifecycleFailure:
 `mob/spawn_many` row carries."""
     cause: MobSpawnManyFailureCause
     message: str
-    code: Optional[Literal['SESSION_NOT_FOUND', 'SCHEDULE_NOT_FOUND', 'SESSION_BUSY', 'SESSION_NOT_RUNNING', 'REQUEST_CANCELLED', 'PROVIDER_ERROR', 'BUDGET_EXHAUSTED', 'HOOK_DENIED', 'AGENT_ERROR', 'CAPABILITY_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_RESOLUTION_FAILED', 'INVALID_PARAMS', 'INTERNAL_ERROR', 'DUPLICATE_INPUT', 'SUPERVISOR_ROTATION_INCOMPLETE'] | Literal['SCOPE_DENIED'] | Literal['HOST_UNAVAILABLE'] | Literal['STALE_CURSOR'] | Literal['STALE_FENCE'] | Literal['MEMBER_RELOAD_REQUIRED'] | Literal['INPUT_REFUSED'] | Literal['INPUT_NOT_READY'] | Literal['SESSION_RUNTIME_UNAVAILABLE'] | Literal['APPROVAL_STORE_UNAVAILABLE'] | Literal['APPROVAL_CONFLICT'] | Literal['APPROVAL_COMMIT_UNKNOWN'] | Literal['STALE_DELIVERY_SCOPE'] | Literal['FORK_INSTRUCTION_REFUSED']] = None
+    code: Optional[Literal['SESSION_NOT_FOUND', 'SCHEDULE_NOT_FOUND', 'SESSION_BUSY', 'SESSION_NOT_RUNNING', 'REQUEST_CANCELLED', 'PROVIDER_ERROR', 'BUDGET_EXHAUSTED', 'HOOK_DENIED', 'AGENT_ERROR', 'CAPABILITY_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_RESOLUTION_FAILED', 'INVALID_PARAMS', 'INTERNAL_ERROR', 'DUPLICATE_INPUT', 'SUPERVISOR_ROTATION_INCOMPLETE'] | Literal['SCOPE_DENIED'] | Literal['HOST_UNAVAILABLE'] | Literal['STALE_CURSOR'] | Literal['STALE_FENCE'] | Literal['MEMBER_RELOAD_REQUIRED'] | Literal['INPUT_REFUSED'] | Literal['INPUT_NOT_READY'] | Literal['SESSION_RUNTIME_UNAVAILABLE'] | Literal['APPROVAL_STORE_UNAVAILABLE'] | Literal['APPROVAL_CONFLICT'] | Literal['APPROVAL_COMMIT_UNKNOWN'] | Literal['STALE_DELIVERY_SCOPE'] | Literal['FORK_INSTRUCTION_REFUSED'] | Literal['ADMISSION_IN_PROGRESS'] | Literal['ADMISSION_FENCE_UNAVAILABLE']] = None
     structured_data: Optional[Any] = None
 
 
@@ -3715,6 +3739,28 @@ class MobHelperResult:
 
 
 @dataclass
+class MobForkMemberParams:
+    """Request payload for `mob/fork_member`: fork a member's session at a
+message boundary and seat the fork as a new member."""
+    agent_identity: str
+    mob_id: str
+    source_member_id: str
+    message_index: Optional[int] = None
+    profile: Optional[str] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+
+
+@dataclass
+class MobForkMemberResult:
+    """Response payload for `mob/fork_member`."""
+    agent_identity: str
+    member_ref: WireMemberRef
+    message_count: int
+    session_id: str
+    source_session_id: str
+
+
+@dataclass
 class MobForceCancelResult:
     """Response payload for `mob/force_cancel`."""
     cancelled: bool
@@ -3971,6 +4017,7 @@ class MobStreamOpenParams:
     """Request payload for `mob/stream_open`."""
     mob_id: str
     agent_identity: Optional[str] = None
+    cursor: Optional[MobStreamCursor] = None
 
 
 @dataclass
@@ -4813,6 +4860,14 @@ class WireProviderParamsOverride:
     temperature: Optional[float] = None
     thinking_budget_tokens: Optional[int] = None
     top_p: Optional[float] = None
+
+
+@dataclass
+class MobStreamCursor:
+    """A position in a mob member's event sequence: the `epoch` a member
+`mob/stream_event` names and the `seq` of its event (`event.seq`)."""
+    epoch: str
+    seq: int
 
 
 @dataclass
@@ -5770,7 +5825,7 @@ WireFlowTurnOutcome = Literal['run_completed'] | Literal['extraction_succeeded']
 
 # Stable discriminant for [`AuthError`]. Used in serialized error summaries
 # and for SDK-facing wire codes.
-AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable']
+AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable', 'source_unavailable']
 
 # Wire projection of `meerkat_core::connection::ConnectionTargetError`'s
 # variant set (closed; kinds only — the parameters stay in the diagnostic
@@ -7509,7 +7564,11 @@ class WireAuthErrorCredentialStoreUnavailable(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['credential_store_unavailable']]
 
-WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable
+class WireAuthErrorSourceUnavailable(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['source_unavailable']]
+
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable
 
 # Wire-safe content block (no `source_path` — internal only).
 class WireContentBlockText(TypedDict, total=False):

@@ -13,6 +13,14 @@
 //! seat or rotation input in that input's own transition) is neither wired
 //! when it is seated nor a target of another member's seat or rotation.
 //!
+//! A seat also realizes its member's owned edges (0.9.11, MobMachine's
+//! `identity_edge_owners`) whose other end is seated, each one MobMachine
+//! holds in force (`AdmitOwnedEdgeRealization`: both its ends are identity
+//! entries): an edge an identity's change declared, which an archive or an
+//! unlisting left unrealized, or whose other end was unseated when it was
+//! declared. These are no definition wiring: they are realized for an exempt
+//! member too, and whatever the definition declares.
+//!
 //! The edges are staged on the seat step's own prepared authority, after its
 //! seats, so the members seated in one chunk see each other: their lifecycle
 //! notice verdicts, their `WireMembers` inputs and, for an edge with a live
@@ -154,7 +162,17 @@ impl MobActor {
         effects: &mut Vec<mob_dsl::MobMachineEffect>,
         journal: &mut Vec<NewMobEvent>,
     ) -> Result<StagedDeclaredEdges, MobError> {
-        if seated.is_empty() || !Self::definition_declares_wiring(&self.definition) {
+        if seated.is_empty() {
+            return Ok(StagedDeclaredEdges::none());
+        }
+        let members = seated
+            .iter()
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        let declares_wiring = Self::definition_declares_wiring(&self.definition);
+        let owned_candidates =
+            crate::runtime::owned_edges::owned_edge_candidates(authority.state(), &members);
+        if !declares_wiring && owned_candidates.is_empty() {
             return Ok(StagedDeclaredEdges::none());
         }
         if authority.state().lifecycle_phase != mob_dsl::MobPhase::Running {
@@ -164,11 +182,37 @@ impl MobActor {
             );
             return Ok(StagedDeclaredEdges::none());
         }
-        let members = seated
+        let mut pairs = if declares_wiring {
+            self.seated_declared_pairs(authority.state(), &members)
+        } else {
+            Vec::new()
+        };
+        // The owned edges in force of the seated members whose other end is
+        // seated too (MobMachine's verdict on each, on the step's prepared
+        // authority): the seat realizes them, whatever the definition
+        // declares and whether or not a member is exempt from its wiring
+        // rules. An owned edge one of whose ends is no identity entry stays
+        // unrealized: a worker under that end's name is no end of it.
+        let declared: BTreeSet<mob_dsl::WiringEdge> = pairs
             .iter()
-            .map(|(identity, _)| identity.clone())
-            .collect::<Vec<_>>();
-        let pairs = self.seated_declared_pairs(authority.state(), &members);
+            .map(|(local, peer)| {
+                mob_dsl::WiringEdge::new(
+                    mob_dsl::AgentIdentity::from_domain(local),
+                    mob_dsl::AgentIdentity::from_domain(peer),
+                )
+            })
+            .collect();
+        for (local, peer) in
+            super::owned_edges::owned_pairs_in_force(authority, owned_candidates, effects)?
+        {
+            let edge = mob_dsl::WiringEdge::new(
+                mob_dsl::AgentIdentity::from_domain(&local),
+                mob_dsl::AgentIdentity::from_domain(&peer),
+            );
+            if !declared.contains(&edge) {
+                pairs.push((local, peer));
+            }
+        }
         if pairs.is_empty() {
             return Ok(StagedDeclaredEdges::none());
         }

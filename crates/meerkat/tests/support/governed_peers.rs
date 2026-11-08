@@ -627,7 +627,14 @@ impl Peers {
         );
         let issue = |name: &str, grantee: PrincipalRef, bounds: ExecutionRestrictions| {
             grants
-                .issue_root(&principal("grant-owner"), id(name), grantee, None, bounds)
+                .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &principal("grant-owner"),
+                    id(name),
+                    grantee,
+                    None,
+                    bounds,
+                )
                 .expect("issued grant")
         };
         let sender_controller = issue(
@@ -670,6 +677,7 @@ impl Peers {
             MeerkatMachine::ephemeral()
                 .with_local_grant_authorization(NativeGrantWorkConfiguration {
                     retained_resume: None,
+                    kept_original: None,
                     require_scoped_destination: false,
                     grants: Arc::clone(&grants),
                     ingress: ingress_check,

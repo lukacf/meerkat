@@ -5429,6 +5429,61 @@ async def test_client_session_and_mob_observe_methods_use_explicit_rpc_methods()
 
 
 @pytest.mark.asyncio
+async def test_fork_mob_member_sends_the_boundary_and_parses_the_fork():
+    from meerkat import Mob, MobForkMemberResult
+
+    client = MeerkatClient()
+    calls = []
+    fork = {
+        "agent_identity": "main-branch",
+        "member_ref": "ref-1",
+        "session_id": "child-session",
+        "source_session_id": "source-session",
+        "message_count": 3,
+    }
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return dict(fork)
+
+    client._request = fake_request  # type: ignore[method-assign]
+    result = await client.fork_mob_member("mob-1", "main", "main-branch", message_index=3)
+    assert result == MobForkMemberResult(**fork)
+    await Mob(client, "mob-1").fork_member(
+        "main", "main-branch", profile="worker", runtime_mode="turn_driven"
+    )
+    assert calls == [
+        (
+            "mob/fork_member",
+            {
+                "mob_id": "mob-1",
+                "source_member_id": "main",
+                "agent_identity": "main-branch",
+                "message_index": 3,
+            },
+        ),
+        (
+            "mob/fork_member",
+            {
+                "mob_id": "mob-1",
+                "source_member_id": "main",
+                "agent_identity": "main-branch",
+                "profile": "worker",
+                "runtime_mode": "turn_driven",
+            },
+        ),
+    ]
+
+    async def malformed_request(_method, _params):
+        return {"agent_identity": "main-branch"}
+
+    client._request = malformed_request  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError) as failure:
+        await client.fork_mob_member("mob-1", "main", "main-branch")
+    assert failure.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     client = MeerkatClient()
     calls = []

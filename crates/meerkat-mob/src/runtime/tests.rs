@@ -40,6 +40,8 @@ mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod respawn_abandonment_replay_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod rotation_intent_rows;
@@ -2187,6 +2189,14 @@ struct MockSessionService {
     create_with_external_tools: RwLock<Vec<bool>>,
     /// Records the exact host curator carried by each create_session request.
     create_with_compaction_curators: RwLock<Vec<Option<Arc<dyn meerkat_core::CompactionCurator>>>>,
+    /// Records the exact final dispatch admission each create_session
+    /// request's build carries, with the session it builds.
+    create_with_dispatch_admissions: RwLock<
+        Vec<(
+            SessionId,
+            Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+        )>,
+    >,
     /// Records the declarative MCP server names per create_session call,
     /// in call order.
     mcp_server_names: RwLock<Vec<(SessionId, Vec<String>)>>,
@@ -2246,6 +2256,10 @@ struct MockSessionService {
     /// when set (presence implies failure), built anew for each refused
     /// attempt: such a create's session id is assigned only as it runs.
     create_mint_fail_error: RwLock<Option<fn() -> SessionError>>,
+    /// Sessions whose create_session fails as the facade reports a provider
+    /// credential its build could not get: the typed provider-auth session
+    /// error of the given kind.
+    create_fail_provider_auth: RwLock<HashMap<SessionId, meerkat_core::AuthErrorKind>>,
     /// Timestamps of every refused create_session attempt, per session, so
     /// retry-schedule tests can assert real attempt spacing.
     create_fail_attempts: RwLock<HashMap<SessionId, Vec<std::time::Instant>>>,
@@ -2634,6 +2648,7 @@ impl MockSessionService {
             member_build_hook: std::sync::Mutex::new(None),
             create_with_external_tools: RwLock::new(Vec::new()),
             create_with_compaction_curators: RwLock::new(Vec::new()),
+            create_with_dispatch_admissions: RwLock::new(Vec::new()),
             mcp_server_names: RwLock::new(Vec::new()),
             external_tools_by_session: RwLock::new(HashMap::new()),
             comms_behaviors: RwLock::new(HashMap::new()),
@@ -2658,6 +2673,7 @@ impl MockSessionService {
             create_fail_details: RwLock::new(HashMap::new()),
             create_fail_errors: RwLock::new(HashMap::new()),
             create_mint_fail_error: RwLock::new(None),
+            create_fail_provider_auth: RwLock::new(HashMap::new()),
             create_fail_attempts: RwLock::new(HashMap::new()),
             create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
@@ -3062,6 +3078,17 @@ impl MockSessionService {
         self.create_with_compaction_curators.read().await.clone()
     }
 
+    /// The exact final dispatch admission each build carried, with the
+    /// session it built, in build order.
+    async fn recorded_dispatch_admissions(
+        &self,
+    ) -> Vec<(
+        SessionId,
+        Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    )> {
+        self.create_with_dispatch_admissions.read().await.clone()
+    }
+
     async fn recorded_mcp_server_names(&self) -> Vec<(SessionId, Vec<String>)> {
         self.mcp_server_names.read().await.clone()
     }
@@ -3239,6 +3266,22 @@ impl MockSessionService {
     async fn fail_session_mints_with(&self, make: fn() -> SessionError) {
         *self.create_mint_fail_error.write().await = Some(make);
     }
+    /// as the facade reports a provider credential its build could not get:
+    /// the typed provider-auth session error of `kind`.
+    async fn set_create_session_provider_auth_failure(
+        &self,
+        session_id: &SessionId,
+        kind: meerkat_core::AuthErrorKind,
+    ) {
+        self.create_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+        self.create_fail_provider_auth
+            .write()
+            .await
+            .insert(session_id.clone(), kind);
+    }
 
     /// Timestamps of every refused create_session attempt for `session_id`,
     /// in attempt order.
@@ -3272,6 +3315,10 @@ impl MockSessionService {
         self.create_fail_sessions.write().await.remove(session_id);
         self.create_fail_details.write().await.remove(session_id);
         self.create_fail_errors.write().await.remove(session_id);
+        self.create_fail_provider_auth
+            .write()
+            .await
+            .remove(session_id);
     }
 
     async fn clear_archive_failure(&self, session_id: &SessionId) {
@@ -4360,6 +4407,22 @@ impl MockSessionService {
             {
                 return Err(make());
             }
+            if let Some(kind) = self
+                .create_fail_provider_auth
+                .read()
+                .await
+                .get(&session_id)
+                .copied()
+            {
+                return Err(SessionError::provider_auth_failure(
+                    meerkat_core::service::SessionProviderAuthFailure {
+                        kind,
+                        provider: meerkat_core::Provider::OpenAI,
+                        realm_id: None,
+                        binding_id: None,
+                    },
+                ));
+            }
             let detail = self
                 .create_fail_details
                 .read()
@@ -4887,6 +4950,13 @@ impl MockSessionService {
                 .and_then(|build| build.compaction_curator_override.as_ref())
                 .cloned(),
         );
+        self.create_with_dispatch_admissions.write().await.push((
+            session_id.clone(),
+            req.build
+                .as_ref()
+                .and_then(|build| build.tool_dispatch_admission.as_ref())
+                .cloned(),
+        ));
         if let Some(dispatcher) = external_tools {
             // A session service that builds its agent through the agent
             // factory binds the member's tools to the session's mob operator
@@ -8953,6 +9023,7 @@ fn sample_definition() -> MobDefinition {
             model: "claude-opus-4-8".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -8991,6 +9062,7 @@ fn sample_definition() -> MobDefinition {
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -20079,6 +20151,33 @@ async fn test_destroy_detaches_mob_owned_session_ingress_before_runtime_destroy(
     );
 }
 
+/// The executor contract for the mob's session executor: a boundary cancel
+/// the runtime loop applies while no run is active is a no-op, so the
+/// member's session keeps serving input.
+#[tokio::test]
+async fn mob_session_executor_idle_boundary_cancel_conformance() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    // Turn-driven: the member's runtime is attached with no run between
+    // turns, so only the check's own prompt runs on it.
+    let session_id = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-idle-boundary-cancel"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn a turn-driven session-backed member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+    meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(&adapter, &session_id)
+        .await;
+    handle.destroy().await.expect("destroy the mob");
+}
+
 #[tokio::test]
 async fn test_shared_runtime_two_mobs_destroy_without_cross_delivered_signals() {
     let service = Arc::new(MockSessionService::new());
@@ -28346,6 +28445,49 @@ async fn spawn_bound_worker(handle: &MobHandle, member: &AgentIdentity) {
         .spawn_spec(spec)
         .await
         .expect("spawn the bound worker");
+}
+
+/// A member of a profile that names an auth binding builds through that
+/// binding, and a spawn that names its own binding wins over the profile's.
+#[tokio::test]
+async fn a_profile_auth_binding_builds_its_member_and_a_spawn_binding_wins() {
+    let profile_binding = meerkat_core::AuthBindingRef {
+        realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+        binding: meerkat_core::BindingId::parse("profile_named").expect("binding id"),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
+    };
+    let mut definition = bound_respawn_definition("profile-binding");
+    match definition.profiles.get_mut(&ProfileName::from("worker")) {
+        Some(ProfileBinding::Inline(profile)) => {
+            profile.auth_binding = Some(profile_binding.clone());
+        }
+        _ => panic!("an inline worker profile"),
+    }
+    let (handle, service) = create_test_mob(definition).await;
+
+    let profile_bound = AgentIdentity::from("profile-bound-worker");
+    let mut spec = SpawnMemberSpec::new("worker", profile_bound.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn on the profile's binding");
+    assert_eq!(
+        last_member_build(&service, &profile_bound)
+            .await
+            .auth_binding,
+        Some(profile_binding),
+        "a spawn that names no binding builds through the profile's"
+    );
+
+    let spawn_bound = AgentIdentity::from("spawn-bound-worker");
+    spawn_bound_worker(&handle, &spawn_bound).await;
+    assert_eq!(
+        last_member_build(&service, &spawn_bound).await.auth_binding,
+        Some(scoped_auth_binding()),
+        "the spawn's own binding wins over the profile's"
+    );
 }
 
 /// A default respawn keeps the auth binding its predecessor's credentials
@@ -44006,9 +44148,22 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
         )
         .await
         .expect_err("comms_name mismatch should be rejected for explicit resume");
+    // The session was created under member `not-w-resume`'s comms name, so it
+    // is that member's: the refusal is typed and names it.
     assert!(
-        error.to_string().contains("persisted comms_name"),
-        "explicit member resume should fail with the comms_name mismatch"
+        matches!(
+            &error,
+            MobError::ResumeSessionBoundToAnotherMember {
+                session_id: bound_session,
+                member_id,
+                bound_mob_id,
+                bound_member_id,
+            } if bound_session == &session_id
+                && member_id.as_str() == "w-resume"
+                && bound_mob_id == &test_mob_id()
+                && bound_member_id.as_str() == "not-w-resume"
+        ),
+        "explicit member resume should fail with the typed comms_name mismatch: {error:?}"
     );
 }
 
@@ -61631,6 +61786,63 @@ async fn test_fanout_emits_per_target_and_aggregate_completion_events() {
     assert_eq!(
         aggregate_completed, 1,
         "fanout should emit a single aggregate StepCompleted event"
+    );
+}
+
+/// An open approval branch runs only its decision's approved work: it is an
+/// active member of its grantee's role, and a role-wide flow step of that
+/// role selects the grantee, never the branch.
+#[tokio::test]
+async fn a_role_wide_flow_step_never_selects_an_open_approval_branch() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(2_000, 8)).await;
+    let grantee = AgentIdentity::from("w-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), grantee.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the grantee");
+    let decision = meerkat_core::approval::decision::DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new("flow-target")
+            .expect("subject key"),
+    );
+    let (branch, _) = handle
+        .open_approval_branch(&grantee, &decision)
+        .await
+        .expect("the approval branch opens");
+    assert!(
+        handle.list_members().await.iter().any(|entry| {
+            entry.agent_identity == branch
+                && entry.role.as_str() == "worker"
+                && entry.status == MobMemberStatus::Active
+        }),
+        "the branch is an active member of its grantee's role"
+    );
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({ "case": "approval-branch" }),
+        )
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    let events = handle.events().replay_all().await.expect("replay");
+    let mut targets: Vec<AgentIdentity> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::StepDispatched {
+                run_id: id, target, ..
+            } if id == &run_id => Some(target.identity.clone()),
+            _ => None,
+        })
+        .collect();
+    targets.sort();
+    targets.dedup();
+    assert_eq!(
+        targets,
+        vec![grantee],
+        "the role-wide step selected the grantee only"
     );
 }
 
@@ -86720,7 +86932,8 @@ async fn test_policy_auto_spawn_ignores_customized_effective_profile_after_autho
 }
 
 #[tokio::test]
-async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn_builds() {
+async fn test_spawn_member_customizer_answers_only_the_admission_of_a_policy_auto_spawn_and_covers_respawn_builds()
+ {
     let customizer = RecordingSpawnCustomizer::new();
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
@@ -86800,11 +87013,14 @@ async fn test_spawn_member_customizer_skips_policy_auto_spawn_and_covers_respawn
     );
 
     let calls = customizer.calls();
-    assert!(
+    assert_eq!(
         calls
             .iter()
-            .all(|ctx| ctx.spawn_source != SpawnSource::PolicySpawn),
-        "policy auto-spawn must not invoke the build customizer after generated resolution"
+            .filter(|ctx| ctx.spawn_source == SpawnSource::PolicySpawn)
+            .count(),
+        1,
+        "a policy auto-spawn asks the customizer once, for its tool dispatch admission alone: \
+         nothing else it installs (the tools and the prompt above) is applied"
     );
     assert!(
         calls
@@ -88917,6 +89133,7 @@ async fn test_spawn_realm_ref_resolves_from_store() {
         model: "claude-sonnet-4-5".into(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -91873,7 +92090,9 @@ fn mob_runtime_parity_field_value(
         // Identity entries: the parity probes declare none.
         | "spawn_exec_entry_custody"
         | "identity_entry_retiring"
-        | "identity_entry_adopting" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "identity_entry_adopting"
+        // The downgrade cycle: the parity probes purge no row.
+        | "identity_entry_rowless" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
         // Created identity entries, from the runtime's formal state.
         "identity_entry_tombstones" => Some(MobRuntimeParityExprValue::Set(
             snapshot.identity_entry_tombstones.clone(),
@@ -91909,13 +92128,22 @@ fn mob_runtime_parity_field_value(
         | "member_rotation_profile_names"
         | "identity_entry_origins"
         | "identity_entry_unseated"
-        | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        | "identity_entry_archived_sessions"
+        // Owned edges: the parity probes declare none.
+        | "identity_edge_owners" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        // The dispatch admission lineage record: the parity probes seat no
+        // member under a host's tool dispatch admission.
+        "member_dispatch_admission_lineage" => {
+            Some(MobRuntimeParityExprValue::Map(BTreeMap::new()))
+        }
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
         "boot_plan_sealed"
         // The declared apply's open fact: the parity probes open no apply.
-        | "declared_apply_open" => Some(MobRuntimeParityExprValue::Bool(false)),
+        | "declared_apply_open"
+        // The downgrade cycle's purge: the parity probes purge nothing.
+        | "identity_rows_purged" => Some(MobRuntimeParityExprValue::Bool(false)),
         "member_restore_policy" => Some(MobRuntimeParityExprValue::String("OnDemand".to_string())),
         "composition_authority" => Some(MobRuntimeParityExprValue::String(
             "Authoritative".to_string(),
@@ -92712,10 +92940,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::ApprovalBranchReserved { .. } => "approval_branch_reserved".to_string(),
         MobError::IdentityChangeRefused { refusal } => {
             format!("identity_change_refused:{}", refusal.kind())
         }
         MobError::IdentityArchived { .. } => "identity_archived".to_string(),
+        MobError::OwnedIdentityEdge { .. } => "owned_identity_edge".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()
@@ -92733,6 +92963,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::DeliveryInteractionConflict { .. } => "delivery_interaction_conflict".to_string(),
         MobError::ForkInstructionRefused { .. } => "fork_instruction_refused".to_string(),
         MobError::ForkContextTooLarge { .. } => "fork_context_too_large".to_string(),
+        MobError::DispatchAdmissionRequired { .. } => "dispatch_admission_required".to_string(),
         MobError::HostFeaturesProbeFailed { .. } => "host_features_probe_failed".to_string(),
         MobError::IncarnationInconsistent { .. } => "incarnation_inconsistent".to_string(),
         MobError::IncarnationDestroyed { .. } => "incarnation_destroyed".to_string(),
@@ -92822,6 +93053,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),
+        MobError::ResumeSessionBoundToAnotherMember { .. } => {
+            "resume_session_bound_to_another_member".to_string()
+        }
         MobError::RuntimeEffectRefused {
             kind, refusal_code, ..
         } => format!("runtime_effect_refused:{kind}:{refusal_code}"),
@@ -102409,6 +102643,10 @@ mod fence_gap_member;
 /// refusal and shortfall is typed.
 #[cfg(not(target_arch = "wasm32"))]
 mod flow_role_targets;
+/// A fork of a member whose build runs under a host's tool dispatch
+/// admission runs under one the host derives for it, at every build.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod fork_dispatch_admission;
 /// #1497 fork job terminals are committed once and validated on every read.
 mod fork_job_terminal;
 /// Producer bridge Part B: held spawns.

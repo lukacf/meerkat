@@ -53,6 +53,7 @@ impl HelperFixture {
                 .source
                 .grants()
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &native.grant_administrator,
                     parent.last().unwrap(),
                     id(label),
@@ -573,6 +574,7 @@ async fn helper_review_lifetime_publication_change_still_refuses_entry_after_wai
                     .source
                     .grants()
                     .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
                         &fixture.installed.application.native.grant_administrator,
                         fixture
                             .association

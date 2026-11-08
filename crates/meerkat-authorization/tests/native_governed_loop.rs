@@ -596,6 +596,7 @@ async fn generated_grant_denial_reaches_controller_and_permitted_tool_finishes_s
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -605,6 +606,7 @@ async fn generated_grant_denial_reaches_controller_and_permitted_tool_finishes_s
         .expect("actual controller lineage with unrestricted lifetime");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -638,6 +640,7 @@ async fn generated_grant_denial_reaches_controller_and_permitted_tool_finishes_s
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

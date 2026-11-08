@@ -44,7 +44,7 @@ use super::dsl::{
 };
 use super::request::{ToolGrantIssueBody, ToolGrantRequestHost};
 use super::{HostToolGrantClock, ToolGrantClock, ToolGrantPolicy};
-use crate::store::{RuntimeStore, RuntimeStoreError};
+use crate::store::{QuarantinedToolGrant, RuntimeStore, RuntimeStoreError};
 
 /// A grant's status, as its stored row records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +482,43 @@ fn unavailable(error: &ToolGrantServiceError) -> ToolGrantRefusal {
     }
 }
 
+/// The row a list reports for a grant whose scope the store quarantined:
+/// its subject and target are unknown, so every subject's list reports it,
+/// among the rows that admit nothing.
+fn quarantined_row(grant: &QuarantinedToolGrant) -> UnreadableToolGrant {
+    UnreadableToolGrant {
+        grant_id: grant
+            .grant_id
+            .clone()
+            .unwrap_or_else(|| grant.refusal.scope.clone()),
+        detail: format!(
+            "the store quarantined the grant's scope, so its subject and target are unknown: {}",
+            grant.refusal
+        ),
+    }
+}
+
+/// The refusal of a call no known live grant admits while the store holds
+/// grants it quarantined: their targets are unknown, so any of them may
+/// have admitted it. Ranked as an unavailable read, below an expired or a
+/// revoked covering grant.
+fn quarantined_refusal(quarantined: &[QuarantinedToolGrant]) -> ToolGrantRefusal {
+    let grants: Vec<String> = quarantined
+        .iter()
+        .map(|grant| {
+            let id = grant.grant_id.as_deref().unwrap_or(&grant.refusal.scope);
+            format!("{id}: {}", grant.refusal)
+        })
+        .collect();
+    ToolGrantRefusal::Unavailable {
+        detail: format!(
+            "tool grants the store quarantined may cover this call, and their rows cannot be \
+             read until each scope is repaired in the store and the realm is reopened ({})",
+            grants.join("; ")
+        ),
+    }
+}
+
 /// A served session's model-request boundary, adjudicated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BoundaryAdjudication {
@@ -523,14 +560,17 @@ pub struct ToolGrantListing {
 }
 
 /// The rows filed under some subjects: the readable ones, and the ones this
-/// binary cannot read.
+/// binary cannot read, and the grants the store quarantined, whose subject
+/// is unknown.
 struct SubjectRows {
     readable: Vec<ReadRow>,
     unreadable: Vec<UnreadableToolGrant>,
+    quarantined: Vec<QuarantinedToolGrant>,
 }
 
 impl SubjectRows {
-    /// Log the rows this binary cannot read: they admit nothing.
+    /// Log the rows this binary cannot read and the grants the store
+    /// quarantined: they admit nothing.
     fn warn_unreadable(&self, adjudication: &'static str) {
         for row in &self.unreadable {
             tracing::warn!(
@@ -538,6 +578,14 @@ impl SubjectRows {
                 detail = %row.detail,
                 adjudication,
                 "an unreadable tool grant row admits nothing"
+            );
+        }
+        for grant in &self.quarantined {
+            tracing::warn!(
+                grant_id = ?grant.grant_id,
+                refusal = %grant.refusal,
+                adjudication,
+                "a tool grant whose scope the store quarantined admits nothing"
             );
         }
     }
@@ -921,7 +969,9 @@ impl ToolGrantService {
     }
 
     /// Every grant of `subject`, each due one settled as expired first, and
-    /// every row of the subject this binary cannot read.
+    /// every row of the subject this binary cannot read, with every grant
+    /// whose scope the store quarantined (its subject is unknown, so every
+    /// subject's list reports it there).
     ///
     /// # Errors
     /// Store and clock failures.
@@ -996,6 +1046,7 @@ impl ToolGrantService {
         let now_ms = self.now_ms()?;
         let mut grants = Vec::with_capacity(rows.readable.len());
         let mut unreadable = rows.unreadable;
+        unreadable.extend(rows.quarantined.iter().map(quarantined_row));
         let mut next_deadline_ms: Option<u64> = None;
         for read in rows.readable {
             let (row, _) = match apply_and_commit(
@@ -1123,8 +1174,10 @@ impl ToolGrantService {
     ///
     /// # Errors
     /// The refusal: no live grant covers the name (in the call's run, for a
-    /// run-scoped grant), the covering grant expired or was revoked, or the
-    /// grants could not be read.
+    /// run-scoped grant), the covering grant expired or was revoked, the
+    /// grants could not be read, or no known grant admits it while the store
+    /// holds grants it quarantined (their targets are unknown): `Unavailable`,
+    /// naming them.
     pub(crate) async fn admit_call(
         &self,
         subjects: &[ToolGrantSubjectKey],
@@ -1154,9 +1207,15 @@ impl ToolGrantService {
             run_id: run_id.clone(),
         };
         // Adjudicate every covering grant at this one reading before
-        // anything else awaits: one admitted grant admits the call.
+        // anything else awaits: one admitted grant admits the call. With no
+        // covering grant the call needs one, unless the store quarantined
+        // grants whose targets are unknown: one of them may have admitted it.
         let mut observed_ends = Vec::new();
-        let mut refusal = ToolGrantRefusal::Required;
+        let mut refusal = if rows.quarantined.is_empty() {
+            ToolGrantRefusal::Required
+        } else {
+            quarantined_refusal(&rows.quarantined)
+        };
         // The subject whose log records the refusal: the explaining grant's,
         // else the session's.
         let mut refusal_subject = subjects.first().cloned();
@@ -1451,7 +1510,9 @@ async fn load_row(
 }
 
 /// Every row filed under `subjects`: the readable ones, and the ones this
-/// binary cannot decode, which admit nothing and block nothing.
+/// binary cannot decode, which admit nothing and block nothing; and the
+/// grants the store quarantined, whose subject is unknown, so that every
+/// subject's read carries them.
 async fn subject_rows(
     store: &dyn RuntimeStore,
     subjects: &[ToolGrantSubjectKey],
@@ -1459,6 +1520,7 @@ async fn subject_rows(
     let mut rows = SubjectRows {
         readable: Vec::new(),
         unreadable: Vec::new(),
+        quarantined: Vec::new(),
     };
     for subject in subjects {
         for (grant_id, bytes) in store.list_tool_grants(subject.as_str()).await? {
@@ -1475,6 +1537,7 @@ async fn subject_rows(
             }
         }
     }
+    rows.quarantined = store.quarantined_tool_grants();
     Ok(rows)
 }
 

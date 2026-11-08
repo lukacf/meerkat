@@ -293,6 +293,10 @@ impl MobCommand {
             | Self::CommitFlowFrameStorePlan { .. }
             | Self::ProjectMachineInput { .. }
             | Self::ApplyMachineInputEffects { .. }
+            // A fork seat's dispatch admission: the handle's fork paths drive
+            // both after their own admission (`admit_fork_member`).
+            | Self::ObserveForkSourceDispatchLineage { .. }
+            | Self::ResolveSeatDispatchAdmission { .. }
             | Self::ValidateCommandAuthority { .. }
             | Self::PruneStaleMemberOperatorRequests { .. }
             | Self::ReserveRemoteTurnObligation { .. }
@@ -608,6 +612,10 @@ impl MobCommand {
             | Self::CommitFlowFrameStorePlan { .. }
             | Self::ProjectMachineInput { .. }
             | Self::ApplyMachineInputEffects { .. }
+            // A fork seat's dispatch admission: the handle's fork paths drive
+            // both after their own admission (`admit_fork_member`).
+            | Self::ObserveForkSourceDispatchLineage { .. }
+            | Self::ResolveSeatDispatchAdmission { .. }
             | Self::ValidateCommandAuthority { .. }
             | Self::PruneStaleMemberOperatorRequests { .. }
             | Self::ReserveRemoteTurnObligation { .. }
@@ -980,6 +988,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ApplyMachineInputEffects { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ObserveForkSourceDispatchLineage { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveSeatDispatchAdmission { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ValidateCommandAuthority { reply_tx } => {

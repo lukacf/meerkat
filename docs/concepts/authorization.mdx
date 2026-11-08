@@ -239,8 +239,13 @@ owner then executes the held request at most once.
 - **One subject digest.** A decision binds one canonical rendering of the held
   request. Core computes its digest from the rendering, and refuses a
   presentation, decision or review that names another digest. A presentation
-  counts only when it shows every canonical part of the rendering to the party
-  that decides now.
+  counts only when it is complete for the party that decides now: it shows
+  every canonical part of the rendering, or, from a surface with a size
+  limit, it is a summary that says it is shortened with a link to the full
+  presentation, and that link served the whole, unchanged rendering (its
+  digest is the subject digest). A summary without such a link, or whose
+  link served a changed rendering, is `presentation_incomplete`: nothing is
+  decided on a silently truncated presentation.
 - **Attested decisions.** A human decides for the decision's approver id with
   an authenticated decision event and its evidence; the decider's eligibility is
   checked when the decision commits, the requester never decides its own
@@ -257,7 +262,11 @@ owner then executes the held request at most once.
   recorded or carried by the event) is refused as
   `decided_before_presentation`; one observed in the same millisecond is
   accepted. The decision's machine makes this check; with no presentation at
-  all, the decision stays `presentation_incomplete`. The two times come from
+  all, the decision stays `presentation_incomplete`. It also decides whether
+  a presentation the event carries counts: only a complete presentation of
+  the held subject to the approver does (as for a recorded one), any other
+  counts as none, and only a counted one is kept with the decision. The two
+  times come from
   different clocks: the observed time is the ingress's (a provider's message
   timestamp, for example), and a presentation's time is the host's. An
   ingress clock that truncates (to whole seconds, for example) or runs behind

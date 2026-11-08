@@ -2435,6 +2435,34 @@ mod tests {
         );
     }
 
+    /// A credential source that cannot answer now (a token exchange outage)
+    /// keeps its typed kind on the session error, and its reason stays out
+    /// of the public message: a caller reads `source_unavailable`, a kind
+    /// that clears on its own, and can build again later.
+    #[test]
+    fn a_source_outage_build_failure_keeps_its_kind() {
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::LlmClient(meerkat_client::FactoryError::ProviderAuth(
+                meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                    meerkat_core::AuthError::SourceUnavailable {
+                        reason: "sentinel-exchange-answer".to_string(),
+                    },
+                ),
+            )),
+            Some(Provider::OpenAI),
+            None,
+        );
+
+        assert!(!error.to_string().contains("sentinel-exchange-answer"));
+        let failure = error
+            .provider_auth_failure_data()
+            .expect("a typed provider-auth failure");
+        assert_eq!(failure.kind, meerkat_core::AuthErrorKind::SourceUnavailable);
+        assert!(failure.kind.clears_on_its_own());
+        let data = error.structured_data().expect("structured auth failure");
+        assert_eq!(data["kind"], "source_unavailable");
+    }
+
     struct MockLlmClient {
         delta: &'static str,
     }
@@ -2809,6 +2837,22 @@ mod tests {
         }
         async fn patch(
             &self,
+            _delta: meerkat_core::config::ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), meerkat_core::config::ConfigError> {
+            Ok(())
+        }
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
             _delta: meerkat_core::config::ConfigDelta,
         ) -> Result<Config, meerkat_core::config::ConfigError> {
             Err(meerkat_core::config::ConfigError::InternalError(

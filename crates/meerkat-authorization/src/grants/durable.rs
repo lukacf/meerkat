@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_authorization_contracts::grant::GrantAuthorityIncarnation;
+use meerkat_core::{AdmissionFence, AdmissionGuard};
 use serde::{Deserialize, Serialize};
 
 use super::dsl::{
@@ -61,8 +62,17 @@ pub struct GrantOwnerChange {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum GrantOwnerChangeKind {
-    Issued { record: GrantRecord },
-    Revoked { grant_id: EvidenceId },
+    Issued {
+        record: GrantRecord,
+    },
+    Revoked {
+        grant_id: EvidenceId,
+    },
+    /// One use of an approval-carried grant was spent. A reader that
+    /// predates approval-carried grants refuses a store holding one.
+    Consumed {
+        grant_id: EvidenceId,
+    },
 }
 
 impl GrantOwnerChange {
@@ -106,6 +116,12 @@ pub enum GrantStoreError {
     Unavailable,
     #[error("grant owner store contents are corrupt")]
     Corrupt,
+    /// Refused before anything was written: the operation's admission guard
+    /// does not hold the store's admission fence
+    /// ([`GrantOwnerStore::admission_fence`]). The change is certainly
+    /// absent.
+    #[error("grant owner store refused the write: the operation does not hold its admission fence")]
+    AdmissionFence,
 }
 
 /// Host storage custody for exactly one grant owner.
@@ -126,16 +142,36 @@ pub enum GrantStoreError {
 ///
 /// `append` returning `Ok` acknowledges the change: it was completely written
 /// and flushed to the store's advertised durability, and a later `load` must
-/// return it. `Refused` proves absence. Any other error is uncertain: the owner
-/// then becomes unavailable until restart, and a later `load` may or may not
-/// return that change. `load` never returns an incomplete record.
+/// return it. `Refused` and `AdmissionFence` prove absence. Any other error is
+/// uncertain: the owner then becomes unavailable until restart, and a later
+/// `load` may or may not return that change. `load` never returns an
+/// incomplete record, and never writes.
+///
+/// A store an admission reads names its admission fence
+/// ([`Self::admission_fence`], `meerkat_core::realm_admission`): `create`
+/// and `append` take the operation's guard and refuse with `AdmissionFence`,
+/// before writing, when it does not hold that fence. A store with no fence
+/// accepts any guard, [`AdmissionGuard::none`] included.
 pub trait GrantOwnerStore: Send + Sync {
     fn load(&self) -> Result<Option<DurableGrantOwner>, GrantStoreError>;
     /// Record a new owner identity. Must refuse with `Occupied` when any owner
     /// is already retained.
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError>;
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError>;
+    fn create(
+        &self,
+        guard: &AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError>;
+    fn append(
+        &self,
+        guard: &AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError>;
     fn release(&self);
+    /// The fence whose holder alone writes this store; `None` for a store
+    /// no admission reads.
+    fn admission_fence(&self) -> Option<AdmissionFence> {
+        None
+    }
 }
 
 /// Failure class a store's acknowledgement survives.
@@ -167,6 +203,12 @@ pub enum GrantDurabilityError {
     RestartRequired,
     #[error("grant owner configuration refused")]
     Refused,
+    /// The store refused the new owner before writing it: the operation's
+    /// admission guard does not hold the store's admission fence.
+    #[error(
+        "grant owner store refused the new owner: the operation does not hold its admission fence"
+    )]
+    AdmissionFence,
 }
 
 pub(super) struct DurableCustody {
@@ -197,16 +239,24 @@ impl DurableCustody {
         Ok(())
     }
 
+    /// The store's admission fence, if it has one.
+    pub(super) fn admission_fence(&self) -> Option<AdmissionFence> {
+        self.store.admission_fence()
+    }
+
     /// Validate a recovered candidate, acknowledge, then install. A refused or
     /// unacknowledged change leaves the retained owner untouched. An uncertain
     /// write makes this owner unavailable and publishes that availability
     /// change through the caller's reservation, so every earlier observation
     /// fails its final currentness check. The candidate itself is never
-    /// installed or published.
+    /// installed or published. The store refuses a `guard` that does not
+    /// hold its admission fence before it writes
+    /// ([`GrantRefusal::AdmissionFence`]): nothing is appended.
     pub(super) fn apply(
         &self,
         owner: &mut GrantAuthorityMachineAuthority,
         publication: &mut LocalPublicationGuard<'_>,
+        guard: &AdmissionGuard,
         input: GrantAuthorityInput,
     ) -> Result<(), GrantRefusal> {
         self.check_available()?;
@@ -223,15 +273,19 @@ impl DurableCustody {
                 [GrantAuthorityEffect::Revoked { grant_id }] => GrantOwnerChangeKind::Revoked {
                     grant_id: grant_id.clone(),
                 },
+                [GrantAuthorityEffect::UseConsumed { leaf }] => GrantOwnerChangeKind::Consumed {
+                    grant_id: leaf.id.clone(),
+                },
                 _ => return Err(GrantRefusal::Unavailable),
             };
             let change = GrantOwnerChange {
                 revision: candidate.state().revision,
                 kind,
             };
-            match self.store.append(&change) {
+            match self.store.append(guard, &change) {
                 Ok(()) => {}
                 Err(GrantStoreError::Refused) => return Err(GrantRefusal::Unavailable),
+                Err(GrantStoreError::AdmissionFence) => return Err(GrantRefusal::AdmissionFence),
                 Err(_) => {
                     self.failed.store(true, Ordering::Release);
                     // Invalidates every observation of the owner. Poisoned,
@@ -279,12 +333,27 @@ fn rebuild(retained: DurableGrantOwner) -> Result<GrantAuthorityMachineAuthority
                 {
                     return Err(());
                 }
+                // An approval-carried record starts with no use spent and
+                // carries its decision, as its issuance recorded them.
+                if let Some(approval) = &record.approval {
+                    if !state.carried_decisions.insert(approval.decision_id.clone()) {
+                        return Err(());
+                    }
+                    state.spent.insert(record.id.clone(), 0);
+                }
                 state.records.insert(record.id.clone(), record);
             }
             GrantOwnerChangeKind::Revoked { grant_id } => {
                 if !state.records.contains_key(&grant_id) || !state.revoked.insert(grant_id) {
                     return Err(());
                 }
+            }
+            GrantOwnerChangeKind::Consumed { grant_id } => {
+                let Some(spent) = state.spent.get_mut(&grant_id) else {
+                    return Err(());
+                };
+                *spent = spent.checked_add(1).ok_or(())?;
+                state.consumed = state.consumed.checked_add(1).ok_or(())?;
             }
         }
         state.revision = change.revision;
@@ -299,7 +368,11 @@ impl LocalGrantAuthority {
     /// before they become visible. The store must be empty: an existing owner
     /// is restored with `restore`, never replaced. The new owner mints a fresh
     /// incarnation, so references from any lost owner remain unresolvable.
+    /// `guard` must hold the store's admission fence, if it has one
+    /// ([`GrantDurabilityError::AdmissionFence`] otherwise, with nothing
+    /// written).
     pub fn new_durable(
+        guard: &AdmissionGuard,
         configuration: LocalGrantConfiguration,
         store: Arc<dyn GrantOwnerStore>,
         publication: LocalAuthorizationPublication,
@@ -327,10 +400,13 @@ impl LocalGrantAuthority {
                 incarnation: state.incarnation.ok_or(GrantDurabilityError::Refused)?,
             }
         };
-        store.create(&identity).map_err(|error| match error {
-            GrantStoreError::Occupied => GrantDurabilityError::Occupied,
-            _ => GrantDurabilityError::StoreUnavailable,
-        })?;
+        store
+            .create(guard, &identity)
+            .map_err(|error| match error {
+                GrantStoreError::Occupied => GrantDurabilityError::Occupied,
+                GrantStoreError::AdmissionFence => GrantDurabilityError::AdmissionFence,
+                _ => GrantDurabilityError::StoreUnavailable,
+            })?;
         authority.durable = Some(DurableCustody::new(store));
         Ok(authority)
     }
@@ -367,6 +443,7 @@ impl LocalGrantAuthority {
             publication,
             clock,
             durable: Some(DurableCustody::new(store)),
+            approval_currentness: None,
         })
     }
 }
@@ -418,18 +495,20 @@ pub(crate) fn with_last_issued_restrictions(
         .rev()
         .find_map(|change| match &mut change.kind {
             GrantOwnerChangeKind::Issued { record } => Some(record),
-            GrantOwnerChangeKind::Revoked { .. } => None,
+            GrantOwnerChangeKind::Revoked { .. } | GrantOwnerChangeKind::Consumed { .. } => None,
         })?;
     record.restrictions = restrictions;
     let copy = std::sync::Arc::new(InMemoryGrantOwnerStore::new());
-    copy.create(&retained.identity).ok()?;
+    let guard = AdmissionGuard::none();
+    copy.create(&guard, &retained.identity).ok()?;
     for change in &retained.changes {
-        copy.append(change).ok()?;
+        copy.append(&guard, change).ok()?;
     }
     copy.release();
     Some(copy)
 }
 
+/// The in-memory store has no admission fence: it accepts any guard.
 impl GrantOwnerStore for InMemoryGrantOwnerStore {
     fn load(&self) -> Result<Option<DurableGrantOwner>, GrantStoreError> {
         let mut retained = self
@@ -444,7 +523,11 @@ impl GrantOwnerStore for InMemoryGrantOwnerStore {
         Ok(owner)
     }
 
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
+    fn create(
+        &self,
+        _guard: &AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
         let mut retained = self
             .retained
             .lock()
@@ -460,7 +543,11 @@ impl GrantOwnerStore for InMemoryGrantOwnerStore {
         Ok(())
     }
 
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        _guard: &AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
         let mut retained = self.retained.lock().map_err(|_| GrantStoreError::Refused)?;
         if !retained.leased {
             return Err(GrantStoreError::Refused);
@@ -493,18 +580,40 @@ impl GrantOwnerStore for InMemoryGrantOwnerStore {
 /// Loading with `OsCrash` first syncs the retained file and its directory, so
 /// a file written under `ProcessCrash` is upgraded before any acknowledgement.
 ///
-/// `load` never restores an incomplete final line. Such a torn tail belongs to
-/// a write whose caller saw a failure or never saw a result; it is physically
-/// truncated under the exclusive lock before any later append. Any other bad
-/// line is corrupt.
+/// `load` never restores an incomplete final line, and never writes. Such a
+/// torn tail belongs to a write whose caller saw a failure or never saw a
+/// result; the first `append` after the `load` physically truncates it, under
+/// the exclusive lock and its own guard, before it writes. Any other bad line
+/// is corrupt.
+///
+/// Every opener states the log's [`GrantLogFence`]. A realm's own grant log,
+/// which an admission reads, is [`GrantLogFence::Realm`]: `create` and
+/// `append` refuse, before writing, a guard that does not hold that fence
+/// ([`GrantStoreError::AdmissionFence`]), [`AdmissionGuard::none`] included.
+/// A log no admission reads is [`GrantLogFence::NotAdmissionRead`] and
+/// accepts any guard.
 pub struct FileGrantOwnerStore {
     path: PathBuf,
     durability: GrantStoreDurability,
+    fence: GrantLogFence,
     writer: Mutex<Option<FileWriter>>,
     /// Test seam run after the identity file is published under its name and
     /// before `create` returns.
     #[cfg(test)]
     after_publish: Mutex<Option<Box<dyn FnOnce(&Path) + Send>>>,
+}
+
+/// Whether an admission reads a grant log, and so which fence its writers
+/// hold (`meerkat_core::realm_admission`). Every [`FileGrantOwnerStore`]
+/// states it at construction; there is no default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantLogFence {
+    /// A realm's own grant log, which an admission reads: only an operation
+    /// whose guard holds this fence, the realm's fence R, writes it.
+    Realm(AdmissionFence),
+    /// A grant log no admission reads, such as a host's private store: its
+    /// writers take no fence, and any guard is accepted.
+    NotAdmissionRead,
 }
 
 impl std::fmt::Debug for FileGrantOwnerStore {
@@ -521,6 +630,9 @@ struct FileWriter {
     next_revision: u64,
     /// Set after an uncertain write; the writer refuses everything after it.
     poisoned: bool,
+    /// The length of the complete lines `load` read, while a torn tail
+    /// follows them: the next `append` truncates the file to it first.
+    torn_tail_at: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -531,14 +643,27 @@ enum FileLine {
 }
 
 impl FileGrantOwnerStore {
+    /// The grant log at `path`, whose writers hold `fence`.
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub fn new(path: impl Into<PathBuf>, fence: GrantLogFence) -> Self {
         Self {
             path: path.into(),
             durability: GrantStoreDurability::OsCrash,
+            fence,
             writer: Mutex::new(None),
             #[cfg(test)]
             after_publish: Mutex::new(None),
+        }
+    }
+
+    /// Refuse a guard that does not hold this store's fence, before
+    /// anything is written.
+    fn require_covered(&self, guard: &AdmissionGuard) -> Result<(), GrantStoreError> {
+        match &self.fence {
+            GrantLogFence::Realm(fence) => guard
+                .covers(fence)
+                .map_err(|_| GrantStoreError::AdmissionFence),
+            GrantLogFence::NotAdmissionRead => Ok(()),
         }
     }
 
@@ -637,10 +762,9 @@ impl GrantOwnerStore for FileGrantOwnerStore {
                 FileLine::Identity(_) => Err(GrantStoreError::Corrupt),
             })
             .collect::<Result<_, _>>()?;
-        if complete != bytes.len() {
-            file.set_len(complete as u64)
-                .map_err(|_| GrantStoreError::Unavailable)?;
-        }
+        // A torn tail stays on disk: a load never writes. The first append
+        // truncates it, under its own guard, before it writes.
+        let torn_tail_at = (complete != bytes.len()).then_some(complete as u64);
         // The file may have been created or written under `ProcessCrash`.
         // Before this store acknowledges anything as `OsCrash`, make the
         // retained contents and the file name itself durable. This runs once
@@ -655,11 +779,17 @@ impl GrantOwnerStore for FileGrantOwnerStore {
             file,
             next_revision: expected_revision(&retained).ok_or(GrantStoreError::Corrupt)?,
             poisoned: false,
+            torn_tail_at,
         });
         Ok(Some(retained))
     }
 
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
+    fn create(
+        &self,
+        guard: &AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
+        self.require_covered(guard)?;
         let mut writer = self
             .writer
             .lock()
@@ -711,11 +841,17 @@ impl GrantOwnerStore for FileGrantOwnerStore {
             file,
             next_revision: 1,
             poisoned: false,
+            torn_tail_at: None,
         });
         Ok(())
     }
 
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        guard: &AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
+        self.require_covered(guard)?;
         let mut writer = self.writer.lock().map_err(|_| GrantStoreError::Refused)?;
         let writer = writer.as_mut().ok_or(GrantStoreError::Refused)?;
         if writer.poisoned || change.revision != writer.next_revision {
@@ -726,6 +862,15 @@ impl GrantOwnerStore for FileGrantOwnerStore {
             .checked_add(1)
             .ok_or(GrantStoreError::Refused)?;
         let bytes = encode(&FileLine::Change(change.clone()))?;
+        // The torn tail `load` left goes first. A failed truncation wrote no
+        // part of this change: it is refused, and the next append tries again.
+        if let Some(complete) = writer.torn_tail_at {
+            writer
+                .file
+                .set_len(complete)
+                .map_err(|_| GrantStoreError::Refused)?;
+            writer.torn_tail_at = None;
+        }
         let written = writer
             .file
             .write_all(&bytes)
@@ -750,6 +895,13 @@ impl GrantOwnerStore for FileGrantOwnerStore {
             // Dropping the writer releases the exclusive lock, then closes the
             // file (see `LeaseFile`).
             *writer = None;
+        }
+    }
+
+    fn admission_fence(&self) -> Option<AdmissionFence> {
+        match &self.fence {
+            GrantLogFence::Realm(fence) => Some(fence.clone()),
+            GrantLogFence::NotAdmissionRead => None,
         }
     }
 }

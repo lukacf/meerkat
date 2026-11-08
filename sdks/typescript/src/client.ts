@@ -324,6 +324,8 @@ import type {
   MobFlowsResult as RpcMobFlowsResult,
   MobForceCancelResult as RpcMobForceCancelResult,
   MobForkHelperParams as RpcMobForkHelperParams,
+  MobForkMemberParams as RpcMobForkMemberParams,
+  MobForkMemberResult as RpcMobForkMemberResult,
   MobHelperResult as RpcMobHelperResult,
   MobIngressInteractionParams as RpcMobIngressInteractionParams,
   MobIngressInteractionResult as RpcMobIngressInteractionResult,
@@ -354,6 +356,7 @@ import type {
   MobStatusResult as RpcMobStatusResult,
   MobStreamCloseParams as RpcMobStreamCloseParams,
   MobStreamCloseResult as RpcMobStreamCloseResult,
+  MobStreamCursor as RpcMobStreamCursor,
   MobStreamOpenParams as RpcMobStreamOpenParams,
   MobStreamOpenResult as RpcMobStreamOpenResult,
   MobSubmitWorkParams as RpcMobSubmitWorkParams,
@@ -417,6 +420,7 @@ import {
   type MobBoundedHelperResult,
   type MobHandlingMode,
   type MobForkHelperOptions,
+  type MobForkMemberOptions,
   type MobHelperResult,
   type MobHelperOptions,
   type MobKickoffMemberSnapshot,
@@ -741,6 +745,18 @@ function toolGrantSubject(
   return typeof subject === "string"
     ? { kind: "session", session_id: subject }
     : { kind: "identity", mob_id: subject.mobId, identity: subject.identity };
+}
+
+/** Options for a mob member event subscription. */
+export interface MobMemberEventsOptions {
+  /**
+   * Resume after this position: the `epoch` and `seq` of the last event
+   * received (`subscription.lastEventEpoch` and `subscription.lastEventSeq`).
+   * The stream first replays the events the member still retains after it;
+   * a cursor of another sequence space replays the current space from its
+   * earliest retained event. Without a cursor the stream is live.
+   */
+  cursor?: RpcMobStreamCursor;
 }
 
 interface WireSkillKey {
@@ -2492,9 +2508,11 @@ export class MeerkatClient {
   /**
    * Record what a host presenter showed of a durable decision: the audience,
    * the subject digest shown, the parts shown, the channel and message
-   * references and the host clock reading `at_ms`. It counts only when it
-   * shows every canonical part to the party that decides now. Needs a
-   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * references and the host clock reading `at_ms`; a summary a surface with
+   * a size limit showed adds the `link` it carried (`reference` and
+   * `served_digest`). It counts only when it shows every canonical part, or
+   * its link served the held rendering, to the party that decides now. Needs
+   * a Meerkat 0.9.11 or newer server: an older one answers method not found
    * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async presentDecision(
@@ -4328,6 +4346,47 @@ export class MeerkatClient {
     );
   }
 
+  /**
+   * Fork a member's session at a message boundary into a new member. The new
+   * member `agentIdentity` holds the source's messages before
+   * `options.messageIndex` (its committed end when absent) and takes the
+   * source member's profile and runtime mode unless named. A source whose
+   * turn is in flight is refused with `SESSION_BUSY`, and nothing is seated.
+   */
+  async forkMobMember(
+    mobId: string,
+    sourceMemberId: string,
+    agentIdentity: string,
+    options?: MobForkMemberOptions,
+  ): Promise<RpcMobForkMemberResult> {
+    const params: RpcMobForkMemberParams = {
+      mob_id: mobId,
+      source_member_id: sourceMemberId,
+      agent_identity: agentIdentity,
+    };
+    if (options?.messageIndex != null) params.message_index = options.messageIndex;
+    if (options?.profile != null) params.profile = options.profile;
+    if (options?.runtimeMode != null) params.runtime_mode = options.runtimeMode;
+    const result = (await this.request("mob/fork_member", params)) as unknown as Record<
+      string,
+      unknown
+    >;
+    const context = "Invalid mob/fork_member response";
+    for (const field of ["agent_identity", "member_ref", "session_id", "source_session_id"]) {
+      if (typeof result[field] !== "string" || result[field] === "") {
+        throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+      }
+    }
+    const messageCount = result.message_count;
+    if (typeof messageCount !== "number" || !Number.isSafeInteger(messageCount) || messageCount < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: message_count must be a non-negative integer`,
+      );
+    }
+    return result as unknown as RpcMobForkMemberResult;
+  }
+
   async wireMobMembers(mobId: string, member: string, peer: MobPeerTarget): Promise<void> {
     const payload =
       typeof peer === "string"
@@ -4528,10 +4587,18 @@ export class MeerkatClient {
     );
   }
 
-  async subscribeMobMemberEvents(mobId: string, agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
+  async subscribeMobMemberEvents(
+    mobId: string,
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    const params: RpcMobStreamOpenParams = { mob_id: mobId, agent_identity: agentIdentity };
+    if (options?.cursor != null) {
+      params.cursor = { epoch: options.cursor.epoch, seq: options.cursor.seq };
+    }
     return this.openEventSubscription(
       "mob/stream_open",
-      { mob_id: mobId, agent_identity: agentIdentity },
+      params,
       "mob/stream_close",
       MeerkatClient.parseAgentEventEnvelope,
     );
@@ -5653,10 +5720,12 @@ export class MeerkatClient {
             ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
             : rawEvent;
         const sequence = params.sequence;
+        const epoch = params.epoch;
         const delivery: SubscriptionEvent = {
           event,
           rpcSequence: typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
             ? sequence : undefined,
+          epoch: typeof epoch === "string" && epoch !== "" ? epoch : undefined,
         };
         if (queue && event) {
           queue.put(delivery);

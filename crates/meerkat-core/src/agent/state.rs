@@ -39011,6 +39011,10 @@ mod tests {
                     Err(OperationRefused::new(OperationRefusalKind::MalformedFacts).into())
                 }
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         struct FixtureClient {
@@ -41988,6 +41992,10 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         /// The R3 action, whose review its dispatcher consumes at entry; it
@@ -42473,6 +42481,10 @@ mod tests {
                     {
                         return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
                     }
+                    Ok(())
+                }
+
+                fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
                     Ok(())
                 }
             }
@@ -44291,6 +44303,10 @@ mod tests {
                         }
                         _ => Ok(()),
                     }
+                }
+
+                fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                    Ok(())
                 }
             }
 

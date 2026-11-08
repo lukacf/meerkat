@@ -27,6 +27,7 @@ import type {
   LiveOpenResult,
   LiveStatusResult,
   MobBindHostResult,
+  MobForkMemberResult,
   MobHostStatus,
   MobMemberHistoryResult,
   MobRevokeHostResult,
@@ -48,7 +49,7 @@ import type {
   WireReachability,
   MobStopMemberRunResult,
 } from "./generated/types.js";
-import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
+import type { MeerkatClient, MobMemberEventsOptions, MobMemberLiveOpenOptions } from "./client.js";
 import type { Usage } from "./events.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -302,6 +303,20 @@ export interface MobForkHelperOptions extends MobHelperOptions {
   forkContext?: Record<string, unknown>;
 }
 
+/** Options for a member fork at a message boundary (`mob/fork_member`). */
+export interface MobForkMemberOptions {
+  /**
+   * Where the copied prefix ends, as on `session/fork_at`: the new member's
+   * transcript is the source's messages before this index. Absent takes the
+   * source's committed end.
+   */
+  messageIndex?: number;
+  /** The new member's profile. Absent takes the source member's. */
+  profile?: string;
+  /** The new member's runtime mode. Absent takes the source member's. */
+  runtimeMode?: WireMobRuntimeMode;
+}
+
 export class Member {
   private readonly client: MeerkatClient;
   readonly mobId: string;
@@ -321,8 +336,8 @@ export class Member {
     return this.client.sendMobMemberContent(this.mobId, this.agentIdentity, content, options);
   }
 
-  async events(): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity);
+  async events(options?: MobMemberEventsOptions): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity, options);
   }
 }
 
@@ -532,6 +547,15 @@ export class Mob {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
   }
 
+  /** Fork a member's session at a message boundary into a new member. */
+  async forkMember(
+    sourceMemberId: string,
+    agentIdentity: string,
+    options?: MobForkMemberOptions,
+  ): Promise<MobForkMemberResult> {
+    return this.client.forkMobMember(this.mobId, sourceMemberId, agentIdentity, options);
+  }
+
   async wire(member: string, peer: MobPeerTarget): Promise<void> {
     await this.client.wireMobMembers(this.mobId, member, peer);
   }
@@ -589,8 +613,11 @@ export class Mob {
     await this.client.cancelMobFlow(this.mobId, runId);
   }
 
-  async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity);
+  async subscribeMemberEvents(
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity, options);
   }
 
   async subscribeEvents(): Promise<EventSubscription<AttributedMobEvent>> {

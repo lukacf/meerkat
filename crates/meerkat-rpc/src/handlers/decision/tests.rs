@@ -596,6 +596,80 @@ async fn a_host_presentation_is_recorded_over_the_wire() {
     assert_eq!(error_code(&refused), INVALID_PARAMS);
 }
 
+/// A summary a surface with a size limit showed is presented with its link:
+/// it counts when the link served the held rendering, and the decision's
+/// presentations carry the link. A link that served another rendering is
+/// refused `presentation_incomplete`, and a link field this version does
+/// not know is invalid params.
+#[tokio::test]
+async fn a_linked_summary_is_recorded_over_the_wire_with_its_link() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (router, runtime) = persistent_router(root.path()).await;
+    let held = runtime
+        .decision_service()
+        .hold(hold_request("release", "build-1", "team:owners"), false)
+        .expect("hold");
+    let decision_id = held.decision_id.to_string();
+    let summary = |served: String| {
+        let mut presentation = complete_presentation(2_000);
+        presentation["parts_shown"] = json!([]);
+        presentation["link"] = json!({"reference": "decision-page", "served_digest": served});
+        presentation
+    };
+
+    let stale = call(
+        &router,
+        "decision/present",
+        json!({
+            "decision_id": decision_id,
+            "presentation": summary(Sha256Digest::of(b"another rendering").to_string()),
+        }),
+    )
+    .await;
+    assert_eq!(error_code(&stale), INVALID_PARAMS, "{stale:?}");
+    assert_eq!(
+        error_data(&stale),
+        json!({
+            "kind": "decision_refused",
+            "decision_refusal": {"kind": "presentation_incomplete"},
+        })
+    );
+
+    let mut unknown_field = summary(subject_digest());
+    unknown_field["link"]["note"] = json!("shortened");
+    let refused = call(
+        &router,
+        "decision/present",
+        json!({"decision_id": decision_id, "presentation": unknown_field}),
+    )
+    .await;
+    assert_eq!(error_code(&refused), INVALID_PARAMS, "{refused:?}");
+
+    let presented = result(
+        &call(
+            &router,
+            "decision/present",
+            json!({"decision_id": decision_id, "presentation": summary(subject_digest())}),
+        )
+        .await,
+    );
+    let decision = &presented["decision"];
+    assert_eq!(decision["phase"], "open");
+    assert_eq!(decision["first_presented_to_approver_at_ms"], 2_000);
+    assert_eq!(
+        decision["presentations"],
+        json!([{
+            "audience": {"kind": "approver", "approver_id": "team:owners"},
+            "subject_digest": subject_digest(),
+            "parts_shown": [],
+            "link": {"reference": "decision-page", "served_digest": subject_digest()},
+            "channel_ref": "chat:owners",
+            "message_ref": "message-1",
+            "at_ms": 2_000,
+        }])
+    );
+}
+
 #[tokio::test]
 async fn a_withdraw_on_the_wire_is_the_hosts() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -1585,6 +1659,22 @@ mod operator_connections {
         }
 
         async fn patch(&self, _delta: ConfigDelta) -> Result<Config, ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
+
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
+
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _delta: ConfigDelta,
+        ) -> Result<Config, ConfigError> {
             Err(ConfigError::Validation("unreadable".to_string()))
         }
     }

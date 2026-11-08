@@ -592,6 +592,7 @@ mod api_key_tests {
             E::SlotRefused(R::AccountMismatch),
             E::SlotRefused(R::ContextMismatch),
             E::SlotRefused(R::UnverifiedConnectorPublication),
+            E::AdmissionInProgress,
         ] {
             let expected = error.clone();
             let mapped = credential_save_error(error);
@@ -614,6 +615,7 @@ mod api_key_tests {
             E::TokenStore("private-credential-canary".into()),
             E::AuthLifecycle("private-credential-canary".into()),
             E::LockFailed("private-credential-canary".into()),
+            E::AdmissionFenceUnavailable("private-credential-canary".into()),
         ] {
             let expected = std::mem::discriminant(&error);
             let mapped = credential_save_error(error);
@@ -772,16 +774,21 @@ mod api_key_tests {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
             value: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
             self.saves.fetch_add(1, Ordering::SeqCst);
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
-            self.inner.save(key, value).await
+            self.inner.save(fence, key, value).await
         }
-        async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-            self.inner.clear(key).await
+        async fn clear(
+            &self,
+            fence: &meerkat_core::AdmissionGuard,
+            key: &TokenKey,
+        ) -> Result<(), TokenStoreError> {
+            self.inner.clear(fence, key).await
         }
         async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
             self.inner.list().await
@@ -875,7 +882,9 @@ parent = "owner"
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let storage = crate::RealmOptions {
             context_root: root.into(),
@@ -967,7 +976,9 @@ parent = "owner"
             });
             let persistence = ProviderAuthPersistence::new(
                 held.clone(),
-                Arc::new(FileLockCoordinator::new(root.join("locks"))),
+                Arc::new(FileLockCoordinator::new(
+                    root.join("credentials").join("refresh-locks"),
+                )),
             );
             let storage = crate::RealmOptions {
                 context_root: root.into(),
@@ -1193,7 +1204,9 @@ parent = "owner"
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         startup.factory = startup
             .factory
@@ -1614,6 +1627,8 @@ fn credential_save_error(
             detail: "details withheld".into(),
         },
         E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
+        E::AdmissionInProgress => E::AdmissionInProgress,
+        E::AdmissionFenceUnavailable(_) => E::AdmissionFenceUnavailable("details withheld".into()),
     };
     ConnectError::provider_setup("Store native API-key credential", error)
 }

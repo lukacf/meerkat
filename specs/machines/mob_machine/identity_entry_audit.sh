@@ -1176,6 +1176,7 @@ for witness in \
   "apply:Action property:DeclareOverAdopting" "apply:Action property:SealSparesAdopting" \
   "apply:Action property:TakeOverDeferredBySeal" "apply:Action property:AdoptedEntryEnds" \
   "apply:Action property:AdoptionMarkReplayed" "apply:Action property:SealSparesIntentNamed" \
+  "apply:Action property:SealSparesUnseatedIntentNamed" \
   "apply:Action property:RelistedAfterUnlist" \
   "apply:Action property:Revived" "apply:Action property:RetiredEntryKept" \
   "apply:Action property:FreshAfterForget" "apply:Action property:SealRefusesUnseated" \

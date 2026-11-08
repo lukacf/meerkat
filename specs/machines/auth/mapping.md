@@ -642,6 +642,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `released_not_release_draining`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `adopted_marker_generation_below_credential_generation`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `released_publication_only_without_credential`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 
 <!-- GENERATED_COVERAGE_END -->

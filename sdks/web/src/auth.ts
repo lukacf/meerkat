@@ -152,7 +152,11 @@ export type ExternalAuthFailure =
   | { kind: 'interactive_login_required' }
   | { kind: 'host_owned_unavailable' }
   | { kind: 'io'; detail: string }
-  | { kind: 'other'; detail: string };
+  | { kind: 'other'; detail: string }
+  /** The credential's source cannot answer now (an identity provider or
+   * token endpoint that is down or busy). Unlike `other`, the runtime keeps
+   * this kind as one that clears on its own. */
+  | { kind: 'source_unavailable'; detail: string };
 
 /** Successful resolver result. Leases preserve expiration and metadata across
  * the WASM boundary by using a structured envelope. */

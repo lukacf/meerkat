@@ -176,11 +176,36 @@ pub struct WirePresentationRecord {
     pub max_part_bytes: Option<u32>,
     /// The parts the audience was shown.
     pub parts_shown: Vec<WireCanonicalPart>,
+    /// For a summary presentation, the link it carried to the full
+    /// presentation and the digest of the rendering that link served;
+    /// absent for a presentation of the parts themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<WirePresentationLink>,
     /// Where the presentation was shown.
     pub channel_ref: String,
     pub message_ref: String,
     /// The host's clock reading of the presentation, in UNIX ms.
     pub at_ms: u64,
+}
+
+/// The link a summary presentation carried to the full presentation of a
+/// decision's rendering, and the digest of the rendering that link served
+/// when it was followed. A surface with a size limit shows a summary that
+/// says it is shortened, with such a link; the summary counts as a complete
+/// presentation only when the link served the held rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// Closed for the request that carries it (`DecisionPresentationRequest`).
+// Results carry it too (`WirePresentationRecord`), which no client parses
+// with this type: the server only serializes them.
+#[serde(deny_unknown_fields)]
+pub struct WirePresentationLink {
+    /// Where the link points: the page or document that serves the full
+    /// presentation.
+    pub reference: String,
+    /// The digest of the rendering the link served (`sha256:` and 64
+    /// lowercase hex digits).
+    pub served_digest: String,
 }
 
 /// The durable evidence a decision was decided with. An authentication
@@ -235,6 +260,18 @@ pub struct WireDecisionOutcome {
     pub evidence: WireDecisionEvidence,
 }
 
+/// What an executed decision did, as its kind names it: each field names
+/// one thing its execution committed. An executed `grant.child` decision
+/// names the grant it issued. Read tolerantly: a field this version does
+/// not know is ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireDecisionEffect {
+    /// The id of the grant the execution issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+}
+
 /// One durable decision, as its row stands at the read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -287,6 +324,10 @@ pub struct WireDecision {
     /// The owner's typed refusal of an execution-refused decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_refusal: Option<String>,
+    /// What the executed decision did, as its kind names it; absent for a
+    /// decision that is not executed and for a kind that names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<WireDecisionEffect>,
     /// The row's revision: 1 at the hold, one more at each write.
     pub revision: u64,
     /// The held request, when the read asked for it (`include_request`).
@@ -484,6 +525,11 @@ pub struct DecisionPresentationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_part_bytes: Option<u32>,
     pub parts_shown: Vec<WireCanonicalPart>,
+    /// For a summary a surface with a size limit showed, the link it
+    /// carried to the full presentation and the digest of the rendering
+    /// that link served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<WirePresentationLink>,
     /// Where the rendering was shown.
     pub channel_ref: String,
     pub message_ref: String,
@@ -492,8 +538,9 @@ pub struct DecisionPresentationRequest {
 }
 
 /// `decision/present` parameters: record what a host presenter showed. It
-/// counts only when it shows every canonical part of the held rendering to
-/// the party that decides now.
+/// counts only when it shows every canonical part of the held rendering, or
+/// is a summary whose link served the held rendering, to the party that
+/// decides now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -641,6 +688,103 @@ mod tests {
                 "a decide body naming {field} is refused"
             );
         }
+    }
+
+    /// A presenter's request may carry a summary's link, closed like the
+    /// request; a recorded presentation without a link omits it.
+    #[test]
+    fn a_presentation_link_is_optional_and_closed() {
+        let request = serde_json::json!({
+            "audience": {"kind": "approver", "approver_id": "team:owners"},
+            "subject_digest": "sha256:1",
+            "parts_shown": [],
+            "link": {"reference": "decision-page", "served_digest": "sha256:1"},
+            "channel_ref": "chat:owners",
+            "message_ref": "message-1",
+            "at_ms": 2_000,
+        });
+        let decoded: DecisionPresentationRequest =
+            serde_json::from_value(request.clone()).expect("a request with a link reads");
+        assert_eq!(
+            decoded.link,
+            Some(WirePresentationLink {
+                reference: "decision-page".into(),
+                served_digest: "sha256:1".into(),
+            })
+        );
+        let mut unknown = request;
+        unknown["link"]["note"] = serde_json::json!("shortened");
+        assert!(
+            serde_json::from_value::<DecisionPresentationRequest>(unknown).is_err(),
+            "a link field this version does not know is refused"
+        );
+
+        let record = WirePresentationRecord {
+            audience: WirePresentationAudience::Approver {
+                approver_id: "team:owners".into(),
+            },
+            subject_digest: "sha256:1".into(),
+            max_part_bytes: None,
+            parts_shown: Vec::new(),
+            link: None,
+            channel_ref: "chat:owners".into(),
+            message_ref: "message-1".into(),
+            at_ms: 2_000,
+        };
+        let encoded = serde_json::to_value(&record).expect("encodes");
+        assert!(encoded.get("link").is_none(), "{encoded}");
+    }
+
+    /// A decision's effect is optional and read tolerantly: a decision
+    /// without one omits it, an executed decision's effect keeps the grant
+    /// id it names through a read and a write, a field of the effect this
+    /// version does not know is ignored, and an effect that names nothing
+    /// this version knows still reads.
+    #[test]
+    fn a_decision_effect_is_optional_and_read_tolerantly() {
+        let decision = serde_json::json!({
+            "decision_id": "decision:0",
+            "kind": "grant.child",
+            "subject_key": "subject:0",
+            "operation_id": "grant.child:decision:0",
+            "request_digest": "sha256:0",
+            "requester": "principal:0",
+            "approver_id": "data-owner",
+            "phase": "executed",
+            "stage": "human",
+            "notice": "owed",
+            "deadline_at_ms": 2,
+            "created_at_ms": 1,
+            "subject_digest": "sha256:1",
+            "renderer": "grant.render-v1",
+            "permit_issued": false,
+            "revision": 5,
+        });
+        let without: WireDecision =
+            serde_json::from_value(decision.clone()).expect("a decision without an effect reads");
+        let written = serde_json::to_value(&without).expect("encodes");
+        assert!(written.get("effect").is_none(), "{written}");
+
+        let mut with_effect = decision.clone();
+        with_effect["effect"] = serde_json::json!({
+            "grant_id": "decision:0/approval-grant",
+            "issued_at_ms": 3,
+        });
+        let read: WireDecision =
+            serde_json::from_value(with_effect).expect("a decision with an effect reads");
+        let written = serde_json::to_value(&read).expect("encodes");
+        assert_eq!(
+            written["effect"],
+            serde_json::json!({"grant_id": "decision:0/approval-grant"}),
+            "{written}"
+        );
+
+        let mut later = decision;
+        later["effect"] = serde_json::json!({"answer_id": "answer:0"});
+        let read: WireDecision =
+            serde_json::from_value(later).expect("an effect of a later version reads");
+        let written = serde_json::to_value(&read).expect("encodes");
+        assert_eq!(written["effect"], serde_json::json!({}), "{written}");
     }
 
     /// A presented notice carries the whole rendering as one canonical

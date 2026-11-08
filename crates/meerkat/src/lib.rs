@@ -501,7 +501,7 @@ pub use meerkat_providers::connector_login::{
     ConnectorClientAuthProfile, ConnectorClientAuthSource, ConnectorClientSecret,
     ConnectorLoginComplete, ConnectorLoginError, ConnectorLoginStart, ConnectorOAuthAuthority,
     ConnectorOAuthCallback, ConnectorOAuthTarget, ConnectorStrategies, ConnectorVerifiedAccount,
-    clear_connector_client_secret, load_connector_client_secret, save_connector_client_secret,
+    load_connector_client_secret,
 };
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]

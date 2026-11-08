@@ -1622,7 +1622,9 @@ pub(crate) const fn is_deterministic_provider_auth_kind(kind: meerkat_core::Auth
         | AuthErrorKind::CredentialAccessDenied
         | AuthErrorKind::CredentialInteractionRequired
         | AuthErrorKind::CredentialAccessPending
-        | AuthErrorKind::CredentialStoreUnavailable => false,
+        | AuthErrorKind::CredentialStoreUnavailable
+        // An unavailable credential source answers again once it recovers.
+        | AuthErrorKind::SourceUnavailable => false,
     }
 }
 
@@ -16743,6 +16745,7 @@ mod reset_reprofile_tests {
             meerkat_core::AuthErrorKind::CredentialInteractionRequired,
             meerkat_core::AuthErrorKind::CredentialAccessPending,
             meerkat_core::AuthErrorKind::CredentialStoreUnavailable,
+            meerkat_core::AuthErrorKind::SourceUnavailable,
         ] {
             assert!(
                 deterministic_build_rejection_reason(&refusal(transient)).is_none(),

@@ -164,6 +164,8 @@ from .types import (
     MobFlowsResult,
     MobForceCancelResult,
     MobForkHelperParams,
+    MobForkMemberParams,
+    MobForkMemberResult,
     MobGrantScopesParams,
     MobGrantScopesResult,
     MobGrantsResult,
@@ -1494,6 +1496,14 @@ class RpcRequest(Protocol):
         params: MobForkHelperParams,
         /,
     ) -> Awaitable[MobHelperResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/fork_member"],
+        params: MobForkMemberParams,
+        /,
+    ) -> Awaitable[MobForkMemberResult]: ...
 
     @overload
     def __call__(

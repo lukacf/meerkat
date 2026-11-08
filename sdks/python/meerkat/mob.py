@@ -16,6 +16,7 @@ from .generated.types import (
     LiveOpenResult,
     LiveStatusResult,
     MobBindHostResult,
+    MobForkMemberResult,
     MobHostStatus,
     MobMemberHistoryResult,
     MobStopMemberRunResult,
@@ -23,6 +24,7 @@ from .generated.types import (
     MobRevokeHostResult,
     MobRouteInstallsResult,
     MobSpawnManyResult,
+    MobStreamCursor,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
     RealtimeTurningMode,
@@ -745,6 +747,28 @@ class Mob:
             fork_context=fork_context,
         )
 
+    async def fork_member(
+        self,
+        source_member_id: str,
+        agent_identity: str,
+        *,
+        message_index: int | None = None,
+        profile: str | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+    ) -> MobForkMemberResult:
+        """Fork a member's session at a message boundary into a new member.
+
+        See :meth:`MeerkatClient.fork_mob_member`.
+        """
+        return await self._client.fork_mob_member(
+            self.id,
+            source_member_id,
+            agent_identity,
+            message_index=message_index,
+            profile=profile,
+            runtime_mode=runtime_mode,
+        )
+
     async def wire(self, member: str, peer: str | dict[str, Any]) -> None:
         await self._client.wire_mob_members(self.id, member, peer)
 
@@ -803,9 +827,20 @@ class Mob:
     async def cancel_flow(self, run_id: str) -> None:
         await self._client.cancel_mob_flow(self.id, run_id)
 
-    async def subscribe_member_events(self, agent_identity: str) -> EventSubscription:
-        """Subscribe to events for a single mob member."""
-        return await self._client.subscribe_mob_member_events(self.id, agent_identity)
+    async def subscribe_member_events(
+        self,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
+    ) -> EventSubscription:
+        """Subscribe to events for a single mob member.
+
+        ``cursor`` resumes after a position, as
+        :meth:`MeerkatClient.subscribe_mob_member_events` describes.
+        """
+        return await self._client.subscribe_mob_member_events(
+            self.id, agent_identity, cursor=cursor
+        )
 
     async def subscribe_events(self) -> EventSubscription:
         """Subscribe to attributed mob-wide events."""

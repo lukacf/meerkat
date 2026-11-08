@@ -104,7 +104,81 @@ fn owner_code(cause: &(dyn std::error::Error + 'static)) -> Option<OwnerCode> {
     if let Some(refusal) = cause.downcast_ref::<meerkat::help::HelpSessionNotResumable>() {
         return Some(OwnerCode::Public(refusal.error_code()));
     }
+    if let Some(code) = config_write_admission_code(cause) {
+        return Some(OwnerCode::Public(code));
+    }
+    // A fenced operation's own refusal (realm delete): nothing started.
+    if let Some(refusal) = cause.downcast_ref::<meerkat_core::AdmissionRefusal>() {
+        return Some(OwnerCode::Public(match refusal {
+            meerkat_core::AdmissionRefusal::InProgress => ErrorCode::AdmissionInProgress,
+            meerkat_core::AdmissionRefusal::Unavailable(_) => ErrorCode::AdmissionFenceUnavailable,
+        }));
+    }
+    #[cfg(feature = "local-authorization")]
+    if let Some(code) = stock_admission_code(cause) {
+        return Some(OwnerCode::Public(code));
+    }
     None
+}
+
+/// The public code of a stock grant command (`rkat realm govern`, `grant`,
+/// `revoke-grant`) the realm's admission fence refused before it started.
+/// Other stock refusals carry no public code.
+#[cfg(feature = "local-authorization")]
+fn stock_admission_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    use meerkat::governed_realm::stock::StockGovernanceError;
+    use meerkat::governed_realm::stock::issuance::StockGrantError;
+    let governance = match cause.downcast_ref::<StockGrantError>() {
+        Some(StockGrantError::AdmissionInProgress) => return Some(ErrorCode::AdmissionInProgress),
+        Some(StockGrantError::AdmissionFenceUnavailable(_)) => {
+            return Some(ErrorCode::AdmissionFenceUnavailable);
+        }
+        // Transparent: the refusal's own error is not in the chain.
+        Some(StockGrantError::Refused(error)) => Some(error),
+        Some(_) => return None,
+        None => cause.downcast_ref::<StockGovernanceError>(),
+    };
+    match governance? {
+        StockGovernanceError::AdmissionInProgress => Some(ErrorCode::AdmissionInProgress),
+        StockGovernanceError::AdmissionFenceUnavailable(_) => {
+            Some(ErrorCode::AdmissionFenceUnavailable)
+        }
+        _ => None,
+    }
+}
+
+/// The public code of a config write an admission fence refused before it
+/// started: a held fence or one that could not be used. Other config write
+/// failures carry no public code.
+fn config_write_admission_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    let runtime = if let Some(error) = cause.downcast_ref::<meerkat_core::ConfigRuntimeError>() {
+        Some(error)
+    } else if let Some(meerkat_core::McpRealmPersistError::Config(error)) =
+        cause.downcast_ref::<meerkat_core::McpRealmPersistError>()
+    {
+        Some(error)
+    } else {
+        None
+    };
+    match runtime {
+        Some(meerkat_core::ConfigRuntimeError::AdmissionInProgress) => {
+            return Some(ErrorCode::AdmissionInProgress);
+        }
+        Some(meerkat_core::ConfigRuntimeError::AdmissionFenceUnavailable(_)) => {
+            return Some(ErrorCode::AdmissionFenceUnavailable);
+        }
+        Some(_) => return None,
+        None => {}
+    }
+    match cause.downcast_ref::<meerkat_core::config::ConfigError>()? {
+        meerkat_core::config::ConfigError::AdmissionInProgress => {
+            Some(ErrorCode::AdmissionInProgress)
+        }
+        meerkat_core::config::ConfigError::AdmissionFenceUnavailable(_) => {
+            Some(ErrorCode::AdmissionFenceUnavailable)
+        }
+        _ => None,
+    }
 }
 
 /// The runtime classes that carry a public code: native input refusal and
@@ -193,6 +267,8 @@ mod tests {
             ErrorCode::ApprovalCommitUnknown => 55,
             ErrorCode::StaleDeliveryScope => 56,
             ErrorCode::ForkInstructionRefused => 57,
+            ErrorCode::AdmissionInProgress => 58,
+            ErrorCode::AdmissionFenceUnavailable => 59,
         }
     }
 
@@ -209,12 +285,98 @@ mod tests {
     #[test]
     fn every_error_code_exits_with_its_cli_exit_code() {
         let codes = every_error_code();
-        assert_eq!(codes.len(), 29, "every ErrorCode variant is reached");
+        assert_eq!(codes.len(), 31, "every ErrorCode variant is reached");
         for code in codes {
             let documented = documented_exit_status(code);
             assert_eq!(i32::from(documented), code.cli_exit_code(), "{code}");
             assert_eq!(code_exit_status(code), documented, "{code}");
             assert_ne!(documented, 0, "{code} must not exit as a success");
+        }
+    }
+
+    /// A config write an admission fence refused before it started exits
+    /// with the fence's code, whether the runtime, the store or the realm
+    /// server writer reports it; any other config write failure carries no
+    /// public code and exits 1.
+    #[test]
+    fn config_write_admission_refusals_exit_with_their_codes() {
+        use meerkat_core::ConfigRuntimeError;
+        let render = |error: &ConfigRuntimeError| format!("Failed to persist config: {error}");
+        let cases = [
+            (
+                typed_failure(ConfigRuntimeError::AdmissionInProgress, render),
+                58,
+            ),
+            (
+                typed_failure(
+                    ConfigRuntimeError::AdmissionFenceUnavailable("unopenable".into()),
+                    render,
+                ),
+                59,
+            ),
+            (
+                anyhow::Error::new(meerkat_core::config::ConfigError::AdmissionInProgress),
+                58,
+            ),
+            (
+                anyhow::Error::new(
+                    meerkat_core::config::ConfigError::AdmissionFenceUnavailable(
+                        "unopenable".into(),
+                    ),
+                ),
+                59,
+            ),
+            (
+                anyhow::Error::new(meerkat_core::McpRealmPersistError::Config(
+                    ConfigRuntimeError::AdmissionInProgress,
+                )),
+                58,
+            ),
+            (typed_failure(ConfigRuntimeError::LockTimeout, render), 1),
+        ];
+        for (error, status) in cases {
+            assert_eq!(failure_exit_status(&error), status, "{error:#}");
+        }
+    }
+
+    /// A stock grant command the realm's admission fence refused exits with
+    /// the fence's code: `rkat realm grant`'s own refusal, and the
+    /// governance error of `govern` and `revoke-grant`, directly or as the
+    /// grant command's refusal. Every other stock refusal exits 1.
+    #[cfg(feature = "local-authorization")]
+    #[test]
+    fn stock_admission_refusals_exit_with_their_codes() {
+        use meerkat::governed_realm::stock::StockGovernanceError;
+        use meerkat::governed_realm::stock::issuance::StockGrantError;
+        let cases = [
+            (anyhow::Error::new(StockGrantError::AdmissionInProgress), 58),
+            (
+                anyhow::Error::new(StockGrantError::AdmissionFenceUnavailable(
+                    "unopenable".into(),
+                )),
+                59,
+            ),
+            (
+                anyhow::Error::new(StockGovernanceError::AdmissionInProgress),
+                58,
+            ),
+            (
+                anyhow::Error::new(StockGovernanceError::AdmissionFenceUnavailable(
+                    "unopenable".into(),
+                )),
+                59,
+            ),
+            (
+                anyhow::Error::new(StockGrantError::Refused(
+                    StockGovernanceError::AdmissionInProgress,
+                )),
+                58,
+            ),
+            (anyhow::Error::new(StockGovernanceError::NotGoverned), 1),
+            (anyhow::Error::new(StockGrantError::CommandUncertain), 1),
+        ];
+        for (error, status) in cases {
+            assert_eq!(failure_exit_status(&error), status, "{error:#}");
         }
     }
 

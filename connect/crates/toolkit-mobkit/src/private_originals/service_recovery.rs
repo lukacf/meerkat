@@ -55,7 +55,9 @@ fn revoke_outcome(
         Ok(()) => ("revoked", false),
         Err(GrantRefusal::ControllerInUse) => ("controller_in_use", false),
         Err(GrantRefusal::Unavailable) => ("unavailable", true),
-        Err(GrantRefusal::Denied | GrantRefusal::Duplicate) => ("refused", false),
+        Err(GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::AdmissionFence) => {
+            ("refused", false)
+        }
     }
 }
 
@@ -79,6 +81,7 @@ impl PreparedServiceRecovery<'_> {
             .try_controller_grant_mutation()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let parent_result = self.source.owner.grants().revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
             &self.read.human,
             parent,
             &self.read.publication,
@@ -110,6 +113,7 @@ impl PreparedServiceRecovery<'_> {
                 Ok(Some(leaf)) => match selected {
                     ServiceRecoveryChildOwner::ThisApproval(issuer) => {
                         let (state, unknown) = revoke_outcome(self.source.owner.grants().revoke(
+                            &meerkat_core::AdmissionGuard::none(),
                             issuer,
                             &leaf,
                             &mut custody,

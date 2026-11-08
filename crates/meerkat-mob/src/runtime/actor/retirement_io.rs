@@ -7279,6 +7279,8 @@ mod tests {
                 fork_source: None,
                 fork_overlay: Default::default(),
                 definition_wiring: crate::DefinitionWiring::Applies,
+                approval_branch: None,
+                dispatch_admission_lineage: false,
             };
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(
                 crate::roster::Roster::from_projected_entries([entry]),

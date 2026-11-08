@@ -52,6 +52,22 @@ struct SenderOriginal {
     /// work naming it as a contributor is narrowed by. A host-policy or
     /// service-mandate basis narrows no such work.
     grant_basis: bool,
+    /// The original's own ingress actor, basis and contributors, as it was
+    /// admitted: read only by Core's own tools of the staged work.
+    ingress_actor: PrincipalRef,
+    authority_basis: WorkAuthorityBasis,
+    contributing_work: Vec<OriginalWorkRef>,
+}
+
+/// The one staged original of a governed work, as it was admitted: what a
+/// Core tool of that work reads of the work it runs in. Never a grant.
+#[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
+pub(crate) struct StagedOriginal<'a> {
+    pub(crate) namespace: &'a QualifiedIngressNamespace,
+    pub(crate) original_work: &'a OriginalWorkRef,
+    pub(crate) ingress_actor: &'a PrincipalRef,
+    pub(crate) authority_basis: &'a WorkAuthorityBasis,
+    pub(crate) contributing_work: &'a [OriginalWorkRef],
 }
 
 impl GovernedPeerOrigin {
@@ -91,6 +107,9 @@ impl GovernedPeerOrigin {
                     WorkAuthorityBasis::GrantLineage { .. }
                         | WorkAuthorityBasis::TargetedGrantLineages { .. }
                 ),
+                ingress_actor: claims.ingress_actor.clone(),
+                authority_basis: claims.authority_basis.clone(),
+                contributing_work: claims.contributing_work.clone(),
             });
             contributors.extend(claims.contributing_work.iter());
         }
@@ -175,6 +194,22 @@ impl GovernedPeerOrigin {
     /// service-mandate original adds no ceiling to such a work.
     pub fn bounded_by_grants(&self) -> bool {
         self.0.originals.iter().all(|original| original.grant_basis)
+    }
+
+    /// The staged work's one original, as it was admitted, when the work
+    /// staged exactly one. `None` for a work that staged several.
+    #[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
+    pub(crate) fn single_original(&self) -> Option<StagedOriginal<'_>> {
+        let [original] = self.0.originals.as_slice() else {
+            return None;
+        };
+        Some(StagedOriginal {
+            namespace: &original.namespace,
+            original_work: &original.original_work,
+            ingress_actor: &original.ingress_actor,
+            authority_basis: &original.authority_basis,
+            contributing_work: &original.contributing_work,
+        })
     }
 }
 

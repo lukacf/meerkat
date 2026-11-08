@@ -1023,6 +1023,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -1032,6 +1033,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read"),
             principal("executor"),
@@ -1106,6 +1108,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: mcp,
             grants,
             ingress,
@@ -4312,6 +4315,7 @@ async fn stock_governed_restart(revoke_while_down: bool, boundary_only: bool) {
         meerkat_authorization::grants::LocalGrantAuthority::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 meerkat_store::grant_owner_store_path(&paths.root),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             LocalAuthorizationPublication::new(),
             Arc::new(HostAuthorizationClock),
@@ -4570,7 +4574,12 @@ async fn stock_governed_restart(revoke_while_down: bool, boundary_only: bool) {
             .try_controller_grant_mutation()
             .expect("the realm's grant custody");
         owner
-            .revoke(&principals.operator, &installation_grant, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &principals.operator,
+                &installation_grant,
+                &mut custody,
+            )
             .expect("revoked while down");
         drop(custody);
         drop(bundle);
@@ -5710,12 +5719,25 @@ async fn stock_r3_an_approved_consent_never_enters_once_its_grant_is_revoked() {
                 .expect("the open composition's grant owner");
             // The revocation never waits: it answers `Unavailable` while
             // another operation holds the owner's lock or its publication
-            // (the host's own traffic). Ask again until it is free, within
-            // a few seconds, without holding the publication meanwhile.
+            // (the host's own traffic), and the realm's grant log fence may
+            // be held a moment by a child issuance. Ask again until both are
+            // free, within a few seconds, without holding the publication
+            // meanwhile.
             tokio::task::block_in_place(|| {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
-                    match grants.revoke(&operator, &grant, &mut NoControllerWork) {
+                    let guard = match meerkat_core::AdmissionGuard::try_acquire(
+                        grants.admission_fences(),
+                    ) {
+                        Ok(guard) => guard,
+                        Err(refusal) if std::time::Instant::now() < deadline => {
+                            let _ = refusal;
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(refusal) => panic!("the realm's grant log fence: {refusal}"),
+                    };
+                    match grants.revoke(&guard, &operator, &grant, &mut NoControllerWork) {
                         Ok(()) => break,
                         Err(meerkat_authorization::grants::GrantRefusal::Unavailable)
                             if std::time::Instant::now() < deadline =>

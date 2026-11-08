@@ -14372,6 +14372,7 @@ pub struct State {
     pub run_stop_requested: Option<RunId>,
     pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     pub input_controller_holds: std::collections::BTreeSet<String>,
+    pub resumed_run_admission_hold: Option<RunId>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub registration_live_input_seen: bool,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -15245,6 +15246,10 @@ impl std::fmt::Debug for State {
             .field("run_stop_requested", &self.run_stop_requested)
             .field("run_start_holds", &self.run_start_holds)
             .field("input_controller_holds", &self.input_controller_holds)
+            .field(
+                "resumed_run_admission_hold",
+                &self.resumed_run_admission_hold,
+            )
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field(
                 "registration_live_input_seen",
@@ -19179,6 +19184,14 @@ pub mod inputs {
         pub run_id: Option<RunId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldResumedRunForAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseResumedRunAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ExtendToolGrantGate {
         pub server: String,
         pub gated: std::collections::BTreeSet<ToolName>,
@@ -19623,6 +19636,8 @@ pub enum Input {
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     SettleRetainedRun(inputs::SettleRetainedRun),
+    HoldResumedRunForAdmission(inputs::HoldResumedRunForAdmission),
+    ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
     ExtendToolGrantGate(inputs::ExtendToolGrantGate),
     SurfaceStageGatedAdd(inputs::SurfaceStageGatedAdd),
 }
@@ -20226,6 +20241,8 @@ impl Input {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
             Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
+            Self::HoldResumedRunForAdmission(_) => InputKind::HoldResumedRunForAdmission,
+            Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
             Self::ExtendToolGrantGate(_) => InputKind::ExtendToolGrantGate,
             Self::SurfaceStageGatedAdd(_) => InputKind::SurfaceStageGatedAdd,
         }
@@ -20652,6 +20669,8 @@ pub enum InputKind {
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
     SettleRetainedRun,
+    HoldResumedRunForAdmission,
+    ReleaseResumedRunAdmission,
     ExtendToolGrantGate,
     SurfaceStageGatedAdd,
 }
@@ -22440,6 +22459,11 @@ pub mod effects {
         pub verdict: RetainedRunSettleVerdict,
         pub run_id: Option<RunId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExactRunBoundaryCancel {
+        pub run_id: RunId,
+        pub reason: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22719,6 +22743,7 @@ pub enum Effect {
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
     RetainedRunSettleResolved(effects::RetainedRunSettleResolved),
+    ExactRunBoundaryCancel(effects::ExactRunBoundaryCancel),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22985,6 +23010,7 @@ pub enum EffectKind {
     EmptyResumeRetirementResolved,
     InputControllerReleased,
     RetainedRunSettleResolved,
+    ExactRunBoundaryCancel,
 }
 
 pub mod command_capabilities {
@@ -26227,6 +26253,16 @@ pub enum TransitionId {
     SettleRetainedRunNotRetainedRetired,
     SettleRetainedRunNotRetainedStopped,
     SettleRetainedRunInertDestroyed,
+    HoldResumedRunForAdmissionIdle,
+    HoldResumedRunForAdmissionAttached,
+    HoldResumedRunForAdmissionRunning,
+    HoldResumedRunForAdmissionRetired,
+    HoldResumedRunForAdmissionStopped,
+    ReleaseResumedRunAdmissionIdle,
+    ReleaseResumedRunAdmissionAttached,
+    ReleaseResumedRunAdmissionRunning,
+    ReleaseResumedRunAdmissionRetired,
+    ReleaseResumedRunAdmissionStopped,
     ExtendToolGrantGateChangedIdle,
     ExtendToolGrantGateChangedAttached,
     ExtendToolGrantGateChangedRunning,
@@ -26492,6 +26528,7 @@ pub fn initial_state() -> State {
         run_stop_requested: None,
         run_start_holds: Default::default(),
         input_controller_holds: Default::default(),
+        resumed_run_admission_hold: None,
         recovered_admitted_lanes: Default::default(),
         registration_live_input_seen: false,
         op_statuses: Default::default(),

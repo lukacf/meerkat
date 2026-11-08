@@ -492,6 +492,7 @@ mod tests {
         let controller = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("setup-controller").unwrap(),
                 principal("setup-agent"),
@@ -502,6 +503,7 @@ mod tests {
         let operation = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("setup-operation").unwrap(),
                 principal("setup-agent"),

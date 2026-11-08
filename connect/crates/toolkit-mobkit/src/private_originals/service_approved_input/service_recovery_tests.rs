@@ -298,7 +298,12 @@ async fn operator_recovery_restores_file_owner_and_cleans_unpublished_intent_wit
         source
             .owner
             .grants()
-            .revoke(&read.human, &parent, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &read.human,
+                &parent,
+                &mut custody,
+            )
             .unwrap();
         drop(custody);
         assert_eq!(

@@ -355,6 +355,7 @@ pub(super) async fn stage_fixture_controller(
         None => owner
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &intent.issuer,
                 intent.parent_lineage.last().unwrap(),
                 intent.id,

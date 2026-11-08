@@ -84,14 +84,23 @@ impl TokenStore for CountingTokenStore {
         self.inner.load(key).await
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         self.clears.fetch_add(1, Ordering::SeqCst);
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
@@ -256,6 +265,12 @@ async fn managed_pinned_released_owner_cannot_send_or_resurrect() {
 #[tokio::test]
 async fn external_pinned_current_client_does_not_gain_managed_refresh() {
     run_parent("external-current").await;
+}
+/// A lease that adopted another process's record at a lower generation
+/// serves its second use from the cache, as a lease's own publication does.
+#[tokio::test]
+async fn managed_pinned_adopted_publication_second_use_reads_no_store() {
+    run_parent("adopted").await;
 }
 
 struct ExternalFixture;
@@ -426,11 +441,49 @@ async fn managed_lifetime_child() {
     let transition = owner
         .acquire_lease(&lease, expires.timestamp() as u64)
         .unwrap();
-    let original =
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &original, &transition)
+    let original = if mode == "adopted" {
+        // This process published once more (generation 2); the stored
+        // record is another process's later login at its generation 1,
+        // which a status read adopts: the lease keeps 2 and records 1.
+        owner
+            .acquire_lease(&lease, expires.timestamp() as u64)
             .unwrap();
-    store.save(&key, &original).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let other = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+            &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+            &lease,
+            expires.timestamp() as u64,
+        )
+        .unwrap();
+        assert_eq!(other.generation(), 1);
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &original, &other)
+            .unwrap()
+    } else {
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &original, &transition)
+            .unwrap()
+    };
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &original)
+        .await
+        .unwrap();
     drop(guard);
+    if mode == "adopted" {
+        meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+            store.as_ref(),
+            &owner,
+            &account,
+            PersistedAuthMode::ClaudeAiOauth,
+            started,
+        )
+        .await
+        .unwrap()
+        .expect("the status read adopts the stored record");
+        let adopted = owner.snapshot(&lease);
+        assert_eq!(
+            (adopted.generation, adopted.adopted_marker_generation),
+            (2, Some(1))
+        );
+    }
     let connection = AnthropicProviderRuntime
         .resolve_binding(&binding, &environment)
         .await
@@ -483,7 +536,7 @@ async fn managed_lifetime_child() {
     // Exclude fixture setup/readback and cold first use from the measured interval.
     let before_cached_reuse = counting_store.counts();
     let second = consume(&client).await;
-    if mode == "current" || mode == "external-current" {
+    if mode == "current" || mode == "external-current" || mode == "adopted" {
         assert!(
             before_cached_reuse.loads > 0 && before_cached_reuse.saves > 0,
             "decorator observed actual seeded store setup: {before_cached_reuse:?}"

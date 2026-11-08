@@ -340,7 +340,7 @@ pub(super) async fn install_credential(
         meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &tokens, &transition)
             .expect("actual acquisition marker");
     store
-        .save(&key, &marked)
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
         .await
         .expect("committed memory vault");
     assert_eq!(

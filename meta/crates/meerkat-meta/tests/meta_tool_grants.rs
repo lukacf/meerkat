@@ -67,6 +67,7 @@ external_addressable = true
 runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
+comms = true
 builtins = true
 grant_gated = {{ tools = ["{GATED_TOOL}"] }}
 "#
@@ -426,17 +427,20 @@ async fn an_identity_grant_opens_a_gated_tool_of_a_meta_member_and_its_revoke_cl
     rig.shutdown().await;
 }
 
-/// A registered identity Core does not hold (its member was retired) is
-/// granted: the grant seats it through the declared apply's one-identity
-/// door, Dormant, and wakes nothing; the member's first build after that
-/// opens the granted tool.
+/// A registered identity Core does not hold (Core retired its member, as a
+/// host or a seal does) is granted: the grant seats it through the declared
+/// apply's one-identity door, Dormant, and wakes nothing; the member's first
+/// build after that opens the granted tool.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_grant_to_an_identity_seated_by_the_door_applies_at_its_first_build() {
     let temp = tempfile::tempdir().unwrap();
     let mut rig = boot(temp.path(), &fresh_mob_id()).await;
 
-    let retired = rig.rpc("meta/retire", json!({"identity": IDENTITY})).await;
-    assert!(retired["error"].is_null(), "{retired:#?}");
+    rig.runtime
+        .mob_handle()
+        .retire(meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY))
+        .await
+        .expect("Core retires the member");
     assert_eq!(
         rig.materialization(),
         None,

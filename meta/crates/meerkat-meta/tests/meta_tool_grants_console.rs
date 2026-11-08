@@ -76,6 +76,7 @@ external_addressable = true
 runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
+comms = true
 builtins = true
 grant_gated = {{ tools = ["{GATED_TOOL}"] }}
 "#,

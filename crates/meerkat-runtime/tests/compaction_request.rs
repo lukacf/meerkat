@@ -14,6 +14,7 @@ use meerkat_core::turn_execution_authority::{ContentShape, TurnPrimitiveKind};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::{
     CompactionRequestReceipt, LogicalRuntimeId, MeerkatMachine, RuntimeDriverError, RuntimeState,
+    SessionServiceRuntimeExt as _,
 };
 
 /// A session registered on an ephemeral machine with its runtime binding

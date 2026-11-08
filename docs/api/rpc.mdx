@@ -1270,16 +1270,23 @@ Remove a session from the runtime.
 Ask a live session's next compaction check to compact. The session is not
 rebuilt and no compaction threshold changes: the check that precedes the
 session's next model request (in its running turn, once that turn's tool
-results are in, or in its next turn) runs a compaction whatever the
-thresholds and their cadence would decide. The compaction publishes the
-ordinary `compaction_started` and `compaction_completed` events. Its own
-rules still hold: a turn in flight keeps its request and newest round, a
-check with nothing to fold compacts nothing, and so does a session's first
-model request (a request made before it is consumed there).
+results are in, or in its next turn) consumes the request and runs a
+compaction whatever the thresholds and their cadence would decide. The
+compaction publishes the ordinary `compaction_started`, then
+`compaction_completed` or `compaction_failed`. Its own rules still hold: a
+turn in flight keeps its request and newest round, and before a session's
+first model request there is nothing to compact. When the check that
+consumes the request compacts nothing, it publishes
+`requested_compaction_skipped` instead, with the `run_id` of the run whose
+check it was and the `reason`: `first_model_request` (the check came before
+the session's first model request) or `nothing_to_fold` (the turn in flight
+keeps its request and newest round, and nothing else was left to fold).
 
 The request lives in the session's runtime registration only. It is never
 persisted: a restart of the server, an unload or a reload of the session
-drops it, and a per-build threshold override is neither read nor changed.
+drops it, and a per-build threshold override is neither read nor changed. A
+server built without compaction (the `session-compaction` feature) has no
+check to consume it, and it stays requested.
 
 <CodeGroup>
 ```json Request
@@ -3676,6 +3683,7 @@ live transport's realtime observations. See
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished. Since 0.9.4 it carries `summary_source` (who wrote the summary: `{"kind": "provider_call", "source_bound": ...}` with bound `whole`, `trimmed` (`through`) or `requests_only` (`kept`, `of`), `{"kind": "host_curator"}` or `{"kind": "mechanical_fallback"}`) and optional `estimated_history_tokens_after`, in the unit of `compaction_started`'s `estimated_history_tokens` |
 | `compaction_failed` | Compaction failed |
+| `requested_compaction_skipped` | Since 0.9.11: the compaction check that consumed a host's compaction request (`session/compact`, `mob/compact_member`) compacted nothing. Carries `run_id` (the run whose check it was) and `reason`: `first_model_request` (the check came before the session's first model request) or `nothing_to_fold` (the run in flight keeps its request and newest round, and nothing else was left to fold). A check that compacts at the request publishes `compaction_started` instead |
 | `tool_results_bounded_for_request` | A model request carried some of its run's own tool results shortened, for that request only: with them whole it was over the provider's request-body cap, or its forecast was over the model's context window, and no compaction made room (a compaction inside a run keeps the run's request and newest round). Carries `run_id`, `results` (each `tool_use_id`, `tool_name`, `kept_bytes` and `total_bytes`) and `axis` (`request_bytes` or `context_window`). Published before the request is sent; the stored transcript keeps every result whole. With the default compactor the next run's first check then compacts the whole transcript once; with compaction off the request is still bounded and nothing is recorded |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error; the retry reuses `assistant_message_id`, so discard that id's live buffer |

@@ -6594,6 +6594,20 @@ it("a request bound notice is schema-known and keeps its whole payload", () => {
   assert.equal(control.delta, "continued");
 });
 
+it("a requested compaction's skip is schema-known and keeps its whole payload", () => {
+  const raw = {
+    type: "requested_compaction_skipped",
+    run_id: "01900000-0000-7000-8000-000000000003",
+    reason: "nothing_to_fold",
+  };
+  // In the generated inventory, without a handwritten parser case: the
+  // raw-preserving UnknownEvent path keeps every field of the event.
+  assert.deepEqual(parseEvent(JSON.parse(JSON.stringify(raw))), raw);
+  const control = parseEvent({ type: "text_delta", delta: "continued" });
+  assert.equal(control.type, "text_delta");
+  assert.equal(control.delta, "continued");
+});
+
 it("availability wire retains ordered typed settlement companions through raw callback events", () => {
   const settlements = [
     { admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind: "operation_authorization_unavailable" },

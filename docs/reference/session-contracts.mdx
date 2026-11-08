@@ -637,6 +637,13 @@ history and normally report `CompactionFailed`, allowing the run to continue.
   the next request, and once after a request that did not fit: one the
   provider refused for not fitting the model's context, or one that carried
   the open run's own tool results shortened.
+- Also triggered once by a host's compaction request
+  (`MeerkatMachine::request_compaction`, JSON-RPC `session/compact` and
+  `mob/compact_member`): the session's next check consumes it and compacts
+  whatever the thresholds and cadence say. A check that consumes it and
+  compacts nothing (before the session's first model request, or with
+  nothing to fold beside the open run's request and newest round) publishes
+  `requested_compaction_skipped` with the reason.
 - A request still over the provider's request-body cap or the model's input
   budget after the compaction check carries the open run's own oversized
   tool results shortened for that request only, and publishes

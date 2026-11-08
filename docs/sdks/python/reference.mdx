@@ -232,8 +232,11 @@ without a rebuild or a respawn and without changing any compaction
 threshold: the check before its next model request compacts. Returns
 `CompactSessionResult` / `MobCompactMemberResult` whose `outcome` is
 `requested`, or `already_requested` when a request no check consumed yet was
-already recorded. The request is never persisted, and a session or member
-with no live runtime is refused, never woken.
+already recorded. A check that consumes the request and has nothing to
+compact (before the session's first model request, or with nothing to fold)
+publishes the `requested_compaction_skipped` event with its `reason` instead
+of `compaction_started`. The request is never persisted, and a session or
+member with no live runtime is refused, never woken.
 
 ### `send_external_event`
 
@@ -524,8 +527,8 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `reasoning_complete`, `assistant_image_appended`,
 `turn_usage_accounting_unmeasured`,
 `turn_usage_accounting_identity_disputed`, `interaction_callback_pending`,
-`peer_content_ingested`, `provider_cache_breakpoints_discarded`, and
-`tool_results_bounded_for_request`. See the
+`peer_content_ingested`, `provider_cache_breakpoints_discarded`,
+`tool_results_bounded_for_request`, and `requested_compaction_skipped`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
 
 `live_channel_closed` has a handwritten parser class and arrives as a typed

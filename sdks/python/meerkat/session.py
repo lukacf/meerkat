@@ -258,8 +258,10 @@ class Session:
         change: the check before its next model request (in the running turn,
         or in the next one) compacts. The outcome is ``requested``, or
         ``already_requested`` when a request no check consumed yet was
-        already recorded. A session with no live runtime in the server is
-        refused, never loaded or woken.
+        already recorded. A check that consumes the request and has nothing
+        to compact publishes the ``requested_compaction_skipped`` event with
+        its ``reason`` instead of ``compaction_started``. A session with no
+        live runtime in the server is refused, never loaded or woken.
         """
         return await self._client._compact(self._id)  # noqa: SLF001
 
@@ -630,8 +632,10 @@ class DeferredSession:
         change: the check before its next model request (in the running turn,
         or in the next one) compacts. The outcome is ``requested``, or
         ``already_requested`` when a request no check consumed yet was
-        already recorded. A session with no live runtime in the server is
-        refused, never loaded or woken.
+        already recorded. A check that consumes the request and has nothing
+        to compact publishes the ``requested_compaction_skipped`` event with
+        its ``reason`` instead of ``compaction_started``. A session with no
+        live runtime in the server is refused, never loaded or woken.
         """
         return await self._client._compact(self._id)  # noqa: SLF001
 

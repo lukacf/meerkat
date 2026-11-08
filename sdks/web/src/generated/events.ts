@@ -731,6 +731,8 @@ export type ReasoningMode = "emit" | "silent" | "off";
 
 export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" | "unknown_supported_levels" | "budget_conflict" | "thinking_mode_conflict" | "opaque_reasoning_body" | "reasoning_disabled_by_baseline";
 
+export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
+
 export type RevisedPromptDisposition = {
   disposition: "not_requested";
 } | {
@@ -1581,6 +1583,12 @@ export interface ToolResultsBoundedForRequestEvent {
   type: "tool_results_bounded_for_request";
 }
 
+export interface RequestedCompactionSkippedEvent {
+  reason: RequestedCompactionSkipReason;
+  run_id: RunId;
+  type: "requested_compaction_skipped";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1634,7 +1642,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "live_channel_closed",
   "request_reasoning_lowered",
   "run_resumed",
-  "tool_results_bounded_for_request"
+  "tool_results_bounded_for_request",
+  "requested_compaction_skipped"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1692,4 +1701,5 @@ export type AgentEvent =
   HookLaunchRefusedEvent |
   RequestReasoningLoweredEvent |
   RunResumedEvent |
-  ToolResultsBoundedForRequestEvent;
+  ToolResultsBoundedForRequestEvent |
+  RequestedCompactionSkippedEvent;

@@ -22,9 +22,11 @@ impl MeerkatMachine {
     /// own rules still hold, so a run in flight keeps its request and its
     /// newest round, a check with nothing to fold compacts nothing, and so
     /// does the session's first model request (a request made before it is
-    /// consumed there). The
-    /// compaction publishes the session's ordinary `CompactionStarted` and
-    /// `CompactionCompleted` events.
+    /// consumed there). The compaction publishes the session's ordinary
+    /// `CompactionStarted`, then `CompactionCompleted` or `CompactionFailed`;
+    /// a check that consumes the request and compacts nothing publishes
+    /// `RequestedCompactionSkipped` with the reason instead. A session built
+    /// without a compactor has no check to consume the request.
     ///
     /// The request is a fact of this registration only: it is never
     /// persisted. A re-registration of the same session keeps it; an

@@ -2,8 +2,10 @@
 //! (`MeerkatMachine::request_compaction`), beyond the idle-session
 //! acceptance row in `compaction_ownership_gaps.rs`: a request made while a
 //! turn runs compacts at that turn's next model request, two requests before
-//! a check compact once, and a request before a fresh session's first model
-//! request is consumed there without compacting.
+//! a check compact once, and a check that consumes a request with nothing to
+//! compact (before a fresh session's first model request, or inside a run
+//! with nothing to fold) compacts nothing and publishes
+//! `requested_compaction_skipped` with its reason.
 
 #![allow(
     clippy::expect_used,
@@ -32,7 +34,9 @@ mod tests {
     };
     use meerkat_client::types::LlmStream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
-    use meerkat_core::{Message, SessionBuildOptions};
+    use meerkat_core::comms::SessionEventCursor;
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::{AgentEvent, Message, RequestedCompactionSkipReason, SessionBuildOptions};
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{CompactionRequestReceipt, Input, MeerkatMachine, PromptInput};
     use tokio::time::Duration;
@@ -290,6 +294,25 @@ mod tests {
             );
         }
 
+        /// Collect every event of the session's current actor, from its first
+        /// retained envelope on.
+        async fn record_events(&self, id: &SessionId) -> EventLog {
+            let subscription = self
+                .service
+                .subscribe_session_events_from(id, SessionEventCursor::Earliest)
+                .await
+                .expect("subscribe to the session's events");
+            let log = EventLog::default();
+            let sink = Arc::clone(&log.events);
+            let mut stream = subscription.stream;
+            tokio::spawn(async move {
+                while let Some(envelope) = stream.next().await {
+                    sink.lock().expect("event log").push(envelope.payload);
+                }
+            });
+            log
+        }
+
         async fn compaction_summaries(&self, id: &SessionId) -> usize {
             self.service
                 .load_authoritative_session(id)
@@ -323,6 +346,65 @@ mod tests {
                 .try_shutdown()
                 .await
                 .expect("shut the lifetime's session service down");
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct EventLog {
+        events: Arc<Mutex<Vec<AgentEvent>>>,
+    }
+
+    impl EventLog {
+        fn count(&self, matches: impl Fn(&AgentEvent) -> bool) -> usize {
+            self.events
+                .lock()
+                .expect("event log")
+                .iter()
+                .filter(|event| matches(event))
+                .count()
+        }
+
+        fn compactions_started(&self) -> usize {
+            self.count(|event| matches!(event, AgentEvent::CompactionStarted { .. }))
+        }
+
+        fn compactions_completed(&self) -> usize {
+            self.count(|event| matches!(event, AgentEvent::CompactionCompleted { .. }))
+        }
+
+        /// Every `requested_compaction_skipped`, in delivery order: the run
+        /// whose check consumed the request, and the reason.
+        fn requested_compactions_skipped(&self) -> Vec<(RunId, RequestedCompactionSkipReason)> {
+            self.events
+                .lock()
+                .expect("event log")
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::RequestedCompactionSkipped { run_id, reason } => {
+                        Some((run_id.clone(), *reason))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The run id of every `run_started`, in delivery order.
+        fn started_runs(&self) -> Vec<RunId> {
+            self.events
+                .lock()
+                .expect("event log")
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::RunStarted { identity, .. } => identity.run_id.clone(),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Give the forwarding task a moment to drain what the actor already
+        /// published.
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -382,13 +464,15 @@ mod tests {
 
     /// Two requests before a check give one compaction: the second is
     /// already requested, and the run after the compacting one does not
-    /// compact again.
+    /// compact again. The compaction publishes the ordinary events and no
+    /// `requested_compaction_skipped`.
     #[tokio::test]
     async fn two_requests_before_a_check_compact_once() {
         let temp = tempfile::tempdir().expect("tempdir");
         let client = Arc::new(ScriptedClient::new());
         let host = Host::open(temp.path(), Arc::clone(&client)).await;
         let id = host.create().await;
+        let log = host.record_events(&id).await;
         host.run_prompt(&id, "first turn fact").await;
         host.run_prompt(&id, "second turn").await;
 
@@ -413,18 +497,31 @@ mod tests {
             "one compaction, before the first model request after the requests"
         );
         assert_eq!(host.compaction_summaries(&id).await, 1);
+        log.settle().await;
+        assert_eq!(
+            (log.compactions_started(), log.compactions_completed()),
+            (1, 1)
+        );
+        assert_eq!(
+            log.requested_compactions_skipped(),
+            Vec::new(),
+            "a check that compacts at the request publishes no skip"
+        );
         host.stand_down().await;
     }
 
     /// The session's first-ever model request has nothing to compact: a
-    /// request made before it is consumed by its check and compacts nothing,
-    /// and the next turn does not compact either.
+    /// request made before it is consumed by its check, which compacts
+    /// nothing and publishes `requested_compaction_skipped` for that run
+    /// with the reason `first_model_request`. The next turn does not compact
+    /// either.
     #[tokio::test]
     async fn a_request_before_a_fresh_sessions_first_model_request_compacts_nothing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let client = Arc::new(ScriptedClient::new());
         let host = Host::open(temp.path(), Arc::clone(&client)).await;
         let id = host.create().await;
+        let log = host.record_events(&id).await;
 
         assert_eq!(
             host.adapter.request_compaction(&id).await.unwrap(),
@@ -438,10 +535,73 @@ mod tests {
             "neither the first model request nor the next compacts"
         );
         assert_eq!(host.compaction_summaries(&id).await, 0);
+        log.settle().await;
+        let runs = log.started_runs();
+        assert_eq!(runs.len(), 2, "setup: both runs are observed");
+        assert_eq!(
+            log.requested_compactions_skipped(),
+            vec![(
+                runs[0].clone(),
+                RequestedCompactionSkipReason::FirstModelRequest
+            )],
+            "the first run's check says that it consumed the request and compacted nothing"
+        );
+        assert_eq!(log.compactions_started(), 0);
         assert_eq!(
             host.adapter.request_compaction(&id).await.unwrap(),
             CompactionRequestReceipt::Requested,
             "the first turn's check consumed the request"
+        );
+        host.stand_down().await;
+    }
+
+    /// A request made during a fresh session's first turn is consumed by
+    /// the turn's next check, after its tool result. The open run keeps its
+    /// request and its newest round, and nothing else is there to fold, so
+    /// the check compacts nothing and publishes `requested_compaction_skipped`
+    /// with the reason `nothing_to_fold`.
+    #[tokio::test]
+    async fn a_request_during_a_fresh_sessions_first_turn_has_nothing_to_fold() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let client = Arc::new(ScriptedClient::new());
+        let host = Host::open(temp.path(), Arc::clone(&client)).await;
+        let id = host.create().await;
+        let log = host.record_events(&id).await;
+        let receipt = Arc::new(Mutex::new(None));
+        *client.in_turn_request.lock().expect("in-turn request") = Some(InTurnRequest {
+            adapter: Arc::clone(&host.adapter),
+            session_id: id.clone(),
+            receipt: Arc::clone(&receipt),
+        });
+
+        host.run_prompt(&id, TOOL_PROMPT).await;
+        assert_eq!(
+            receipt.lock().expect("in-turn receipt").clone(),
+            Some(Ok(CompactionRequestReceipt::Requested)),
+            "the running turn's registration records the request"
+        );
+        assert_eq!(
+            client.served(),
+            [RequestKind::Ordinary, RequestKind::Ordinary],
+            "the turn's model request after its tool result is not preceded by a compaction"
+        );
+        assert_eq!(host.compaction_summaries(&id).await, 0);
+        log.settle().await;
+        let runs = log.started_runs();
+        assert_eq!(runs.len(), 1, "setup: the run is observed");
+        assert_eq!(
+            log.requested_compactions_skipped(),
+            vec![(
+                runs[0].clone(),
+                RequestedCompactionSkipReason::NothingToFold
+            )],
+            "the turn's next check says that it consumed the request and compacted nothing"
+        );
+        assert_eq!(log.compactions_started(), 0);
+        assert_eq!(
+            host.adapter.request_compaction(&id).await.unwrap(),
+            CompactionRequestReceipt::Requested,
+            "the turn's check consumed the request"
         );
         host.stand_down().await;
     }

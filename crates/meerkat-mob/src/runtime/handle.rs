@@ -11362,7 +11362,8 @@ impl MobHandle {
     /// precedes the member's next model request, in its running turn or in
     /// its next run, and compacts whatever the member's compaction
     /// thresholds would decide; the member publishes its ordinary
-    /// `CompactionStarted` and `CompactionCompleted` events. The request is
+    /// compaction events, or `RequestedCompactionSkipped` with the reason
+    /// when that check has nothing to compact. The request is
     /// never persisted: a respawn, a reload or the end of the process drops
     /// it.
     ///

@@ -651,6 +651,10 @@ fn agent_event_all_variants_roundtrip() {
             }],
             axis: meerkat_core::ToolResultBoundAxis::RequestBytes,
         },
+        AgentEvent::RequestedCompactionSkipped {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            reason: meerkat_core::RequestedCompactionSkipReason::FirstModelRequest,
+        },
     ];
 
     for event in &direct_variants {
@@ -985,6 +989,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 total_bytes: 600_000,
             }],
             axis: meerkat_core::ToolResultBoundAxis::ContextWindow,
+        },
+        AgentEvent::RequestedCompactionSkipped {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            reason: meerkat_core::RequestedCompactionSkipReason::NothingToFold,
         },
     ];
 

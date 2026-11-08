@@ -190,7 +190,10 @@ in, or in the next turn. That check compacts without the decision flow above
 during the compaction is unchanged, so a turn in flight keeps its request and
 newest round, and a check with nothing to fold compacts nothing. A session's
 first model request has nothing to compact either: a request made before it
-is consumed there and compacts nothing. Two requests
+is consumed there and compacts nothing. A check that consumes the request
+and compacts nothing says so: it publishes `requested_compaction_skipped`
+with the run and the reason (`first_model_request` or `nothing_to_fold`)
+instead of `compaction_started`. Two requests
 before a check give one compaction. The request is never persisted, and a
 session with no live runtime is refused rather than loaded for it.
 

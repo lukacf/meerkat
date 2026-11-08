@@ -1135,6 +1135,13 @@ export type ReasoningLoweringOutcome = {
 };
 
 /**
+ * Why the compaction check that consumed a host's compaction request
+ * compacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports
+ * it. The vocabulary may grow.
+ */
+export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
+
+/**
  * Typed input fact for a run boundary.
  *
  * A run either starts from caller-provided content or resumes from tool
@@ -1750,6 +1757,10 @@ export type AgentEvent = {
   results: BoundedToolResult[];
   run_id: RunId;
   type: "tool_results_bounded_for_request";
+} | {
+  reason: RequestedCompactionSkipReason;
+  run_id: RunId;
+  type: "requested_compaction_skipped";
 };
 
 /**

@@ -1184,6 +1184,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         }
         AgentEvent::RunResumed { .. } => "run_resumed",
         AgentEvent::ToolResultsBoundedForRequest { .. } => "tool_results_bounded_for_request",
+        AgentEvent::RequestedCompactionSkipped { .. } => "requested_compaction_skipped",
     }
 }
 
@@ -3197,6 +3198,23 @@ pub enum AgentEvent {
         /// The limit that set how much of each result the request kept.
         axis: ToolResultBoundAxis,
     },
+    /// The compaction check that consumed a host's compaction request
+    /// (`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and
+    /// `mob/compact_member`) compacted nothing.
+    ///
+    /// A check that compacts at the request publishes the ordinary
+    /// `compaction_started`, then `compaction_completed` or
+    /// `compaction_failed`. When the check has nothing to compact, it
+    /// publishes this event instead, so the host can tell that the request
+    /// was consumed and that nothing was compacted. Published at that check,
+    /// before its model request is sent. A check that consumed no request
+    /// publishes nothing new.
+    RequestedCompactionSkipped {
+        /// The run whose compaction check consumed the request.
+        run_id: crate::lifecycle::RunId,
+        /// Why the check compacted nothing.
+        reason: RequestedCompactionSkipReason,
+    },
 }
 
 /// One tool result a model request carried shortened, as
@@ -3250,6 +3268,22 @@ impl From<&crate::session::RunResumePoint> for RunResumePointKind {
             crate::session::RunResumePoint::AwaitingModel => Self::AwaitingModel,
         }
     }
+}
+
+/// Why the compaction check that consumed a host's compaction request
+/// compacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports
+/// it. The vocabulary may grow.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestedCompactionSkipReason {
+    /// The check came before the session's first model request, when the
+    /// session has nothing to compact yet.
+    FirstModelRequest,
+    /// A run in flight keeps its request and its newest round, and nothing
+    /// else was left to fold.
+    NothingToFold,
 }
 
 /// Exact negative application fact projected from durable boundary join resolution.
@@ -3658,6 +3692,19 @@ pub fn format_verbose_event_with_config(
                  session: {shortened}"
             ))
         }
+        AgentEvent::RequestedCompactionSkipped { reason, .. } => {
+            let why = match reason {
+                RequestedCompactionSkipReason::FirstModelRequest => {
+                    "the session had made no model request yet"
+                }
+                RequestedCompactionSkipReason::NothingToFold => {
+                    "nothing to fold outside the open run's request and newest round"
+                }
+            };
+            Some(format!(
+                "  Requested compaction consumed, nothing compacted: {why}"
+            ))
+        }
         _ => None,
     }
 }
@@ -3808,6 +3855,41 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ToolResultBoundAxis::RequestBytes).unwrap(),
             "request_bytes"
+        );
+    }
+
+    /// A check that consumed a host's compaction request and compacted
+    /// nothing says so under its own wire name, with the run and the reason,
+    /// and reads back unchanged.
+    #[test]
+    fn requested_compaction_skipped_has_its_own_wire_name_and_round_trips() {
+        let run_id = crate::lifecycle::RunId::new();
+        let event = AgentEvent::RequestedCompactionSkipped {
+            run_id: run_id.clone(),
+            reason: RequestedCompactionSkipReason::FirstModelRequest,
+        };
+        assert_eq!(agent_event_type(&event), "requested_compaction_skipped");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "requested_compaction_skipped",
+                "run_id": run_id,
+                "reason": "first_model_request",
+            })
+        );
+        let AgentEvent::RequestedCompactionSkipped {
+            run_id: parsed_run,
+            reason,
+        } = serde_json::from_value::<AgentEvent>(wire).unwrap()
+        else {
+            panic!("the event reads back as itself");
+        };
+        assert_eq!(parsed_run, run_id);
+        assert_eq!(reason, RequestedCompactionSkipReason::FirstModelRequest);
+        assert_eq!(
+            serde_json::to_value(RequestedCompactionSkipReason::NothingToFold).unwrap(),
+            "nothing_to_fold"
         );
     }
 
@@ -5983,6 +6065,10 @@ mod tests {
                     total_bytes: 600_000,
                 }],
                 axis: ToolResultBoundAxis::RequestBytes,
+            },
+            AgentEvent::RequestedCompactionSkipped {
+                run_id: crate::lifecycle::RunId::new(),
+                reason: RequestedCompactionSkipReason::NothingToFold,
             },
         ];
 

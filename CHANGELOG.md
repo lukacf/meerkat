@@ -300,6 +300,20 @@ them.
   arms, or a wildcard arm; a `MeerkatMachineState` literal that ends with
   `..Default::default()` keeps compiling.
 
+- `meerkat-core`: `AgentEvent` gains the variant
+  `RequestedCompactionSkipped { run_id, reason }`, wire type
+  `requested_compaction_skipped`, with the new enum
+  `RequestedCompactionSkipReason` (`first_model_request`,
+  `nothing_to_fold`; non-exhaustive). The compaction check that consumes a
+  host's compaction request and compacts nothing publishes it (see Added):
+  the run whose check it was, and why. `AgentEvent` is non-exhaustive, so a
+  Rust match already has a wildcard arm; the published event catalog
+  (`meerkat_contracts::KNOWN_AGENT_EVENT_TYPES`) lists the new type, and the
+  generated SDK inventories with it. An SDK of this version surfaces the
+  event as its unknown-event form with the whole payload (Python,
+  TypeScript) or as its generated event type (Web); an SDK of 0.9.10 or
+  earlier refuses the unknown type, as for any newer contract.
+
 ### Added
 
 - `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-rpc`,
@@ -317,11 +331,14 @@ them.
   thresholds and cadence). The compaction's own rules hold (a turn in
   flight keeps its request and newest round; a check with nothing to fold
   compacts nothing, and so does the session's first model request), and it
-  publishes the ordinary
-  compaction events. The request is never persisted, a per-build threshold
-  override is neither read nor changed, and a registration that is
-  initializing, retired, stopped or gone refuses it with
-  `RuntimeDriverError::NotReady`. Nothing is woken or loaded for a request.
+  publishes the ordinary compaction events. A check that consumes the
+  request and compacts nothing says so: it publishes the new
+  `requested_compaction_skipped` event with the run and the reason
+  (`first_model_request` or `nothing_to_fold`; see Breaking). The request
+  is never persisted, a per-build threshold override is neither read nor
+  changed, and a registration that is initializing, retired, stopped or
+  gone refuses it with `RuntimeDriverError::NotReady`. Nothing is woken or
+  loaded for a request.
   JSON-RPC `session/compact` (`CompactSessionParams`, `CompactSessionResult`)
   answers `outcome` `requested` or `already_requested`
   (`WireCompactionRequestOutcome`); a session with no live runtime in the
@@ -1126,6 +1143,11 @@ them.
   `SpiRealmConfig::renew_timeout` to the renew interval first, then lengthen
   the timing as the host store SPI reference describes (Core's Timeouts And
   The Safety Condition).
+
+- Upgrade the SDKs with the server before a host asks for compactions
+  (`session/compact`, `mob/compact_member`): a Python, TypeScript or Web SDK
+  of 0.9.10 or earlier refuses the new `requested_compaction_skipped` event
+  type, as it does any event type newer than its contract (see Breaking).
 
 ### Known limitations
 

@@ -18,7 +18,9 @@ pub enum CompactionRequestReceipt {
     /// further model request leaves it to the first check of the session's
     /// next run. A check whose compaction finds nothing to fold (a run in
     /// flight keeps its own request and newest round) consumes the request
-    /// and compacts nothing, and so does the session's first model request.
+    /// and compacts nothing, and so does the session's first model request;
+    /// such a check publishes `AgentEvent::RequestedCompactionSkipped` with
+    /// the reason.
     Requested,
     /// The registration already held a request that no check consumed yet:
     /// nothing changed, and the next check compacts once.

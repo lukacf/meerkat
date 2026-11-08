@@ -8998,6 +8998,31 @@ def test_tool_results_bounded_for_request_is_known_and_retains_exact_payload():
     assert control.delta == "continued"
 
 
+def test_requested_compaction_skipped_is_known_and_retains_exact_payload():
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+    from meerkat.generated.event_types import RequestedCompactionSkipReason
+
+    raw = {
+        "type": "requested_compaction_skipped",
+        "run_id": "01900000-0000-7000-8000-000000000003",
+        "reason": "first_model_request",
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    assert set(get_args(RequestedCompactionSkipReason)) == {
+        "first_model_request",
+        "nothing_to_fold",
+    }
+    event = parse_event(json.loads(json.dumps(raw)))
+    # In the generated inventory, without a handwritten class: the
+    # raw-preserving UnknownEvent path keeps every field of the event.
+    assert isinstance(event, UnknownEvent)
+    assert event.type == raw["type"]
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
 def test_wire_tool_result_retains_typed_observation_settlement_companions():
     from dataclasses import asdict
     import json

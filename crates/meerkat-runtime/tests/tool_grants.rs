@@ -3311,3 +3311,107 @@ async fn a_run_scoped_identity_grant_ends_with_its_identity() {
         );
     }
 }
+
+/// The identity's audit rows as stored, read without settling anything.
+async fn identity_audit_events(
+    store: &dyn RuntimeStore,
+    member: &ToolGrantSubject,
+) -> Vec<ToolGrantAuditEvent> {
+    store
+        .read_tool_grant_audit(member.key().as_str(), None, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, bytes)| ToolGrantAuditRow::decode(&bytes).unwrap().event)
+        .collect()
+}
+
+/// A run's end and then its identity's end: a run-scoped grant to a member
+/// identity whose run ended stays as its run ended it when the identity then
+/// ends (the end finds no live grant, changes nothing and records nothing),
+/// and a later member of the name, in a run of its own, is refused as
+/// needing a grant, its refusal citing no grant of the earlier life.
+#[tokio::test]
+async fn an_identity_end_after_its_grants_run_ended_changes_nothing() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let member_session = SessionId::new();
+        let served = serve_member(&machine, &member_session, &member).await;
+        let run = RunId::new();
+        let grant = machine
+            .grant_tool(
+                ToolGrantRequest {
+                    run_scope: Some(run.clone()),
+                    ..member_shell_grant(&member, Duration::from_mins(10))
+                },
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        served.boundary_in(Some(&run)).await.unwrap();
+        assert_eq!(served.visible(), OPEN, "{backend:?}");
+
+        // The member's run ends: the grant ends with it.
+        clock.set(T0 + 1_000);
+        served.gate.end_run(&run).await.unwrap();
+        let store = durable.open();
+        let run_ended = stored(&*store, &grant).await;
+        assert_eq!(run_ended.status, ToolGrantStatus::RunEnded, "{backend:?}");
+        assert!(!run_ended.subject_ended, "{backend:?}");
+        let audit_before = identity_audit_events(&*store, &member).await;
+
+        // The identity ends: its run-ended grant stays as it stands.
+        clock.set(T0 + 2_000);
+        assert_eq!(
+            machine
+                .end_tool_grants_of(
+                    &member,
+                    ToolGrantRevocation {
+                        actor: Some("mob-1".to_string()),
+                        reason: Some("identity ended".to_string()),
+                    },
+                )
+                .await
+                .unwrap(),
+            0,
+            "{backend:?}: the identity's end ends no grant"
+        );
+        assert_eq!(
+            stored(&*store, &grant).await,
+            run_ended,
+            "{backend:?}: the run-ended grant stays as its run ended it"
+        );
+        assert_eq!(
+            identity_audit_events(&*store, &member).await,
+            audit_before,
+            "{backend:?}: the end records nothing"
+        );
+
+        // A later member of the name, on a fresh session, in a run of its own.
+        let later_session = SessionId::new();
+        let later = serve_member(&machine, &later_session, &member).await;
+        let later_run = RunId::new();
+        later.boundary_in(Some(&later_run)).await.unwrap();
+        assert_eq!(later.visible(), CLOSED, "{backend:?}");
+        let refusal = later
+            .call_in("shell", "call-of-a-later-member", Some(&later_run))
+            .await
+            .expect_err("no grant of the earlier life admits the later member");
+        assert_eq!(refusal, ToolGrantRefusal::Required, "{backend:?}");
+        let events = identity_audit_events(&*store, &member).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(ToolGrantAuditEvent::Refused {
+                    reason: ToolGrantRefusalKind::Required,
+                    grant_id: None,
+                    ..
+                })
+            ),
+            "{backend:?}: the refusal cites no grant of the earlier life: {events:?}"
+        );
+    }
+}

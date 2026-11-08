@@ -381,6 +381,13 @@ struct PendingDelegation {
     /// Blockers that ended without completing, found by the pump; dispatch
     /// replaces the item and prefaces the task with them.
     failed_blockers: Vec<(meerkat::WorkItemId, String)>,
+    /// Continuations a start of this request folded into its task under
+    /// generated steer authority when that start then met a busy source:
+    /// nothing ran with them, so their delivery is not recorded yet. The
+    /// retry folds them again (each is one steer, authorized once) and
+    /// records them delivered once a worker starts with them; a retired
+    /// request records them not delivered.
+    folded_steers: Vec<FoldedSteer>,
 }
 
 /// Canonical transcript commit evidence and its `Confirmed` reconciliation.
@@ -435,6 +442,13 @@ struct ChannelSchedule {
     /// Results of completed items on this channel, by item, so a worker
     /// restarted after waiting on them receives them verbatim.
     completed_results: std::collections::HashMap<meerkat::WorkItemId, (String, String)>,
+    /// The channel closed. Its admitted delegations still start, run and
+    /// settle on the operation's own retired channel, and it is dropped once
+    /// nothing is queued or running on it. A worker's blocked hand-back
+    /// follows the machine's settlement; one the machine still held Blocked
+    /// when the close swept this schedule is cancelled, as the close cancels
+    /// the blocked work it finds.
+    closed: bool,
 }
 
 impl ChannelSchedule {
@@ -445,9 +459,33 @@ impl ChannelSchedule {
             pending: std::collections::HashMap::new(),
             append_lane: Arc::new(Mutex::new(())),
             completed_results: std::collections::HashMap::new(),
+            closed: false,
         }
     }
 }
+
+/// Drop a closed channel's schedule once nothing is queued or running on it.
+fn drop_drained_closed_schedule(
+    schedules: &mut std::collections::HashMap<ActiveChannelKey, ChannelSchedule>,
+    channel_key: &ActiveChannelKey,
+) {
+    if schedules.get(channel_key).is_some_and(|schedule| {
+        schedule.closed && schedule.queue.is_empty() && schedule.running.is_empty()
+    }) {
+        schedules.remove(channel_key);
+    }
+}
+
+/// One continuation folded into a worker's task, with the generated steer
+/// authority that admitted it.
+type FoldedSteer = (
+    meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+    PendingContinuation,
+);
+
+/// A worker's task with the continuations folded into it, and the steer
+/// authority of each, to reconcile once the continuation's row commits.
+type FoldedContinuations = (String, Vec<FoldedSteer>);
 
 /// Exact identity and transport needed to narrate one delegation's state.
 struct NarrationSubject {
@@ -1788,6 +1826,61 @@ pub struct ExperimentalLiveDelegationCoordinator {
     #[cfg(test)]
     deferred_close_gate_for_test:
         Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test gate on the schedule pump's next WorkGraph readiness read:
+    /// `(entered, resume)`.
+    #[cfg(test)]
+    pump_readiness_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test gate on the next scheduled start, entered once the pump has taken
+    /// the item off its queue (it is running, not yet retained):
+    /// `(entered, resume)`.
+    #[cfg(test)]
+    start_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test stand-in for a busy source member at the fork cut: this many
+    /// next worker starts end as the executor's `SourceBusy` once their
+    /// worker-start authority was granted, before anything physical starts.
+    #[cfg(test)]
+    source_busy_starts_for_test: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test stand-in for an executor start failure other than a busy source:
+    /// this many next worker starts end as a failed spawn once their
+    /// worker-start authority was granted, before anything physical starts.
+    #[cfg(test)]
+    failed_starts_for_test: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test gate on the next worker terminal's realization, entered once it
+    /// read the machine's settlement and before it takes the schedule lock:
+    /// `(entered, resume)`.
+    #[cfg(test)]
+    realization_lock_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test stand-in for the machine's answer to the reports that an
+    /// authorized worker start did not start.
+    #[cfg(test)]
+    start_report_faults_for_test: Arc<StartReportFaultsForTest>,
+    /// Test gate on the lifecycle seam's next delegation admission, entered
+    /// once the seam read its started turn and before the machine admits the
+    /// delegation: `(entered, resume)`.
+    #[cfg(test)]
+    delegation_admission_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test gate on the lifecycle seam's next completed-turn custody, entered
+    /// once the machine admitted the delegation and before the seam records
+    /// its custody: `(entered with the admitted operation, resume)`.
+    #[cfg(test)]
+    delegation_custody_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<OperationId>, oneshot::Receiver<()>)>>>,
+}
+
+/// Test stand-in for the machine's answer to a report that an authorized
+/// worker start did not start: `transient` next reports fail with a
+/// mechanical error first, then every report is refused while `refused`
+/// holds. `reports` counts every report.
+#[cfg(test)]
+#[derive(Default)]
+struct StartReportFaultsForTest {
+    transient: std::sync::atomic::AtomicUsize,
+    refused: std::sync::atomic::AtomicBool,
+    reports: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2462,6 +2555,22 @@ impl ExperimentalLiveDelegationCoordinator {
             awaiting_peer_replies_for_test: Arc::default(),
             #[cfg(test)]
             deferred_close_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            pump_readiness_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            start_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            source_busy_starts_for_test: Arc::default(),
+            #[cfg(test)]
+            failed_starts_for_test: Arc::default(),
+            #[cfg(test)]
+            realization_lock_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            start_report_faults_for_test: Arc::default(),
+            #[cfg(test)]
+            delegation_admission_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            delegation_custody_gate_for_test: Arc::default(),
         }
     }
 
@@ -2931,18 +3040,82 @@ impl ExperimentalLiveDelegationCoordinator {
                 }
             }
 
-            if let Err(error) = self
+            // The shell passes what it observed: the Mob's durable terminal.
+            // The machine settles the operation from its recorded terminal,
+            // which a completed turn agrees with when it is the coordinator's
+            // classification of that turn (a blocked hand-back, or an item
+            // that failed or was cancelled).
+            let reconciled = match self
                 .runtime
                 .reconcile_revoked_live_delegation_worker_after_restart(snapshot, terminal)
                 .await
             {
-                return ExperimentalClientContextRestartDisposition::Broken {
-                    reason: format!("durable ClientContext terminal remains unreconciled: {error}"),
-                };
+                Ok(reconciled) => reconciled,
+                Err(error) => {
+                    return ExperimentalClientContextRestartDisposition::Broken {
+                        reason: format!(
+                            "durable ClientContext terminal remains unreconciled: {error}"
+                        ),
+                    };
+                }
+            };
+            // A blocked hand-back the machine settled Cancelled leaves its
+            // voice work item as the in-process close leaves it: cancelled.
+            if reconciled.terminal() == Some(LiveDelegationWorkerTerminalKind::Blocked)
+                && self
+                    .runtime
+                    .live_delegation_schedule_state(snapshot.session_id(), snapshot.operation_id())
+                    .await
+                    .ok()
+                    .flatten()
+                    == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled)
+            {
+                self.cancel_voice_item_after_restart(mob_handle, snapshot)
+                    .await;
             }
             return ExperimentalClientContextRestartDisposition::Reconciled {
-                completed: terminal == LiveDelegationWorkerTerminalKind::Completed,
+                completed: reconciled.terminal()
+                    == Some(LiveDelegationWorkerTerminalKind::Completed),
             };
+        }
+    }
+
+    /// Cancel the open voice work item of a restart-recovered delegation
+    /// whose blocked hand-back the machine settled Cancelled, as the
+    /// in-process close cancels it. The item names its operation.
+    async fn cancel_voice_item_after_restart(
+        &self,
+        mob_handle: &meerkat_mob::MobHandle,
+        snapshot: &LiveDelegationRecoverySnapshot,
+    ) {
+        let Some(workgraph) = self.voice_workgraph(mob_handle) else {
+            return;
+        };
+        match workgraph
+            .open_item_of_operation(snapshot.channel_id(), snapshot.operation_id())
+            .await
+        {
+            Ok(Some(item)) => {
+                if let Err(failure) = workgraph
+                    .close(&item, meerkat::WorkStatus::Cancelled, None)
+                    .await
+                {
+                    tracing::warn!(
+                        %failure,
+                        operation_id = %snapshot.operation_id(),
+                        "voice work item of a restart-recovered blocked hand-back could not be cancelled"
+                    );
+                }
+            }
+            Ok(None) => tracing::debug!(
+                operation_id = %snapshot.operation_id(),
+                "no open voice work item names the restart-recovered blocked hand-back"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                operation_id = %snapshot.operation_id(),
+                "voice work items unavailable for a restart-recovered blocked hand-back"
+            ),
         }
     }
 
@@ -4435,6 +4608,18 @@ impl ExperimentalLiveDelegationCoordinator {
         // running: arrival never cancels or supersedes them. Canonical
         // transcript reconciliation and all executor authority remain
         // control-owned below.
+        #[cfg(test)]
+        {
+            let gate = self
+                .delegation_admission_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
+            }
+        }
         self.runtime
             .admit_live_delegation(&runtime_binding, &operation, &provisional)
             .await
@@ -4458,12 +4643,24 @@ impl ExperimentalLiveDelegationCoordinator {
             finished.binding().channel_id().clone(),
             finished.provider_turn_ref().to_string(),
         );
+        #[cfg(test)]
+        {
+            let gate = self
+                .delegation_custody_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(operation.operation_id().clone());
+                let _ = resume.await;
+            }
+        }
         if self
             .completed_delegation_turns
             .lock()
             .await
             .insert(
-                completed_key,
+                completed_key.clone(),
                 CompletedDelegationTurn {
                     authority: finished.clone(),
                     operation,
@@ -4475,6 +4672,38 @@ impl ExperimentalLiveDelegationCoordinator {
             .is_some()
         {
             return Err("client delegation final duplicated completed-turn custody".to_string());
+        }
+        // A close whose sweep ran after this admission closed the channel's
+        // delegation intake and drained nothing of it: no channel loop will
+        // claim this delegation and no sweep will settle it. The machine
+        // cancels it, as the close cancels an admitted delegation no loop
+        // claimed.
+        if self
+            .runtime
+            .live_delegation_intake_closed(
+                provider_binding.session_id(),
+                provider_binding.channel_id(),
+            )
+            .await
+            .unwrap_or(false)
+        {
+            let unclaimed = self
+                .completed_delegation_turns
+                .lock()
+                .await
+                .remove(&completed_key);
+            if let Some(unclaimed) = unclaimed
+                && let Err(error) = self
+                    .runtime
+                    .cancel_queued_live_delegation(&unclaimed.runtime_binding, &unclaimed.operation)
+                    .await
+            {
+                tracing::warn!(
+                    %error,
+                    operation_id = %unclaimed.operation.operation_id(),
+                    "an admitted delegation whose custody landed after its channel's close could not be cancelled"
+                );
+            }
         }
         self.runtime.wake_live_context_outbox(finished.binding());
         Ok(())
@@ -4637,6 +4866,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     provider_binding.channel_id(),
                     provider_binding.session_id(),
                     delegation.adapter_key(),
+                    operation.operation_id(),
                     &executor_input.request_transcript,
                 )
                 .await
@@ -4678,6 +4908,7 @@ impl ExperimentalLiveDelegationCoordinator {
             start_attempts: 0,
             waited_on: Vec::new(),
             failed_blockers: Vec::new(),
+            folded_steers: Vec::new(),
         };
         {
             let mut schedules = self.schedules.lock().await;
@@ -4731,6 +4962,18 @@ impl ExperimentalLiveDelegationCoordinator {
                         .and_then(|pending| pending.workgraph.clone())
                 })
             };
+            #[cfg(test)]
+            {
+                let gate = self
+                    .pump_readiness_gate_for_test
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some((entered, resume)) = gate {
+                    let _ = entered.send(());
+                    let _ = resume.await;
+                }
+            }
             let readiness = match workgraph {
                 Some(workgraph) => match workgraph.channel_readiness(&channel_key.1).await {
                     Ok(readiness) => Some(readiness),
@@ -4951,12 +5194,13 @@ impl ExperimentalLiveDelegationCoordinator {
                 return;
             };
             schedule.running.remove(operation_id);
+            // The entry keeps what the start recorded on it (the transcript
+            // it committed, the work item it claimed or replaced): a retry
+            // never commits the spoken request twice.
             if let Some(entry) = schedule.pending.get_mut(operation_id) {
                 entry.blocked = false;
                 entry.deferred = true;
                 entry.start_attempts = entry.start_attempts.saturating_add(1);
-                entry.transcript = pending.transcript.clone();
-                entry.work = pending.work.clone();
             }
             if !schedule.queue.contains(operation_id) {
                 schedule.queue.push_back(operation_id.clone());
@@ -4999,6 +5243,18 @@ impl ExperimentalLiveDelegationCoordinator {
         waited: Vec<(String, String)>,
         append_lane: Arc<Mutex<()>>,
     ) -> Result<(), ScheduledStartFailure> {
+        #[cfg(test)]
+        {
+            let gate = self
+                .start_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
+            }
+        }
         let operation_id = pending.operation.operation_id().clone();
         if pending.blocked {
             self.runtime
@@ -5044,6 +5300,7 @@ impl ExperimentalLiveDelegationCoordinator {
                         pending.provider_binding.channel_id(),
                         pending.provider_binding.session_id(),
                         pending.delegation.adapter_key(),
+                        &operation_id,
                         &pending.executor_input.request_transcript,
                     )
                     .await
@@ -5180,7 +5437,9 @@ impl ExperimentalLiveDelegationCoordinator {
     /// Drop a delegation that cannot start: cancel it in the machine when it
     /// is still queued, fail its WorkGraph item, and tell the user. The
     /// narration is authorized only once the machine holds the item as
-    /// Failed or Cancelled, so an unstartable request is never silent.
+    /// Failed or Cancelled, so an unstartable request is never silent. Steers
+    /// an earlier start folded for the retry reached no worker: they are
+    /// recorded as not delivered.
     async fn retire_unstartable_delegation(
         &self,
         channel_key: &ActiveChannelKey,
@@ -5188,10 +5447,24 @@ impl ExperimentalLiveDelegationCoordinator {
         pending: &PendingDelegation,
         lane: Arc<Mutex<()>>,
     ) {
-        if let Some(schedule) = self.schedules.lock().await.get_mut(channel_key) {
-            schedule.running.remove(operation_id);
-            schedule.pending.remove(operation_id);
-        }
+        let carried = {
+            let mut schedules = self.schedules.lock().await;
+            let carried = schedules
+                .get_mut(channel_key)
+                .and_then(|schedule| {
+                    schedule.running.remove(operation_id);
+                    schedule.pending.remove(operation_id)
+                })
+                .map(|entry| entry.folded_steers)
+                .unwrap_or_default();
+            drop_drained_closed_schedule(&mut schedules, channel_key);
+            carried
+        };
+        self.resolve_folded_steers(&pending.runtime_binding, &carried, false)
+            .await;
+        // An owned delegation that waited out its channel's close is no
+        // longer on its way to the source member.
+        lock_unpoisoned(&self.running_after_close).remove(operation_id);
         let state = self
             .runtime
             .live_delegation_schedule_state(pending.runtime_binding.session_id(), operation_id)
@@ -5331,21 +5604,23 @@ impl ExperimentalLiveDelegationCoordinator {
 
     /// Take the continuations held for `delegation` while it waited for a
     /// worker, authorize each as a steer (the worker's start is authorized),
-    /// record it delivered, and append it to the worker's task. Returns the
-    /// task and the authorities to reconcile once each row commits.
+    /// and append it to the worker's task, after the steers an earlier start
+    /// of the same request already authorized (`carried`, kept over a busy
+    /// source). Returns the task and the authority of each folded steer; the
+    /// caller records their delivery once a worker started with the task, or
+    /// as not delivered when the start is retired, and reconciles each once
+    /// its row commits. A held continuation the machine refuses fails the
+    /// fold: the caller retires the start instead of running the request
+    /// without words the user spoke for it, and every steer folded so far is
+    /// recorded as not delivered.
     async fn fold_pending_continuations(
         &self,
         runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
         delegation: &LiveSidebandDelegationRef,
         mut task: String,
-    ) -> (
-        String,
-        Vec<(
-            meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
-            PendingContinuation,
-        )>,
-    ) {
+        carried: Vec<FoldedSteer>,
+    ) -> Result<FoldedContinuations, String> {
         let held: Vec<PendingContinuation> = {
             let mut pending = self.pending_continuations.lock().await;
             let (held, waiting): (Vec<_>, Vec<_>) = pending
@@ -5354,10 +5629,17 @@ impl ExperimentalLiveDelegationCoordinator {
             *pending = waiting;
             held
         };
-        let mut folded = Vec::new();
+        let mut folded = carried;
         for continuation in held {
+            // A continuation observed twice is one steer.
+            if folded
+                .iter()
+                .any(|(_, earlier)| earlier.continuation_id == continuation.continuation_id)
+            {
+                continue;
+            }
             let digest = continuation_digest(&continuation.transcript);
-            let authority = match self
+            match self
                 .runtime
                 .authorize_live_delegation_steer(
                     runtime_binding,
@@ -5367,24 +5649,96 @@ impl ExperimentalLiveDelegationCoordinator {
                 )
                 .await
             {
-                Ok(authority) => authority,
+                Ok(authority) => folded.push((authority, continuation)),
                 Err(error) => {
-                    tracing::debug!(%error, "held continuation was not authorized as a steer");
-                    continue;
+                    for (authority, _) in &folded {
+                        if let Err(error) = self
+                            .runtime
+                            .resolve_live_delegation_steer_delivery(
+                                authority,
+                                runtime_binding,
+                                false,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "a steer of a retired start was not recorded as undelivered"
+                            );
+                        }
+                    }
+                    return Err(format!(
+                        "held continuation {} was refused as a steer: {error}",
+                        continuation.continuation_id
+                    ));
                 }
-            };
+            }
+        }
+        for (_, continuation) in &folded {
             task.push_str("\n\n");
             task.push_str(&continuation_steer_text(&continuation.transcript));
+        }
+        Ok((task, folded))
+    }
+
+    /// Record the delivery of the steers folded into a start's task:
+    /// delivered once a worker started with the task, not delivered when the
+    /// start is retired. Exactly one outcome per steer.
+    async fn resolve_folded_steers(
+        &self,
+        runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        folded: &[FoldedSteer],
+        delivered: bool,
+    ) {
+        for (authority, _) in folded {
             if let Err(error) = self
                 .runtime
-                .resolve_live_delegation_steer_delivery(&authority, runtime_binding, true)
+                .resolve_live_delegation_steer_delivery(authority, runtime_binding, delivered)
                 .await
             {
-                tracing::warn!(%error, "folded steer delivery outcome was not recorded");
+                tracing::warn!(%error, delivered, "folded steer delivery outcome was not recorded");
             }
-            folded.push((authority, continuation));
         }
-        (task, folded)
+    }
+
+    /// Take the steers an earlier start of this request folded and carried
+    /// over a busy source off its schedule entry.
+    async fn take_folded_steers(
+        &self,
+        channel_key: &ActiveChannelKey,
+        operation_id: &OperationId,
+    ) -> Vec<FoldedSteer> {
+        self.schedules
+            .lock()
+            .await
+            .get_mut(channel_key)
+            .and_then(|schedule| schedule.pending.get_mut(operation_id))
+            .map(|entry| std::mem::take(&mut entry.folded_steers))
+            .unwrap_or_default()
+    }
+
+    /// Keep the steers a start folded on its request's schedule entry for
+    /// the retry of a start that met a busy source. Hands them back when the
+    /// entry is gone.
+    async fn keep_folded_steers(
+        &self,
+        channel_key: &ActiveChannelKey,
+        operation_id: &OperationId,
+        folded: Vec<FoldedSteer>,
+    ) -> Result<(), Vec<FoldedSteer>> {
+        match self
+            .schedules
+            .lock()
+            .await
+            .get_mut(channel_key)
+            .and_then(|schedule| schedule.pending.get_mut(operation_id))
+        {
+            Some(entry) => {
+                entry.folded_steers = folded;
+                Ok(())
+            }
+            None => Err(folded),
+        }
     }
 
     /// A queued delegation's worker started: deliver the continuations that
@@ -5926,6 +6280,88 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    /// Start the executor for one admitted delegation whose worker-start
+    /// authority was granted.
+    async fn start_delegation_service(
+        &self,
+        service: &DelegationExecutionService,
+        request: DelegationExecutionRequest,
+        source_identity: &AgentIdentity,
+    ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
+        #[cfg(test)]
+        if self
+            .source_busy_starts_for_test
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(DelegationExecutionError::SourceBusy {
+                source_identity: source_identity.clone(),
+                waited_ms: 0,
+            });
+        }
+        #[cfg(test)]
+        if self
+            .failed_starts_for_test
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(DelegationExecutionError::Spawn(
+                meerkat_mob::MobError::Internal("injected executor start failure".to_string()),
+            ));
+        }
+        #[cfg(not(test))]
+        let _ = source_identity;
+        service.start(request).await
+    }
+
+    /// Report to the machine that an authorized worker start did not start
+    /// (nothing physical exists).
+    async fn report_unstarted_start(
+        &self,
+        runtime_binding: &LiveDelegationRuntimeBinding,
+        admission: &LiveDelegationExecutionAdmission,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let faults = &self.start_report_faults_for_test;
+            faults.reports.fetch_add(1, Ordering::AcqRel);
+            if faults
+                .transient
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(meerkat_runtime::RuntimeDriverError::Internal(
+                    "transient fault of a test start report".to_string(),
+                ));
+            }
+            if faults.refused.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                    reason: "the machine refused a test start report".to_string(),
+                });
+            }
+        }
+        self.runtime
+            .resolve_live_delegation_worker_start(
+                runtime_binding.runtime_id(),
+                runtime_binding.fence_token(),
+                runtime_binding.generation(),
+                admission,
+                false,
+            )
+            .await
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "this exact delegation boundary carries independent provider, runtime, fork, and operation authorities"
@@ -6064,15 +6500,50 @@ impl ExperimentalLiveDelegationCoordinator {
         admission
             .release_tool_execution(&consequential)
             .map_err(|error| other(error.to_string()))?;
-        // Continuations that arrived while this delegation waited for its
-        // worker join the task itself, under generated steer authority: the
-        // task is the worker's runtime input, so the runtime accounts for it.
-        let (task, folded_continuations) = self
-            .fold_pending_continuations(&runtime_binding, &operation, &delegation, task)
-            .await;
         let result_spec =
             BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES)
                 .map_err(|error| other(error.to_string()))?;
+        // Continuations that arrived while this delegation waited for its
+        // worker join the task itself, under generated steer authority: the
+        // task is the worker's runtime input, so the runtime accounts for it.
+        // Steers an earlier start of this request folded before it met a busy
+        // source join first. From here every path records each folded steer's
+        // delivery exactly once, or keeps them for the retry.
+        let carried = self
+            .take_folded_steers(&channel_key, operation.operation_id())
+            .await;
+        let (task, folded_continuations) = match self
+            .fold_pending_continuations(&runtime_binding, &operation, &delegation, task, carried)
+            .await
+        {
+            Ok(folded) => folded,
+            Err(reason) => {
+                // Nothing physical started. The machine records the start as
+                // not started (its slot is released and the operation is held
+                // Failed), and the schedule retires the request: it never runs
+                // without the words the user spoke for it. A refusal of that
+                // report cannot change, so it is not offered again.
+                if let Err(refused) =
+                    reconciled_cleanup_step_or_refused("refused-continuation-start-report", || {
+                        self.report_unstarted_start(&runtime_binding, &admission)
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        operation_id = %operation.operation_id(),
+                        step = refused.step,
+                        reason = %refused.reason,
+                        "the machine refused the report that a retired start did not start"
+                    );
+                }
+                tracing::warn!(
+                    operation_id = %operation.operation_id(),
+                    %reason,
+                    "a held continuation could not join its delegation; the request is retired, not run"
+                );
+                return Err(other(format!("{reason}; the request was retired, not run")));
+            }
+        };
         let service = DelegationExecutionService::new(mob_handle.clone());
         let request = DelegationExecutionRequest::new_live(
             worker_identity.clone(),
@@ -6091,26 +6562,70 @@ impl ExperimentalLiveDelegationCoordinator {
             operation_id = %operation.operation_id(),
             "client-context control entering durable delegation service"
         );
-        let execution = match service.start(request).await {
-            Ok(execution) => execution,
+        let execution = match self
+            .start_delegation_service(&service, request, &source_identity)
+            .await
+        {
+            Ok(execution) => {
+                // The worker started with the folded words in its task.
+                self.resolve_folded_steers(&runtime_binding, &folded_continuations, true)
+                    .await;
+                execution
+            }
             Err(error) => {
                 let failure = LiveDelegationStartFailure::from(&error);
                 if let LiveDelegationStartFailure::SourceBusy { .. } = &failure {
                     // Nothing physical exists: the fork was never cut.
                     // Record the failed start so the machine can requeue the
-                    // exact operation; no child retirement is owed.
-                    retry_reconciled_cleanup_step("busy-source-start-report", || {
-                        self.runtime.resolve_live_delegation_worker_start(
-                            runtime_binding.runtime_id(),
-                            runtime_binding.fence_token(),
-                            runtime_binding.generation(),
-                            &admission,
-                            false,
-                        )
-                    })
-                    .await;
-                    return Err(failure);
+                    // exact operation; no child retirement is owed. The
+                    // retry runs the same request, so the steers folded into
+                    // this start wait on its schedule entry for that retry.
+                    // A refusal of the report cannot change: the request is
+                    // retired instead of requeued.
+                    return match reconciled_cleanup_step_or_refused(
+                        "busy-source-start-report",
+                        || self.report_unstarted_start(&runtime_binding, &admission),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            if let Err(folded) = self
+                                .keep_folded_steers(
+                                    &channel_key,
+                                    operation.operation_id(),
+                                    folded_continuations,
+                                )
+                                .await
+                            {
+                                self.resolve_folded_steers(&runtime_binding, &folded, false)
+                                    .await;
+                            }
+                            Err(failure)
+                        }
+                        Err(refused) => {
+                            self.resolve_folded_steers(
+                                &runtime_binding,
+                                &folded_continuations,
+                                false,
+                            )
+                            .await;
+                            tracing::warn!(
+                                operation_id = %operation.operation_id(),
+                                step = refused.step,
+                                reason = %refused.reason,
+                                "the machine refused the report that a busy-source start did not start; the request is retired"
+                            );
+                            Err(other(format!(
+                                "{failure}; the machine refused the report that the start did not start ({}); the request was retired, not run",
+                                refused.reason
+                            )))
+                        }
+                    };
                 }
+                // The executor did not start: the folded words reached no
+                // worker.
+                self.resolve_folded_steers(&runtime_binding, &folded_continuations, false)
+                    .await;
                 tracing::warn!(
                     operation_id = %operation.operation_id(),
                     kind = failure.kind(),
@@ -6370,18 +6885,56 @@ impl ExperimentalLiveDelegationCoordinator {
             .iter()
             .map(|(_, title)| title.clone())
             .collect::<Vec<_>>();
+        // The machine settled a blocked hand-back: Blocked while the channel
+        // is bound (the item requeues once it is ready again), Cancelled once
+        // the channel is unbound (a requeue needs the binding, so nothing
+        // could serve it again). The schedule follows that settlement.
+        let blocked_cancelled = terminal.terminal == LiveDelegationWorkerTerminalKind::Blocked
+            && self
+                .runtime
+                .live_delegation_schedule_state(
+                    retained.runtime_binding.session_id(),
+                    &operation_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled);
+        #[cfg(test)]
+        {
+            let gate = self
+                .realization_lock_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
+            }
+        }
+        // A hand-back the machine still holds Blocked whose channel's close
+        // swept the schedule after that read (the sweep kept it as running
+        // work) is cancelled like the blocked work the close finds.
+        let mut cancelled_at_close = false;
         {
             let mut schedules = self.schedules.lock().await;
             if let Some(schedule) = schedules.get_mut(channel_key) {
                 schedule.running.remove(&operation_id);
                 if terminal.terminal == LiveDelegationWorkerTerminalKind::Blocked {
-                    if let Some(pending) = schedule.pending.get_mut(&operation_id) {
-                        pending.blocked = true;
-                        pending.waited_on =
-                            terminal.blockers.iter().map(|(id, _)| id.clone()).collect();
-                    }
-                    if !schedule.queue.contains(&operation_id) {
-                        schedule.queue.push_back(operation_id.clone());
+                    if blocked_cancelled {
+                        schedule.pending.remove(&operation_id);
+                    } else if schedule.closed {
+                        schedule.pending.remove(&operation_id);
+                        cancelled_at_close = true;
+                    } else {
+                        if let Some(pending) = schedule.pending.get_mut(&operation_id) {
+                            pending.blocked = true;
+                            pending.waited_on =
+                                terminal.blockers.iter().map(|(id, _)| id.clone()).collect();
+                        }
+                        if !schedule.queue.contains(&operation_id) {
+                            schedule.queue.push_back(operation_id.clone());
+                        }
                     }
                 } else {
                     schedule.pending.remove(&operation_id);
@@ -6394,7 +6947,29 @@ impl ExperimentalLiveDelegationCoordinator {
                             .insert(work.id.clone(), (retained.title.clone(), text.clone()));
                     }
                 }
+                drop_drained_closed_schedule(&mut schedules, channel_key);
             }
+        }
+        if cancelled_at_close
+            && let Err(error) = self
+                .runtime
+                .cancel_queued_live_delegation(&retained.runtime_binding, &retained.operation)
+                .await
+        {
+            tracing::warn!(
+                %error,
+                %operation_id,
+                "a blocked hand-back realized across its channel's close could not be cancelled"
+            );
+        }
+        if (blocked_cancelled || cancelled_at_close)
+            && let (Some(workgraph), Some(work)) =
+                (retained.workgraph.as_ref(), retained.work.as_ref())
+            && let Err(error) = workgraph
+                .close(&work.id, meerkat::WorkStatus::Cancelled, None)
+                .await
+        {
+            tracing::warn!(%error, %operation_id, "voice work item of a cancelled blocked hand-back could not be cancelled");
         }
         match terminal.terminal {
             LiveDelegationWorkerTerminalKind::Blocked => {
@@ -6410,14 +6985,10 @@ impl ExperimentalLiveDelegationCoordinator {
             }
             LiveDelegationWorkerTerminalKind::Completed if terminal.channel_closed => {
                 // An existing member executed the turn in its own canonical
-                // session; only an owned fork's result needs merging back.
-                if retained.admission.worker_ownership()
-                    == LiveDelegationWorkerOwnership::OwnedMember
-                    && let Some(text) = terminal.result_text.as_deref()
-                {
-                    self.merge_result_into_source(retained, text).await;
-                }
-                self.remove_retained_delegation(retained).await;
+                // session; only an owned fork's result merges back, exactly
+                // once even when the close sweep reaches it first (the result
+                // text is taken under its lock).
+                self.merge_result_after_channel_close(retained).await;
             }
             LiveDelegationWorkerTerminalKind::Completed if !terminal.terminal_ineligible => {
                 // The Completed sentence and the result are released under one
@@ -7223,57 +7794,147 @@ impl ExperimentalLiveDelegationCoordinator {
         Ok(())
     }
 
+    /// Close the channel's delegation intake in the machine under the exact
+    /// binding of this close, so a delegation the lifecycle seam still
+    /// carries past the close is refused admission. A channel already
+    /// unbound, or bound under another incarnation, admits nothing under
+    /// this binding any more.
+    async fn close_delegation_intake(&self, binding: &ProviderWebrtcBinding) {
+        let Ok(runtime_binding) = self
+            .runtime
+            .live_delegation_runtime_binding(binding.session_id(), binding.channel_id())
+            .await
+        else {
+            return;
+        };
+        if runtime_binding.fence_token() != binding.runtime_fence().get()
+            || runtime_binding.generation() != binding.runtime_generation().get()
+        {
+            return;
+        }
+        if let Err(error) = self
+            .runtime
+            .close_live_delegation_intake(&runtime_binding)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                channel_id = %binding.channel_id(),
+                "the closed channel's delegation intake could not be closed"
+            );
+        }
+    }
+
     async fn cancel_channel_binding(&self, binding: &ProviderWebrtcBinding) {
+        // The intake closes first: nothing is admitted on this channel past
+        // this sweep, so nothing admitted is left that no loop claims and no
+        // sweep settles.
+        self.close_delegation_intake(binding).await;
         let key = (binding.session_id().clone(), binding.channel_id().clone());
         self.active_user_turns.lock().await.remove(&key);
-        self.completed_delegation_turns
-            .lock()
-            .await
-            .retain(|(session_id, channel_id, _), _| {
-                session_id != binding.session_id() || channel_id != binding.channel_id()
-            });
+        // A delegation the lifecycle seam admitted but the channel loop never
+        // claimed (a retirement cancelled the run before the loop read its
+        // request) cannot run after the close: its control payload never
+        // arrived. The machine settles it as cancelled, so it is never left
+        // Created with no schedule and no worker.
+        let unclaimed = {
+            let mut completed = self.completed_delegation_turns.lock().await;
+            let keys = completed
+                .keys()
+                .filter(|(session_id, channel_id, _)| {
+                    session_id == binding.session_id() && channel_id == binding.channel_id()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| completed.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for turn in unclaimed {
+            if let Err(error) = self
+                .runtime
+                .cancel_queued_live_delegation(&turn.runtime_binding, &turn.operation)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    operation_id = %turn.operation.operation_id(),
+                    "an admitted delegation the channel never claimed could not be cancelled at its close"
+                );
+            }
+        }
         self.cancel_responses_executions_for_binding(binding).await;
         self.settle_result_recovery_tasks(binding).await;
         self.settle_failed_start_cleanups(binding).await;
-        // Channel close cancels only work that never started: queued items
-        // and blocked items awaiting requeue. Running forks keep their
-        // machine custody and finish; their results merge into the source
-        // member instead of reaching the closed provider channel.
-        let (queued, running) = {
+        // Channel close cancels only the blocked work its schedule holds: a
+        // worker already took such an item and handed it back. Every admitted
+        // delegation that has not started keeps its generated admission (the
+        // close cancelled it once, as work that never started, and the spoken
+        // request was neither executed nor recorded, Turbo S S107): the
+        // schedule stays, marked closed, and starts it on the operation's own
+        // retired channel once a worker slot frees. Running workers keep
+        // their machine custody and finish. Results merge into the source
+        // member (an owned fork) or stay in the member's own canonical
+        // session (an existing member) instead of reaching the closed
+        // provider channel.
+        let owned_workers =
+            self.execution_policy.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember;
+        let (blocked, waiting, running) = {
             let mut schedules = self.schedules.lock().await;
-            match schedules.remove(&key) {
+            match schedules.get_mut(&key) {
                 Some(schedule) => {
-                    let queued = schedule
+                    schedule.closed = true;
+                    let mut blocked = Vec::new();
+                    let mut waiting = std::collections::BTreeSet::new();
+                    for operation_id in &schedule.queue {
+                        let Some(pending) = schedule.pending.get(operation_id) else {
+                            continue;
+                        };
+                        if pending.runtime_binding.generation()
+                            != binding.runtime_generation().get()
+                            || pending.runtime_binding.fence_token()
+                                != binding.runtime_fence().get()
+                        {
+                            continue;
+                        }
+                        if pending.blocked {
+                            blocked.push(pending.clone());
+                        } else {
+                            waiting.insert(operation_id.clone());
+                        }
+                    }
+                    let running = schedule.running.clone();
+                    schedule
                         .queue
-                        .iter()
-                        .filter_map(|operation_id| schedule.pending.get(operation_id).cloned())
-                        .collect::<Vec<_>>();
-                    (queued, schedule.running)
+                        .retain(|operation_id| waiting.contains(operation_id));
+                    schedule.pending.retain(|operation_id, _| {
+                        waiting.contains(operation_id) || running.contains(operation_id)
+                    });
+                    // An owned delegation still waiting for its worker, mid-start
+                    // or running finishes after the close and merges its result
+                    // into the source member: a channel reopened on this
+                    // session meanwhile is told the work is still finishing.
+                    // Recorded under the schedule lock, while the item is still
+                    // queued or running, so a worker that settles meanwhile
+                    // cannot leave a stale entry behind.
+                    if owned_workers {
+                        let mut running_after_close = lock_unpoisoned(&self.running_after_close);
+                        for operation_id in waiting.iter().chain(running.iter()) {
+                            running_after_close
+                                .insert(operation_id.clone(), binding.session_id().clone());
+                        }
+                    }
+                    drop_drained_closed_schedule(&mut schedules, &key);
+                    (blocked, waiting, running)
                 }
-                None => (Vec::new(), std::collections::BTreeSet::new()),
+                None => (
+                    Vec::new(),
+                    std::collections::BTreeSet::new(),
+                    std::collections::BTreeSet::new(),
+                ),
             }
         };
-        // An owned worker still running finishes after the close and merges
-        // its result into the source member: a channel reopened on this
-        // session meanwhile is told the work is still finishing.
-        {
-            let retained = self.retained.lock().await;
-            let mut running_after_close = lock_unpoisoned(&self.running_after_close);
-            for operation_id in &running {
-                if retained.get(operation_id).is_some_and(|retained| {
-                    retained.admission.worker_ownership()
-                        == LiveDelegationWorkerOwnership::OwnedMember
-                }) {
-                    running_after_close.insert(operation_id.clone(), binding.session_id().clone());
-                }
-            }
-        }
-        for pending in queued {
-            if pending.runtime_binding.generation() != binding.runtime_generation().get()
-                || pending.runtime_binding.fence_token() != binding.runtime_fence().get()
-            {
-                continue;
-            }
+        for pending in blocked {
             if let Err(error) = self
                 .runtime
                 .cancel_queued_live_delegation(&pending.runtime_binding, &pending.operation)
@@ -7282,7 +7943,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 tracing::warn!(
                     %error,
                     operation_id = %pending.operation.operation_id(),
-                    "queued live delegation could not be cancelled at channel close"
+                    "blocked live delegation could not be cancelled at channel close"
                 );
             }
             if let (Some(workgraph), Some(work)) =
@@ -7291,8 +7952,11 @@ impl ExperimentalLiveDelegationCoordinator {
                     .close(&work.id, meerkat::WorkStatus::Cancelled, None)
                     .await
             {
-                tracing::warn!(%error, "queued voice work item could not be cancelled");
+                tracing::warn!(%error, "blocked voice work item could not be cancelled");
             }
+        }
+        if !waiting.is_empty() {
+            self.spawn_pump(key.clone());
         }
         let retained = self
             .retained
@@ -8145,6 +8809,7 @@ mod tests {
                 &meerkat_core::LiveChannelId::new("settle-test-channel"),
                 &SessionId::new(),
                 "settle-delegation",
+                &OperationId::new(),
                 "settle the item",
             )
             .await
@@ -10214,6 +10879,25 @@ mod tests {
                 meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit,
             >,
         >,
+        /// What `next_observation` returns, in order. An empty script is a
+        /// stream that has ended.
+        scripted_observations: Mutex<std::collections::VecDeque<ScriptedObservation>>,
+    }
+
+    /// One step of a scripted provider observation stream.
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    enum ScriptedObservation {
+        /// The control consumer receives this observation.
+        Observation(ExperimentalGptLiveControlObservation),
+        /// The stream ends once this signal fires.
+        EndAfter(oneshot::Receiver<()>),
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    impl ExactProjectionControl {
+        async fn script_observations(&self, steps: impl IntoIterator<Item = ScriptedObservation>) {
+            self.scripted_observations.lock().await.extend(steps);
+        }
     }
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
@@ -10310,7 +10994,15 @@ mod tests {
             Option<ExperimentalGptLiveControlObservation>,
             meerkat_live::ProviderWebrtcBrokerError,
         > {
-            Ok(None)
+            let step = self.scripted_observations.lock().await.pop_front();
+            match step {
+                Some(ScriptedObservation::Observation(observation)) => Ok(Some(observation)),
+                Some(ScriptedObservation::EndAfter(signal)) => {
+                    let _ = signal.await;
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
         }
 
         async fn append_session_context(

@@ -12,9 +12,50 @@ import tempfile
 
 from mcp_connections import configuration_value
 from application_configuration import application_fields, validate_configuration_value, validate_configuration_values
-from console_configuration import console_configuration, console_credential_issue, validate_console_configuration_values
+from console_configuration import (console_account_issue, console_authentication_choice, console_configuration,
+    console_credential_issue, console_password_issue, validate_console_configuration_values)
 
 ROOT = Path(__file__).resolve().parent
+ACCOUNT_PROMPT = "Named account to add or to change its password (Enter finishes, :remove NAME removes): "
+
+
+def manage_named_accounts(installation_account):
+    """Keep named Console accounts as password hashes in the private .mobkit folder."""
+    from console_auth import console_accounts_for_change, hash_console_password, save_console_accounts
+    accounts, original = console_accounts_for_change(ROOT, installation_account)
+    before = dict(accounts)
+    print("\nNamed Console accounts: one per person, besides this installation's own account ("
+          + installation_account + "). Each person signs in with their account name and password.")
+    print("Current named accounts: " + (", ".join(accounts) if accounts else "none") + ".")
+    while True:
+        entry = input(ACCOUNT_PROMPT).strip()
+        if not entry:
+            break
+        if entry.startswith(":remove "):
+            name = entry.removeprefix(":remove ").strip()
+            print(f"Removed {name}." if accounts.pop(name, None) is not None else f"There is no named account {name}.")
+            continue
+        issue = console_account_issue(entry, installation_account)
+        if issue is not None:
+            print(issue)
+            continue
+        while True:
+            password = getpass.getpass(f"Password for {entry} (Enter keeps the account unchanged): ")
+            if not password:
+                break
+            repeated = getpass.getpass(f"Repeat the password for {entry}: ")
+            issue = console_password_issue(password)
+            if issue is None and repeated != password:
+                issue = "The two passwords differ."
+            if issue is not None:
+                print(issue + " Enter the password again.")
+                continue
+            accounts[entry] = hash_console_password(password)
+            print(f"Saved the password for {entry}.")
+            break
+    if accounts != before:
+        save_console_accounts(ROOT, accounts, original, installation_account)
+        print("Named accounts saved. Restart the application to apply them.")
 
 
 def private_values(path):
@@ -87,6 +128,12 @@ def main():
     generated_keys = {spec["knowledge"]["token_env"], spec["knowledge"]["space_env"]} if local_knowledge else set()
     fields = [*spec["environment"], *application_fields(ROOT, (field["key"] for field in spec["environment"]))]
     authenticated_console = console_configuration(ROOT, fields)
+    authentication = console_authentication_choice(ROOT, fields) if authenticated_console else None
+    named = authentication == "local-accounts"
+    if named:
+        from console_auth import load_console_accounts
+        # The installation's own account cannot take a named account's name.
+        existing_accounts = set(load_console_accounts(ROOT, None))
     for field in fields:
         key = field["key"]
         if key in generated_keys:
@@ -114,9 +161,12 @@ def main():
             value = value or current or fallback
             try:
                 validate_configuration_value(field, value)
-                issue = console_credential_issue(field, value) if authenticated_console else None
+                issue = console_credential_issue(field, value, authentication) if authenticated_console else None
                 if issue is not None:
                     raise ValueError(f"{issue['label']} ({issue['key']}): {issue['message']}")
+                if named and key == "CONSOLE_USER_ID" and value in existing_accounts:
+                    raise ValueError("That name is a named account. Choose another name for the installation's "
+                                     "own account, or remove that named account first.")
             except ValueError as error:
                 print(str(error))
                 continue
@@ -125,8 +175,15 @@ def main():
             break
     validate_configuration_values([field for field in fields if field["key"] not in generated_keys], values)
     if authenticated_console:
-        validate_console_configuration_values(fields, values)
+        validate_console_configuration_values(fields, values, authentication)
     save_values(path, values, original)
+    if named:
+        manage_named_accounts(values["CONSOLE_USER_ID"])
+    if authentication == "oidc":
+        port = values.get("MOBKIT_PORT") or os.environ.get("MOBKIT_PORT") or spec["port"]
+        print("People sign in to the Console at its identity provider. Register the Console's sign-in "
+              f"callback with the provider: http://127.0.0.1:{port}/login/callback here, or the same path "
+              "on the Console's public address.")
     if local_knowledge:
         print("Preparing the local knowledge service credentials and project space...")
         subprocess.run([sys.executable, str(ROOT / "knowledge/manage.py"), "setup"], check=True)

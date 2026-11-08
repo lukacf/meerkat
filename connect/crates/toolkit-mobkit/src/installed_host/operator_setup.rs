@@ -474,6 +474,9 @@ impl OperatorSetup {
 
     /// Close and join the exclusive installer before starting the ordinary
     /// restore-only gateway. This neither issues a grant nor changes selection.
+    /// The installer's grant owner and originals store stay in custody until
+    /// the last reference to them drops, so a decision still running keeps
+    /// them, and a gateway opened meanwhile is refused until it ends.
     pub async fn finish(self) -> Result<(), HostLifetimeError> {
         use meerkat_toolkit::host_lifetime::control::{
             HostCloseReason, HostCloseState, PrivateHostLifetimeControl,

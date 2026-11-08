@@ -2259,6 +2259,15 @@ pub struct MobToolsBuildArgs {
     pub session_id: crate::SessionId,
     /// Model name of the owning agent — inherited by implicit mob helpers.
     pub model: String,
+    /// The provider the owning agent's build resolved for `model`. Implicit
+    /// mob helpers inherit it with the model, so they run on the agent's own
+    /// route and a model outside the catalog (a realm `[models.<id>]` entry,
+    /// a self-hosted model) names its provider.
+    pub provider: crate::Provider,
+    /// The self-hosted server the owning agent's build resolved for `model`
+    /// (`Some` only when `provider` is [`crate::Provider::SelfHosted`]),
+    /// inherited with the provider.
+    pub self_hosted_server_id: Option<String>,
     /// Runtime-injected mob operator authority context.
     ///
     /// The session factory only calls [`MobToolsFactory::build_mob_tools`]
@@ -2597,6 +2606,12 @@ pub struct StartTurnRuntimeSemantics {
     /// adapters stamp these values onto `InputHeader`; direct session
     /// backends that cannot provide durable input dedup must reject it.
     pub input_identity: Option<StartTurnInputIdentity>,
+    /// The original requester of this turn's input: an opaque, qualified
+    /// principal the host supplies from the caller it authenticated (never
+    /// from a request body, a tool argument or model output). Runtime
+    /// adapters stamp it onto `InputHeader`; direct session backends, which
+    /// keep no admitted input to carry it, reject it.
+    pub requester: Option<crate::PrincipalRef>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -2627,6 +2642,7 @@ impl Default for StartTurnRuntimeSemantics {
         Self {
             work_authorization: None,
             input_identity: None,
+            requester: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
             typed_turn_appends: Vec::new(),
@@ -2645,6 +2661,7 @@ impl StartTurnRuntimeSemantics {
         Self {
             work_authorization: None,
             input_identity: None,
+            requester: None,
             handling_mode,
             turn_tool_overlay,
             typed_turn_appends: Vec::new(),
@@ -2669,6 +2686,14 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn with_input_identity(mut self, input_identity: StartTurnInputIdentity) -> Self {
         self.input_identity = Some(input_identity);
+        self
+    }
+
+    /// Carry the original requester the host authenticated for this turn's
+    /// input (see [`Self::requester`]).
+    #[must_use]
+    pub fn with_requester(mut self, requester: crate::PrincipalRef) -> Self {
+        self.requester = Some(requester);
         self
     }
 

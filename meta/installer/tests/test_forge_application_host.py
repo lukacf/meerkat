@@ -269,7 +269,14 @@ def test_initial_hook_joins_original_protected_inputs_and_exact_wheels(selected,
     assert project.read_file("config/mob.toml") == original_definition
     original_inputs = {**selected.protected, "application/tool-policy.json": selected.policy}
     for name, pin in original_inputs.items():
-        assert project.read_file(name).encode() == pin.read()
+        if name == "application/console.json":
+            # The pin declares one shared console account; every Build of
+            # this source declares named accounts instead, the one change
+            # its installation's update accepts.
+            assert json.loads(pin.read()) == {"authentication": "local-password"}
+            assert project.read_file(name) == '{"authentication":"local-accounts"}\n'
+        else:
+            assert project.read_file(name).encode() == pin.read()
         with pytest.raises(WorkspaceError, match="read-only"):
             project.write_file(name, "unselected builder override\n")
     for wheel in (selected.target.meta_wheel, selected.target.toolkit_wheel, *selected.target.dependency_wheels):
@@ -442,6 +449,58 @@ def test_logical_console_declaration_is_exact_and_never_claims_authentication(se
     selected.host.validate_settings("another-guide", {"CONSOLE_USER_ID": "other"})
     with pytest.raises(DraftConflict, match="Console user"):
         selected.host.validate_settings("original-guide", {"CONSOLE_USER_ID": "other"})
+
+
+def test_installed_access_toml_stays_the_exact_package_bytes(selected, tmp_path):
+    # The console's Access panel writes its live copy in private state
+    # (.mobkit/console-access.toml). The installed config/access.toml stays
+    # the package's exact bytes, which every Forge check compares.
+    operator, other = "inert-selected-operator", "second-admin@example.test"
+    access = ('enabled = true\nadmins = ["' + operator + '"]\nrules = []\n\n[groups]\n').encode()
+    sources = {"application/configuration.json": encoded({"fields": []}),
+        "application/console.json": encoded({"authentication": "local-accounts"}),
+        "config/access.toml": access}
+    protected = {name: put(selected.root / "named" / name, value) for name, value in sources.items()}
+    viewer = put(selected.root / "named" / "APPLICATION-SELECTION.json", {
+        "base_source_selection": selected.acquisition.pin(),
+        "operator": {"subject": operator, "private_configuration_key": "CONSOLE_USER_ID",
+            "authenticated_evidence": None},
+        "source_inputs": {name: pin.pin() for name, pin in protected.items()}})
+    host = ForgeApplicationHost(guide_id="original-guide", runtime_target=selected.target,
+        acquisition_selection=selected.acquisition, viewer_selection=viewer, require_current=lambda: None)
+    destination = tmp_path / "installed"
+    for name, content in sources.items():
+        path = destination / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        path.chmod(0o644)
+    package = {name: (content, 0o644) for name, content in sources.items()}
+    receipt, settings = {"source_kind": "application"}, {"CONSOLE_USER_ID": operator}
+    host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    second_admin = ("# Meta access control. Managed by the console Access panel;\n"
+        "# hand edits are preserved until the next console save.\n\n"
+        'enabled = true\nadmins = ["' + operator + '", "' + other + '"]\nrules = []\n\n[groups]\n').encode()
+    # The console's own edit lives outside the package and changes nothing here.
+    live = destination / ".mobkit/console-access.toml"
+    live.parent.mkdir(mode=0o700)
+    live.write_bytes(second_admin)
+    host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    # The same edit in the package's file is a changed installation.
+    edited = destination / "config/access.toml"
+    edited.write_bytes(second_admin)
+    edited.chmod(0o644)
+    with pytest.raises(CustodyError):
+        host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    edited.write_bytes(access)
+    host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    # The package Forge recorded must still equal the selected source exactly.
+    with pytest.raises(CustodyError):
+        host.validate_installed_settings("original-guide", receipt, destination,
+            {**package, "config/access.toml": (access + b"\n", 0o644)}, settings)
+    # The application's own declarations stay exact once installed.
+    (destination / "application/console.json").write_bytes(encoded({"authentication": "local-password"}))
+    with pytest.raises(CustodyError):
+        host.validate_installed_settings("original-guide", receipt, destination, package, settings)
 
 
 def startup(selected, kind):

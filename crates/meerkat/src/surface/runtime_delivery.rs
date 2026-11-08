@@ -232,6 +232,13 @@ where
         self.continuations.observe_address(address).await
     }
 
+    async fn external_work_refusal(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        self.continuations.external_work_refusal(address).await
+    }
+
     fn retained_job_source(&self) -> Option<Arc<dyn crate::RetainedJobSource>> {
         let others = self.continuations.job_source();
         match &self.consent_notices {

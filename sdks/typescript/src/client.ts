@@ -199,6 +199,15 @@ import type {
   BlobPayload as RpcBlobPayload,
   CreateProfileParams as RpcCreateProfileParams,
   CreateScheduleRequest as RpcCreateScheduleRequest,
+  DecisionGetParams as RpcDecisionGetParams,
+  DecisionListParams as RpcDecisionListParams,
+  DecisionListResult as RpcDecisionListResult,
+  DecisionPresentationRequest as RpcDecisionPresentationRequest,
+  DecisionPresentParams as RpcDecisionPresentParams,
+  DecisionRenderingParams as RpcDecisionRenderingParams,
+  DecisionRenderingResult as RpcDecisionRenderingResult,
+  DecisionResult as RpcDecisionResult,
+  DecisionWithdrawParams as RpcDecisionWithdrawParams,
   DeferredCreateResult as RpcDeferredCreateResult,
   DeviceCompleteParams as RpcDeviceCompleteParams,
   DeviceStartParams as RpcDeviceStartParams,
@@ -285,6 +294,12 @@ import type {
   ToolGrantAuditParams as RpcToolGrantAuditParams,
   ToolGrantAuditResult as RpcToolGrantAuditResult,
   UpdateSystemPromptParams as RpcUpdateSystemPromptParams,
+  SetSessionInstructionParams as RpcSetSessionInstructionParams,
+  RevokeSessionInstructionParams as RpcRevokeSessionInstructionParams,
+  SessionInstructionStatusParams as RpcSessionInstructionStatusParams,
+  MobSetInstructionParams as RpcMobSetInstructionParams,
+  MobRevokeInstructionParams as RpcMobRevokeInstructionParams,
+  MobInstructionStatusParams as RpcMobInstructionStatusParams,
   WireDeviceCompleteResult as RpcWireDeviceCompleteResult,
   WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
   WireRunResult as RpcWireRunResult,
@@ -410,6 +425,7 @@ import {
   type MobHelperOptions,
   type MobKickoffMemberSnapshot,
   type MobMemberCustodyDeferral,
+  type MobMemberPreviewUnavailableUnknown,
   type MobKickoffWaitOptions,
   type MobMemberSnapshot,
   type MobPeerConnectivity,
@@ -422,6 +438,19 @@ import {
 import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { isCommsSendErrorCode } from "./comms-errors.js";
 import { parseMobDestroyReport } from "./mob-destroy-report.js";
+import {
+  parseMobInstructionStatus,
+  parseMobInstructionWriteResult,
+  parseSessionInstructionStatus,
+  parseSessionInstructionWriteResult,
+  type InstructionTarget,
+  type InstructionWriteOptions,
+  type MobInstructionStatus,
+  type MobInstructionStatusOptions,
+  type MobInstructionWriteResult,
+  type SessionInstructionStatus,
+  type SessionInstructionWriteResult,
+} from "./instructions.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { parseUsage } from "./events.js";
 import type { RealtimeMessageOrigin } from "./events.js";
@@ -524,6 +553,7 @@ import type {
   TurnOptions,
   TurnToolOverlay,
   ToolCallDedupeKey,
+  ToolCallRequester,
   Usage,
   ReadyWorkFilter,
   WorkGraphEventFilter,
@@ -673,6 +703,26 @@ const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
 ]);
 function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailureCause {
   return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
+}
+
+/** The principal kinds the runtime's requester grammar names. */
+const REQUESTER_PRINCIPAL_KINDS = new Set<string>([
+  "human",
+  "personal_agent",
+  "shared_agent",
+  "runtime_host",
+  "service_account",
+]);
+/** A control character, as the runtime's identity check reads one. */
+const REQUESTER_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+/**
+ * Whether `value` is an id the runtime accepts for a qualified principal or a
+ * trust domain: a string that is not blank and holds no control character.
+ */
+function isRequesterIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.trim() !== "" && !REQUESTER_CONTROL_CHARACTER.test(value)
+  );
 }
 
 interface ResolvedBinary {
@@ -1068,6 +1118,7 @@ export class MeerkatClient {
       handler: (
         args: Record<string, unknown>,
         dedupeKey?: ToolCallDedupeKey,
+        requester?: ToolCallRequester,
       ) => Promise<string | ContentBlock[]>;
     }
   >();
@@ -1100,6 +1151,11 @@ export class MeerkatClient {
    * {@link ToolCallDedupeKey}, present when an agent-loop round dispatched
    * the call. A resumed run that dispatches the same call again passes the
    * same key.
+   *
+   * Its optional third argument is the {@link ToolCallRequester} of the run
+   * the call serves, when the run has one. The runtime sets it from the run's
+   * admitted inputs, never from the arguments, so a tool that acts in one
+   * person's name can refuse every other requester.
    */
   registerTool(
     name: string,
@@ -1108,6 +1164,7 @@ export class MeerkatClient {
     handler: (
       args: Record<string, unknown>,
       dedupeKey?: ToolCallDedupeKey,
+      requester?: ToolCallRequester,
     ) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
@@ -1952,6 +2009,119 @@ export class MeerkatClient {
     return MeerkatClient.parseInstructionActivationReadPage(raw);
   }
 
+  // -- Operator instructions ------------------------------------------------
+
+  /**
+   * Record one session-owned operator instruction: the slot's body at a
+   * revision, applied at the session's next fresh run start. A mob member's
+   * session is refused `owned_by_mob`: write to it with
+   * {@link setMobInstruction} and a member target. A refusal rejects with
+   * `MeerkatError`; {@link instructionSetCode} reads its closed code.
+   */
+  async setSessionInstruction(
+    sessionId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    options?: InstructionWriteOptions,
+  ): Promise<SessionInstructionWriteResult> {
+    const params: RpcSetSessionInstructionParams = {
+      session_id: sessionId,
+      namespace,
+      key,
+      revision,
+      body,
+    };
+    if (options?.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this.request("session/set_instruction", params);
+    return parseSessionInstructionWriteResult(raw, "Invalid session/set_instruction response");
+  }
+
+  /** Revoke one session-owned operator instruction at a higher revision. */
+  async revokeSessionInstruction(
+    sessionId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<SessionInstructionWriteResult> {
+    const params: RpcRevokeSessionInstructionParams = {
+      session_id: sessionId,
+      namespace,
+      key,
+      revision,
+    };
+    const raw = await this.request("session/revoke_instruction", params);
+    return parseSessionInstructionWriteResult(raw, "Invalid session/revoke_instruction response");
+  }
+
+  /** Read a session's committed operator-instruction state without materializing it. */
+  async sessionInstructionStatus(sessionId: string): Promise<SessionInstructionStatus> {
+    const params: RpcSessionInstructionStatusParams = { session_id: sessionId };
+    const raw = await this.request("session/instruction_status", params);
+    return parseSessionInstructionStatus(raw, "Invalid session/instruction_status response");
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects:
+   * `{ kind: "mob" }`, `{ kind: "profile", profile }` or
+   * `{ kind: "member", agent_identity }`. Resolves once the record is in the
+   * mob's journal; delivery to the members is asynchronous (see
+   * {@link mobInstructionStatus}).
+   */
+  async setMobInstruction(
+    mobId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target: InstructionTarget,
+    options?: InstructionWriteOptions,
+  ): Promise<MobInstructionWriteResult> {
+    const params: RpcMobSetInstructionParams = {
+      mob_id: mobId,
+      namespace,
+      key,
+      revision,
+      body,
+      target,
+    };
+    if (options?.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this.request("mob/set_instruction", params);
+    return parseMobInstructionWriteResult(raw, "Invalid mob/set_instruction response");
+  }
+
+  /** Revoke one operator instruction of a mob at a higher revision; the record keeps its target. */
+  async revokeMobInstruction(
+    mobId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<MobInstructionWriteResult> {
+    const params: RpcMobRevokeInstructionParams = { mob_id: mobId, namespace, key, revision };
+    const raw = await this.request("mob/revoke_instruction", params);
+    return parseMobInstructionWriteResult(raw, "Invalid mob/revoke_instruction response");
+  }
+
+  /**
+   * Read a mob's operator-instruction records and one page of members
+   * (`limit` 1 to 200, 100 when absent), without waking a member.
+   */
+  async mobInstructionStatus(
+    mobId: string,
+    options?: MobInstructionStatusOptions,
+  ): Promise<MobInstructionStatus> {
+    const params: RpcMobInstructionStatusParams = { mob_id: mobId };
+    if (options?.namespace !== undefined) params.namespace = options.namespace;
+    if (options?.key !== undefined) params.key = options.key;
+    if (options?.agentIdentity !== undefined) params.agent_identity = options.agentIdentity;
+    if (options?.profile !== undefined) params.profile = options.profile;
+    if (options?.offset !== undefined) params.offset = options.offset;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    const raw = await this.request("mob/instruction_status", params);
+    return parseMobInstructionStatus(raw, "Invalid mob/instruction_status response");
+  }
+
   async restoreSessionTranscriptRevision(
     sessionId: string,
     revision: string,
@@ -2293,6 +2463,128 @@ export class MeerkatClient {
     if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options?.limit !== undefined) params.limit = options.limit;
     return this.request("tool_grants/audit", params);
+  }
+
+  /**
+   * List a page of the server's durable decisions, in decision id order.
+   * Every given filter must match; `requester` is a principal key. A page
+   * holds 100 decisions unless `limit` asks for another size, at most 500.
+   * While the result carries `next_after`, pass it as the next page's
+   * `after`. A server whose persistence keeps no durable decisions answers
+   * capability unavailable. Needs a Meerkat 0.9.11 or newer server: an
+   * older one answers method not found (`-32601`), raised as a
+   * `MeerkatError` that names the method.
+   *
+   * A list on the stdio connection this client opens is more than a read
+   * when the server is a Unix build with local authorization: before it
+   * answers, the server shows the connection's operator each decision of the
+   * page that is open, waits for a human and is held for an approver id the
+   * operator acts for (once per connection), and records each presentation.
+   * It writes a `decision/notice` for each decision it shows; this client
+   * drops those notices.
+   */
+  async listDecisions(options?: {
+    kind?: string;
+    phase?: RpcDecisionListParams["phase"];
+    approverId?: string;
+    requester?: string;
+    after?: string;
+    limit?: number;
+  }): Promise<RpcDecisionListResult> {
+    const params: RpcDecisionListParams = {};
+    if (options?.kind !== undefined) params.kind = options.kind;
+    if (options?.phase !== undefined) params.phase = options.phase;
+    if (options?.approverId !== undefined) params.approver_id = options.approverId;
+    if (options?.requester !== undefined) params.requester = options.requester;
+    if (options?.after !== undefined) params.after = options.after;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    return this.request("decision/list", params).catch(
+      MeerkatClient.decisionMethodServed("decision/list"),
+    );
+  }
+
+  /**
+   * Read one durable decision, its expiry recorded once its deadline
+   * passed. The held request is in the answer only with `includeRequest`.
+   * Needs a Meerkat 0.9.11 or newer server: an older one answers method not
+   * found (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async getDecision(
+    decisionId: string,
+    options?: { includeRequest?: boolean },
+  ): Promise<RpcDecisionResult> {
+    const params: RpcDecisionGetParams = { decision_id: decisionId };
+    if (options?.includeRequest) params.include_request = true;
+    return this.request("decision/get", params).catch(
+      MeerkatClient.decisionMethodServed("decision/get"),
+    );
+  }
+
+  /**
+   * Read a durable decision's rendering and its canonical parts for a part
+   * size; without `maxPartBytes` the rendering is one part. Needs a Meerkat
+   * 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async decisionRendering(
+    decisionId: string,
+    options?: { maxPartBytes?: number },
+  ): Promise<RpcDecisionRenderingResult> {
+    const params: RpcDecisionRenderingParams = { decision_id: decisionId };
+    if (options?.maxPartBytes !== undefined) params.max_part_bytes = options.maxPartBytes;
+    return this.request("decision/rendering", params).catch(
+      MeerkatClient.decisionMethodServed("decision/rendering"),
+    );
+  }
+
+  /**
+   * Record what a host presenter showed of a durable decision: the audience,
+   * the subject digest shown, the parts shown, the channel and message
+   * references and the host clock reading `at_ms`. It counts only when it
+   * shows every canonical part to the party that decides now. Needs a
+   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async presentDecision(
+    decisionId: string,
+    presentation: RpcDecisionPresentationRequest,
+  ): Promise<RpcDecisionResult> {
+    const params: RpcDecisionPresentParams = { decision_id: decisionId, presentation };
+    return this.request("decision/present", params).catch(
+      MeerkatClient.decisionMethodServed("decision/present"),
+    );
+  }
+
+  /**
+   * Withdraw an open durable decision as the host; a decision no longer
+   * open is refused with the `not_open` decision refusal. Needs a Meerkat
+   * 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async withdrawDecision(decisionId: string): Promise<RpcDecisionResult> {
+    const params: RpcDecisionWithdrawParams = { decision_id: decisionId };
+    return this.request("decision/withdraw", params).catch(
+      MeerkatClient.decisionMethodServed("decision/withdraw"),
+    );
+  }
+
+  /**
+   * The `decision/*` methods need a 0.9.11 or newer server. The SDK sets no
+   * contract floor for them: an older server answers method not found
+   * (`-32601`), which already fails closed, in words that need not name the
+   * method. Raise that answer as an error that names it.
+   */
+  private static decisionMethodServed(method: string): (error: unknown) => never {
+    return (error: unknown) => {
+      if (error instanceof MeerkatError && error.code === "-32601") {
+        throw new MeerkatError(
+          error.code,
+          `${method} needs a Meerkat 0.9.11 or newer server: ${error.message}`,
+          error.details,
+        );
+      }
+      throw error;
+    };
   }
 
   async listArtifacts(
@@ -5081,6 +5373,67 @@ export class MeerkatClient {
   }
 
   /**
+   * The `requester` of a `tool/execute` request: the original requester of
+   * the run the call serves, read as the runtime's grammar reads it. An
+   * absent or malformed value is `undefined`, no requester, which a
+   * person-scoped tool refuses. Malformed is anything the runtime refuses: a
+   * principal kind outside `human`, `personal_agent`, `shared_agent`,
+   * `runtime_host` and `service_account`; a qualification that is null, has
+   * an unknown kind, or carries a field its kind does not have; a blank trust
+   * domain or one with a control character; and a blank qualified id or one
+   * with a control character.
+   */
+  static parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return undefined;
+    }
+    const { principal, carried } = raw as Record<string, unknown>;
+    if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
+      return undefined;
+    }
+    const wirePrincipal = principal as Record<string, unknown>;
+    const { kind, id } = wirePrincipal;
+    if (
+      typeof kind !== "string" ||
+      !REQUESTER_PRINCIPAL_KINDS.has(kind) ||
+      typeof id !== "string" ||
+      id.trim() === ""
+    ) {
+      return undefined;
+    }
+    let trustDomainId: string | undefined;
+    if (Object.prototype.hasOwnProperty.call(wirePrincipal, "qualification")) {
+      const qualification = wirePrincipal.qualification;
+      if (qualification === null || typeof qualification !== "object" || Array.isArray(qualification)) {
+        return undefined;
+      }
+      const fields = qualification as Record<string, unknown>;
+      const keys = Object.keys(fields).sort().join(",");
+      if (fields.kind === "qualified") {
+        const domain = fields.trust_domain_id;
+        if (
+          keys !== "kind,trust_domain_id" ||
+          !isRequesterIdentity(domain) ||
+          !isRequesterIdentity(id)
+        ) {
+          return undefined;
+        }
+        trustDomainId = domain;
+      } else if (fields.kind !== "unqualified" || keys !== "kind") {
+        return undefined;
+      }
+    }
+    if (carried !== undefined && typeof carried !== "boolean") {
+      return undefined;
+    }
+    return {
+      principal:
+        trustDomainId === undefined ? { kind, id } : { kind, id, trust_domain_id: trustDomainId },
+      carried: carried === true,
+    };
+  }
+
+  /**
    * Type-narrow an inbound live-adapter observation against
    * {@link WireLiveAdapterObservation}.
    *
@@ -6520,29 +6873,35 @@ export class MeerkatClient {
 
   /**
    * Parse the typed reason a member-status read carries no observed preview.
-   * Absent (or `null`) means `output_preview`/`tokens_used` are observations;
-   * a value outside the closed vocabulary fails closed.
+   * Absent (or `null`) means `output_preview`/`tokens_used` are observations.
+   * The field is advisory and its vocabulary may grow: a reason this SDK
+   * does not know reads as `{ unknown: <value> }`, so a newer server never
+   * fails the read. A value that is not a string is malformed and fails
+   * closed.
    */
   private static parseWireMemberPreviewUnavailable(
     raw: unknown,
     context: string,
-  ): WireMemberPreviewUnavailable | undefined {
+  ): WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | undefined {
     if (raw == null) {
       return undefined;
+    }
+    if (typeof raw !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: preview_unavailable must be a string`,
+      );
     }
     const values: readonly WireMemberPreviewUnavailable[] = [
       "observation_deadline",
       "read_failed",
       "session_absent",
       "not_observed_while_retiring",
+      "store_refused",
     ];
-    if (typeof raw === "string" && values.includes(raw as WireMemberPreviewUnavailable)) {
-      return raw as WireMemberPreviewUnavailable;
-    }
-    throw new MeerkatError(
-      "INVALID_RESPONSE",
-      `${context}: preview_unavailable must be a valid preview-unavailable reason`,
-    );
+    return values.includes(raw as WireMemberPreviewUnavailable)
+      ? (raw as WireMemberPreviewUnavailable)
+      : { unknown: raw };
   }
 
   /**
@@ -8972,8 +9331,11 @@ export class MeerkatClient {
       if (handler) {
         const args = (params.arguments ?? {}) as Record<string, unknown>;
         const dedupeKey = MeerkatClient.parseToolCallDedupeKey(params.dedupe_key);
+        // The runtime names the run's requester here, never in the
+        // arguments; absent or malformed is no requester.
+        const requester = MeerkatClient.parseToolCallRequester(params.requester);
         handler
-          .handler(args, dedupeKey)
+          .handler(args, dedupeKey, requester)
           .then((content) => {
             this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })

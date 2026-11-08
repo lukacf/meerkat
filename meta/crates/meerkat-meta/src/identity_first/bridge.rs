@@ -435,6 +435,23 @@ fn classify_reload_mob_error(
                 stage: stage.to_string(),
             }
         }
+        // Core's machine refused to materialize the member for this wake,
+        // typed with Core's own verdict, as a delivery's wake is
+        // (`classify_submit_mob_error`): the door takes its one step for a
+        // refusal the host ends, and a final refusal stays final.
+        error @ meerkat_mob::MobError::MemberWakeRefused { .. } => {
+            let meerkat_mob::MobError::MemberWakeRefused {
+                member_id, refusal, ..
+            } = &error
+            else {
+                unreachable!("matched above")
+            };
+            BridgeError::MemberWakeRefused {
+                identity: member_id.clone(),
+                refusal: *refusal,
+                detail: error.to_string(),
+            }
+        }
         // Core holds the member Broken: its restore failed, or its host
         // refused the restored registration. Final (or held, by Core's
         // hold) for the reload and the wake alike, never a retryable text.
@@ -1011,6 +1028,13 @@ pub enum BridgeError {
         identity: MobAgentIdentity,
         detail: String,
     },
+    /// Core refused a declared apply because another apply of the mob was
+    /// in progress: nothing of the roster was declared, and the same roster
+    /// can be applied again once the other apply ends. Raised by
+    /// `apply_declared_roster` only.
+    DeclaredApplyPending {
+        detail: String,
+    },
     /// The launch's member auth binding refused the member's build: the
     /// gateway's build check refused it typed (`member_auth_binding_uncarried`,
     /// read off the mob error's structured data through Meerkat's shared
@@ -1026,6 +1050,19 @@ pub enum BridgeError {
     /// `detail` is the bridge step and the refusal's reason.
     MemberRouteRefused {
         kind: &'static str,
+        detail: String,
+    },
+    /// The member's host refused its build: the gateway's session builder
+    /// answered the host's own refusal typed, with structured data of
+    /// Meta's kind (`meta_host_rejected_build`), read off the mob error
+    /// through Meerkat's shared failure wrappers, never from its text.
+    /// Raised where a build is refused (a spawn, a create, the resume
+    /// door); a member Core holds Broken for it is the resume refusal of
+    /// kind [`ResumeRejectionKind::HostRejectedBuild`]. Deterministic: the
+    /// host answers the same build the same way until it changes, so
+    /// nothing retries it. `detail` is the bridge step plus Meerkat's
+    /// message.
+    HostRejectedBuild {
         detail: String,
     },
 }
@@ -1196,12 +1233,24 @@ impl std::fmt::Display for BridgeError {
                  of it started; nothing was retired or seated (retryable once the mob runs and \
                  the member's other lifecycle operation has ended): {detail}"
             ),
+            Self::DeclaredApplyPending { detail } => write!(
+                f,
+                "session bridge: Core refused the declared apply while another apply of the \
+                 mob was in progress; nothing was declared (retryable once that apply has \
+                 ended): {detail}"
+            ),
             Self::MemberRouteRefused { kind, detail } => write!(
                 f,
                 "session bridge member build refused by the launch's member auth binding \
                  ({kind}); nothing was built, and the same build is refused until the member's \
                  spec or the launch's binding changes: {detail}"
             ),
+            Self::HostRejectedBuild { detail } => {
+                write!(
+                    f,
+                    "session bridge member build refused by its host: {detail}"
+                )
+            }
         }
     }
 }
@@ -1450,6 +1499,10 @@ impl From<BridgeError> for BridgeAdmissionError {
             error @ BridgeError::RealmBackendUnavailable { .. } => Self::Mob(error.to_string()),
             // A durable profile's spawn refusal; admission keeps its text.
             error @ BridgeError::NonDurableService { .. } => Self::Mob(error.to_string()),
+            // A build its host refused (a spawn, a create, the resume door);
+            // a member Core holds Broken for it crosses as its resume
+            // refusal. Admission keeps its text.
+            error @ BridgeError::HostRejectedBuild { .. } => Self::Mob(error.to_string()),
             // The heal seam's hosting holds; admission keeps their text.
             error @ (BridgeError::ServedElsewhere { .. }
             | BridgeError::HostingUnavailable { .. }) => Self::Mob(error.to_string()),
@@ -1569,6 +1622,9 @@ impl From<BridgeError> for BridgeAdmissionError {
             // the delivery path.
             error @ (BridgeError::MemberReleaseRefused { .. }
             | BridgeError::RotationRefused { .. }) => Self::Mob(error.to_string()),
+            // Raised by `apply_declared_roster` only, never on the delivery
+            // path.
+            error @ BridgeError::DeclaredApplyPending { .. } => Self::Mob(error.to_string()),
             // A member build the launch's binding refuses, raised by the
             // spawn, seat, rotation and resume doors, never on the delivery
             // path; admission keeps its text.
@@ -1822,6 +1878,12 @@ pub enum ResumeRejectionKind {
     /// failed to answer. Nothing was disposed or retired; retryable once the
     /// authority answers.
     SourceUnanswered { authority: &'static str },
+    /// meerkat's typed restore failure whose cause is the member's host
+    /// refusing its build (the restore failure's cause data is of Meta's
+    /// kind, `meta_host_rejected_build`): Core holds the member Broken, as
+    /// for [`Self::MemberRestoreFailed`], and the refusal is the host's.
+    /// Final for every wake.
+    HostRejectedBuild,
 }
 
 /// meerkat's typed resume hold carried by a mob error, when it carries one.
@@ -1931,6 +1993,19 @@ fn resume_rejected(
             detail: format!("{step}: {error}"),
         };
     }
+    if host_rejected_build(error) && broken_member_session(error).is_none() {
+        tracing::error!(
+            identity = %identity,
+            session_id = %session_id,
+            step,
+            error = %error,
+            "resume refused by the member's host, typed; durable session preserved, refused \
+             on every attempt until the host builds the member"
+        );
+        return BridgeError::HostRejectedBuild {
+            detail: format!("{step}: {error}"),
+        };
+    }
     if let Some((_, profile)) = non_durable_service_refusal(error) {
         tracing::error!(
             identity = %identity,
@@ -1994,6 +2069,39 @@ fn resume_rejected(
         kind,
         session_id: session_id.clone(),
         detail: format!("{step}: {error}"),
+    }
+}
+
+/// The `kind` of the structured data the gateway's session builder refuses
+/// a member's build with when the host answered its build callback with an
+/// error. Meta owns it; Meerkat carries it as opaque data (a failed build's
+/// session error, a Broken member's restore failure).
+pub(crate) const HOST_REJECTED_BUILD_KIND: &str = "meta_host_rejected_build";
+
+/// Whether `data` is the structured data of the host's refusal of a
+/// member's build ([`HOST_REJECTED_BUILD_KIND`]).
+fn is_host_rejected_build_data(data: &serde_json::Value) -> bool {
+    data.get("kind").and_then(serde_json::Value::as_str) == Some(HOST_REJECTED_BUILD_KIND)
+}
+
+/// Whether the build a mob error reports was refused by its host, read
+/// typed from the data Meerkat carries, never from text: a failed build
+/// carries it as its session error's structured data, and a member Core
+/// holds Broken keeps it as its restore failure's cause data. Read through
+/// meerkat-mob's shared failure wrappers.
+pub(crate) fn host_rejected_build(error: &meerkat_mob::MobError) -> bool {
+    match error {
+        meerkat_mob::MobError::SessionError(session_error) => session_error
+            .structured_data()
+            .as_ref()
+            .is_some_and(is_host_rejected_build_data),
+        meerkat_mob::MobError::MemberRestoreFailed {
+            cause_data: Some(data),
+            ..
+        } => is_host_rejected_build_data(data),
+        meerkat_mob::MobError::SharedRetirementFailure(inner)
+        | meerkat_mob::MobError::SharedLifecycleFailure(inner) => host_rejected_build(inner),
+        _ => false,
     }
 }
 
@@ -2062,13 +2170,18 @@ pub(crate) fn non_durable_service_refusal(
 }
 
 /// Map a member spawn failure onto the bridge vocabulary: the typed
-/// provider-auth, non-persistent-realm, durable-profile or member route
-/// refusal when meerkat carried one, otherwise the display text exactly as
-/// before.
+/// provider-auth refusal, the host's refusal of the build, or the
+/// non-persistent-realm, durable-profile or member route refusal when
+/// meerkat carried one, otherwise the display text exactly as before.
 fn spawn_bridge_error(step: &str, error: &meerkat_mob::MobError) -> BridgeError {
     if let Some(failure) = provider_auth_rejection(error) {
         return BridgeError::ProviderAuthRejected {
             failure,
+            detail: format!("{step}: {error}"),
+        };
+    }
+    if host_rejected_build(error) {
+        return BridgeError::HostRejectedBuild {
             detail: format!("{step}: {error}"),
         };
     }
@@ -2122,6 +2235,13 @@ fn classify_resume_error(error: &meerkat_mob::MobError) -> ResumeRejectionKind {
             | meerkat_mob::MobError::MemberRoleMigrationRejected { .. }
     ) {
         return ResumeRejectionKind::RoleMigrationNotApplied;
+    }
+    // A restore failure whose cause is the host's refusal of the member's
+    // build is the host's, read from its cause data's kind.
+    if matches!(error, meerkat_mob::MobError::MemberRestoreFailed { .. })
+        && host_rejected_build(error)
+    {
+        return ResumeRejectionKind::HostRejectedBuild;
     }
     if matches!(
         error,
@@ -2515,6 +2635,12 @@ struct InternalBridgeWork<'a> {
     /// Selected skills for the explicit human lane, resolved natively by
     /// the target member. Empty on every other lane.
     skill_references: &'a [meerkat_core::skills::SkillKey],
+    /// The original requester of the explicit human lane's turn, carried to
+    /// the member's admitted input. Absent on every other lane.
+    requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// The sender label of the explicit human lane's message, which the
+    /// member's model reads right before it. Absent on every other lane.
+    sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
 /// Which lane a submission runs in.
@@ -2656,12 +2782,21 @@ async fn submit_internal_bridge_work(
                 BridgeError::Mob(format!("member not found: {member_id}"))
             }
         })?;
-    let spec = internal_bridge_work_spec(
+    let mut spec = internal_bridge_work_spec(
         work.content,
         work.system_prompt,
         work.injected_context,
         work.interaction_id,
     );
+    // The original requester and the sender label ride only the explicit
+    // human lane (refused on every other lane before this), onto the
+    // member's admitted input.
+    if let Some(requester) = work.requester {
+        spec = spec.with_requester(requester.clone());
+    }
+    if let Some(label) = work.sender_label {
+        spec = spec.with_sender_label(label.clone());
+    }
     if let Some(expected_session) = work.host_human_session {
         if entry.bridge_session_id() != Some(expected_session) {
             return Err(BridgeError::HostHumanInput(
@@ -3981,6 +4116,16 @@ pub struct BridgeDelivery {
     /// references); every other lane refuses a nonempty selection typed
     /// instead of delivering the turn without it.
     pub skill_references: Vec<meerkat_core::skills::SkillKey>,
+    /// The original requester of this turn: the authenticated person the
+    /// host sends for. Only the explicit local host-human lane carries it, to
+    /// the member's admitted input; every other lane refuses one typed
+    /// instead of delivering the turn without it.
+    pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The sender label of this turn's message, which the member's model
+    /// reads right before it (see [`meerkat_mob::SenderLabel`]). Only the
+    /// explicit local host-human lane carries it; every other lane refuses
+    /// one typed instead of delivering the turn without it.
+    pub sender_label: Option<meerkat_mob::SenderLabel>,
 }
 
 impl BridgeDelivery {
@@ -3993,6 +4138,8 @@ impl BridgeDelivery {
             interaction_id: None,
             delivery_identity: None,
             skill_references: Vec::new(),
+            requester: None,
+            sender_label: None,
         }
     }
 }
@@ -4228,6 +4375,272 @@ pub enum DormantSeatResult {
     },
     /// Core refused this identity's seat, typed; nothing was written for it.
     Refused(BridgeError),
+}
+
+/// One identity of a declared roster
+/// ([`SessionBridge::apply_declared_roster`]), with what its declaration
+/// carries of the identity's member build.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DeclaredIdentity {
+    /// The identity's roster spec: its role, runtime mode and placement or
+    /// binding are the lifecycle facts Core decides the identity's verdict
+    /// from.
+    pub spec: DurableAgentSpec,
+    /// What the declaration carries of the identity's member build.
+    pub build: DeclaredIdentityBuild,
+    /// Whether the host holds the identity's creation for its held protocol:
+    /// an identity Core never created then awaits its held creation
+    /// ([`DeclaredIdentityAnswer::AwaitingHeldCreation`]) and is never seated
+    /// otherwise.
+    pub held_creation: bool,
+}
+
+impl DeclaredIdentity {
+    /// A declaration of `spec` with the member build its host composed.
+    #[must_use]
+    pub fn composed(spec: DurableAgentSpec, draft: AgentBuildDraft) -> Self {
+        Self {
+            spec,
+            build: DeclaredIdentityBuild::Composed(draft),
+            held_creation: false,
+        }
+    }
+
+    /// A declaration of `spec`'s lifecycle facts only: Core builds no member
+    /// from it ([`DeclaredIdentityAnswer::BuildRequired`]).
+    #[must_use]
+    pub fn facts_only(spec: DurableAgentSpec) -> Self {
+        Self {
+            spec,
+            build: DeclaredIdentityBuild::FactsOnly,
+            held_creation: false,
+        }
+    }
+
+    /// Whether the host holds the identity's creation for its held protocol
+    /// ([`Self::held_creation`]).
+    #[must_use]
+    pub fn with_held_creation(mut self, held_creation: bool) -> Self {
+        self.held_creation = held_creation;
+        self
+    }
+}
+
+/// What a declaration carries of its identity's member build
+/// ([`meerkat_mob::DeclaredBuild`]).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one per declared identity of a roster request, built and lowered once; boxing the \
+              draft would only add an allocation per declaration"
+)]
+pub enum DeclaredIdentityBuild {
+    /// The member build its host composed: the spec's base draft with the
+    /// host's `customize_build` applied. A verdict that seats the identity
+    /// or moves its member to a fresh session builds the member from it.
+    Composed(AgentBuildDraft),
+    /// The identity's lifecycle facts only. A verdict that would seat the
+    /// identity or move its member to a fresh session takes no member step
+    /// and answers [`DeclaredIdentityAnswer::BuildRequired`]: the host
+    /// declares the identity again with its composed build.
+    FactsOnly,
+}
+
+/// A declared roster ([`SessionBridge::apply_declared_roster`]).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct DeclaredRosterRequest {
+    /// The identities the roster declares.
+    pub identities: Vec<DeclaredIdentity>,
+    /// Whether the roster is the host's whole roster: Core then unlists
+    /// every identity it holds declared that the roster does not list, and
+    /// retires its member ([`DeclaredRosterAnswer::unlisted`]). A partial
+    /// roster declares its identities only.
+    pub complete: bool,
+    /// The one-shot first-boot requests the roster carries, by identity.
+    /// Core names each request it carried out in
+    /// [`DeclaredRosterAnswer::first_boot_requests_carried_out`]; every
+    /// other one stays to carry out.
+    pub first_boot_requests: BTreeMap<AgentIdentity, meerkat_mob::FirstBootRequest>,
+}
+
+impl DeclaredRosterRequest {
+    /// The host's whole roster.
+    #[must_use]
+    pub fn complete(identities: impl IntoIterator<Item = DeclaredIdentity>) -> Self {
+        Self {
+            identities: identities.into_iter().collect(),
+            complete: true,
+            first_boot_requests: BTreeMap::new(),
+        }
+    }
+
+    /// Part of the host's roster: nothing is unlisted.
+    #[must_use]
+    pub fn partial(identities: impl IntoIterator<Item = DeclaredIdentity>) -> Self {
+        Self {
+            identities: identities.into_iter().collect(),
+            complete: false,
+            first_boot_requests: BTreeMap::new(),
+        }
+    }
+
+    /// Carry out `identity`'s first-boot request with the roster.
+    #[must_use]
+    pub fn with_first_boot_request(
+        mut self,
+        identity: AgentIdentity,
+        request: meerkat_mob::FirstBootRequest,
+    ) -> Self {
+        self.first_boot_requests.insert(identity, request);
+        self
+    }
+}
+
+/// Core's answer for one declared identity
+/// ([`meerkat_mob::DeclaredEntryOutcome`], in the bridge's vocabulary).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DeclaredIdentityAnswer {
+    /// Seated Dormant on `session_id`: its archived session (it comes back
+    /// with its history), its first-boot request's session, or a fresh one.
+    /// `history_unavailable` is set when its archived session is gone from
+    /// the store and it was seated on a fresh session.
+    Seated {
+        session_id: meerkat_core::types::SessionId,
+        history_unavailable: Option<meerkat_mob::HistoryUnavailable>,
+    },
+    /// A fresh spec that owes a kickoff was spawned, live, on `session_id`.
+    Embodied {
+        session_id: meerkat_core::types::SessionId,
+        history_unavailable: Option<meerkat_mob::HistoryUnavailable>,
+    },
+    /// The identity's member keeps its seat: nothing was written.
+    Kept,
+    /// The member was restamped with its declared runtime mode on its own
+    /// session, at `generation`.
+    Restamped { generation: u64 },
+    /// The member was restamped under its declared new role on its own
+    /// session, at `generation`.
+    RoleMigrated { generation: u64 },
+    /// The member moved to a fresh session, `session_id`, under its declared
+    /// role and runtime mode.
+    RoleRotated {
+        session_id: meerkat_core::types::SessionId,
+    },
+    /// The identity's first-boot request started its fresh life on
+    /// `session_id`.
+    FreshLife {
+        session_id: meerkat_core::types::SessionId,
+    },
+    /// The roster moves the member from role `from` to role `to` with no
+    /// declared migration: Core holds it, and refuses its wakes, until an
+    /// apply declares the move or restores the role.
+    RoleMigrationHeld {
+        from: meerkat_mob::ProfileName,
+        to: meerkat_mob::ProfileName,
+    },
+    /// The identity awaits its held creation.
+    AwaitingHeldCreation,
+    /// The identity, never seated, awaits its host's preparation.
+    PreparationPending,
+    /// The identity is hosted on its first use: its host creates the member.
+    HostedOnFirstUse,
+    /// The identity's verdict seats or moves its member, and its declaration
+    /// carried its lifecycle facts only
+    /// ([`DeclaredIdentityBuild::FactsOnly`]): nothing was done. Declare it
+    /// again with its composed build.
+    BuildRequired,
+    /// Left to the next apply, for a cause that clears on its own: nothing
+    /// of it was done.
+    Deferred { reason: BridgeError },
+    /// Refused, typed: nothing of it was written.
+    Refused {
+        refusal: meerkat_mob::DeclaredEntryRefusal,
+    },
+    /// Left as it is, for a typed note: a quiet steady state, not a refusal.
+    Noted {
+        note: meerkat_mob::DeclaredEntryNote,
+    },
+    /// Realizing the identity's verdict failed, typed, or its composed build
+    /// could not be lowered: an apply runs it again only once the cause is
+    /// fixed.
+    Failed { error: BridgeError },
+    /// Nothing was declared in Core: the identity runtime that registered
+    /// the spec has no session bridge, so no Core mob to declare it in. Never
+    /// answered by a session bridge.
+    RecordedOnly,
+}
+
+impl DeclaredIdentityAnswer {
+    /// The session the apply bound the identity's member to, when it bound
+    /// one: a seat, a live spawn, a move to a fresh session, a fresh life.
+    #[must_use]
+    pub fn bound_session(&self) -> Option<&meerkat_core::types::SessionId> {
+        match self {
+            Self::Seated { session_id, .. }
+            | Self::Embodied { session_id, .. }
+            | Self::RoleRotated { session_id }
+            | Self::FreshLife { session_id } => Some(session_id),
+            _ => None,
+        }
+    }
+}
+
+/// What a complete roster's apply did with one identity Core held declared
+/// that the roster does not list ([`meerkat_mob::UnlistedEntryOutcome`]).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum UnlistedIdentityAnswer {
+    /// Its member was retired, and the identity is no longer declared.
+    Retired,
+    /// No member held it: Core removed the declaration at once.
+    Removed,
+    /// Its member's retirement failed: Core keeps it marked, and the next
+    /// complete apply retires it again.
+    Failed { error: BridgeError },
+    /// A member of a legacy host seated under the identity, which Core
+    /// neither adopted nor retired, for `reason`: the member stays as it is,
+    /// and the next complete apply decides it again.
+    NotAdopted {
+        reason: meerkat_mob::NotAdoptedReason,
+    },
+}
+
+/// Core's answer to a declared roster
+/// ([`SessionBridge::apply_declared_roster`]).
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct DeclaredRosterAnswer {
+    /// Each declared identity's answer, and each identity a first-boot
+    /// request names.
+    pub identities: BTreeMap<AgentIdentity, DeclaredIdentityAnswer>,
+    /// What a complete roster did with each identity Core held declared that
+    /// it does not list.
+    pub unlisted: BTreeMap<AgentIdentity, UnlistedIdentityAnswer>,
+    /// The identities whose first-boot request the apply carried out.
+    pub first_boot_requests_carried_out: BTreeSet<AgentIdentity>,
+}
+
+impl DeclaredRosterAnswer {
+    /// The answer of a session bridge with no Core mob of its own (a test
+    /// double) to `roster`: every declared identity keeps what it has
+    /// ([`DeclaredIdentityAnswer::Kept`]), nothing is unlisted, and no
+    /// first-boot request is carried out.
+    #[must_use]
+    pub fn kept_for(roster: &DeclaredRosterRequest) -> Self {
+        Self {
+            identities: roster
+                .identities
+                .iter()
+                .map(|declared| (declared.spec.identity.clone(), DeclaredIdentityAnswer::Kept))
+                .collect(),
+            unlisted: BTreeMap::new(),
+            first_boot_requests_carried_out: BTreeSet::new(),
+        }
+    }
 }
 
 /// Where Core's member lifecycle journal of the bridge's mob stands
@@ -4539,17 +4952,270 @@ impl MemberStanding {
     }
 }
 
+/// What Core's MobMachine records for one identity's name
+/// ([`SessionBridge::identity_entry`], `MobHandle::identity_entry`): how
+/// Core holds the name, the member that holds it, the host preparation its
+/// entry owes and the session its last member's retirement archived. Read
+/// from the machine state the mob's actor last published: no store read, no
+/// actor command, and it never wakes a member. The identity runtime builds
+/// every view of an identity's lifecycle from it. Build one with its
+/// constructors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreIdentityEntry {
+    /// How Core holds the name.
+    pub kind: CoreNameKind,
+    /// Where the entry comes from, when Core holds the name as an identity
+    /// entry: a host's declaration (its roster), or a creation at runtime,
+    /// whose record the mob's identity store owns. `None` for a name that is
+    /// no entry, that Core reserves, or a removed identity's.
+    pub origin: Option<meerkat_mob::IdentityEntryOrigin>,
+    /// The member that holds the name, if one does: the entry's member, or
+    /// the worker member that holds a name Core holds as no entry.
+    pub member: Option<CoreMember>,
+    /// The host preparation Core holds the entry's member for, with its
+    /// cause: while one is owed, Core refuses the member's wakes.
+    pub host_preparation: Option<meerkat_mob::HostPreparationCause>,
+    /// The session Core archived the entry's last member on, while no member
+    /// holds the entry: the entry's next seat revives it.
+    pub archived_session: Option<meerkat_core::types::SessionId>,
+}
+
+impl CoreIdentityEntry {
+    /// Core holds the name as an identity entry a host declared;
+    /// [`Self::with_origin`] names another origin.
+    pub fn entry() -> Self {
+        Self::of_kind(CoreNameKind::Entry).with_origin(meerkat_mob::IdentityEntryOrigin::Declared)
+    }
+
+    /// Core holds the name as no identity entry: a worker member holds it
+    /// ([`Self::with_member`]), or nothing does.
+    pub fn not_an_entry() -> Self {
+        Self::of_kind(CoreNameKind::NotAnEntry)
+    }
+
+    /// Core reserves the name: its entry is one this build of Core cannot
+    /// read.
+    pub fn reserved() -> Self {
+        Self::of_kind(CoreNameKind::Reserved)
+    }
+
+    /// Core holds the name as a removed identity's: never an entry or a
+    /// member again.
+    pub fn removed() -> Self {
+        Self::of_kind(CoreNameKind::Removed)
+    }
+
+    fn of_kind(kind: CoreNameKind) -> Self {
+        Self {
+            kind,
+            origin: None,
+            member: None,
+            host_preparation: None,
+            archived_session: None,
+        }
+    }
+
+    /// The read, with the entry's origin.
+    #[must_use]
+    pub fn with_origin(mut self, origin: meerkat_mob::IdentityEntryOrigin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The read, with the member that holds the name.
+    #[must_use]
+    pub fn with_member(mut self, member: CoreMember) -> Self {
+        self.member = Some(member);
+        self
+    }
+
+    /// The read, with the host preparation the entry owes.
+    #[must_use]
+    pub fn with_host_preparation(mut self, cause: meerkat_mob::HostPreparationCause) -> Self {
+        self.host_preparation = Some(cause);
+        self
+    }
+
+    /// The read, with the session the entry's last member's retirement
+    /// archived.
+    #[must_use]
+    pub fn with_archived_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
+        self.archived_session = Some(session_id);
+        self
+    }
+
+    /// Whether Core holds the name as an identity entry a host declared:
+    /// the one kind of name a roster pass registers with this runtime. A
+    /// created entry (the mob's identity store owns its record), a name Core
+    /// reserves and a removed identity's name are never registered by a
+    /// roster pass.
+    pub fn is_declared_entry(&self) -> bool {
+        self.kind == CoreNameKind::Entry
+            && self.origin == Some(meerkat_mob::IdentityEntryOrigin::Declared)
+    }
+
+    /// The member's role move Core holds: the host's roster moved the
+    /// member to another role without declaring the migration.
+    pub fn holds_role_migration(&self) -> bool {
+        self.host_preparation == Some(meerkat_mob::HostPreparationCause::RoleMigrationUndeclared)
+    }
+}
+
+/// How Core holds a name ([`CoreIdentityEntry::kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreNameKind {
+    /// An identity entry: a host declared it, or it was created.
+    Entry,
+    /// No identity entry: a worker member holds it, or nothing does.
+    NotAnEntry,
+    /// Reserved: the name's entry is one this build of Core cannot read (its
+    /// created entry row is in a format this build does not know, or the
+    /// journal contradicts it). A repair of the mob's store, or a release
+    /// that reads it, is needed before anything acts on the name.
+    Reserved,
+    /// Removed: the identity was removed, and its name is never an entry or
+    /// a member again.
+    Removed,
+}
+
+/// The member that holds a name in Core's mob ([`CoreIdentityEntry::member`]),
+/// as MobMachine records it. It never says whether the member is
+/// materialized in this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreMember {
+    /// The incarnation's generation.
+    pub generation: u64,
+    /// The session the member is bound to; `None` for a member bound to no
+    /// session.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+    /// The role the incarnation runs.
+    pub profile: meerkat_mob::ProfileName,
+    /// The runtime mode the incarnation runs in.
+    pub runtime_mode: meerkat_mob::MobRuntimeMode,
+    /// The member's retirement started and has not ended.
+    pub retiring: bool,
+    /// Set while Core holds the member Broken.
+    pub broken: Option<CoreBrokenMember>,
+}
+
+impl CoreMember {
+    /// The incarnation `generation` holds the name, bound to `session_id`
+    /// under `profile` in `runtime_mode`.
+    pub fn seated(
+        generation: u64,
+        session_id: Option<meerkat_core::types::SessionId>,
+        profile: meerkat_mob::ProfileName,
+        runtime_mode: meerkat_mob::MobRuntimeMode,
+    ) -> Self {
+        Self {
+            generation,
+            session_id,
+            profile,
+            runtime_mode,
+            retiring: false,
+            broken: None,
+        }
+    }
+
+    /// The member, with its retirement started.
+    #[must_use]
+    pub fn retiring(mut self) -> Self {
+        self.retiring = true;
+        self
+    }
+
+    /// The member, held Broken by Core.
+    #[must_use]
+    pub fn with_broken(mut self, broken: CoreBrokenMember) -> Self {
+        self.broken = Some(broken);
+        self
+    }
+}
+
+/// A member Core holds Broken ([`CoreMember::broken`]): its restore failed,
+/// or its host refused its restored registration. Core answers every later
+/// wake of it the same until a lifecycle step replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CoreBrokenMember {
+    /// Core's reason.
+    pub reason: String,
+    /// The stable refusal code, when the host refused the member.
+    pub code: Option<String>,
+    /// Core's durable resume hold, when the failed restore was a resume Core
+    /// held: the session is kept, and the hold names what clears it.
+    pub hold: Option<meerkat_core::service::DurableResumeHold>,
+    /// The session the failed restore named.
+    pub session_id: Option<meerkat_core::types::SessionId>,
+}
+
+impl CoreBrokenMember {
+    /// Core holds the member Broken for `reason`.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            code: None,
+            hold: None,
+            session_id: None,
+        }
+    }
+
+    /// The fact, with the stable refusal code of the host's refusal.
+    #[must_use]
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// The fact, with Core's durable resume hold.
+    #[must_use]
+    pub fn with_hold(mut self, hold: meerkat_core::service::DurableResumeHold) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+
+    /// The fact, with the session the failed restore named.
+    #[must_use]
+    pub fn with_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+}
+
 /// A [`MemberLifecycleFact`] at its journal cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MemberLifecycleFactRecord {
     pub cursor: u64,
     pub fact: MemberLifecycleFact,
+    /// When Core appended the fact's journal event, in Unix milliseconds
+    /// (`meerkat_mob::MemberLifecycleRecord::timestamp`): stored with the
+    /// event, so a later read of the journal reads the same time again. The
+    /// lifecycle projection keys the exit interview of a retirement no Meta
+    /// verb asked for by it. `None` from a bridge that does not carry it
+    /// ([`Self::new`] alone): that exit interview is then keyed by the time
+    /// its side effects run.
+    pub recorded_at_ms: Option<u64>,
 }
 
 impl MemberLifecycleFactRecord {
     pub fn new(cursor: u64, fact: MemberLifecycleFact) -> Self {
-        Self { cursor, fact }
+        Self {
+            cursor,
+            fact,
+            recorded_at_ms: None,
+        }
+    }
+
+    /// The record, with the time Core appended its journal event, in Unix
+    /// milliseconds ([`Self::recorded_at_ms`]).
+    #[must_use]
+    pub fn with_recorded_at_ms(mut self, recorded_at_ms: u64) -> Self {
+        self.recorded_at_ms = Some(recorded_at_ms);
+        self
     }
 }
 
@@ -4690,6 +5356,108 @@ fn member_standing_of(
     })
 }
 
+/// For a name Core holds as an identity entry, or reserves unreadable, with
+/// a member, whether that member's runtime admits external work (Core's
+/// machine fact); `None` otherwise: a name that is no entry, or holds no
+/// member, takes the external door as external work, and Core answers it.
+fn entry_member_externally_addressable(read: &meerkat_mob::IdentityEntryRead) -> Option<bool> {
+    let standing = match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => &view.standing,
+        meerkat_mob::IdentityEntryRead::Unreadable {
+            member: Some(standing),
+            ..
+        } => standing,
+        _ => return None,
+    };
+    match standing {
+        meerkat_mob::EntryStanding::Seated(member)
+        | meerkat_mob::EntryStanding::Retiring(member) => Some(member.externally_addressable),
+        _ => None,
+    }
+}
+
+/// Meta's [`CoreIdentityEntry`] of Core's read of one identity
+/// (`MobHandle::identity_entry`). The resume hold of a member Core holds
+/// Broken is not part of Core's read; [`MobSessionBridge`] adds it from
+/// Core's own answer for the member. A read this build cannot read is
+/// answered as an error, never as one it can.
+fn core_identity_entry_of(
+    read: &meerkat_mob::IdentityEntryRead,
+) -> Result<CoreIdentityEntry, BridgeError> {
+    fn member_of(
+        standing: &meerkat_mob::EntryStanding,
+        broken: Option<&meerkat_mob::MemberBrokenFact>,
+    ) -> Result<Option<CoreMember>, BridgeError> {
+        let (seated, retiring) = match standing {
+            meerkat_mob::EntryStanding::Seated(member) => (member, false),
+            meerkat_mob::EntryStanding::Retiring(member) => (member, true),
+            meerkat_mob::EntryStanding::Unseated(_) => return Ok(None),
+            other => {
+                return Err(BridgeError::Mob(format!(
+                    "Core answered a member standing this build cannot read: {other:?}"
+                )));
+            }
+        };
+        let mut member = CoreMember::seated(
+            seated.generation.get(),
+            seated.session_id.clone(),
+            seated.profile.clone(),
+            seated.runtime_mode,
+        );
+        if retiring {
+            member = member.retiring();
+        }
+        if let Some(fact) = broken {
+            let mut broken = CoreBrokenMember::new(fact.reason.clone());
+            if let Some(code) = &fact.code {
+                broken = broken.with_code(code.clone());
+            }
+            member = member.with_broken(broken);
+        }
+        Ok(Some(member))
+    }
+
+    Ok(match read {
+        meerkat_mob::IdentityEntryRead::Entry(view) => {
+            let mut entry = CoreIdentityEntry::entry().with_origin(view.origin);
+            if let Some(member) = member_of(&view.standing, view.broken.as_ref())? {
+                entry = entry.with_member(member);
+            }
+            if let Some(cause) = view.host_preparation {
+                entry = entry.with_host_preparation(cause);
+            }
+            if let Some(session_id) = &view.archived_session {
+                entry = entry.with_archived_session(session_id.clone());
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::NotAnEntry { worker } => {
+            let mut entry = CoreIdentityEntry::not_an_entry();
+            if let Some(worker) = worker
+                && let Some(member) = member_of(&worker.standing, worker.broken.as_ref())?
+            {
+                entry = entry.with_member(member);
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::Unreadable { member } => {
+            let mut entry = CoreIdentityEntry::reserved();
+            if let Some(standing) = member
+                && let Some(member) = member_of(standing, None)?
+            {
+                entry = entry.with_member(member);
+            }
+            entry
+        }
+        meerkat_mob::IdentityEntryRead::Removed => CoreIdentityEntry::removed(),
+        other => {
+            return Err(BridgeError::Mob(format!(
+                "Core answered an identity read this build cannot read: {other:?}"
+            )));
+        }
+    })
+}
+
 /// Bridge between the identity-first control plane and the Meerkat session
 /// pipeline. Each method maps an identity-layer operation to its concrete
 /// mob-level counterpart.
@@ -4743,6 +5511,46 @@ pub trait SessionBridge: Send + Sync {
     /// Bridges without run-start holds have nothing to release. A member that
     /// is not in the mob, or does not hold the reason, is a no-op.
     async fn release_member_run_starts_for_published_tools(
+        &self,
+        _member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        Ok(())
+    }
+
+    /// The members whose run starts the mob holds for unpublished customizer
+    /// tools (`ToolsNotPublished`), in identity order: Core's read
+    /// (`MobHandle::members_holding_run_starts`), from its published state,
+    /// with no actor command. The members a composition publishes and
+    /// releases. Bridges without run-start holds hold none.
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        Ok(Vec::new())
+    }
+
+    /// Whether the mob holds `member_id`'s run starts for unpublished
+    /// customizer tools (`ToolsNotPublished`): one member's answer of
+    /// [`Self::members_holding_run_starts_for_published_tools`], Core's
+    /// read of that member alone (`MobHandle::member_holds_run_starts`)
+    /// from its published state, with no actor command. A delivery and one
+    /// identity's status read it. Defaults to the list read's answer for
+    /// the member.
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        Ok(self
+            .members_holding_run_starts_for_published_tools()?
+            .contains(member_id))
+    }
+
+    /// Retry the build preparation the host asked to retry for a member
+    /// (`MobHandle::resolve_member_build_preparation`): Core ends the cause
+    /// it recorded, which refused the member's wakes
+    /// (`MemberWakeRefusal::BuildPreparationRetry`), so the member's next
+    /// wake asks the host's build preparer again. A member with no such cause
+    /// is a no-op. Bridges without build preparation record no cause.
+    async fn resolve_member_build_preparation(
         &self,
         _member_id: &MobAgentIdentity,
     ) -> Result<(), BridgeError> {
@@ -4828,6 +5636,41 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// Apply a declared roster in Core's mob
+    /// (`MobHandle::apply_declared_roster`): Core's MobMachine decides each
+    /// declared identity's verdict from its declaration and Core's member
+    /// facts, and Core realizes it (a Dormant seat, a kept member, a
+    /// restamp, a move to a fresh session, a held role move). A complete
+    /// roster then unlists every identity Core holds declared that it does
+    /// not list, and retires that identity's member. The bridge declares this
+    /// activation's role migrations ([`Self::declared_role_migration`]) for
+    /// the identities the roster lists.
+    ///
+    /// Each identity's answer is its own and typed: one identity's refusal
+    /// or failure never fails the call. `Err` only when Core answered no
+    /// identity: a mob that is not running, another apply of the mob in
+    /// progress ([`BridgeError::DeclaredApplyPending`], retryable), or a
+    /// store that cannot be read.
+    ///
+    /// The default fails closed: a bridge that cannot reach Core's declared
+    /// apply declares nothing and answers [`BridgeError::Unsupported`], so no
+    /// Meta verb that needs Core's verdict goes ahead without it. A bridge
+    /// that wraps another forwards it.
+    async fn apply_declared_roster(
+        &self,
+        roster: DeclaredRosterRequest,
+    ) -> Result<DeclaredRosterAnswer, BridgeError> {
+        tracing::error!(
+            identities = roster.identities.len(),
+            complete = roster.complete,
+            "this session bridge does not implement the declared apply: no identity of the \
+             roster was declared in Core"
+        );
+        Err(BridgeError::Unsupported {
+            operation: "apply_declared_roster",
+        })
+    }
+
     /// Start `identity`'s fresh life as ONE Core transition
     /// (`MobHandle::rotate_member`): Core retires the current incarnation and
     /// re-seats the identity Dormant at the next generation on a new empty
@@ -4848,6 +5691,25 @@ pub trait SessionBridge: Send + Sync {
             "this SessionBridge does not implement member rotation, so identity {identity} \
              cannot start a fresh life: the transition must be one Core rotation"
         )))
+    }
+
+    /// Settle the owed compaction projections of `identity`'s current
+    /// session cold (`MobHandle::settle_member_owed_compaction_projections`),
+    /// before a verb asks Core to end that session: Core finalizes each
+    /// memory batch its runtime still owes for the session, and answers the
+    /// finalized batches, whose discards the caller harvests. A session Core
+    /// hosts live answers `Live` (its live agent finalizes, and its
+    /// `CompactionCompleted` triggers the harvest); nothing owed answers
+    /// `NothingOwed`. Nothing is woken.
+    ///
+    /// The default settles nothing: the bridge cannot reach Core's settle.
+    async fn settle_owed_compaction_projections(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "settle_owed_compaction_projections",
+        })
     }
 
     /// Release `identity`'s live materialization (`MobHandle::release_member`):
@@ -4981,6 +5843,28 @@ pub trait SessionBridge: Send + Sync {
         })
     }
 
+    /// Wait, at most `timeout`, until Core holds no lifecycle operation of
+    /// `identity`'s member in flight (`MobHandle::wait_member_lifecycle_settled`):
+    /// its spawn, a wake, its retirement, its entry's removal or archive, or
+    /// its held construction. These are the facts on which Core's declared
+    /// apply leaves the identity's declaration to its next apply
+    /// ([`DeclaredIdentityAnswer::Deferred`]). It sends Core no command and
+    /// wakes nothing.
+    ///
+    /// The default answers [`BridgeError::Unsupported`]: a bridge that cannot
+    /// read Core's member lifecycle waits for nothing, and a door whose
+    /// declaration Core left to its next apply answers its typed refusal at
+    /// once. A bridge that wraps another forwards it.
+    async fn wait_member_lifecycle_settled(
+        &self,
+        _identity: &AgentIdentity,
+        _timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "wait_member_lifecycle_settled",
+        })
+    }
+
     /// Core's output-only convergence status for `identity`, unclassified.
     async fn identity_convergence_status(
         &self,
@@ -5050,8 +5934,8 @@ pub trait SessionBridge: Send + Sync {
 
     /// The incarnation of this bridge's mob, as the head of its member
     /// lifecycle journal names it, known without a store read. When the head
-    /// does not read, the identity runtime lets a seat step go ahead past a
-    /// stored lifecycle projection cursor only if the cursor is of this
+    /// does not read, the identity runtime lets a declaration go ahead past
+    /// a stored lifecycle projection cursor only if the cursor is of this
     /// incarnation. `None`, the default, places no cursor: such a step is
     /// refused, retryable, until the head reads. A bridge that wraps another
     /// forwards it.
@@ -5094,6 +5978,37 @@ pub trait SessionBridge: Send + Sync {
     ) -> Result<MemberStanding, BridgeError> {
         Err(BridgeError::Unsupported {
             operation: "member_standing",
+        })
+    }
+
+    /// Core's read of `identity`'s name (`MobHandle::identity_entry`): how
+    /// Core holds it (an identity entry, no entry, a reserved name or a
+    /// removed identity's), the member that holds it with Core's Broken fact
+    /// and that fact's resume hold, the host preparation its entry owes, and
+    /// the session its last member's retirement archived. Read from the
+    /// machine state the mob's actor last published: no store read and no
+    /// actor command, and it never wakes a member. The resume hold of a
+    /// member Core holds Broken, and the session whose restore failed, come
+    /// from Core's restore diagnostic, which [`MobSessionBridge`] reads
+    /// through `MobHandle::member`, with no actor command either: until Core
+    /// records that diagnostic (in the same actor step as the Broken fact,
+    /// or, for a warm revival, once the revival's off-actor cleanup commits
+    /// back), the answer reads the member Broken without them. The identity
+    /// runtime builds every view of an identity's lifecycle from it
+    /// (`status`, `statuses`, `member_health`, the bootstrap status) and
+    /// chooses an identity's door by it.
+    ///
+    /// The default fails closed: a bridge that cannot read Core's entry
+    /// answers [`BridgeError::Unsupported`], and every view of an identity
+    /// over it refuses typed (history unavailable, retryable) instead of
+    /// reading a member live, or not Broken, on a read that could not tell. A
+    /// bridge that wraps another forwards it.
+    async fn identity_entry(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "identity_entry",
         })
     }
 
@@ -5141,16 +6056,6 @@ pub trait SessionBridge: Send + Sync {
         Err(BridgeError::Unsupported {
             operation: "identity_labelled_members",
         })
-    }
-
-    /// Core's members it holds Broken (it could not restore them, for
-    /// example because a restored member's comms identity is missing on this
-    /// host), each with Core's reason, read from Core's member list without
-    /// the mob actor. A bridge without the read reports none.
-    async fn broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        Ok(BTreeMap::new())
     }
 
     /// Whether Core holds a durable copy of `session_id`: Core's latest
@@ -7022,7 +7927,7 @@ enum ResumeSourceProbe {
     /// before its retire: retiring the member would destroy nothing, but the
     /// resume after it would find no session and leave the identity without
     /// its seat. A role move of such a member is Core's rotation, which
-    /// needs no resume (the seat step plans it so).
+    /// needs no resume (Core's declared apply decides it so).
     NeverCreated,
     /// At least one authority answered and none knows the session: the
     /// member holds the only live copy, so the repair refuses before its
@@ -7527,7 +8432,234 @@ impl MobSessionBridge {
             None => build_spawn_spec(&request.spec, &request.draft, base_profile.as_ref())?,
         };
         self.apply_compaction_floor(&request.identity, &request.spec, &mut spawn_spec)?;
+        spawn_spec.entry_custody = self.declared_entry_custody(&spawn_spec.identity);
         Ok(spawn_spec)
+    }
+
+    /// Core's declaration of one declared identity
+    /// ([`SessionBridge::apply_declared_roster`]): its composed build lowered
+    /// as a create of the identity lowers it, or its lifecycle facts only. A
+    /// composed build that does not lower is declared with the identity's
+    /// lifecycle facts only, so a complete roster still lists the identity,
+    /// and the lowering failure is returned to answer the identity when Core
+    /// needs its build.
+    fn declared_entry(
+        &self,
+        declared: &DeclaredIdentity,
+    ) -> (meerkat_mob::DeclaredEntry, Option<BridgeError>) {
+        let facts_only = || {
+            meerkat_mob::DeclaredEntry::new(lifecycle_facts_spawn_spec(&declared.spec))
+                .with_build(meerkat_mob::DeclaredBuild::FactsOnly)
+                .with_held_creation(declared.held_creation)
+        };
+        let DeclaredIdentityBuild::Composed(draft) = &declared.build else {
+            return (facts_only(), None);
+        };
+        let identity = &declared.spec.identity;
+        let lowered = build_spawn_spec(
+            &declared.spec,
+            draft,
+            self.base_profile_for_spec(&declared.spec).as_ref(),
+        )
+        .and_then(|mut spawn_spec| {
+            self.apply_compaction_floor(identity, &declared.spec, &mut spawn_spec)?;
+            Ok(spawn_spec)
+        });
+        match lowered {
+            Ok(spawn_spec) => (
+                meerkat_mob::DeclaredEntry::new(spawn_spec)
+                    .with_build(meerkat_mob::DeclaredBuild::Composed)
+                    .with_held_creation(declared.held_creation),
+                None,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %identity,
+                    %error,
+                    "the identity's composed build could not be lowered; it is declared with \
+                     its lifecycle facts only"
+                );
+                (facts_only(), Some(error))
+            }
+        }
+    }
+
+    /// Whether a spawn of `member` acts for its identity entry: Core holds
+    /// the member id as a declared identity entry, whose name a spawn
+    /// without entry custody cannot take
+    /// ([`meerkat_mob::MobError::IdentityMember`]). A member id that is no
+    /// declared entry is spawned without custody, as before. A read Core
+    /// refuses answers no custody, and the spawn meets Core's own name guard,
+    /// typed.
+    fn declared_entry_custody(&self, member: &MobAgentIdentity) -> bool {
+        matches!(
+            self.handle.identity_entry(member),
+            Ok(meerkat_mob::IdentityEntryRead::Entry(view))
+                if view.origin == meerkat_mob::IdentityEntryOrigin::Declared
+        )
+    }
+}
+
+/// The spawn spec of `spec`'s lifecycle facts only
+/// ([`meerkat_mob::DeclaredBuild::FactsOnly`]): its member id, role, runtime
+/// mode, backend, binding and placement, with the durable-identity marker
+/// every identity-first spawn carries. It carries no member build: no member
+/// is built from it.
+fn lifecycle_facts_spawn_spec(spec: &DurableAgentSpec) -> SpawnMemberSpec {
+    let mut spawn_spec =
+        SpawnMemberSpec::host_root(spec.profile.clone(), member_id_for_spawn_spec(spec));
+    spawn_spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+        continuity_key: spec.identity.as_str().to_string(),
+    };
+    if let Some(runtime_mode) = spec.runtime_mode_override {
+        spawn_spec = spawn_spec.with_runtime_mode(runtime_mode);
+    }
+    spawn_spec.backend = spec.backend;
+    if let Some(binding) = spec.binding.clone() {
+        spawn_spec.binding = runtime_binding_from_wire(binding);
+    }
+    if let Some(placement) = spec.placement.as_ref() {
+        spawn_spec.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(
+            placement.0.clone(),
+        ));
+    }
+    spawn_spec
+}
+
+/// The identity a Core member id stands for: the identity its member id
+/// encodes. `None` for a member id that encodes no identity.
+fn identity_of_member(member: &MobAgentIdentity) -> Option<AgentIdentity> {
+    AgentIdentity::parse(&crate::member_comms_id::durable_identity_for_roster_member(
+        member.as_str(),
+    ))
+    .ok()
+}
+
+/// Whether an answer ends the member's incarnation the bridge may have
+/// recorded: a seat, a live spawn, a restamp, a move to a fresh session, a
+/// fresh life.
+fn answer_changes_incarnation(answer: &DeclaredIdentityAnswer) -> bool {
+    matches!(
+        answer,
+        DeclaredIdentityAnswer::Seated { .. }
+            | DeclaredIdentityAnswer::Embodied { .. }
+            | DeclaredIdentityAnswer::Restamped { .. }
+            | DeclaredIdentityAnswer::RoleMigrated { .. }
+            | DeclaredIdentityAnswer::RoleRotated { .. }
+            | DeclaredIdentityAnswer::FreshLife { .. }
+    )
+}
+
+/// Core's answer for one declared identity, in the bridge's vocabulary.
+/// `lowering_failure` is the identity's composed build that did not lower:
+/// it answers the identity when Core needs the build.
+fn declared_identity_answer(
+    identity: &AgentIdentity,
+    outcome: meerkat_mob::DeclaredEntryOutcome,
+    lowering_failure: Option<BridgeError>,
+) -> DeclaredIdentityAnswer {
+    let step = format!("declaration of {identity}");
+    match outcome {
+        meerkat_mob::DeclaredEntryOutcome::Seated {
+            session_id,
+            history_unavailable,
+        } => DeclaredIdentityAnswer::Seated {
+            session_id,
+            history_unavailable,
+        },
+        meerkat_mob::DeclaredEntryOutcome::Embodied {
+            session_id,
+            history_unavailable,
+        } => DeclaredIdentityAnswer::Embodied {
+            session_id,
+            history_unavailable,
+        },
+        meerkat_mob::DeclaredEntryOutcome::Kept => DeclaredIdentityAnswer::Kept,
+        meerkat_mob::DeclaredEntryOutcome::Restamped { generation } => {
+            DeclaredIdentityAnswer::Restamped {
+                generation: generation.get(),
+            }
+        }
+        meerkat_mob::DeclaredEntryOutcome::RoleMigrated { generation } => {
+            DeclaredIdentityAnswer::RoleMigrated {
+                generation: generation.get(),
+            }
+        }
+        meerkat_mob::DeclaredEntryOutcome::RoleRotated { session_id } => {
+            DeclaredIdentityAnswer::RoleRotated { session_id }
+        }
+        meerkat_mob::DeclaredEntryOutcome::FreshLife { session_id } => {
+            DeclaredIdentityAnswer::FreshLife { session_id }
+        }
+        meerkat_mob::DeclaredEntryOutcome::RoleMigrationHeld { from, to } => {
+            DeclaredIdentityAnswer::RoleMigrationHeld { from, to }
+        }
+        meerkat_mob::DeclaredEntryOutcome::AwaitingHeldCreation => {
+            DeclaredIdentityAnswer::AwaitingHeldCreation
+        }
+        meerkat_mob::DeclaredEntryOutcome::PreparationPending => {
+            DeclaredIdentityAnswer::PreparationPending
+        }
+        meerkat_mob::DeclaredEntryOutcome::HostedOnFirstUse => {
+            DeclaredIdentityAnswer::HostedOnFirstUse
+        }
+        // A build that did not lower is the identity's own failure: declared
+        // again, it would not lower either.
+        meerkat_mob::DeclaredEntryOutcome::BuildRequired => match lowering_failure {
+            Some(error) => DeclaredIdentityAnswer::Failed { error },
+            None => DeclaredIdentityAnswer::BuildRequired,
+        },
+        meerkat_mob::DeclaredEntryOutcome::Deferred { reason } => {
+            DeclaredIdentityAnswer::Deferred {
+                reason: spawn_bridge_error(&step, &reason),
+            }
+        }
+        meerkat_mob::DeclaredEntryOutcome::Refused { refusal } => {
+            DeclaredIdentityAnswer::Refused { refusal }
+        }
+        meerkat_mob::DeclaredEntryOutcome::Noted { note } => DeclaredIdentityAnswer::Noted { note },
+        meerkat_mob::DeclaredEntryOutcome::Failed { error } => DeclaredIdentityAnswer::Failed {
+            // Core's typed answer about the session a seat named (absent,
+            // archived beyond revival, held) stays typed, as a resume's does.
+            error: match &error {
+                meerkat_mob::MobError::SessionUnavailableForResume { session_id, .. } => {
+                    resume_rejected(identity, session_id, &error, &step)
+                }
+                _ => spawn_bridge_error(&step, &error),
+            },
+        },
+        // An outcome this build does not know declared nothing it can
+        // account for: the identity's answer is a typed failure, never
+        // assumed declared.
+        _ => DeclaredIdentityAnswer::Failed {
+            error: BridgeError::Mob(format!(
+                "Core answered the {step} with an outcome this build does not know"
+            )),
+        },
+    }
+}
+
+/// What a complete roster's apply did with one identity it does not list,
+/// in the bridge's vocabulary.
+fn unlisted_identity_answer(
+    identity: &AgentIdentity,
+    outcome: meerkat_mob::UnlistedEntryOutcome,
+) -> UnlistedIdentityAnswer {
+    match outcome {
+        meerkat_mob::UnlistedEntryOutcome::Retired => UnlistedIdentityAnswer::Retired,
+        meerkat_mob::UnlistedEntryOutcome::Removed => UnlistedIdentityAnswer::Removed,
+        meerkat_mob::UnlistedEntryOutcome::Failed { error } => UnlistedIdentityAnswer::Failed {
+            error: spawn_bridge_error(&format!("unlisting of {identity}"), &error),
+        },
+        meerkat_mob::UnlistedEntryOutcome::NotAdopted { reason } => {
+            UnlistedIdentityAnswer::NotAdopted { reason }
+        }
+        _ => UnlistedIdentityAnswer::Failed {
+            error: BridgeError::Mob(format!(
+                "Core answered the unlisting of {identity} with an outcome this build does not \
+                 know"
+            )),
+        },
     }
 }
 
@@ -7858,35 +8990,19 @@ pub(crate) fn build_spawn_spec(
     draft: &AgentBuildDraft,
     base_profile: Option<&meerkat_mob::Profile>,
 ) -> Result<SpawnMemberSpec, BridgeError> {
-    let mid = member_id_for_spawn_spec(spec);
     // A DurableAgentSpec is the trusted host roster's identity declaration.
     // This ingress creates that identity, not an agent-requested descendant.
     // Fresh creation is therefore an explicit Root fact. Resume and reset
     // still go through native transitions that preserve predecessor proof.
-    let mut spawn_spec = SpawnMemberSpec::host_root(spec.profile.clone(), mid);
     // Every identity-first spawn carries the durable-identity marker, keyed
     // by the identity: the create, the held create, both resume branches and
     // the reset successor all build here. Core's durable identity member read
     // lists exactly the members whose spawn carried it, which is how the boot
     // roster compile finds a member the roster dropped while Meta was down.
-    spawn_spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
-        continuity_key: spec.identity.as_str().to_string(),
-    };
+    let mut spawn_spec = lifecycle_facts_spawn_spec(spec);
 
     if let Some(message) = spec.initial_message.as_ref() {
         spawn_spec = spawn_spec.with_initial_message(message.clone());
-    }
-    if let Some(runtime_mode) = spec.runtime_mode_override {
-        spawn_spec = spawn_spec.with_runtime_mode(runtime_mode);
-    }
-    spawn_spec.backend = spec.backend;
-    if let Some(binding) = spec.binding.clone() {
-        spawn_spec.binding = runtime_binding_from_wire(binding);
-    }
-    if let Some(placement) = spec.placement.as_ref() {
-        spawn_spec.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(
-            placement.0.clone(),
-        ));
     }
     if let Some(ref ctx) = draft.app_context {
         spawn_spec = spawn_spec.with_context(ctx.clone());
@@ -8098,6 +9214,52 @@ impl SessionBridge for MobSessionBridge {
         }
     }
 
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        self.handle
+            .members_holding_run_starts(meerkat_mob::HostRunStartHoldReason::ToolsNotPublished)
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "reading the members held for unpublished customizer tools failed: {error}"
+                ))
+            })
+    }
+
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.handle
+            .member_holds_run_starts(
+                member_id,
+                meerkat_mob::HostRunStartHoldReason::ToolsNotPublished,
+            )
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "reading whether {member_id} is held for unpublished customizer tools \
+                     failed: {error}"
+                ))
+            })
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        match self
+            .handle
+            .resolve_member_build_preparation(member_id)
+            .await
+        {
+            // Not a member of this mob: no cause is recorded for it.
+            Ok(()) | Err(meerkat_mob::MobError::MemberNotFound(_)) => Ok(()),
+            Err(error) => Err(BridgeError::Mob(format!(
+                "retrying the build preparation of {member_id} failed: {error}"
+            ))),
+        }
+    }
+
     async fn member_durability(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -8208,6 +9370,126 @@ impl SessionBridge for MobSessionBridge {
             .collect())
     }
 
+    async fn apply_declared_roster(
+        &self,
+        roster: DeclaredRosterRequest,
+    ) -> Result<DeclaredRosterAnswer, BridgeError> {
+        let DeclaredRosterRequest {
+            identities,
+            complete,
+            first_boot_requests,
+        } = roster;
+        // The member ids the roster names, with the identity each stands
+        // for: Core answers by member id.
+        let mut named = BTreeMap::new();
+        // A composed build that does not lower declares the identity's
+        // lifecycle facts only, so a complete roster still lists it; its
+        // lowering failure answers the identity when Core needs the build.
+        let mut lowering_failures = BTreeMap::new();
+        let mut entries = Vec::with_capacity(identities.len());
+        let mut migrations = Vec::new();
+        for declared in &identities {
+            let identity = declared.spec.identity.clone();
+            let member = member_id_for_identity(&identity);
+            let (entry, lowering_failure) = self.declared_entry(declared);
+            if let Some(error) = lowering_failure {
+                lowering_failures.insert(member.clone(), error);
+            }
+            if let Some(from) =
+                declared_role_migration_in(&self.role_migration_declarations, &identity)
+            {
+                migrations.push((member.clone(), from));
+            }
+            named.insert(member, identity);
+            entries.push(entry);
+        }
+        let mut core_roster = if complete {
+            meerkat_mob::DeclaredRoster::complete(entries)
+        } else {
+            meerkat_mob::DeclaredRoster::partial(entries)
+        };
+        for (member, from) in migrations {
+            core_roster = core_roster.with_role_migration(member, from);
+        }
+        for (identity, request) in first_boot_requests {
+            let member = member_id_for_identity(&identity);
+            named.entry(member.clone()).or_insert(identity);
+            core_roster = core_roster.with_first_boot_request(member, request);
+        }
+        let outcome = Box::pin(self.handle.apply_declared_roster(core_roster))
+            .await
+            .map_err(|error| match error {
+                // Another apply of the mob holds its open fact: nothing was
+                // declared, and the roster can be applied again.
+                error @ meerkat_mob::MobError::LifecycleOperationPending { .. } => {
+                    BridgeError::DeclaredApplyPending {
+                        detail: error.to_string(),
+                    }
+                }
+                error => spawn_bridge_error("apply_declared_roster", &error),
+            })?;
+
+        let mut answer = DeclaredRosterAnswer::default();
+        for (member, entry) in outcome.entries {
+            let Some(identity) = named
+                .get(&member)
+                .cloned()
+                .or_else(|| identity_of_member(&member))
+            else {
+                tracing::warn!(
+                    %member,
+                    "Core answered a declaration for a member id that names no identity; the \
+                     answer is dropped"
+                );
+                continue;
+            };
+            let answer_for =
+                declared_identity_answer(&identity, entry, lowering_failures.remove(&member));
+            // A seat, a restamp, a move or a fresh life ends the member's
+            // incarnation this bridge may have recorded: its runtime id names
+            // nothing now, and the next call reads the current one from Core.
+            if answer_changes_incarnation(&answer_for) {
+                self.forget_member_bindings(&member).await;
+            }
+            answer.identities.insert(identity, answer_for);
+        }
+        for (member, unlisted) in outcome.unlisted {
+            let Some(identity) = named
+                .get(&member)
+                .cloned()
+                .or_else(|| identity_of_member(&member))
+            else {
+                tracing::warn!(
+                    %member,
+                    "Core unlisted a declared member id that names no identity; its answer is \
+                     dropped"
+                );
+                continue;
+            };
+            let unlisted = unlisted_identity_answer(&identity, unlisted);
+            // A retirement or a removal ends the member's incarnation; a
+            // member Core did not adopt keeps it.
+            if matches!(
+                unlisted,
+                UnlistedIdentityAnswer::Retired | UnlistedIdentityAnswer::Removed
+            ) {
+                self.forget_member_bindings(&member).await;
+            }
+            answer.unlisted.insert(identity, unlisted);
+        }
+        answer.first_boot_requests_carried_out = outcome
+            .first_boot_requests_carried_out
+            .into_iter()
+            .filter_map(|member| {
+                named
+                    .get(&member)
+                    .cloned()
+                    .or_else(|| identity_of_member(&member))
+            })
+            .collect();
+        Ok(answer)
+    }
+
     async fn rotate_member(
         &self,
         identity: &AgentIdentity,
@@ -8231,6 +9513,10 @@ impl SessionBridge for MobSessionBridge {
         successor.identity = roster_id.clone();
         successor.launch_mode = meerkat_mob::launch::MemberLaunchMode::Fresh;
         successor.auto_wire_parent = false;
+        // The fresh life of an identity Core holds no member for is a seat of
+        // its name, which takes a declared entry's name only with the
+        // entry's custody, as the create paths carry it.
+        successor.entry_custody = self.declared_entry_custody(&roster_id);
         let session_id =
             self.handle
                 .rotate_member(successor)
@@ -8252,6 +9538,21 @@ impl SessionBridge for MobSessionBridge {
         // one is read from Core when a delivery needs it.
         self.forget_member_bindings(&roster_id).await;
         Ok(session_id)
+    }
+
+    async fn settle_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        let member = member_id_for_identity(identity);
+        self.handle
+            .settle_member_owed_compaction_projections(&member)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "settling the owed compaction projections of {identity}: {error}"
+                ))
+            })
     }
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
@@ -8317,6 +9618,7 @@ impl SessionBridge for MobSessionBridge {
         let mut spawn_spec =
             build_spawn_spec(spec, draft, self.base_profile_for_spec(spec).as_ref())?;
         self.apply_compaction_floor(identity, spec, &mut spawn_spec)?;
+        spawn_spec.entry_custody = self.declared_entry_custody(&mid);
 
         self.spawn_member_spec(spawn_spec)
             .await
@@ -8360,6 +9662,7 @@ impl SessionBridge for MobSessionBridge {
         let mut spawn_spec =
             build_spawn_spec(spec, draft, self.base_profile_for_spec(spec).as_ref())?;
         self.apply_compaction_floor(identity, spec, &mut spawn_spec)?;
+        spawn_spec.entry_custody = self.declared_entry_custody(&mid);
         if spawn_spec_requires_generated_owner_context(&spawn_spec) {
             return Err(BridgeError::Mob(format!(
                 "the externally bound member of {identity} cannot be held before its publication"
@@ -8475,6 +9778,7 @@ impl SessionBridge for MobSessionBridge {
             )?;
             self.apply_compaction_floor(identity, spec, &mut spawn_spec)?;
             let mid = member_id_for_spawn_spec(spec);
+            spawn_spec.entry_custody = self.declared_entry_custody(&mid);
             self.spawn_member_spec(spawn_spec).await.map_err(|error| {
                 resume_rejected(identity, session_id, &error, "external-binding resume")
             })?;
@@ -8499,6 +9803,9 @@ impl SessionBridge for MobSessionBridge {
         self.apply_compaction_floor(identity, spec, &mut spawn_spec)?;
 
         let mid = member_id_for_spawn_spec(spec);
+        // A resume of a declared identity the roster's verdict left unseated
+        // (its member retired outside the declared apply) acts for its entry.
+        spawn_spec.entry_custody = self.declared_entry_custody(&mid);
         let declared_migration = DeclaredRoleMigration::of(&spawn_spec);
 
         match self.spawn_member_spec(spawn_spec.clone()).await {
@@ -8930,6 +10237,21 @@ impl SessionBridge for MobSessionBridge {
         Ok(Some(binding))
     }
 
+    async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        self.handle
+            .wait_member_lifecycle_settled(&member_id_for_identity(identity), timeout)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "waiting for the lifecycle of {identity}'s member to settle: {error}"
+                ))
+            })
+    }
+
     async fn identity_convergence_status(
         &self,
         identity: &AgentIdentity,
@@ -9048,8 +10370,12 @@ impl SessionBridge for MobSessionBridge {
             .into_iter()
             .filter_map(|record| {
                 let cursor = record.cursor.get();
-                member_lifecycle_fact(record.event)
-                    .map(|fact| MemberLifecycleFactRecord::new(cursor, fact))
+                // A time before the Unix epoch is no time Core appends at.
+                let recorded_at_ms =
+                    u64::try_from(record.timestamp.timestamp_millis()).unwrap_or_default();
+                member_lifecycle_fact(record.event).map(|fact| {
+                    MemberLifecycleFactRecord::new(cursor, fact).with_recorded_at_ms(recorded_at_ms)
+                })
             })
             .collect();
         Ok(MemberLifecycleJournalPage::new(records, page.next.get()))
@@ -9079,6 +10405,55 @@ impl SessionBridge for MobSessionBridge {
                 "reading Core's standing of {identity}: {error}"
             ))),
         }
+    }
+
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        let member_id = member_id_for_identity(identity);
+        let read = match self.handle.identity_entry(&member_id) {
+            Ok(read) => read,
+            // The handle's principal may not list the mob's members: this
+            // bridge cannot read Core's entry, now or later.
+            Err(meerkat_mob::MobError::ScopeDenied(denial)) => {
+                tracing::warn!(
+                    ?denial,
+                    "the session bridge's mob handle may not read Core's entry of an identity"
+                );
+                return Err(BridgeError::Unsupported {
+                    operation: "identity_entry",
+                });
+            }
+            Err(error) => {
+                return Err(BridgeError::Mob(format!(
+                    "reading Core's entry of {identity}: {error}"
+                )));
+            }
+        };
+        let mut entry = core_identity_entry_of(&read)?;
+        // A member Core holds Broken: Core's answer for the member names the
+        // failed restore's session and its durable resume hold, which the
+        // machine's read does not carry. `MobHandle::member` answers it from
+        // Core's restore diagnostic without the mob actor (its fallback,
+        // `get_member`, reads the published state too). Until Core records
+        // the diagnostic (in the same actor step as the Broken fact, or, for
+        // a warm revival, once the revival's off-actor cleanup commits back)
+        // `member` answers the member, and the read goes on without the hold
+        // or the session; carrying the hold in Core's entry read is a tracked
+        // follow-up.
+        if let Some(broken) = entry
+            .member
+            .as_mut()
+            .and_then(|member| member.broken.as_mut())
+            && let Err(meerkat_mob::MobError::MemberRestoreFailed {
+                session_id, hold, ..
+            }) = self.handle.member(&member_id).await
+        {
+            broken.hold = hold;
+            broken.session_id = session_id;
+        }
+        Ok(entry)
     }
 
     async fn identity_management(
@@ -9121,15 +10496,6 @@ impl SessionBridge for MobSessionBridge {
                 )
             })
             .map(|entry| entry.agent_identity)
-            .collect())
-    }
-
-    async fn broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        Ok(crate::mob_handle_runtime::broken_members_of(&self.handle)
-            .await
-            .into_iter()
             .collect())
     }
 
@@ -9696,6 +11062,29 @@ impl MobSessionBridge {
         if entry.bridge_session_id() != Some(session_id) {
             return Err(governed(GovernedInputError::BindingChanged));
         }
+        // External work never reaches an identity entry in Core: the entry's
+        // host, this identity runtime, delivers to it through its own door,
+        // as internal work. The external door keeps Core's addressability
+        // rule for the entry's member: a runtime that admits no external
+        // work is refused as Core refuses one, before anything is submitted.
+        let door = match door {
+            GovernedDoor::External => {
+                let read = self
+                    .handle
+                    .identity_entry(&mid)
+                    .map_err(|error| BridgeAdmissionError::Mob(error.to_string()))?;
+                match entry_member_externally_addressable(&read) {
+                    None => GovernedDoor::External,
+                    Some(true) => GovernedDoor::TrustedHostInternal,
+                    Some(false) => {
+                        return Err(governed(GovernedInputError::Mob(Box::new(
+                            meerkat_mob::MobError::NotExternallyAddressable(mid.clone()),
+                        ))));
+                    }
+                }
+            }
+            door => door,
+        };
         // Once submitted, native admission owns the custody's settlement, and
         // its answer is awaited to its definitive acknowledgement or error: no
         // observation deadline drops it, since native admission can still
@@ -9708,15 +11097,31 @@ impl MobSessionBridge {
                 receipt: None,
             }));
         };
+        // Submitted at the incarnation read above, its runtime id, fence and
+        // session: a member rotated since the reads (by a caller outside
+        // this runtime's verbs) is refused stale, never admitted to its
+        // successor, whose addressability nothing here read.
         let turn = match door {
             GovernedDoor::External => {
                 self.handle
-                    .start_governed_input_with_custody(&mid, input, custody)
+                    .start_governed_input_with_custody_at(
+                        &entry.agent_runtime_id,
+                        entry.fence_token,
+                        session_id,
+                        input,
+                        custody,
+                    )
                     .await
             }
             GovernedDoor::TrustedHostInternal => {
                 self.handle
-                    .start_internal_governed_input_with_custody(&mid, input, custody)
+                    .start_internal_governed_input_with_custody_at(
+                        &entry.agent_runtime_id,
+                        entry.fence_token,
+                        session_id,
+                        input,
+                        custody,
+                    )
                     .await
             }
         }
@@ -9818,6 +11223,18 @@ impl MobSessionBridge {
                 "selected skills are carried only on the local host-human lane".to_string(),
             ));
         }
+        let requester = delivery.requester.as_ref();
+        if requester.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a requester is carried only on the local host-human lane".to_string(),
+            ));
+        }
+        let sender_label = delivery.sender_label.as_ref();
+        if sender_label.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a sender label is carried only on the local host-human lane".to_string(),
+            ));
+        }
         let mid = self.member_id_for_runtime_id(runtime_id).await?;
         // One admission budget for the whole attempt, shared by every actor
         // round trip below: the serialized hops must not each cost a budget.
@@ -9867,6 +11284,8 @@ impl MobSessionBridge {
                 delivery_identity,
                 host_human_session,
                 skill_references,
+                requester,
+                sender_label,
             },
             handling_mode,
             &deadline,
@@ -10005,6 +11424,29 @@ impl SessionBridge for super::PublicSessionBridge {
             .await
     }
 
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        self.bridge.members_holding_run_starts_for_published_tools()
+    }
+
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.bridge
+            .member_holds_run_starts_for_published_tools(member_id)
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        self.bridge
+            .resolve_member_build_preparation(member_id)
+            .await
+    }
+
     async fn member_durability(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -10047,6 +11489,13 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.seat_dormant_members(requests).await
     }
 
+    async fn apply_declared_roster(
+        &self,
+        roster: DeclaredRosterRequest,
+    ) -> Result<DeclaredRosterAnswer, BridgeError> {
+        self.bridge.apply_declared_roster(roster).await
+    }
+
     async fn rotate_member(
         &self,
         identity: &AgentIdentity,
@@ -10054,6 +11503,15 @@ impl SessionBridge for super::PublicSessionBridge {
         draft: &AgentBuildDraft,
     ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         self.bridge.rotate_member(identity, spec, draft).await
+    }
+
+    async fn settle_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        self.bridge
+            .settle_owed_compaction_projections(identity)
+            .await
     }
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
@@ -10122,6 +11580,16 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.ensure_member_live(identity).await
     }
 
+    async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        self.bridge
+            .wait_member_lifecycle_settled(identity, timeout)
+            .await
+    }
+
     async fn identity_convergence_status(
         &self,
         identity: &AgentIdentity,
@@ -10181,6 +11649,13 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.member_standing(identity).await
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        self.bridge.identity_entry(identity).await
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,
@@ -10198,12 +11673,6 @@ impl SessionBridge for super::PublicSessionBridge {
         &self,
     ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
         self.bridge.identity_labelled_members().await
-    }
-
-    async fn broken_members(
-        &self,
-    ) -> Result<BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        self.bridge.broken_members().await
     }
 
     async fn durable_session_held(
@@ -10566,6 +12035,7 @@ mod tests {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         }
     }
 
@@ -12329,8 +13799,8 @@ mod tests {
 
     /// A seat Core refused for the session it names (here: Core holds no
     /// durable copy of it) keeps Core's typed reason, as a resume's refusal
-    /// does, so the seat step can answer a first-boot `Resume` row's typed
-    /// refusal instead of a generic retry.
+    /// does, so a first-boot `Resume` row's refusal stays typed instead of
+    /// a generic retry.
     #[test]
     fn a_seat_refused_for_its_session_keeps_cores_typed_reason() {
         let identity = AgentIdentity::parse("agent:seat-absent").expect("identity");
@@ -12513,6 +13983,7 @@ mod tests {
             member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
             session_id: None,
             reason: "durable snapshot missing".to_string(),
+            cause_data: None,
         };
         assert_eq!(
             classify_resume_error(&restore_failed(None)),
@@ -12634,6 +14105,7 @@ mod tests {
             member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
             session_id: None,
             reason: "durable snapshot missing".to_string(),
+            cause_data: None,
         };
         let retirement = |inner: meerkat_mob::MobError| {
             meerkat_mob::MobError::SharedRetirementFailure(Arc::new(inner))
@@ -13108,6 +14580,7 @@ mod tests {
             member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
             session_id: None,
             reason: "durable snapshot missing".to_string(),
+            cause_data: None,
         };
         assert!(matches!(
             resume_rejected(&identity, &session_id, &restore_failed, "resume"),
@@ -13116,6 +14589,211 @@ mod tests {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    /// The host's typed refusal of a member's build, as the gateway's session
+    /// builder carries it: structured data of Meta's own kind, and a message
+    /// that names no callback.
+    fn host_refused_build() -> meerkat_mob::MobError {
+        meerkat_mob::MobError::SessionError(meerkat_core::service::SessionError::FailedWithData {
+            message: "the host's build gate refused the member".to_string(),
+            data: serde_json::json!({
+                "kind": "meta_host_rejected_build",
+                "reason": "the host's build gate refused the member",
+            }),
+        })
+    }
+
+    /// A member Core holds Broken because its wake's build failed for
+    /// `cause`: its restore failure keeps the cause's structured data.
+    fn broken_for(
+        cause: &meerkat_mob::MobError,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> meerkat_mob::MobError {
+        meerkat_mob::MobError::MemberRestoreFailed {
+            member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
+            session_id: Some(session_id.clone()),
+            reason: format!("failed to restore durable session '{session_id}': {cause}"),
+            hold: None,
+            cause_data: cause.structured_data(),
+        }
+    }
+
+    /// A bridge error's form as these rows read it: its variant, and a
+    /// rejected resume's kind.
+    fn bridge_form(error: &BridgeError) -> String {
+        match error {
+            BridgeError::ResumeRejected { kind, .. } => format!("ResumeRejected/{kind:?}"),
+            other => format!("{other:?}")
+                .split([' ', '('])
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+
+    /// The host's typed refusal of a member's build is typed on every bridge
+    /// path, read from its data's kind and never from text: a refused create
+    /// and a refused resume on the resume door are `HostRejectedBuild`,
+    /// through meerkat-mob's shared failure wrappers too; a member Core holds
+    /// Broken for it is the resume refusal of kind `HostRejectedBuild`, on
+    /// the door's wake and on a delivery's alike, and the delivery's crosses
+    /// into `BridgeAdmissionError` unchanged.
+    ///
+    /// RED before the bridge read the kind: the refused builds were mob
+    /// text, and the Broken member the final restore failure.
+    #[test]
+    fn the_hosts_typed_build_refusal_is_typed_on_every_bridge_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = AgentIdentity::parse("domain:gated")?;
+        let member = member_id_for_identity(&identity);
+        let session_id = meerkat_core::types::SessionId::new();
+        let deadline = ActorAdmissionDeadline::new(Duration::from_secs(1));
+        let refused = host_refused_build();
+        let shared = meerkat_mob::MobError::SharedLifecycleFailure(Arc::new(host_refused_build()));
+        for (door, error) in [
+            ("create", spawn_bridge_error("create_session", &refused)),
+            (
+                "shared create",
+                spawn_bridge_error("create_session", &shared),
+            ),
+            (
+                "resume door",
+                resume_rejected(&identity, &session_id, &refused, "resume"),
+            ),
+        ] {
+            assert_eq!(
+                bridge_form(&error),
+                "HostRejectedBuild",
+                "{door}: {error:?}"
+            );
+        }
+        let woken = classify_reload_mob_error(
+            "ensure_member_live",
+            &member,
+            broken_for(&refused, &session_id),
+            &deadline,
+        );
+        assert_eq!(
+            bridge_form(&woken),
+            "ResumeRejected/HostRejectedBuild",
+            "the door's wake: {woken:?}"
+        );
+        let delivered =
+            classify_submit_mob_error(&member, broken_for(&refused, &session_id), &deadline);
+        assert_eq!(
+            bridge_form(&delivered),
+            "ResumeRejected/HostRejectedBuild",
+            "a delivery's wake: {delivered:?}"
+        );
+        let BridgeAdmissionError::ResumeRejected { kind, .. } =
+            BridgeAdmissionError::from(delivered)
+        else {
+            return Err(
+                "a delivery's refusal crosses the admission seam as a resume refusal".into(),
+            );
+        };
+        assert_eq!(format!("{kind:?}"), "HostRejectedBuild");
+        Ok(())
+    }
+
+    /// A member Core holds Broken because provider authentication refused its
+    /// wake's build keeps the typed provider-auth data in its restore failure,
+    /// and the bridge answers it as the Broken member it is (the final restore
+    /// failure), never as the host's build refusal: Meta reads only its own
+    /// kind from that data. A pin: it holds on both sides of that read.
+    #[test]
+    fn a_broken_members_provider_auth_cause_is_never_the_hosts_build_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = AgentIdentity::parse("domain:keyless")?;
+        let member = member_id_for_identity(&identity);
+        let session_id = meerkat_core::types::SessionId::new();
+        let deadline = ActorAdmissionDeadline::new(Duration::from_secs(1));
+        let provider_auth = meerkat_mob::MobError::SessionError(
+            meerkat_core::service::SessionError::provider_auth_failure(
+                meerkat_core::service::SessionProviderAuthFailure {
+                    kind: meerkat_core::AuthErrorKind::MissingSecret,
+                    provider: meerkat_core::Provider::Anthropic,
+                    realm_id: None,
+                    binding_id: None,
+                },
+            ),
+        );
+        let woken = classify_reload_mob_error(
+            "ensure_member_live",
+            &member,
+            broken_for(&provider_auth, &session_id),
+            &deadline,
+        );
+        let delivered =
+            classify_submit_mob_error(&member, broken_for(&provider_auth, &session_id), &deadline);
+        for (path, error) in [("the door's wake", woken), ("a delivery's wake", delivered)] {
+            assert_eq!(
+                bridge_form(&error),
+                "ResumeRejected/MemberRestoreFailed",
+                "{path}: {error:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Core's typed refusal of a member's wake (`MemberWakeRefused`) is
+    /// typed on the door's own wake (`ensure_member_live`, which maps
+    /// through `classify_reload_mob_error`) as it is on a delivery's wake
+    /// (`classify_submit_mob_error`): `BridgeError::MemberWakeRefused` with
+    /// the member, Core's refusal and Core's rendering, for a refusal the
+    /// door takes a step for and for a final one alike.
+    ///
+    /// RED before the reload mapping read it: the door's own wake answered
+    /// Core's refusal as mob text.
+    #[test]
+    fn cores_wake_refusal_is_typed_on_the_doors_own_wake_as_on_a_deliverys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = AgentIdentity::parse("domain:refused")?;
+        let member = member_id_for_identity(&identity);
+        let deadline = ActorAdmissionDeadline::new(Duration::from_secs(1));
+        let refused = |refusal| meerkat_mob::MobError::MemberWakeRefused {
+            member_id: member.clone(),
+            refusal,
+        };
+        for refusal in [
+            meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+            meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+            meerkat_mob::MemberWakeRefusal::Retiring,
+        ] {
+            let rendering = refused(refusal).to_string();
+            for (path, error) in [
+                (
+                    "the door's own wake",
+                    classify_reload_mob_error(
+                        "ensure_member_live",
+                        &member,
+                        refused(refusal),
+                        &deadline,
+                    ),
+                ),
+                (
+                    "a delivery's wake",
+                    classify_submit_mob_error(&member, refused(refusal), &deadline),
+                ),
+            ] {
+                match error {
+                    BridgeError::MemberWakeRefused {
+                        identity: answered,
+                        refusal: kept,
+                        detail,
+                    } => {
+                        assert_eq!(answered, member, "{path}, {refusal:?}");
+                        assert_eq!(kept, refusal, "{path}, {refusal:?}");
+                        assert_eq!(detail, rendering, "{path}, {refusal:?}: Core's rendering");
+                    }
+                    other => {
+                        panic!("{path}, {refusal:?}: Core's wake refusal is typed, got {other:?}")
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -14116,6 +15794,7 @@ mod tests {
                 session_id: Some(id.clone()),
                 reason: "recorded restore failure".to_string(),
                 hold: Some(DurableResumeHold::AuditedEndpointDivergence),
+                cause_data: None,
             }),
             ResumeRejectionKind::Held {
                 hold: DurableResumeHold::AuditedEndpointDivergence
@@ -14127,6 +15806,7 @@ mod tests {
                 session_id: Some(id.clone()),
                 reason: "recorded restore failure".to_string(),
                 hold: None,
+                cause_data: None,
             }),
             ResumeRejectionKind::MemberRestoreFailed
         );
@@ -14222,6 +15902,7 @@ mod tests {
                 session_id,
                 reason: "missing durable session snapshot".to_string(),
                 hold,
+                cause_data: None,
             }
         };
         let registration_refused = || MobError::MemberRegistrationRefused {

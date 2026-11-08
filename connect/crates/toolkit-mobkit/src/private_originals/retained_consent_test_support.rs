@@ -418,6 +418,9 @@ fn native_failure_kind(error: &IdentityRuntimeError) -> &'static str {
         IdentityRuntimeError::SessionNotHeldByIdentity { .. } => {
             "IdentityRuntimeError::SessionNotHeldByIdentity"
         }
+        IdentityRuntimeError::DeclarationNotApplied { .. } => {
+            "IdentityRuntimeError::DeclarationNotApplied"
+        }
     }
 }
 

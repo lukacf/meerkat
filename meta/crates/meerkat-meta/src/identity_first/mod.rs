@@ -36,7 +36,9 @@ pub use bridge::{
     ActorCallObservation, ActorCommandTimeout, BoundGovernedInput, BridgeAdmissionError,
     BridgeDelivery, BridgeError, BridgeMemberReload, BridgeTurnError, BridgeTurnReceipt,
     CommittedBoundaryRecoverer, CommittedBoundaryRepair, CompactionFloorRegistry,
-    ControllerPinSource, GOVERNED_SUBMISSION_RECEIPT_VERSION, GovernedAdmission,
+    ControllerPinSource, CoreBrokenMember, CoreIdentityEntry, CoreMember, CoreNameKind,
+    DeclaredIdentity, DeclaredIdentityAnswer, DeclaredIdentityBuild, DeclaredRosterAnswer,
+    DeclaredRosterRequest, GOVERNED_SUBMISSION_RECEIPT_VERSION, GovernedAdmission,
     GovernedAdmissionRecord, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
     GovernedBindRefusalKind, GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence,
     GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedHold,
@@ -45,6 +47,7 @@ pub use bridge::{
     MemberLifecycleFactRecord, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
     MemberRuntimeBinding, MemberStanding, MobSessionBridge, NativeInputAdmissionSettlement,
     QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
+    UnlistedIdentityAnswer,
 };
 pub use build_preparer::IdentityBuildPreparer;
 pub use contracts::*;

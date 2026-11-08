@@ -758,6 +758,26 @@ describe("#306: the first boot after storage-migrate-native", () => {
         true,
       ],
     ],
+    [
+      {
+        kind: "identity_name_unreadable",
+        identity: "w",
+        remedy: "repair_or_upgrade",
+        retryable: false,
+      },
+      [
+        "identity_name_unreadable",
+        "w",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        "repair_or_upgrade",
+        false,
+      ],
+    ],
   ] as const) {
     it(`types the ${data.kind} refusal (${"row_kind" in data ? data.row_kind : "no row"})`, async () => {
       const err = await refusal({ code: STORAGE_RESOLUTION_CODE, message: "refused", data });

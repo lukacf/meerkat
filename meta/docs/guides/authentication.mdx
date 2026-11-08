@@ -137,6 +137,16 @@ its historical behaviour. The recorded discovery document names the real key
 source (the fetched `jwks_uri`, or `inline` for `jwks_json`), so a public
 issuer's host can never read as the HS256 development host.
 
+**Shared and personal accounts.** A front that signs everyone in as one
+account mints every holder of its password the same `sub`. The console cannot
+tell those people apart, so such a token never counts as a person: the caller
+is identified as its principal and can act as today. A `provider: "jwt"`
+configuration counts as shared unless it declares `"accounts": "personal"`,
+which a front that mints one token per person sets. `provider: "oidc"` tokens
+name persons unless the configuration declares `"accounts": "shared"`. Any
+other value is refused. `meta/console/whoami` reports the result as
+`actor.kind`.
+
 The result is the fixed trusted snapshot described next: the console does not
 refetch the JWKS, so an issuer key rotation needs a restart of the host (or a
 refreshable `JwksCache` on the host's own front, see below). Google rotates its
@@ -155,6 +165,7 @@ TrustedOidcRuntimeConfig {
     jwks_json: jwks_json_text,
     audience: "meerkat-console".to_string(),
     require_verified_email: false,
+    shared_account_tokens: false,
 }
 ```
 
@@ -248,7 +259,12 @@ In the reference app router, these surfaces remain public even when
 
 Console JSON, JSON-RPC, timeline, blob, Flow Editor RPC, and all Meta SSE
 surfaces honor `require_app_auth`. When enabled, they accept either
-`Authorization: Bearer <token>` or an exact `auth_token` query parameter.
+`Authorization: Bearer <token>` or an exact `auth_token` query parameter. A
+console write (`POST /console/rpc`, `/console/rpc/multipart`,
+`/console/send`, `/console/send/recover`, the MCP Apps routes and the Flow
+Editor RPC `/flow-editor/rpc`) takes its token only in the header: one whose
+only token is in the query string is refused 401, on an open console too,
+because a token in a URL reaches proxy logs and browser history.
 Query values are percent-decoded, so callers must URL-encode reserved
 characters. Prefer the header except where a browser or SSE bootstrap requires
 a query token.
@@ -281,12 +297,18 @@ lists it, by the principal and a non-expiring flag only, in `meta/status`
 To revoke every session of a principal, call `meta/console/revoke_sessions`
 with the principal (the email, or the `sub` when the token carries no
 email), on the runtime's RPC surface or on the console's `/console/rpc`. On
-the console route an access admin may revoke when an access controller is
-installed, enforced or not; without an access controller, any authenticated
-console caller may revoke sessions, as with other console actions. The
+the console route an access admin may revoke anyone's sessions when an
+access controller is installed, enforced or not. Without an access
+controller, a console caller revokes only their own sessions: naming
+another principal is refused (`-32030`, `access_denied`) and fences no one.
+On the console route `principal` may be left out, an access admin's
+request included: the request then revokes the caller's own sessions. A
+revocation also stops the console schedules its principal defined before
+it: their sends are refused from then on (see
+[Console schedules](/api/rpc#console-schedules-console)). The
 principal is matched exactly as the token names it, case included, as the
-allowlist compares it: a revocation for another spelling answers success and
-fences nothing.
+allowlist compares it: a revocation for another spelling fences nothing,
+even when it answers success.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"meta/console/revoke_sessions","params":{"principal":"alice@example.com"}}
@@ -313,9 +335,10 @@ are kept for as long as the file exists.
 
 A candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) reads that file when it starts, so it refuses the sessions
-revoked before it. It writes nothing to the file: it refuses
-`meta/console/revoke_sessions` (revoke on the authoritative launch), and it
-lists a principal whose token has no `exp` in its own `meta/status` only.
+revoked, and the logins signed out, before it. It writes nothing to the
+file: it refuses `meta/console/revoke_sessions` and `meta/console/sign_out`
+(revoke and sign out on the authoritative launch), and it lists a principal
+whose token has no `exp` in its own `meta/status` only.
 
 A revocation is written to that file before it takes effect. On Unix the
 state directory is synced after the file is replaced; when that sync fails,
@@ -325,7 +348,7 @@ not survive a power loss: revoke again. On other platforms the replaced file
 is as durable as the platform makes it.
 
 The routers a `UnifiedRuntime` builds, and both bundled gateways, apply
-revocations. The standalone router constructors, the
+revocations and sign-outs. The standalone router constructors, the
 `handle_console_rest_json_route*` functions and `validate_console_token`
 apply no session fence; use the runtime's routers, or
 `validate_console_token_under_session_fences` for a host's own token check.
@@ -337,6 +360,45 @@ part of the Console's configuration itself (an HS256 shared secret in
 restarting the gateway. Removing a principal's access grants, or adding a
 deny rule, is an access change: it applies to open streams at once, but it
 does not refuse the token.
+
+### Signing out of one login
+
+A revocation ends every session of a principal. To end one login and keep
+the others (another browser, another device), the caller calls
+`meta/console/sign_out` on the console's `/console/rpc` with a token of that
+login, in the `Authorization` header:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"meta/console/sign_out","params":{}}
+```
+
+A login is the issuer's login association, the `sid` claim, when the token
+carries one: every token the issuer signs into that login. A token without
+`sid` is a login of its own. A front that mints a fresh token per request
+signs its own session's `sid` into each, so that one sign-out ends them all.
+From then on the Console refuses with 401 each token of that login issued
+before the sign-out plus 30 seconds, by the rule of a revocation, and ends
+the event streams and console voice sessions they opened. The caller's other
+logins are untouched, and so are its schedules: a schedule keeps the mandate
+it was defined with, and only a revocation of the principal stops it. A token
+the issuer signs into the same login after that (a sign-in again) is
+accepted. Every caller a token identified may sign itself out, under an
+access controller or not and on a read-only console too; a caller the
+Console did not identify by a token has no login and gets 401.
+
+Sign-outs live in `console-session-fences.json` beside the revocations,
+written and synced the same way, and a console without a durable state
+directory refuses `meta/console/sign_out` (`-32004`). The file keys a login
+by an opaque digest, never the `sid` or the token. A revocation of the
+principal drops the sign-outs it covers, and the sign-out of a token without
+`sid` is dropped once that token expired. A principal keeps at most 64 other
+sign-outs (of `sid` logins, and of tokens without `exp`): the 65th folds the
+oldest into one fence of all the principal's logins, so each login of that
+principal with tokens issued before the folded sign-out plus 30 seconds is
+signed out too, and a login signed in after it keeps working. The fold
+revokes nothing: the principal's schedules keep firing. A binary without
+sign-out keeps the sign-outs in the file but does not enforce them while it
+runs; they apply again after the upgrade.
 
 ### Human consent decisions by Console humans
 

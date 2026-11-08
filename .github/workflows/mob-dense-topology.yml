@@ -17,6 +17,11 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (nightly.yml says why): at the default 600 s the
+  # server exits under a long compile, which then starts again without the
+  # cache. On 2026-11-06 the archive build lost its server ten minutes into
+  # a compile and ran out of its time with that compile still running.
+  SCCACHE_IDLE_TIMEOUT: "0"
   # A failed sccache install never fails a job either: each Setup sccache
   # step continues on error (so does the action's post step, which reads
   # the stats), and the step after it then sets an empty RUSTC_WRAPPER,
@@ -26,10 +31,13 @@ jobs:
   unit-archive:
     name: Build Mob unit-test archive
     runs-on: ubuntu-24.04
-    # A release commit bumps every workspace crate version, which invalidates
-    # all compiled workspace artifacts in sccache and the cargo cache; the
-    # archive then builds cold and needs well over 15 minutes.
-    timeout-minutes: 30
+    # Without an exact-commit CI archive to reuse (main's push CI has not
+    # passed at the nightly commit) the archive builds from source. At 30
+    # minutes that build ran out of time in 11 of the 13 nightly runs from
+    # 2026-10-26 to 11-07 that reached it, and the stress never ran; it
+    # finished in 1182 and 1398 s in the other two. ci.yml's build of the
+    # same archive (main-unit-archive-build) has 60.
+    timeout-minutes: 60
     env:
       RUSTC_WRAPPER: sccache
     steps:

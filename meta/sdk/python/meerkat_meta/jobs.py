@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import time
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
+from .tool_requester import ToolCallRequester
+
 
 RestartClass = Literal[
     "adoptable",
@@ -264,6 +266,7 @@ class DetachedJobContext:
         resume_checkpoint: str | None,
         cancellation: asyncio.Event,
         reporter: _DetachedJobReporter,
+        requester: ToolCallRequester | None = None,
     ) -> None:
         self.authority = authority
         self.runner_handle = runner_handle
@@ -271,6 +274,9 @@ class DetachedJobContext:
         self.credentials = dict(credentials)
         self.resume_checkpoint = resume_checkpoint
         self.cancellation = cancellation
+        # The original requester of the run that submitted the job, as
+        # ``callback/job/start`` named it; ``None`` when that run had none.
+        self.requester = requester
         self._reporter = reporter
 
     @property

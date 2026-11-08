@@ -539,6 +539,60 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SuspendRunForStopFenceGapRunningToAttached",
     "StopCurrentRunForRunResumableIdle",
     "StopCurrentRunForRunResumableAttached",
+    // A failed until-changed switch-turn reconfigure withdraws the request
+    // it staged (0.9.10); its input is declared after every published one.
+    "AbortUntilChangedSwitchTurnReconfigureIdle",
+    "AbortUntilChangedSwitchTurnReconfigureAttached",
+    "AbortUntilChangedSwitchTurnReconfigureRunning",
+    "AbortUntilChangedSwitchTurnReconfigureRetired",
+    "AbortUntilChangedSwitchTurnReconfigureStopped",
+    // An until-changed switch-turn refused while another switch is pending
+    // (0.9.10): declared beside its siblings in the catalog for first-match
+    // dispatch, emitted here after every published variant.
+    "RequestUntilChangedSwitchTurnPendingConflictIdle",
+    "RequestUntilChangedSwitchTurnPendingConflictAttached",
+    "RequestUntilChangedSwitchTurnPendingConflictRunning",
+    // A reconfigured until-changed switch-turn completes after a retirement
+    // or a stop (0.9.10).
+    "CompleteUntilChangedSwitchTurnReconfigureRetired",
+    "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    // A host's settle of the run its session retained (0.9.11).
+    "SettleRetainedRunAcceptedIdle",
+    "SettleRetainedRunAcceptedAttached",
+    "SettleRetainedRunBusyRunCurrentInitializing",
+    "SettleRetainedRunBusyRunCurrentIdle",
+    "SettleRetainedRunBusyRunCurrentAttached",
+    "SettleRetainedRunBusyRunCurrentRunning",
+    "SettleRetainedRunBusyRunCurrentRetired",
+    "SettleRetainedRunBusyRunCurrentStopped",
+    "SettleRetainedRunBusyDrainingIdle",
+    "SettleRetainedRunBusyDrainingAttached",
+    "SettleRetainedRunBusyStaleRunIdle",
+    "SettleRetainedRunBusyStaleRunAttached",
+    "SettleRetainedRunBusyNotServingInitializing",
+    "SettleRetainedRunBusyNotServingRunning",
+    "SettleRetainedRunBusyNotServingRetired",
+    "SettleRetainedRunBusyNotServingStopped",
+    "SettleRetainedRunNotRetainedInitializing",
+    "SettleRetainedRunNotRetainedIdle",
+    "SettleRetainedRunNotRetainedAttached",
+    "SettleRetainedRunNotRetainedRunning",
+    "SettleRetainedRunNotRetainedRetired",
+    "SettleRetainedRunNotRetainedStopped",
+    "SettleRetainedRunInertDestroyed",
+    // A channel's close sweep closes its delegation intake (0.9.11).
+    "CloseLiveDelegationIntakeIdle",
+    "CloseLiveDelegationIntakeAttached",
+    "CloseLiveDelegationIntakeRunning",
+    "CloseLiveDelegationIntakeRetired",
+    "CloseLiveDelegationIntakeStopped",
+    // The recovered ungoverned row's requester batch key (0.9.11), declared
+    // beside BindInputAuthority in the catalog.
+    "BindInputRequesterBatchKeyIdle",
+    "BindInputRequesterBatchKeyAttached",
+    "BindInputRequesterBatchKeyRunning",
+    "BindInputRequesterBatchKeyRetired",
+    "BindInputRequesterBatchKeyStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public
@@ -814,8 +868,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverOperatorInstructionGenerationHighwaterKept",
             "PrepareMemberInstructionDeliveryNotOwedRunning",
             "PrepareMemberInstructionDeliveryNotOwedStopped",
-            "PrepareMemberInstructionDeliveryPlacedRunning",
-            "PrepareMemberInstructionDeliveryPlacedStopped",
             "PrepareMemberInstructionDeliveryUnbornRunning",
             "PrepareMemberInstructionDeliveryUnbornStopped",
             "PrepareMemberInstructionDeliveryUnboundRunning",
@@ -997,6 +1049,36 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "UnlistIdentityEntryMobNotRunningStopped",
             "UnlistIdentityEntryMobNotRunningCompleted",
             "UnlistIdentityEntryMobNotRunningDestroyed",
+            // The legacy adoption of an unlisted member and the retirement
+            // of one placed or bound to no session, without its adoption
+            // (0.9.11).
+            "AdoptLegacyIdentityEntryAdoptedUnlisted",
+            "AdoptLegacyIdentityEntryRetireUnadopted",
+            // A host's adoption over a declared identity entry (0.9.11): its
+            // archive terminals, the takeover's verdicts and the replay of
+            // its mark.
+            "ObserveMemberRetirementArchivedLiveHostAdopted",
+            "ObserveMemberRetirementArchivedRetiredHostAdopted",
+            "TakeOverIdentityEntryAdopting",
+            "TakeOverIdentityEntryEnded",
+            "TakeOverIdentityEntryDeferred",
+            "TakeOverIdentityEntryNotADeclaredEntry",
+            "TakeOverIdentityEntryNonAuthoritative",
+            "TakeOverIdentityEntryMobNotRunningStopped",
+            "TakeOverIdentityEntryMobNotRunningCompleted",
+            "TakeOverIdentityEntryMobNotRunningDestroyed",
+            "RecoverIdentityEntryAdoptingMarkedRunning",
+            "RecoverIdentityEntryAdoptingStaleRunning",
+            // A build preparation the host asked to retry (0.9.11): the wake
+            // feedback arm that records it, and its resolution.
+            "ResolveMemberRevivalRetryableBuildPreparationRunning",
+            "ResolveMemberBuildPreparationRunning",
+            "ResolveMemberBuildPreparationStopped",
+            "ResolveMemberBuildPreparationCompleted",
+            // External work refused for an identity entry and for a name
+            // reserved unreadable (0.9.11).
+            "ResolveSubmitWorkRejectionIdentityMember",
+            "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

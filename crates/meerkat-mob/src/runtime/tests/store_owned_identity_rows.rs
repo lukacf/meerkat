@@ -2301,7 +2301,7 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "runtime/handle.rs",
-        &["pub async fn adopt_legacy_identity_entry("],
+        &["pub(super) async fn adopt_listed_legacy_member("],
         "the legacy adoption's custody guard",
     ),
     (
@@ -3541,6 +3541,7 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
         Outcome::PreparationPending => "preparation_pending",
         Outcome::HostedOnFirstUse => "hosted_on_first_use",
         Outcome::Deferred { .. } => "deferred",
+        Outcome::BuildRequired => "build_required",
         Outcome::Refused { .. } => "refused",
         Outcome::Noted { .. } => "noted",
         Outcome::Failed { .. } => "failed",

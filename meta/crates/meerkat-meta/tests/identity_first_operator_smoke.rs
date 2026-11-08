@@ -340,7 +340,8 @@ async fn e2e_smoke_01_identity_first_send_real_llm() {
             AgentAddressability::InternalOnly,
             "review",
         ))
-        .await;
+        .await
+        .expect("the identity registers");
 
     let reject = identity_rt
         .send(

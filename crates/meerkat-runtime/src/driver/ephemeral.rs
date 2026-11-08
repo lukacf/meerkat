@@ -573,6 +573,7 @@ impl EphemeralRuntimeDriver {
         input: &Input,
         resolved: Option<crate::input_authority::NativeReplayLookup>,
     ) -> Result<(), RuntimeDriverError> {
+        crate::input_authority::verify_single_requester(input)?;
         if let Some(row) = self.ledger.get(input.id()) {
             crate::input_authority::verify_retained_replay(row, input)?;
         }
@@ -824,6 +825,24 @@ impl EphemeralRuntimeDriver {
         let run = mm_dsl::RunId::from_domain(run_id);
         self.with_dsl_state(|state| {
             !mm_dsl::command_capabilities::resumed_run_destination_attached(state, &run)
+        })
+    }
+
+    /// Whether `input_id` may join the current run `run_id` at a live
+    /// boundary: without mixing requesters (its batch key, its governed
+    /// binding's, its requester's, or none, is the key of the batch the run
+    /// staged), and without overtaking a steer of another requester (no
+    /// stageable Steer-lane input admitted before it waits with another
+    /// key). The machine decides (`live_boundary_joins_run_batch`, which
+    /// mirrors the `JoinLiveBoundaryDurableAppend` and
+    /// `ResolveLiveBoundaryContextReceipt` guards `live_join_same_requester`
+    /// and `steer_lane_fifo_across_requesters`); an input it refuses keeps
+    /// its place in the Steer lane and waits for a run of its own.
+    pub(crate) fn live_boundary_joins_run_batch(&self, input_id: &InputId, run_id: &RunId) -> bool {
+        let input = Self::dsl_key(input_id);
+        let run = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| {
+            mm_dsl::command_capabilities::live_boundary_joins_run_batch(state, &input, &run)
         })
     }
 
@@ -1217,10 +1236,18 @@ impl EphemeralRuntimeDriver {
                     .iter()
                     .find(|item| item.input_id() == input_id)
             };
-            let expected = own
-                .map(|item| crate::input_authority::association_binding(item.association()))
-                .transpose()?
-                .unwrap_or((None, None));
+            let expected = match own {
+                Some(item) => crate::input_authority::association_binding(item.association())?,
+                // An ungoverned row has no binding; its batch key is its
+                // requester's, when its host supplied one.
+                None => (
+                    None,
+                    row.requester
+                        .as_ref()
+                        .map(crate::input_authority::requester_batch_key)
+                        .transpose()?,
+                ),
+            };
             let key = Self::dsl_key(input_id);
             if !self.with_dsl_state(|state| {
                 state.input_authority_bindings.get(&key) == expected.0.as_ref()
@@ -1328,6 +1355,19 @@ impl EphemeralRuntimeDriver {
         // rejects.
         self.staged_retained_work.set(Some(identity.clone()));
         let context = context.with_retained_work(identity);
+        // The governed origin of the staged run, minted from the admitted
+        // associations of every original it stages: the work its comms
+        // tools' in-process deliveries are sent under. Core sets it, or none,
+        // whatever the host's context held.
+        let context = context.with_governed_send_origin(
+            crate::input_authority::GovernedPeerOrigin::from_associations(
+                batch
+                    .contributors
+                    .iter()
+                    .map(crate::input_authority::RetainedInputAuthority::association),
+            )
+            .map(|origin| origin.to_send_origin()),
+        );
         // The staged inputs that resume retained work, each with the run it
         // resumes: the consent owner moves parked custody into this run only
         // for an input its own committed notice receipt names.
@@ -2797,7 +2837,26 @@ impl EphemeralRuntimeDriver {
                     &recovered_state.scoped_destination,
                 )?;
             }
-            (None, None) if recovered_state.authority_contributors.is_empty() => {}
+            (None, None) if recovered_state.authority_contributors.is_empty() => {
+                // An ungoverned row whose host supplied a requester keeps its
+                // requester's batch key, so a recovered input still never
+                // shares a run with another requester's.
+                let requester = persisted_input.header().requester.as_ref();
+                if requester != recovered_state.requester.as_ref() {
+                    return Err(crate::input_authority::unavailable());
+                }
+                if let Some(requester) = requester {
+                    self.dsl_apply(
+                        mm_dsl::MeerkatMachineInput::BindInputRequesterBatchKey {
+                            input_id: Self::dsl_key(&work_id),
+                            authority_batch_key: crate::input_authority::requester_batch_key(
+                                requester,
+                            )?,
+                        },
+                        "BindInputRequesterBatchKey(recovered row)",
+                    )?;
+                }
+            }
             // A recovered resume of retained work is bound under its canonical
             // original contributor, as at admission.
             (None, None)
@@ -5291,11 +5350,13 @@ impl EphemeralRuntimeDriver {
     /// queued prompt, or an input of a run marked resumable and not resumed
     /// yet, which stays Staged or Applied and bound to its run) keeps its
     /// phase and payload and is durably marked with the stop's time and max
-    /// age. An input it keeps (the rollback of a materialization that never
-    /// served keeps every input its registration recovered, but the inputs
-    /// bound to a run marked resumable whose stop was asked) stays exactly
-    /// as the store holds it, with no mark. Every other input ends as
-    /// stopped. Returns the retained and kept inputs.
+    /// age, which replace a mark an earlier stop left: its requeue age counts
+    /// from this stop. An input it keeps (the rollback of a materialization
+    /// that never served keeps every input its registration recovered, but
+    /// the inputs bound to a run marked resumable whose stop was asked) stays
+    /// exactly as the store holds it: this stop adds no mark, and a mark an
+    /// earlier stop left stays. Every other input ends as stopped. Returns
+    /// the retained and kept inputs.
     ///
     /// `retained_before_exit` is the set the classifier retained before the
     /// executor's exit, for which no runless carrier was staged. The stop
@@ -6331,6 +6392,9 @@ impl EphemeralRuntimeDriver {
         state.authority_contributors = admitted.contributors;
         state.controller_client = admitted.controller_client;
         state.retained_resume = admitted.retained_resume;
+        // The host-supplied requester is a row fact: it outlives the
+        // retired payload (see `InputState::requester`).
+        state.requester = input.header().requester.clone();
         state.prompt_replay_identity =
             crate::input_state::PromptReplayIdentity::from_input(&input)?;
         state.external_event_replay_identity =
@@ -6609,6 +6673,9 @@ impl EphemeralRuntimeDriver {
         state.authority_contributors = admitted.contributors;
         state.controller_client = admitted.controller_client;
         state.retained_resume = admitted.retained_resume;
+        // The host-supplied requester is a row fact: it outlives the
+        // retired payload (see `InputState::requester`).
+        state.requester = input.header().requester.clone();
         state.policy = Some(PolicySnapshot {
             version: resolved.policy().policy_version,
             decision: resolved.policy().clone(),
@@ -7532,6 +7599,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: "peer body".into(),
@@ -7636,6 +7704,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             operation_id: operation_id.clone(),
             event: OpEvent::Cancelled { id: operation_id },
@@ -7665,6 +7734,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: Some(SupersessionKey::new(supersession_key)),
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: format!("request-{label}"),
@@ -8453,6 +8523,7 @@ mod tests {
                     ingress_context: None,
                     retained_resume: None,
                     authority_association: None,
+                    requester: None,
                 },
                 event_type: "build".into(),
                 payload: serde_json::json!({ "status": status }),
@@ -9007,6 +9078,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_uuid.to_string(),
@@ -9060,6 +9132,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_uuid.to_string(),
@@ -9335,6 +9408,7 @@ mod tests {
                 ingress_context: None,
                 retained_resume: None,
                 authority_association: None,
+                requester: None,
             },
             event_type: "build".into(),
             payload: serde_json::json!({ "status": "queued" }),
@@ -9388,9 +9462,9 @@ mod tests {
     }
 
     /// The stop's mark stays on a kept input until it runs or expires, so
-    /// every attachment that still finds it queued checks its age again: a
-    /// check within the bound leaves it queued and marked, and a later one,
-    /// past the bound, selects it for expiry.
+    /// every attachment that still finds it queued checks its age, counted
+    /// from the stop, again: a check within the bound leaves it queued and
+    /// marked, and a later one, past the bound, selects it for expiry.
     #[tokio::test]
     async fn every_attachment_that_finds_a_kept_input_queued_checks_its_age_again() {
         let (mut driver, durable_id, _, _) =
@@ -9406,15 +9480,14 @@ mod tests {
             driver.stop_non_terminal_inputs(&before_exit).unwrap(),
             vec![durable_id.clone()]
         );
-        let admitted_at = driver
+        let stopped_at = driver
             .ledger
             .get(&durable_id)
-            .and_then(|state| state.persisted_input.as_ref())
-            .expect("a kept input keeps its payload")
-            .header()
-            .timestamp;
+            .and_then(|state| state.stop_requeue)
+            .expect("the stop marks the input it keeps")
+            .stopped_at;
 
-        let within = admitted_at + chrono::Duration::milliseconds(900_000);
+        let within = stopped_at + chrono::Duration::milliseconds(900_000);
         assert!(crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty());
         assert!(
             driver
@@ -9427,10 +9500,83 @@ mod tests {
             driver.input_phase(&durable_id),
             Some(InputLifecycleState::Queued)
         );
-        let past = admitted_at + chrono::Duration::milliseconds(900_001);
+        let past = stopped_at + chrono::Duration::milliseconds(900_001);
         assert_eq!(
             crate::input_state::expired_stop_requeued_inputs(&driver, past),
             vec![durable_id]
+        );
+    }
+
+    /// A second graceful requeue stop over an input an earlier one kept,
+    /// before any start ran it, marks it again: the second stop's time and
+    /// max age replace the earlier mark, which is not kept. So the input's
+    /// age counts from the last stop that kept it, and the max age bounds
+    /// that last outage alone, however long before it the input was admitted
+    /// or first kept. RED before: the age counted from the input's admission,
+    /// so the input, admitted 20 minutes back, was over the second stop's
+    /// 10-minute max age the moment that stop kept it.
+    #[tokio::test]
+    async fn a_second_requeue_stop_marks_a_kept_input_again_from_its_own_time() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-second-stop").await;
+        // Admitted 20 minutes ago and kept by a first stop 10 minutes ago
+        // with a 15-minute max age, as the next registration recovers it.
+        let now = Utc::now();
+        let first_stop = now - chrono::Duration::minutes(10);
+        {
+            let row = driver.ledger.get_mut(&durable_id).expect("the kept row");
+            let admitted_at = now - chrono::Duration::minutes(20);
+            row.persisted_input
+                .as_mut()
+                .expect("a kept input keeps its payload")
+                .header_mut()
+                .timestamp = admitted_at;
+            row.created_at = admitted_at;
+            row.stop_requeue = Some(crate::input_state::StopRequeueMark {
+                stopped_at: first_stop,
+                max_age_ms: 900_000,
+            });
+        }
+
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            600_000,
+        );
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        assert_eq!(
+            driver.stop_non_terminal_inputs(&before_exit).unwrap(),
+            vec![durable_id.clone()],
+            "the second stop keeps the input again"
+        );
+        let mark = driver
+            .ledger
+            .get(&durable_id)
+            .and_then(|state| state.stop_requeue)
+            .expect("the second stop marks the input");
+        assert!(
+            mark.stopped_at >= now && mark.max_age_ms == 600_000,
+            "the second stop's time and max age replace the first stop's mark: {mark:?}"
+        );
+
+        // Fifteen minutes after the first stop is five minutes into the
+        // second outage: the first stop's mark no longer counts.
+        let first_bound = first_stop + chrono::Duration::milliseconds(900_001);
+        assert!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, first_bound).is_empty(),
+            "past the first stop's max age, the input is inside the second's"
+        );
+        let within = mark.stopped_at + chrono::Duration::milliseconds(600_000);
+        assert!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty(),
+            "at the second stop's max age, counted from that stop, the input still runs"
+        );
+        let past = mark.stopped_at + chrono::Duration::milliseconds(600_001);
+        assert_eq!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, past),
+            vec![durable_id],
+            "past it, the input expires"
         );
     }
 

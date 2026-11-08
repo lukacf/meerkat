@@ -5,10 +5,11 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "9b9ed54b656285522da2960a1a6b0b1a379baca2",
-  "connect_source_commit": "c5b339a8d78f1a214a6fa7e5a995b750b0fbf857",
+  "source_docs_tree": "cad9cfcdf564a5af2b4b3fe3737d144403e38837",
+  "connect_source_commit": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
+  "connect_source_tree": "245cf826ee78d6f60c098dc9d8856b100448fa23",
   "connect_source_state": "monorepo_sync",
-  "connect_source_version": "0.9.4",
+  "connect_source_version": "0.9.10",
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
@@ -36,8 +37,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "b7a7519ead9e9632e7ba184c94111432f5976d25347173b1f5113c24f5d9ced6",
-      "rendered_sha256": "91d0a12ae66755b7da22248bedb716e4753d211b771e9ca4da4fa7a00823fb02"
+      "source_sha256": "aff7c8e57837e0cd0ca7c05ccc63caa1c7569ba11cd02c820c2a638aa6967d1e",
+      "rendered_sha256": "2b6efd5b851da39e1f2345e46776befaa0139a3e1b2a2353cd91a60dc19f732f"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -96,8 +97,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "2f7ae3f6016577ce2fc560db15be921a818d5c33f5779b66073e970d9bd7ea7d",
-      "rendered_sha256": "cb16d25a1d7ac12d97348c0176f7555adc3185975f4c1b68784b060d0a649061"
+      "source_sha256": "3f4c713e2e0060e12a1610745211992f35eaf4cf5d61ed16ad0112f6fc1a9f6e",
+      "rendered_sha256": "5ce418cd4d86911c8a21015cea8b523ffb882d957da7be775ff7a71335d60d23"
     },
     {
       "path": "guides/manage-connections.mdx",
@@ -106,8 +107,8 @@
     },
     {
       "path": "guides/native-mcp.mdx",
-      "source_sha256": "bebc5a0c6ce26fa96d49b99c0b2837cb9fe13331806e31bd3df0d8caf0efe601",
-      "rendered_sha256": "4233f7e063de2dcf493ddfdecaef50e853e4430c9f19e24e14f46197ffc614f3"
+      "source_sha256": "1219eb97543dea8adc1599b4eba9f9a675a607ae7d6fcd9dafc1ab5dd0ea3907",
+      "rendered_sha256": "3f9208e13f4a8b78777aff19e59b128107b5160d5357a23cf5fba0130c6a2fd0"
     },
     {
       "path": "guides/port-an-integration.mdx",
@@ -126,8 +127,8 @@
     },
     {
       "path": "guides/service-collections.mdx",
-      "source_sha256": "00e5eb10ce5f0d9944bbd91026dfbb8c326ad0e7673e8b0f05c45b6f28748b6f",
-      "rendered_sha256": "2bf989b13dc6c8ad2ae9d9307431659f92403cdb0e551e8c2c207f2ab0321291"
+      "source_sha256": "0b217fbdb2b60420f629305f0e4ae1dbf3c8e325986ad8c526960551282d5862",
+      "rendered_sha256": "e227355db2ba24d8a00d8b74ca69ef42e2f1ce241834f9f43fb4a3e90e30d147"
     },
     {
       "path": "guides/service-connectors.mdx",
@@ -181,18 +182,18 @@
     },
     {
       "path": "operations/troubleshooting.mdx",
-      "source_sha256": "5f8901f38e459c148f4b3010fbb5afcf781202a63c7ac52a9b2aad73fc17e8a6",
-      "rendered_sha256": "a3b6a92ac55b2c096b33ed99789b55088c208ad07a10fbe53f6aed786a614c9b"
+      "source_sha256": "ac4d2c3ff99ade727c3f473d7f429fe0072102f6fa68951119d2b442fdcb97cd",
+      "rendered_sha256": "7c0027ae7497b99a79dc6296cbb88894987bd8dc14eb94cfaff4551ba62a3641"
     },
     {
       "path": "quickstart.mdx",
-      "source_sha256": "7a5bcfb98deb8b4e8249466363569147bfb6e2113c8fe3033b0ce360d743d5d2",
-      "rendered_sha256": "5a7ef5afd80df133527fda35a3cd43040d863280cbc0c4f78cf834123de159ed"
+      "source_sha256": "a89cc80953b40ac3ebb296a822527cd954317b461d59f437ab94dc27f9b2ecc5",
+      "rendered_sha256": "85ac9823c270d77c96e74d101bf6a7d95bb8d500ace425cedfcfd5d94fe4df65"
     },
     {
       "path": "reference/access-control.mdx",
-      "source_sha256": "358f131572b0fc533e7b8165bb841327c00613feb1f3f77b7b2d880c57524df0",
-      "rendered_sha256": "358f131572b0fc533e7b8165bb841327c00613feb1f3f77b7b2d880c57524df0"
+      "source_sha256": "58af164a5999fa7f7389ece8d22560b199c3de098b630a8db84974b38928c6df",
+      "rendered_sha256": "58af164a5999fa7f7389ece8d22560b199c3de098b630a8db84974b38928c6df"
     },
     {
       "path": "reference/architecture.mdx",
@@ -251,13 +252,13 @@
     },
     {
       "path": "sdks/python.mdx",
-      "source_sha256": "e00b2043ae9596ce88de259e97666a1e9715d42d2a2fe1cb1a8d1aad48f59152",
-      "rendered_sha256": "d5231111cca0b53cd4ade1938aa39cf43dc9ab97b66912e9bf426642eb9eb1f2"
+      "source_sha256": "0244c20b8dc3b30a6a1430d966ec0df24d85cc51ed7687bc4c437f53c4831634",
+      "rendered_sha256": "a0619080da252e21a0a548f4a9b00d27e83984a3ceb705fbe5fe2613fb92ebbb"
     },
     {
       "path": "sdks/rust.mdx",
-      "source_sha256": "1ffadba4bda019f975d4d84838a0530d2633d9edcfcbdf3413c7538d1d6b547b",
-      "rendered_sha256": "0cb26254621c594772d372701d31c5088204b444ad2c42b35943583cb658526f"
+      "source_sha256": "7a7c1d7d9e47faeb865b6a426ecaced55decb98748e3bdeaca3906cafaba5fd9",
+      "rendered_sha256": "cb399dc296c6c69721b9abf99a1cfb7ab061202eed59ce77652590c531c9b4f7"
     },
     {
       "path": "sdks/service-profiles.mdx",
@@ -271,8 +272,8 @@
     },
     {
       "path": "sdks/typescript.mdx",
-      "source_sha256": "2a33d868d62d360e2f1d9aa070e47600f76d3f0020ea12fae6649afc3dde80b6",
-      "rendered_sha256": "337d1066bd28e5098e3df70927e37386d5c9bbf1c94cbb596fe43f86454c7e5b"
+      "source_sha256": "affc4d2025ea066d1ba2f8973d1788add673b4e27378911d95e002ba3f0b8f11",
+      "rendered_sha256": "b56006c3ca973a002d605993e266ec67b72b8d5e9b7c4b010d814bcd58f3ecbd"
     },
     {
       "path": "sdks/ui.mdx",

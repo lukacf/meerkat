@@ -325,6 +325,10 @@ impl GatewayComposition<PreparedGateway> {
             )
         })
         .await?;
+        // The stock gateways keep the gating owner's state in the realm's
+        // metadata store across restarts, restored here, before anything
+        // can evaluate a gating action.
+        runtime.keep_gating_state_in_realm().await;
         Ok(GatewayComposition {
             profile: self.profile,
             state: BootstrappedGateway { runtime },
@@ -397,6 +401,67 @@ pub const GATEWAY_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(377);
 /// existed used exactly this, and it is still the default on both binaries.
 pub const DEFAULT_GATEWAY_HTTP_LISTEN: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+/// The hosts a gateway listener serves, recorded on every request it
+/// serves: an open Console answers only requests addressed to one of them.
+#[derive(Clone, Debug)]
+pub(crate) struct ServedHosts {
+    listen: IpAddr,
+    public_host: Option<String>,
+}
+
+impl ServedHosts {
+    /// The hosts a listener bound to `listen` serves, with the host of the
+    /// public base URL declared for it.
+    pub(crate) fn new(listen: SocketAddr, public_base_url: Option<&str>) -> Self {
+        Self {
+            listen: listen.ip(),
+            public_host: public_base_url
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .and_then(|url| url.host_str().map(normalized_host_name)),
+        }
+    }
+
+    /// Whether a request whose `Host` header is `host` is addressed to this
+    /// listener: a loopback name, the bound address (unless it binds every
+    /// interface), or the public base URL's host. Ports do not matter: a
+    /// page that rebinds its own name to this listener still sends that
+    /// name.
+    pub(crate) fn allows(&self, host: &str) -> bool {
+        let name = host_name(host);
+        if name == "localhost" {
+            return true;
+        }
+        if let Ok(ip) = name.parse::<IpAddr>()
+            && (ip.is_loopback() || (!self.listen.is_unspecified() && ip == self.listen))
+        {
+            return true;
+        }
+        self.public_host.as_deref() == Some(name.as_str())
+    }
+}
+
+/// The host name of a `Host` header value, without its port.
+fn host_name(authority: &str) -> String {
+    let authority = authority.trim();
+    let name = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => match authority.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => name,
+            _ => authority,
+        },
+    };
+    normalized_host_name(name)
+}
+
+/// A host name as the Host check compares it: lowercased, without the
+/// brackets of an IPv6 literal or a trailing dot.
+fn normalized_host_name(name: &str) -> String {
+    name.trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
 
 /// A bound gateway HTTP listener plus the two base URLs it can be reached at:
 /// the same-host form ([`http_base_url`](Self::http_base_url)) and, when the
@@ -483,6 +548,10 @@ impl GatewayHttpBinding {
         let (streams_end_tx, streams_end_rx) = tokio::sync::watch::channel(false);
         let app = app.layer(axum::Extension(crate::http_sse::StreamShutdown::new(
             streams_end_rx,
+        )));
+        let app = app.layer(axum::Extension(ServedHosts::new(
+            self.local_addr,
+            self.advertised_base_url.as_deref(),
         )));
         let task = tokio::spawn(async move {
             axum::serve(self.listener, app)
@@ -652,8 +721,10 @@ impl std::fmt::Display for HttpBindPolicyError {
                  the launch acknowledges the exposure with allow_remote \
                  (runtime_options.allow_remote = true on rpc_gateway; the allow_remote init param, \
                  --allow-remote, or META_HTTP_ALLOW_REMOTE=1 on meta_gateway). allow_remote is \
-                 an exposure acknowledgement, not an auth mechanism: pass it only with an \
-                 authenticating proxy in front of this listener"
+                 an exposure acknowledgement, not an auth mechanism: without app auth the \
+                 console treats every caller as one anonymous caller, even behind a proxy that \
+                 signs people in. To tell people apart, configure auth_config so the console \
+                 verifies each person's token"
             ),
         }
     }
@@ -694,14 +765,17 @@ pub fn warn_on_non_loopback_bind(
         ConsoleAuthPosture::ClosedToEveryCaller => {
             "the console requires app auth but trusts no key (refuses every caller)"
         }
-        ConsoleAuthPosture::Open => "the console is OPEN (no app auth)",
+        ConsoleAuthPosture::Open => {
+            "the console is OPEN (no app auth): every caller is one anonymous caller, even \
+             behind a proxy that signs people in"
+        }
     };
     tracing::warn!(
         %bound,
         "{surface} HTTP listener is bound to a NON-LOOPBACK address; {console_auth}; every route \
          on this listener (console, JSON-RPC, blobs, SSE, live) is reachable by anyone who can \
-         reach {bound}. Bind 127.0.0.1 (the default) unless an authenticating proxy fronts this \
-         listener"
+         reach {bound}. Bind 127.0.0.1 (the default) unless people must reach it from other \
+         hosts, and configure auth_config to tell them apart"
     );
 }
 
@@ -1832,6 +1906,23 @@ mod tests {
         profile: GatewayCompatibilityProfile,
         workgraph: Option<meerkat::WorkGraphService>,
     ) -> Result<GatewayComposition<BootstrappedGateway>, Box<dyn std::error::Error>> {
+        console_drain_test_composition_over(
+            directory,
+            profile,
+            workgraph,
+            Arc::new(InMemoryMetadataStore::new()),
+        )
+        .await
+    }
+
+    /// [`console_drain_test_composition_with`], the stdio profile keeping its
+    /// metadata in `metadata` (the console profile keeps its own in memory).
+    async fn console_drain_test_composition_over(
+        directory: &tempfile::TempDir,
+        profile: GatewayCompatibilityProfile,
+        workgraph: Option<meerkat::WorkGraphService>,
+        metadata: Arc<dyn PersistentMetadataStore>,
+    ) -> Result<GatewayComposition<BootstrappedGateway>, Box<dyn std::error::Error>> {
         let session_path = directory.path().join("sessions");
         std::fs::create_dir_all(&session_path)?;
         let service: Arc<dyn meerkat_mob::MobSessionService> =
@@ -1877,12 +1968,234 @@ mod tests {
                 Vec::new(),
                 Duration::from_secs(10),
                 RuntimeOptions::default(),
-                Arc::new(InMemoryMetadataStore::new()),
+                metadata,
             ),
         };
         Ok(GatewayComposition::prepare(profile, plan)
             .bootstrap()
             .await?)
+    }
+
+    /// An R3 gating request that waits for approval.
+    fn gated(action: &str) -> crate::runtime::GatingEvaluateRequest {
+        crate::runtime::GatingEvaluateRequest {
+            action: action.to_string(),
+            actor_id: "worker".to_string(),
+            risk_tier: crate::runtime::GatingRiskTier::R3,
+            rationale: None,
+            requested_approver: None,
+            approval_recipient: None,
+            approval_channel: None,
+            approval_timeout_ms: Some(600_000),
+            entity: None,
+            topic: None,
+        }
+    }
+
+    /// The `retention` a `meta/gating/audit` read on the stdio surface
+    /// reports.
+    async fn gating_audit_retention(
+        runtime: &UnifiedRuntime,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "meta/gating/audit",
+            "params": { "limit": 1 },
+        });
+        let answer = crate::rpc::handle_unified_rpc_json(
+            runtime,
+            &request.to_string(),
+            Duration::from_secs(5),
+            None,
+            None,
+        )
+        .await;
+        let answer: serde_json::Value = serde_json::from_str(&answer)?;
+        Ok(answer["result"]["retention"].clone())
+    }
+
+    /// The stock gateways keep the gating owner's state in the realm's
+    /// metadata store: the approval a gateway left pending and the decision
+    /// it recorded are there after a restart, and after the next one, and
+    /// its gating audit reads report `durable` retention.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_state_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        let first = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let waiting = first
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        let decided = first
+            .runtime()
+            .evaluate_gating_action(gated("rollback"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        first
+            .runtime()
+            .decide_gating_action(crate::runtime::GatingDecideRequest {
+                pending_id: decided.clone(),
+                approver_id: "ops-lead".to_string(),
+                decision: crate::runtime::GatingDecision::Approve,
+                reason: None,
+            })
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let _ = first.runtime().shutdown().await;
+        drop(first);
+
+        for restart in 1..=2 {
+            let next = console_drain_test_composition_over(
+                &directory,
+                GatewayCompatibilityProfile::StdioRpc,
+                None,
+                Arc::clone(&metadata),
+            )
+            .await?;
+            let pending = next.runtime().list_gating_pending().await;
+            assert_eq!(
+                pending
+                    .iter()
+                    .map(|entry| entry.pending_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![waiting.clone()],
+                "restart {restart}: the pending approval survived"
+            );
+            let audit = next.runtime().gating_audit_entries(512).await;
+            assert!(
+                audit.iter().any(|entry| {
+                    entry.pending_id.as_deref() == Some(decided.as_str())
+                        && entry.event_type == "approval_decided"
+                }),
+                "restart {restart}: the recorded decision survived: {audit:#?}"
+            );
+            assert_eq!(
+                gating_audit_retention(next.runtime()).await?,
+                serde_json::json!("durable"),
+                "restart {restart}"
+            );
+            let _ = next.runtime().shutdown().await;
+        }
+        Ok(())
+    }
+
+    /// A stock gateway whose metadata store keeps nothing across restarts
+    /// keeps gating in memory, and its gating audit reads say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_audit_reports_process_retention_on_an_ephemeral_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let composition =
+            console_drain_test_composition(&directory, GatewayCompatibilityProfile::StdioRpc)
+                .await?;
+        assert_eq!(
+            gating_audit_retention(composition.runtime()).await?,
+            serde_json::json!("process")
+        );
+        let _ = composition.runtime().shutdown().await;
+        Ok(())
+    }
+
+    /// A stored gating state this build cannot read is left byte for byte,
+    /// through gating changes and a shutdown, and the audit reads say
+    /// `process`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_gating_state_is_never_overwritten() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        metadata
+            .set_realm_document("gating/state", Some("{not a snapshot"))
+            .await
+            .map_err(|error| format!("{error}"))?;
+        let composition = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let _pending = composition
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await;
+        assert_eq!(
+            gating_audit_retention(composition.runtime()).await?,
+            serde_json::json!("process")
+        );
+        let _ = composition.runtime().shutdown().await;
+        assert_eq!(
+            metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+                .as_deref(),
+            Some("{not a snapshot")
+        );
+        Ok(())
+    }
+
+    /// The gating state's writer follows a gating change without a shutdown:
+    /// the pending approval reaches the stored state while the gateway still
+    /// runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_change_is_written_without_a_shutdown() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        let composition = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let pending = composition
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut written = false;
+        while tokio::time::Instant::now() < deadline {
+            if metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+                .is_some_and(|document| document.contains(&pending))
+            {
+                written = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            written,
+            "the pending approval was written before any shutdown"
+        );
+        let _ = composition.runtime().shutdown().await;
+        Ok(())
     }
 
     fn console_drain_event(
@@ -2090,6 +2403,7 @@ mod tests {
                 jwks_json: r#"{"keys":[]}"#.to_string(),
                 audience: "gateway-stream-tests".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::decisions::ConsolePolicy {
                 require_app_auth: false,
@@ -3296,5 +3610,141 @@ default_binding = "local"
             ScheduleFiringRole::Executor,
             "a launch that declares nothing keeps executing schedules"
         );
+    }
+
+    /// Neither the refusal of a remote bind nor the warning a remote bind
+    /// logs sends an operator to an authenticating proxy: the Console reads
+    /// identity only from a token it verifies itself, so behind such a proxy
+    /// every person is one anonymous caller. Both texts say so.
+    #[test]
+    fn remote_bind_texts_name_the_anonymous_console() -> Result<(), std::net::AddrParseError> {
+        let listen: SocketAddr = "0.0.0.0:8080".parse()?;
+        let refusal = HttpBindPolicyError::RemoteBindRequiresExplicitAllow {
+            surface: GatewaySurface::MetaGateway,
+            listen,
+        }
+        .to_string();
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .finish();
+        // A second registered Dispatch keeps callsite interest from being
+        // cached `never` by threads without a subscriber.
+        let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        tracing::subscriber::with_default(subscriber, || {
+            warn_on_non_loopback_bind(
+                GatewaySurface::MetaGateway,
+                listen,
+                &open_console_decisions(),
+            );
+        });
+        let warning = writer.contents();
+        for text in [refusal.as_str(), warning.as_str()] {
+            assert!(!text.contains("authenticating proxy"), "{text}");
+            assert!(text.contains("anonymous"), "{text}");
+        }
+        Ok(())
+    }
+
+    /// An open Console serves only the hosts it is reached at: a loopback
+    /// name, its listen address or its public base URL. A request that names
+    /// another host (a page that rebound its own name to this listener) is
+    /// refused 403.
+    #[tokio::test]
+    async fn open_console_refuses_a_foreign_host() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let composition =
+            console_drain_test_composition(&directory, GatewayCompatibilityProfile::ConsoleHttp)
+                .await?;
+        let app = composition
+            .runtime()
+            .build_reference_app_router(open_console_decisions());
+        let composition = composition.activate();
+        let binding = GatewayHttpBinding::bind_loopback()
+            .await?
+            .with_advertised_base_url(Some("https://mob.example.com".to_string()));
+        let base = binding.http_base_url();
+        let port = binding.port();
+        let server = binding.serve(app);
+        let client = reqwest::Client::new();
+        let mut answers = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("localhost:{port}"),
+            "mob.example.com".to_string(),
+        ] {
+            let status = client
+                .post(format!("{base}/console/rpc"))
+                .header(reqwest::header::HOST, host.as_str())
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": crate::rpc::CONSOLE_WHOAMI_METHOD,
+                    "params": {},
+                }))
+                .send()
+                .await?
+                .status();
+            answers.push((host, status.as_u16()));
+        }
+        // The console's other routes (its page, its event streams) answer
+        // only the hosts it serves too; a health probe answers any host.
+        let mut other_routes = Vec::new();
+        for path in ["/console", "/mob/events", "/healthz"] {
+            let status = client
+                .get(format!("{base}{path}"))
+                .header(
+                    reqwest::header::HOST,
+                    format!("rebound.example.net:{port}").as_str(),
+                )
+                .send()
+                .await?
+                .status();
+            other_routes.push((path, status == reqwest::StatusCode::FORBIDDEN));
+        }
+        // The health summary names members, so it answers only the hosts
+        // the console serves.
+        let mut summaries = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+        ] {
+            let status = client
+                .get(format!("{base}/healthz"))
+                .header(reqwest::header::HOST, host.as_str())
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await?
+                .status();
+            summaries.push((host, status.as_u16()));
+        }
+        let _ = composition.shutdown(server, || async {}, || async {}).await;
+        assert_eq!(
+            answers,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
+                (format!("localhost:{port}"), 200),
+                ("mob.example.com".to_string(), 200),
+            ]
+        );
+        assert_eq!(
+            other_routes,
+            vec![
+                ("/console", true),
+                ("/mob/events", true),
+                ("/healthz", false)
+            ]
+        );
+        assert_eq!(
+            summaries,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
+            ]
+        );
+        Ok(())
     }
 }

@@ -128,7 +128,7 @@ impl FakeJudgmentStore {
             tags: vec![],
             provenance: MemoryProvenance {
                 evidence: vec![],
-                author: MemoryAuthor::Operator,
+                author: MemoryAuthor::Operator { principal: None },
                 profile: None,
                 verification: None,
             },
@@ -865,7 +865,7 @@ fn fake_fact(id: String, identity: &str, updated_at_ms: u64, body: String) -> Me
         tags: vec![],
         provenance: MemoryProvenance {
             evidence: vec![],
-            author: MemoryAuthor::Operator,
+            author: MemoryAuthor::Operator { principal: None },
             profile: None,
             verification: None,
         },
@@ -1057,6 +1057,7 @@ restart_policy = "always"
                 .to_string(),
             audience: "meerkat-console".to_string(),
             require_verified_email: false,
+            shared_account_tokens: false,
         },
         console: meerkat_meta::ConsolePolicy {
             require_app_auth: false,

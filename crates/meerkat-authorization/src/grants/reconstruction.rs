@@ -32,12 +32,13 @@ impl LocalGrantAuthority {
     /// exact retained lineage and check fresh time through the normal API.
     ///
     /// # Errors
-    /// `RestartRequired` means retained state cannot be verified. It remains
-    /// untouched and unavailable; the host must not reuse its old references in
-    /// a new owner. `ReplacementPublicationUnavailable` means the replacement
-    /// was the old instance, poisoned (even while this call held it), retired
-    /// or exhausted. A failed attempt never clears poison or publishes the
-    /// retained state under that instance.
+    /// `RestartRequired` means retained state cannot be verified, or this
+    /// owner's custody of it ended (its host's close, or an uncertain
+    /// append). It remains untouched and unavailable; the host must not reuse
+    /// its old references in a new owner. `ReplacementPublicationUnavailable`
+    /// means the replacement was the old instance, poisoned (even while this
+    /// call held it), retired or exhausted. A failed attempt never clears
+    /// poison or publishes the retained state under that instance.
     pub fn reconstruct(
         &mut self,
         replacement: LocalAuthorizationPublication,

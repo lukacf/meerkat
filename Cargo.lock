@@ -172,15 +172,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arc-swap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1568,17 +1559,6 @@ name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
 
 [[package]]
 name = "digest"
@@ -3039,7 +3019,6 @@ dependencies = [
  "indexmap",
  "inventory",
  "mcp-test-server",
- "meerkat",
  "meerkat-anthropic",
  "meerkat-atif",
  "meerkat-authorization",
@@ -3075,6 +3054,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3151,7 +3131,6 @@ dependencies = [
  "indexmap",
  "jsonwebtoken",
  "keyring",
- "meerkat-auth-core",
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-runtime",
@@ -3183,7 +3162,6 @@ dependencies = [
  "meerkat",
  "meerkat-anthropic",
  "meerkat-auth-core",
- "meerkat-authorization",
  "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-llm-core",
@@ -3258,7 +3236,6 @@ dependencies = [
  "getrandom 0.3.4",
  "inventory",
  "meerkat-capabilities",
- "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-runtime",
@@ -3397,7 +3374,6 @@ dependencies = [
  "indexmap",
  "js-sys",
  "jsonschema",
- "meerkat-core",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
  "parking_lot",
@@ -3569,7 +3545,6 @@ dependencies = [
  "indexmap",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-llm-core",
  "meerkat-models",
  "parking_lot",
  "reqwest 0.12.28",
@@ -3660,7 +3635,6 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-mcp",
  "meerkat-runtime",
  "meerkat-sandbox",
  "meerkat-skills",
@@ -3825,7 +3799,6 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
- "meerkat-mob",
  "meerkat-models",
  "meerkat-runtime",
  "meerkat-session",
@@ -3944,7 +3917,6 @@ dependencies = [
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
- "meerkat-openai",
  "meerkat-runtime",
  "oai-rt-rs",
  "reqwest 0.12.28",
@@ -4037,7 +4009,6 @@ dependencies = [
  "meerkat-mob-mcp",
  "meerkat-models",
  "meerkat-providers",
- "meerkat-rpc",
  "meerkat-runtime",
  "meerkat-session",
  "meerkat-sqlite",
@@ -4075,7 +4046,6 @@ dependencies = [
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
- "meerkat-runtime",
  "meerkat-sqlite",
  "meerkat-store",
  "nix 0.29.0",
@@ -7149,6 +7119,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8328,18 +8304,16 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.4.2"
+version = "9.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
 dependencies = [
- "arbitrary",
  "crc32fast",
- "crossbeam-utils",
- "displaydoc",
  "flate2",
  "indexmap",
  "memchr",
- "thiserror 2.0.21",
+ "nix 0.31.3",
+ "typed-path",
 ]
 
 [[package]]

@@ -48,9 +48,9 @@ make test
 # Run fast tests through BuildBuddy/Bazel
 MEERKAT_BUILDBUDDY=1 make test
 
-# Run all tests including doc-tests (SLOW due to doc-test compilation);
-# without a package flag Cargo builds the default members, Core's crates
-./scripts/repo-cargo test
+# Run all tests including doc-tests (SLOW due to doc-test compilation) over
+# Core's crates, with their test features (see Build Efficiency)
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests)
 
 # Run deterministic end-to-end lane
 make e2e-fast
@@ -108,14 +108,48 @@ This is a large workspace (50 members). Careless builds waste minutes. Follow th
 # Editing meerkat-mob? Check the mob subtree
 ./scripts/repo-cargo check -p meerkat-mob -p meerkat-mob-mcp
 
-# Running tests for one crate
-./scripts/repo-cargo nextest run -p meerkat-mob
+# Running tests for one crate, with its test features
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-mob)
 
 # Only use workspace-wide commands for final verification (make lint, make
 # test-unit and the other whole-workspace targets select Core's members)
 ./scripts/repo-cargo clippy $(node scripts/core-workspace-args.mjs) -- -D warnings
-./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs) --status-level none --final-status-level fail
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests) --status-level none --final-status-level fail
 ```
+
+**Test commands pass the crates' test features.** A crate's own tests build
+with the features its `[package.metadata.meerkat.standalone-tests]` lists,
+plus `workspace-tests` when it declares that feature. No dev-dependency turns
+them on (a path-only self dev-dependency made the crate's lib test wait for
+its own library), so every test command passes them:
+`node scripts/core-workspace-args.mjs --tests -p NAME` prints one crate's
+selection with them (`-p meerkat-mob --features test-support`), and `--tests`
+alone prints Core's whole selection with every member's. Use that form, as
+above, for every test command. The Make targets, the CI planner's rows, the
+Cargo aliases and the Bazel generator pass them already. A test build of such
+a crate without them fails to compile in this repository: its `lib.rs`
+canary, armed by `.cargo/config.toml` [env], stops the build with the exact
+command to run (`cargo test -p NAME --features ...`). Only code generation
+trips it, so `cargo check`, clippy and an editor's check run are unaffected,
+and the published packages build without that configuration. The canary sits
+in the crate's lib test: a run narrowed to an integration target
+(`--test TARGET`) builds no lib test, so nothing stops it, and without the
+flags it compiles the tests they gate out without a word. Pass the same
+flags there, plus any feature the target's own `#![cfg(feature = ...)]`
+names (meerkat-core's `wholeblob_compaction_media_guard` needs
+`test-support`; a second `--features` adds it):
+`./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p NAME) --test TARGET`.
+
+**rust-analyzer: set `rust-analyzer.cargo.features` to `"all"`.** Without
+features its analysis treats the code the test features gate (the
+`workspace-tests` test modules, for one) as inactive: no completion and no
+diagnostics there, and its Run test lens builds without the flags and stops
+on the canary. A package-qualified list (`meerkat-mob/test-support`, ...)
+does not work: Cargo refuses a feature of a package the command does not
+select, and rust-analyzer's runnables select one package (`--package NAME`).
+`"all"` also turns on every other feature (the live, realtime and GPT Live
+ones, and the products'), so the editor's check compiles more than a
+default build does; it is still the one global value that works.
 
 **The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
 (`connect/`).** Cargo unifies features across the packages of one invocation,
@@ -484,9 +518,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   machine-authority change or a dogma document (`governance_gates` in the
   plan, `GOVERNANCE_DOC_PATTERNS` in `scripts/ci-cargo-lanes.mjs`); the `CI
   gate` requires both on such a change.
-- `tlc-audits`: on a machine-authority change, the twenty-one hand-written TLC
+- `tlc-audits`: on a machine-authority change, the twenty-four hand-written TLC
   audit shards of the canonical TLC lane
-  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-o`, and `audits-q` through `audits-v`) in parallel,
+  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-o`, and `audits-q` through `audits-y`) in parallel,
   needing only a JDK and the TLC jar (`.github/actions/setup-tlc-ci`, the one
   TLC install for every lane: an immutable repository mirror of the tlaplus
   v1.8.0 jar pinned by sha256); the `CI gate` requires them on such a change. The `machine-verify --all` sweep is not in PR CI.
@@ -590,7 +624,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   `--partition count:K/N` per canary, so the canaries run on separate
   runners; the coverage check credits it only when every partition is
   planned. A test no hosted runner can run, in a binary whose other tests
-  do run (it needs an environment only its product's own lane provides), is
+  do run (it needs an environment no CI lane provides: Connect's PTY
+  tests of `cli_paired_host` need an assembled synthetic resource prefix
+  that no workflow builds, so no lane runs them), is
   listed by exact name with its reason in `HOSTED_RUNNER_EXCLUDED_TESTS` and
   named in `hosted_runner_excluded_tests`: the row that holds its binary
   leaves it out with the row's `filter`, and
@@ -616,12 +652,16 @@ and its CI must be green before a release tag (`require_ci_green`):
   job per product's part of it (`closure_check_rows`), the parts in parallel
   and with the first wave.
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
-  `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features and
-  `--all-features`), over Core's members (`--workspace` excluding the
-  products' packages) when the plan reaches Core, else over the changed
-  products' packages (`rustdoc_flags` in the plan), so a broken or private
-  intra-doc link fails the push. It documents those packages together, so
-  an error that only `cargo doc -p <crate>` shows is outside it.
+  `RUSTDOCFLAGS=-Dwarnings` for each row of the plan's `rustdoc_rows`:
+  Core's members (`--workspace` excluding the products' packages) when the
+  plan reaches Core, in two parallel legs (default features and
+  `--all-features`), and each product's packages in the reverse-dependency
+  closure, `-p` each, with `--all-features` only, in rows of that product
+  (as few as hold no bin name twice: Cargo refuses to document two bins of
+  one name at once), so a Core change that breaks a product's link into a
+  Core item fails the push that makes it, and a broken or private
+  intra-doc link fails the push. Each row documents its packages together,
+  so an error that only `cargo doc -p <crate>` shows is outside it.
 - `governed-jsonl` and `mcp-confinement-positive` (push; a pull request
   runs a lane when it touches the lane's inputs, `GUARD_LANE_INPUTS` in
   `scripts/ci-cargo-lanes.mjs` (the files that define its selected cases,
@@ -767,11 +807,11 @@ names per target must equal the workspace's minus the files and tests
 `ci/standalone-workspace-only.toml` declares workspace-only. A unit test that
 needs a crate the package cannot depend on (a cyclic or unpublished
 dev-dependency) is gated on its crate's internal `workspace-tests` feature,
-which only the crate's path-only self dev-dependency enables (`cargo package`
-strips it), and the Bazel generator fails a crate that declares the feature
-without that edge. Publication does not wait for the census yet: the release
-gate on a passing run at the release commit returns once a nightly run has
-passed and its duration is measured.
+which only the workspace's own test builds pass (the package's README command
+leaves it off), and the Bazel generator fails a crate that declares the
+feature when its test targets would build without it. Publication does not
+wait for the census yet: the release gate on a passing run at the release
+commit returns once a nightly run has passed and its duration is measured.
 
 The release tag path requires successful exact-main CI (schema-4 attestation;
 for a maintenance release, the same push CI on `release/<version>`, the

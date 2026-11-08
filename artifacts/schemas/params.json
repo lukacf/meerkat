@@ -2982,6 +2982,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction\ncommits (for a staged memory projection, when the runtime commits it,\nright after its `CompactionCompleted`; a compaction rolled back before\nits commit is never observed, and its entry sequence goes to the next\nentry). A restart before the entry is durable (the run's first\ncheckpoint, or the projection's commit) applies the changes again at\nthe next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4806,6 +4859,17 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "instruction_target": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeInstructionTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "V7: the operator-instruction snapshot of the member a `Fresh` launch\nmints, at its mob's generation. The host records it in the session it\nmints, before anything else, so the member's first run applies it,\nand the mob's delivery of that generation then finds it recorded.\nCarrying it is a V7 command, sent only to a host whose `HostFeatures`\nanswer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused\non any other launch, and a replay of the materialize at its tuple\nrecords nothing."
+              },
               "launch": {
                 "$ref": "#/$defs/MaterializeLaunchMode"
               },
@@ -5375,6 +5439,95 @@
               "epoch",
               "protocol_version",
               "expected_member"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V7 host-addressed record of a placed member's operator-instruction\nsnapshot in its session on the host.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "record_member_instruction_target",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "member": {
+                "$ref": "#/$defs/BridgeMemberIncarnation",
+                "description": "The member's exact incarnation on the host. Its mob and identity own\nthe recorded target."
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              },
+              "target": {
+                "$ref": "#/$defs/BridgeInstructionTarget"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "member",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V7 host-addressed release of a retired placed member's\noperator-instruction target, once no member holds its session.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "release_member_instruction_target",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "member_session_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/$defs/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/$defs/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "mob_id",
+              "agent_identity",
+              "member_session_id"
             ],
             "type": "object"
           }
@@ -6115,6 +6268,51 @@
       "BridgeHostRuntimeIncarnation": {
         "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
         "type": "string"
+      },
+      "BridgeInstructionTarget": {
+        "additionalProperties": false,
+        "description": "A member's whole operator-instruction snapshot at one mob generation:\nevery record of the mob, with its body where the record is Active for\nthe member (none where it is revoked or does not select the member).",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/$defs/BridgeInstructionTargetSlot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "generation",
+          "slots"
+        ],
+        "type": "object"
+      },
+      "BridgeInstructionTargetSlot": {
+        "additionalProperties": false,
+        "description": "One slot of a [`BridgeInstructionTarget`].",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "slot": {
+            "$ref": "#/$defs/InstructionSlot"
+          }
+        },
+        "required": [
+          "slot",
+          "revision"
+        ],
+        "type": "object"
       },
       "BridgeLiveControlOutcome": {
         "description": "Per-verb result of `ControlMemberLiveChannel` — mirrors the typed\nstatuses the local live command results carry.",
@@ -7055,6 +7253,27 @@
               "fork_instruction_refused"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A placed member's session refused an operator-instruction record or\nrelease (V7 `RecordMemberInstructionTarget`,\n`ReleaseMemberInstructionTarget`) for a reason in the closed refusal\nvocabulary. The mob blocks the member's delivery for\n`owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`\nand `durability_unavailable`, and retries it for any other.",
+            "properties": {
+              "instruction_target_refused": {
+                "properties": {
+                  "code": {
+                    "$ref": "#/$defs/InstructionSetErrorCode"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "instruction_target_refused"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -7872,6 +8091,54 @@
             "properties": {
               "result": {
                 "const": "member_visible_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::RecordMemberInstructionTarget`].",
+            "properties": {
+              "disposition": {
+                "$ref": "#/$defs/InstructionRecordDisposition"
+              },
+              "result": {
+                "const": "member_instruction_target_recorded",
+                "type": "string"
+              },
+              "target_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "result",
+              "disposition",
+              "target_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::ReleaseMemberInstructionTarget`].",
+            "properties": {
+              "disposition": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionReleaseDisposition"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "const": "member_instruction_target_released",
                 "type": "string"
               }
             },
@@ -10568,6 +10835,36 @@
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
       },
+      "InstructionRecordDisposition": {
+        "description": "What a mob's record did to the member session's target.",
+        "oneOf": [
+          {
+            "const": "recorded",
+            "description": "The snapshot replaced the target.",
+            "type": "string"
+          },
+          {
+            "const": "already_recorded",
+            "description": "The session already recorded this generation or a later one: a\nrepeated delivery writes nothing.",
+            "type": "string"
+          }
+        ]
+      },
+      "InstructionReleaseDisposition": {
+        "description": "What a release by a member's mob did to the member session's target.",
+        "oneOf": [
+          {
+            "const": "released",
+            "description": "The mob's target is now empty and unowned; the next fresh run start\nrevokes what the mob had in effect.",
+            "type": "string"
+          },
+          {
+            "const": "already_unowned",
+            "description": "No owner held the target: a repeated release writes nothing.",
+            "type": "string"
+          }
+        ]
+      },
       "InstructionRevision": {
         "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
         "format": "uint64",
@@ -10600,6 +10897,45 @@
           "key",
           "revision_id",
           "content_sha256"
+        ],
+        "type": "object"
+      },
+      "InstructionSetErrorCode": {
+        "description": "The closed vocabulary of operator-instruction write refusals, as hosts\nand SDKs read it.",
+        "enum": [
+          "invalid_request",
+          "digest_mismatch",
+          "stale_revision",
+          "revision_conflict",
+          "unknown_slot",
+          "slot_limit_exceeded",
+          "body_too_large",
+          "active_set_budget_exceeded",
+          "owned_by_mob",
+          "owned_by_session",
+          "owned_by_other_mob",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "mob_terminal",
+          "malformed_instruction_history",
+          "prepared_authorization_required"
+        ],
+        "type": "string"
+      },
+      "InstructionSlot": {
+        "additionalProperties": false,
+        "description": "One standing instruction's name: the issuer partition and the key.\n\nOrdered by namespace bytes, then key bytes: the order every rendered\nsequence uses.",
+        "properties": {
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
         ],
         "type": "object"
       },
@@ -12969,6 +13305,112 @@
             "type": "string"
           }
         ]
+      },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
       },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
@@ -16123,6 +16565,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -16426,10 +16879,40 @@
           }
         ]
       },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
       "TurnRequestContext": {
         "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
         "minLength": 1,
         "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -22379,6 +22862,498 @@
       "target"
     ],
     "title": "CreateScheduleRequest",
+    "type": "object"
+  },
+  "DecisionAudienceRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who a presenter showed a rendering to. Closed.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Whoever acts for the decision's approver id.",
+        "properties": {
+          "approver_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "approver",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "approver_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The decision's named reviewer (a principal key).",
+        "properties": {
+          "kind": {
+            "const": "reviewer",
+            "type": "string"
+          },
+          "reviewer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reviewer"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "DecisionAudienceRequest"
+  },
+  "DecisionDecideParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/decide` parameters. They name only the decision, the answer,\nthe digest of the rendering the human saw and a reason; who decided\ncomes from the authenticated event, never from the request.",
+    "properties": {
+      "approve": {
+        "type": "boolean"
+      },
+      "decision_id": {
+        "type": "string"
+      },
+      "presented_digest": {
+        "type": "string"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "decision_id",
+      "approve",
+      "presented_digest"
+    ],
+    "title": "DecisionDecideParams",
+    "type": "object"
+  },
+  "DecisionGetParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/get` parameters.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "include_request": {
+        "description": "Whether the result carries the held request.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "decision_id"
+    ],
+    "title": "DecisionGetParams",
+    "type": "object"
+  },
+  "DecisionListParams": {
+    "$defs": {
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/list` parameters: every field set must match. The page holds\nat most `limit` decisions (100 when absent, at most 500), in decision id\norder after `after`.",
+    "properties": {
+      "after": {
+        "description": "The decision id to read the page after.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "approver_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "kind": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "limit": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "phase": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionPhase"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requester": {
+        "description": "The requester's principal key.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "DecisionListParams",
+    "type": "object"
+  },
+  "DecisionPresentParams": {
+    "$defs": {
+      "DecisionAudienceRequest": {
+        "description": "Who a presenter showed a rendering to. Closed.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "DecisionPresentationRequest": {
+        "additionalProperties": false,
+        "description": "What a host presenter showed. Closed.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/DecisionAudienceRequest"
+          },
+          "channel_ref": {
+            "description": "Where the rendering was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when it presented one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      },
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/present` parameters: record what a host presenter showed. It\ncounts only when it shows every canonical part of the held rendering to\nthe party that decides now.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "presentation": {
+        "$ref": "#/$defs/DecisionPresentationRequest"
+      }
+    },
+    "required": [
+      "decision_id",
+      "presentation"
+    ],
+    "title": "DecisionPresentParams",
+    "type": "object"
+  },
+  "DecisionPresentationRequest": {
+    "$defs": {
+      "DecisionAudienceRequest": {
+        "description": "Who a presenter showed a rendering to. Closed.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "What a host presenter showed. Closed.",
+    "properties": {
+      "at_ms": {
+        "description": "The host's clock reading of the presentation, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "audience": {
+        "$ref": "#/$defs/DecisionAudienceRequest"
+      },
+      "channel_ref": {
+        "description": "Where the rendering was shown.",
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "description": "The presenter's part size; absent when it presented one part.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "message_ref": {
+        "type": "string"
+      },
+      "parts_shown": {
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "subject_digest": {
+        "description": "The digest of the rendering that was presented.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "audience",
+      "subject_digest",
+      "parts_shown",
+      "channel_ref",
+      "message_ref",
+      "at_ms"
+    ],
+    "title": "DecisionPresentationRequest",
+    "type": "object"
+  },
+  "DecisionRenderingParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/rendering` parameters. `max_part_bytes` splits the rendering\ninto canonical parts of at most that many bytes; absent, it is one part.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "decision_id"
+    ],
+    "title": "DecisionRenderingParams",
+    "type": "object"
+  },
+  "DecisionWithdrawParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/withdraw` parameters: the connection withdraws as the host.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id"
+    ],
+    "title": "DecisionWithdrawParams",
     "type": "object"
   },
   "DeviceCompleteParams": {
@@ -33428,6 +34403,81 @@
     "title": "MobIngressInteractionParams",
     "type": "object"
   },
+  "MobInstructionStatusParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/instruction_status`: the mob's records\n(optionally one namespace or slot) and one page of members (optionally\none member or one profile).",
+    "properties": {
+      "agent_identity": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "key": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "limit": {
+        "description": "1 to 200 members; absent reads 100.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "offset": {
+        "description": "Members to skip, in identity order.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "profile": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "mob_id"
+    ],
+    "title": "MobInstructionStatusParams",
+    "type": "object"
+  },
   "MobLifecycleParams": {
     "$defs": {
       "WireMobLifecycleAction": {
@@ -37179,6 +38229,49 @@
     "title": "MobRevokeHostParams",
     "type": "object"
   },
+  "MobRevokeInstructionParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/revoke_instruction`: revoke one slot at a higher\nrevision. The record keeps its target.",
+    "properties": {
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      }
+    },
+    "required": [
+      "mob_id",
+      "namespace",
+      "key",
+      "revision"
+    ],
+    "title": "MobRevokeInstructionParams",
+    "type": "object"
+  },
   "MobRevokeScopesParams": {
     "$defs": {
       "WireControlScope": {
@@ -37253,6 +38346,129 @@
       "mob_id"
     ],
     "title": "MobRunParams",
+    "type": "object"
+  },
+  "MobSetInstructionParams": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "WireInstructionTarget": {
+        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does. A target refuses a field its kind does not have (`Mob` is a\nstruct variant for that: serde lets a unit variant ignore extra fields),\nso a member or profile name sent with the wrong kind never widens a\nwrite to every member.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Every member of the mob.",
+            "properties": {
+              "kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The members of one profile.",
+            "properties": {
+              "kind": {
+                "const": "profile",
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "profile"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One member.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/set_instruction`: one slot's body at a revision,\nfor the members the target selects.",
+    "properties": {
+      "body": {
+        "description": "The exact UTF-8 body, at most 256 KiB.",
+        "type": "string"
+      },
+      "content_sha256": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The body's digest as the caller computed it; one that is not the\nbody's is refused (`digest_mismatch`)."
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision",
+        "description": "Strictly increasing per slot within the mob."
+      },
+      "target": {
+        "$ref": "#/$defs/WireInstructionTarget"
+      }
+    },
+    "required": [
+      "mob_id",
+      "namespace",
+      "key",
+      "revision",
+      "body",
+      "target"
+    ],
+    "title": "MobSetInstructionParams",
     "type": "object"
   },
   "MobSpawnHelperParams": {
@@ -41724,6 +42940,49 @@
     "title": "RestoreSessionTranscriptRevisionParams",
     "type": "object"
   },
+  "RevokeSessionInstructionParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/revoke_instruction`: revoke one session-owned\nslot at a higher revision.",
+    "properties": {
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "namespace",
+      "key",
+      "revision"
+    ],
+    "title": "RevokeSessionInstructionParams",
+    "type": "object"
+  },
   "RevokeToolGrantParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -45130,6 +46389,21 @@
     ],
     "title": "SessionInputStateSelector"
   },
+  "SessionInstructionStatusParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/instruction_status`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "SessionInstructionStatusParams",
+    "type": "object"
+  },
   "SessionPeerResponseTerminalParams": {
     "$defs": {
       "PeerCorrelationId": {
@@ -45220,6 +46494,70 @@
       "session_id"
     ],
     "title": "SessionStreamOpenParams",
+    "type": "object"
+  },
+  "SetSessionInstructionParams": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/set_instruction`: one session-owned write of\na slot's body at a revision.",
+    "properties": {
+      "body": {
+        "description": "The exact UTF-8 body, at most 256 KiB.",
+        "type": "string"
+      },
+      "content_sha256": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The body's digest as the caller computed it; one that is not the\nbody's is refused (`digest_mismatch`)."
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision",
+        "description": "Strictly increasing per slot within the session."
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "namespace",
+      "key",
+      "revision",
+      "body"
+    ],
+    "title": "SetSessionInstructionParams",
     "type": "object"
   },
   "SkillsParams": {

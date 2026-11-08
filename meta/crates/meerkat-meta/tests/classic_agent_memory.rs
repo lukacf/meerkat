@@ -190,7 +190,7 @@ async fn seed_identity_record(
                 evidence: vec![],
                 verification: None,
             },
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("seed memory record");
@@ -616,6 +616,7 @@ restart_policy = "always"
                 .to_string(),
             audience: "meerkat-console".to_string(),
             require_verified_email: false,
+            shared_account_tokens: false,
         },
         console: ConsolePolicy {
             require_app_auth: false,
@@ -786,7 +787,7 @@ async fn builder_full_memory_stack_installs_engines_and_panel() {
                 evidence: Vec::new(),
                 verification: None,
             },
-            meerkat_meta::memory::records::MemoryAuthor::Operator,
+            meerkat_meta::memory::records::MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("write through the stack store");

@@ -643,11 +643,18 @@ mod platform {
         manager.bind_process_custody(custody).unwrap();
 
         let command = format!(
-            "{}{RECORD_ENVIRONMENT}{}",
+            "{}{}{RECORD_ENVIRONMENT}{}",
             concat!(
                 "cat \"$CUSTODY_RECORD_DIR\"/*.json > custody-record || exit 90; ",
                 "printf '%s' \"$$\" > custody-pid; ",
             ),
+            // On Linux, the start time of the launch's init, pid 1 of the
+            // launch's own pid namespace.
+            if cfg!(target_os = "linux") {
+                "cut -d ' ' -f 22 /proc/1/stat > init-start; "
+            } else {
+                ""
+            },
             concat!(
                 "if printf changed > ../outside; then printf allowed > outside-write; ",
                 "else printf denied > outside-write; fi; ",
@@ -675,8 +682,32 @@ mod platform {
             .parse()
             .unwrap();
         assert_eq!(recorded["phase"], "spawned");
-        assert_eq!(recorded["leader"]["pid"], target_pid);
-        assert!(recorded["leader"]["start"].is_object());
+        // Every Linux confined launch is a pid namespace of its own. Custody
+        // records its init, the process group leader (pid 1 there, which
+        // takes the whole launch with it when it ends); the target runs as
+        // pid 2. The recorded leader's start stamp is the init's, as the
+        // target reads it from its own procfs.
+        #[cfg(target_os = "linux")]
+        {
+            let init_start: u64 = std::fs::read_to_string(fixture.work.join("init-start"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(target_pid, 2);
+            assert_eq!(recorded["leader"]["start"]["kind"], "linux_boot");
+            assert_eq!(recorded["leader"]["start"]["start_ticks"], init_start);
+            assert!(
+                recorded["leader"]["pid"]
+                    .as_i64()
+                    .is_some_and(|pid| pid > 0)
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(recorded["leader"]["pid"], target_pid);
+            assert!(recorded["leader"]["start"].is_object());
+        }
         assert_eq!(recorded["scope"], fixture.session.to_string());
         assert_eq!(recorded["tool_call_id"], "confined-custody");
         assert_eq!(recorded["spawner"]["kind"], "background_job");

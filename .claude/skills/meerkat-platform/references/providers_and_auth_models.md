@@ -80,7 +80,7 @@ Rules:
 | OpenAI | `gpt-6-astra` |
 | Gemini | `gemini-4-argon` (paid Gemini API tiers; on the free tier select `gemini-3.8-flash`, for example `[models] gemini = "gemini-3.8-flash"`) |
 | Self-hosted | `[self_hosted] default_model`, or the only configured alias |
-| Image generation (OpenAI / Gemini) | `gpt-image-2` / `gemini-nano-banana-2.1` |
+| Image generation (OpenAI / Gemini) | `gpt-image-2.6-sunburst` / `gemini-nano-banana-2.1` |
 
 Change defaults:
 
@@ -137,6 +137,7 @@ recommended, S = supported):
 | `gpt-6-astra` (default) | R | 1.05M (922K input) / 128K | low..max |
 | `gpt-6-sol`, `gpt-6-luna` | S | 1.05M (922K input) / 128K | none..max |
 | `gpt-6.1-sol` | S | 1.05M (922K input) / 128K | low..max |
+| `gpt-6.1-terra` | S | 1.05M (922K input) / 128K | none..max |
 | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.6` (GPT-5.6 Sol) | S | 1.05M / 128K | none..max |
 | `gpt-5.5`, `gpt-5.5-pro` | R | 1.05M / 128K | none..xhigh |
 | `gpt-5.4` | S | 1.05M / 128K | none..xhigh |
@@ -327,9 +328,10 @@ run with `rkat run --no-web-search`, or in config with
   binaries do not enable.
 - `gpt-live-1-codex`: experimental private path (`experimental-gpt-live`),
   deprecated since 0.8.38; use `gpt-live-1`.
-- Image generation (`generate_image` builtin) models: OpenAI `gpt-image-2`
-  (default), `gpt-image-1`, `dall-e-3`, `dall-e-2`; Gemini
-  `gemini-nano-banana-2.1` (default since 0.9.1),
+- Image generation (`generate_image` builtin) models: OpenAI
+  `gpt-image-2.6-sunburst` (default since 0.9.11), `gpt-image-2.6-flare`,
+  `gpt-image-2` (the default before 0.9.11; select it by model to keep it);
+  Gemini `gemini-nano-banana-2.1` (default since 0.9.1),
   `gemini-3.1-flash-image-preview` (the 0.9.0 default; select it by model to
   keep it), `gemini-3-pro-image-preview`, `gemini-2.5-flash-image`.
 

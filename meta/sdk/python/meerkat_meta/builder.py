@@ -43,6 +43,8 @@ class MetaBuilderConfig:
     # ``runtime_options.mob_announcements``, sent as given; ``None`` sends nothing.
     mob_announcements: dict[str, Any] | None = None
     fork_instruction_policy: str | None = None
+    # ``runtime_options.decisions`` ingresses; ``None`` sends nothing.
+    decision_ingresses: list[dict[str, Any]] | None = None
     routing_config_path: str | None = None
     host_runnables: list[str] = field(default_factory=list)
     installed_artifacts: list[ToolArtifactRef] | None = None
@@ -476,6 +478,21 @@ class MetaBuilder:
         self._config.fork_instruction_policy = policy
         return self
 
+    def decision_ingresses(self, ingresses: Sequence[Mapping[str, Any]]) -> MetaBuilder:
+        """Declare the decision ingresses the host attests people through.
+
+        Emitted as ``runtime_options.decisions`` (``{"ingresses": [...]}``).
+        Each entry names its ``ingress`` (1 to 64 of ``a-z``, ``0-9``,
+        ``.``, ``_`` and ``-``; never ``operator``, the built-in stdio
+        operator), ``attests`` (``"person"``) and ``max_clock_skew_ms``, how
+        far ahead of the gateway's clock an attested event's time may be, at
+        most one hour (``3_600_000``). The gateway refuses the init when an
+        entry is malformed or the access configuration's approver map names
+        an ingress not declared here.
+        """
+        self._config.decision_ingresses = [dict(entry) for entry in ingresses]
+        return self
+
     def routing(self, config_path: str) -> MetaBuilder:
         self._config.routing_config_path = config_path
         return self
@@ -882,8 +899,10 @@ class MetaBuilder:
 
         Emitted as ``runtime_options.allow_remote``. Same word and rule as
         ``--allow-remote`` on ``rkat-rpc --tcp``: an exposure acknowledgement,
-        not an auth mechanism. Pass it only with an authenticating proxy in
-        front of the listener. Mirrors the TypeScript builder's ``allowRemote``.
+        not an auth mechanism. Without app auth the console treats every caller
+        as one anonymous caller, even behind a proxy that signs people in;
+        configure ``auth_config`` to tell people apart. Mirrors the TypeScript
+        builder's ``allowRemote``.
         """
         self._config.allow_remote = bool(allow)
         return self

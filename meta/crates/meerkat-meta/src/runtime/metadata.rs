@@ -249,6 +249,18 @@ impl std::fmt::Display for MetadataStoreError {
 
 impl std::error::Error for MetadataStoreError {}
 
+/// How long records are kept: for the life of the process, or across
+/// restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecordRetention {
+    /// For the life of the process: the records end with it.
+    Process,
+    /// Across restarts: the records are kept in durable storage.
+    Durable,
+}
+
 /// One spawned member's durable idle-retirement opt-in.
 ///
 /// A member seated in the primary mob is idle-retired only when its spawning
@@ -331,8 +343,9 @@ pub struct IdentityToolRecord {
 /// A fresh life (`reset`, `delete_identity`) Meta asked Core to start for an
 /// identity, recorded before Core is asked and removed once Core answers.
 /// A record that survives a restart names a rotation whose steps a crash
-/// interrupted: the next roster compile drives it to its end. Kept in the
-/// same placements as [`IdentityToolRecord`] (key
+/// interrupted, which Core finishes from its own record; the record stays
+/// written for a rollback, whose roster pass drives the rotation to its end
+/// or settles it. Kept in the same placements as [`IdentityToolRecord`] (key
 /// `identity_rotation/<identity>`; host store document `rotation/...`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityRotationIntent {
@@ -627,17 +640,23 @@ pub enum LifecycleEffectKind {
     ExitInterview,
     /// The distillation of a retired session.
     Distillation,
+    /// The harvest of the discards of a compaction a step owed the session
+    /// it ended: the batch Core's settle answered, then a fallback read of
+    /// the session's memory. Its record is removed once the fallback
+    /// harvested them.
+    CompactionHarvest,
 }
 
 impl LifecycleEffectKind {
     /// The side effect's wire name: `after_create`, `retirement_hook`,
-    /// `exit_interview` or `distillation`.
+    /// `exit_interview`, `distillation` or `compaction_harvest`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AfterCreate => "after_create",
             Self::RetirementHook => "retirement_hook",
             Self::ExitInterview => "exit_interview",
             Self::Distillation => "distillation",
+            Self::CompactionHarvest => "compaction_harvest",
         }
     }
 }
@@ -646,9 +665,15 @@ impl LifecycleEffectKind {
 /// every attempt missed its deadline or failed, or the host answered it with
 /// an error. The projection recorded it before its cursor moved past the
 /// event that owed it, and reported it on the error hook; the side effect
-/// is not run again. Kept in the same placements as [`IdentityToolRecord`]
-/// (key `lifecycle_failure/<generation>/<effect>/<identity>`; host store
-/// document `failure/...`).
+/// is not run again, except a compaction harvest, whose fallback runs
+/// after it and removes the record once it harvested the discards. Kept in
+/// the same placements as [`IdentityToolRecord`] (key
+/// `lifecycle_failure/<generation>/<effect>/<identity>`, a compaction
+/// harvest's `lifecycle_harvest_failure/<generation>/<identity>`; host
+/// store documents `failure/...` and `harvest-failure/...`): a compaction
+/// harvest's key is its own, apart from the retirement's distillation, and
+/// apart from the prefix the other failures share, which a build without
+/// that kind reads.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct LifecycleEffectFailure {
@@ -765,6 +790,12 @@ const LIFECYCLE_INTENT_KEY_PREFIX: &str = "lifecycle_intent/";
 /// Key prefix of the lifecycle effect failures in the `meta_metadata` table.
 const LIFECYCLE_FAILURE_KEY_PREFIX: &str = "lifecycle_failure/";
 
+/// Key prefix of the compaction harvest failures in the `meta_metadata`
+/// table: apart from [`LIFECYCLE_FAILURE_KEY_PREFIX`], whose rows a build
+/// without [`LifecycleEffectKind::CompactionHarvest`] reads and decodes
+/// strictly, so such a build never reads one.
+const LIFECYCLE_HARVEST_FAILURE_KEY_PREFIX: &str = "lifecycle_harvest_failure/";
+
 /// The key of the lifecycle effect intent `key` names: the generation and
 /// the slot first, so the key is unambiguous whatever the identity holds
 /// (a generation's digits end at `/` for the intent of the step that ends
@@ -780,15 +811,30 @@ fn lifecycle_intent_key(key: &LifecycleIntentKey) -> String {
     }
 }
 
-/// The key of `failure`: its generation and effect first, both free of `/`,
-/// so the key is unambiguous whatever the identity holds.
+/// The key of `failure` ([`lifecycle_failure_key_of`]).
 fn lifecycle_failure_key(failure: &LifecycleEffectFailure) -> String {
-    format!(
-        "{LIFECYCLE_FAILURE_KEY_PREFIX}{}/{}/{}",
-        failure.generation,
-        failure.effect.as_str(),
-        failure.identity
-    )
+    lifecycle_failure_key_of(failure.generation, failure.effect, &failure.identity)
+}
+
+/// The key of the failure of `effect` owed to `identity`'s incarnation
+/// `generation`: its generation and effect first, both free of `/`, so the
+/// key is unambiguous whatever the identity holds. A compaction harvest's
+/// is under a prefix of its own
+/// ([`LIFECYCLE_HARVEST_FAILURE_KEY_PREFIX`]).
+fn lifecycle_failure_key_of(
+    generation: u64,
+    effect: LifecycleEffectKind,
+    identity: &str,
+) -> String {
+    match effect {
+        LifecycleEffectKind::CompactionHarvest => {
+            format!("{LIFECYCLE_HARVEST_FAILURE_KEY_PREFIX}{generation}/{identity}")
+        }
+        _ => format!(
+            "{LIFECYCLE_FAILURE_KEY_PREFIX}{generation}/{}/{identity}",
+            effect.as_str()
+        ),
+    }
 }
 
 /// The order a mob's lifecycle effect failures read in: oldest first, then
@@ -887,16 +933,17 @@ pub trait PersistentMetadataStore: Send + Sync {
 
     /// Every rotation intent recorded for `mob_id`'s identities.
     ///
-    /// Required: the records carry a rotation (a reset, a delete) a crash
-    /// interrupted across the restart, so that the next roster compile
-    /// drives it to its end.
+    /// Required: the records carry a rotation (a reset, a delete) that may
+    /// have started, which a rollback's roster pass (Meta 0.9.10's) drives to
+    /// its end. This Meta writes them for that rollback and never reads them.
     async fn load_identity_rotation_intents(
         &self,
         mob_id: &str,
     ) -> Result<Vec<IdentityRotationIntent>, MetadataStoreError>;
 
-    /// Record (or replace) an identity's rotation intent, durably, before
-    /// the rotation starts. An error refuses the rotation: nothing starts.
+    /// Record (or replace) an identity's rotation intent, durably: the
+    /// identity runtime writes it after Core's answer to a rotation that may
+    /// have started, for a rollback. An error is logged.
     async fn set_identity_rotation_intent(
         &self,
         intent: &IdentityRotationIntent,
@@ -998,11 +1045,93 @@ pub trait PersistentMetadataStore: Send + Sync {
         keep: usize,
     ) -> Result<usize, MetadataStoreError>;
 
+    /// Remove the recorded failure of `effect` owed to `identity`'s
+    /// incarnation `generation` of `mob_id`, if one is recorded: a later
+    /// attempt made it good (a compaction harvest's fallback harvested the
+    /// discards). Removing none is no error.
+    ///
+    /// The default removes nothing: a store without it keeps the record of
+    /// a failure that was made good since.
+    async fn clear_lifecycle_effect_failure(
+        &self,
+        _mob_id: &str,
+        _generation: u64,
+        _effect: LifecycleEffectKind,
+        _identity: &str,
+    ) -> Result<(), MetadataStoreError> {
+        Ok(())
+    }
+
     /// Wait until the writes this store runs off its callers' tasks (such as
     /// coalesced cursor writes) have landed. Shutdown calls it once the last
     /// writer stopped, under its own bound. The default runs no write off
     /// its callers, so it returns at once.
     async fn settle_detached_writes(&self) {}
+
+    /// How long this store keeps realm documents ([`Self::realm_document`]):
+    /// named documents of the realm as a whole, beside every mob's records.
+    /// The console audit log is kept as realm documents, and so is the
+    /// gating state of a runtime that keeps it.
+    ///
+    /// The default keeps none (`None`): a store that keeps none has no
+    /// console audit log and leaves gating in memory.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        None
+    }
+
+    /// The realm document `key`, `None` when the realm holds none.
+    async fn realm_document(&self, _key: &str) -> Result<Option<String>, MetadataStoreError> {
+        Ok(None)
+    }
+
+    /// Replace the realm document `key` (`None` removes it), durably when
+    /// the store is durable, before this answers. The default keeps no
+    /// realm documents and refuses.
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        _document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        Err(MetadataStoreError::Io(format!(
+            "realm document {key}: this metadata store keeps no realm documents"
+        )))
+    }
+
+    /// The keys of the realm documents that start with `prefix`, in no
+    /// promised order. A key may name a document removed since, which
+    /// [`Self::realm_document`] answers `None` for.
+    async fn realm_document_keys(&self, _prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Bind the attested decide event `event_ref` of the decision ingress
+    /// `ingress` to `decision_id`, durably and once: the first decision that
+    /// uses an event keeps it. Answers the id of the decision the event is
+    /// bound to, which is `decision_id` when it was bound now or before.
+    ///
+    /// The default keeps no such record and refuses, so an attested decide
+    /// never runs unrecorded on a store that cannot keep the binding.
+    async fn bind_decision_event(
+        &self,
+        mob_id: &str,
+        ingress: &str,
+        event_ref: &str,
+        decision_id: &str,
+    ) -> Result<String, MetadataStoreError> {
+        let _ = (mob_id, ingress, event_ref, decision_id);
+        Err(MetadataStoreError::Io(
+            "this metadata store keeps no decision events".to_string(),
+        ))
+    }
+}
+
+/// Key prefix of the decision events attested decides used, in the
+/// `meta_metadata` table: the ingress (an ingress name, free of `/`) and the
+/// event reference follow.
+const DECISION_EVENT_KEY_PREFIX: &str = "decision_event/";
+
+fn decision_event_key(ingress: &str, event_ref: &str) -> String {
+    format!("{DECISION_EVENT_KEY_PREFIX}{ingress}/{event_ref}")
 }
 
 /// In-memory persistent metadata store.
@@ -1012,7 +1141,9 @@ pub trait PersistentMetadataStore: Send + Sync {
 /// is configured. The structural-events subscription falls back to "start
 /// at latest" on restart in this case, which is the right behaviour:
 /// in-memory deployments don't have a persistent ledger to replay against
-/// either.
+/// either. It keeps no attested decision events (`bind_decision_event`
+/// refuses): a record a restart forgets cannot keep an event to one
+/// decision, so a runtime built with it refuses the attested decide.
 #[derive(Debug, Default)]
 pub struct InMemoryMetadataStore {
     cursors: RwLock<BTreeMap<String, u64>>,
@@ -1022,6 +1153,7 @@ pub struct InMemoryMetadataStore {
     lifecycle_cursors: RwLock<BTreeMap<String, LifecycleProjectionCursor>>,
     lifecycle_intents: RwLock<BTreeMap<(String, LifecycleIntentKey), LifecycleEffectIntent>>,
     lifecycle_failures: RwLock<BTreeMap<(String, String), LifecycleEffectFailure>>,
+    realm_documents: RwLock<BTreeMap<String, String>>,
 }
 
 impl InMemoryMetadataStore {
@@ -1265,6 +1397,57 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
         }
         Ok(older)
     }
+
+    async fn clear_lifecycle_effect_failure(
+        &self,
+        mob_id: &str,
+        generation: u64,
+        effect: LifecycleEffectKind,
+        identity: &str,
+    ) -> Result<(), MetadataStoreError> {
+        self.lifecycle_failures.write().await.remove(&(
+            mob_id.to_string(),
+            lifecycle_failure_key_of(generation, effect, identity),
+        ));
+        Ok(())
+    }
+
+    /// Kept for the life of the process.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        Some(RecordRetention::Process)
+    }
+
+    async fn realm_document(&self, key: &str) -> Result<Option<String>, MetadataStoreError> {
+        Ok(self.realm_documents.read().await.get(key).cloned())
+    }
+
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        let mut documents = self.realm_documents.write().await;
+        match document {
+            Some(document) => {
+                documents.insert(key.to_string(), document.to_string());
+            }
+            None => {
+                documents.remove(key);
+            }
+        }
+        Ok(())
+    }
+
+    async fn realm_document_keys(&self, prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        Ok(self
+            .realm_documents
+            .read()
+            .await
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
 }
 
 /// SQLite-backed persistent metadata store.
@@ -1308,6 +1491,17 @@ const MEMBER_IDLE_RETIRE_KEY_PREFIX: &str = "member_idle_retire/";
 
 fn member_idle_retire_key(member_id: &str) -> String {
     format!("{MEMBER_IDLE_RETIRE_KEY_PREFIX}{member_id}")
+}
+
+/// The `mob_id` of a realm document's row: empty, for the realm as a whole.
+/// The rows' own key prefix keeps them apart from any mob's records.
+const REALM_DOCUMENT_MOB_ID: &str = "";
+
+/// Key prefix of a realm document's row: the document's key follows.
+const REALM_DOCUMENT_KEY_PREFIX: &str = "realm_document/";
+
+fn realm_document_row_key(key: &str) -> String {
+    format!("{REALM_DOCUMENT_KEY_PREFIX}{key}")
 }
 
 /// The runtime-metadata store's schema domain in the per-file migration
@@ -1406,6 +1600,32 @@ impl SqliteMetadataStore {
 
 #[async_trait]
 impl PersistentMetadataStore for SqliteMetadataStore {
+    async fn bind_decision_event(
+        &self,
+        mob_id: &str,
+        ingress: &str,
+        event_ref: &str,
+        decision_id: &str,
+    ) -> Result<String, MetadataStoreError> {
+        let key = decision_event_key(ingress, event_ref);
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        // The first decision keeps the event: a later binding leaves the
+        // row as it is and reads it back.
+        conn.execute(
+            "INSERT INTO meta_metadata (mob_id, key, value) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(mob_id, key) DO NOTHING",
+            rusqlite::params![mob_id, key, decision_id],
+        )
+        .map_err(|err| MetadataStoreError::Io(format!("insert: {err}")))?;
+        conn.query_row(
+            "SELECT value FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
+            rusqlite::params![mob_id, key],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|err| MetadataStoreError::Io(format!("query: {err}")))
+    }
+
     async fn get_subscription_cursor(
         &self,
         mob_id: &str,
@@ -1789,20 +2009,111 @@ impl PersistentMetadataStore for SqliteMetadataStore {
             .map_err(|err| MetadataStoreError::Io(format!("commit: {err}")))?;
         Ok(older)
     }
+
+    async fn clear_lifecycle_effect_failure(
+        &self,
+        mob_id: &str,
+        generation: u64,
+        effect: LifecycleEffectKind,
+        identity: &str,
+    ) -> Result<(), MetadataStoreError> {
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "DELETE FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
+            rusqlite::params![
+                mob_id,
+                lifecycle_failure_key_of(generation, effect, identity)
+            ],
+        )
+        .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
+        Ok(())
+    }
+
+    /// Kept in the store's file across restarts; a store opened in memory
+    /// ([`SqliteMetadataStore::in_memory`]) keeps them for the process.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        Some(if self.db_path.as_os_str() == ":memory:" {
+            RecordRetention::Process
+        } else {
+            RecordRetention::Durable
+        })
+    }
+
+    async fn realm_document(&self, key: &str) -> Result<Option<String>, MetadataStoreError> {
+        self.identity_record_row(REALM_DOCUMENT_MOB_ID, &realm_document_row_key(key))
+    }
+
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        let row_key = realm_document_row_key(key);
+        let Some(document) = document else {
+            let _fence = self.operation_fence()?;
+            let conn = self.lock_conn()?;
+            conn.execute(
+                "DELETE FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
+                rusqlite::params![REALM_DOCUMENT_MOB_ID, row_key],
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
+            return Ok(());
+        };
+        self.upsert_identity_record_row(REALM_DOCUMENT_MOB_ID, &row_key, document)
+    }
+
+    async fn realm_document_keys(&self, prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        let row_prefix = realm_document_row_key(prefix);
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        // A compare of each key's start, not LIKE (keys may carry `_` and
+        // `%`); the realm documents' own `mob_id` keeps it to their rows.
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT key FROM meta_metadata WHERE mob_id = ?1 AND substr(key, 1, ?2) = ?3",
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("prepare: {err}")))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    REALM_DOCUMENT_MOB_ID,
+                    row_prefix.chars().count(),
+                    row_prefix
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|err| MetadataStoreError::Io(format!("query: {err}")))?;
+        let mut keys = Vec::new();
+        for row in rows {
+            let row_key = row.map_err(|err| MetadataStoreError::Io(format!("row: {err}")))?;
+            if let Some(key) = row_key.strip_prefix(REALM_DOCUMENT_KEY_PREFIX) {
+                keys.push(key.to_string());
+            }
+        }
+        Ok(keys)
+    }
 }
 
 impl SqliteMetadataStore {
     /// Every lifecycle effect failure of `mob_id`, in the order
-    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them.
+    /// [`PersistentMetadataStore::lifecycle_effect_failures`] reads them:
+    /// the rows under both failure prefixes.
     fn lifecycle_effect_failures_of(
         &self,
         mob_id: &str,
     ) -> Result<Vec<LifecycleEffectFailure>, MetadataStoreError> {
-        let mut failures = self
-            .identity_record_rows(mob_id, LIFECYCLE_FAILURE_KEY_PREFIX)?
-            .iter()
-            .map(|value| decode_identity_record::<LifecycleEffectFailure>(value.as_bytes()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut failures = Vec::new();
+        for prefix in [
+            LIFECYCLE_FAILURE_KEY_PREFIX,
+            LIFECYCLE_HARVEST_FAILURE_KEY_PREFIX,
+        ] {
+            for value in self.identity_record_rows(mob_id, prefix)? {
+                failures.push(decode_identity_record::<LifecycleEffectFailure>(
+                    value.as_bytes(),
+                )?);
+            }
+        }
         failures.sort_by(lifecycle_effect_failure_order);
         Ok(failures)
     }
@@ -2088,6 +2399,78 @@ mod tests {
         assert!(
             reencoded.contains("\"record_revision\":7"),
             "a record is written under its current name: {reencoded}"
+        );
+    }
+
+    /// Realm documents round trip on the in-memory and the SQLite store
+    /// alike: written, replaced, listed by prefix (a prefix with `_` and `%`
+    /// matches only itself) and removed, beside a mob's records, which they
+    /// leave alone. The SQLite ones are durable and survive a reopen; the
+    /// in-memory ones last for the process.
+    #[tokio::test]
+    async fn realm_documents_round_trip_beside_mob_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.sqlite");
+        let sqlite = SqliteMetadataStore::open(&path).unwrap();
+        let memory = InMemoryMetadataStore::new();
+        assert_eq!(
+            sqlite.realm_document_retention(),
+            Some(RecordRetention::Durable)
+        );
+        assert_eq!(
+            SqliteMetadataStore::in_memory()
+                .unwrap()
+                .realm_document_retention(),
+            Some(RecordRetention::Process)
+        );
+        assert_eq!(
+            memory.realm_document_retention(),
+            Some(RecordRetention::Process)
+        );
+        let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
+        for store in stores {
+            store.set_subscription_cursor("", 7).await.unwrap();
+            assert_eq!(store.realm_document("log/1").await.unwrap(), None);
+            store
+                .set_realm_document("log/1", Some("one"))
+                .await
+                .unwrap();
+            store
+                .set_realm_document("log/1", Some("first"))
+                .await
+                .unwrap();
+            store
+                .set_realm_document("log/2", Some("second"))
+                .await
+                .unwrap();
+            store
+                .set_realm_document("log_%/3", Some("other"))
+                .await
+                .unwrap();
+            assert_eq!(
+                store.realm_document("log/1").await.unwrap().as_deref(),
+                Some("first")
+            );
+            let mut keys = store.realm_document_keys("log/").await.unwrap();
+            keys.sort();
+            assert_eq!(keys, vec!["log/1".to_string(), "log/2".to_string()]);
+            assert_eq!(
+                store.realm_document_keys("log_%/").await.unwrap(),
+                vec!["log_%/3".to_string()]
+            );
+            store.set_realm_document("log/2", None).await.unwrap();
+            assert_eq!(store.realm_document("log/2").await.unwrap(), None);
+            assert_eq!(
+                store.get_subscription_cursor("").await.unwrap(),
+                Some(7),
+                "a mob's records are left alone"
+            );
+        }
+        drop(sqlite);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(
+            reopened.realm_document("log/1").await.unwrap().as_deref(),
+            Some("first")
         );
     }
 
@@ -2492,6 +2875,109 @@ mod tests {
                 LifecycleIntentKey::new("personal:bob", 1),
             ],
             "both of an incarnation's intents survive a reopen"
+        );
+    }
+
+    /// A compaction harvest's failure has a key of its own: it is listed and
+    /// pruned beside the distillation's failure of the same incarnation, a
+    /// clear removes it alone, and its row is outside the prefix the other
+    /// failures share, which a build without its kind reads.
+    #[tokio::test]
+    async fn a_compaction_harvest_failure_keeps_its_own_key_and_clears_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite = SqliteMetadataStore::open(dir.path().join("meta.sqlite")).unwrap();
+        let memory = InMemoryMetadataStore::new();
+        let stores: [&dyn PersistentMetadataStore; 2] = [&sqlite, &memory];
+        let failure = |effect, recorded_at_ms| {
+            LifecycleEffectFailure::new(
+                "mob-a",
+                "incarnation-1",
+                7,
+                "personal:alice",
+                2,
+                effect,
+                1,
+                "failed",
+                recorded_at_ms,
+            )
+        };
+        let harvest = failure(LifecycleEffectKind::CompactionHarvest, 1_700_000_000_000);
+        let distillation = failure(LifecycleEffectKind::Distillation, 1_700_000_000_001);
+        for store in stores {
+            store
+                .record_lifecycle_effect_failure(&harvest)
+                .await
+                .unwrap();
+            store
+                .record_lifecycle_effect_failure(&distillation)
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-a", 0, usize::MAX)
+                    .await
+                    .unwrap(),
+                vec![harvest.clone(), distillation.clone()],
+                "one incarnation's harvest and distillation failures, each under its own key"
+            );
+            for _ in 0..2 {
+                store
+                    .clear_lifecycle_effect_failure(
+                        "mob-a",
+                        2,
+                        LifecycleEffectKind::CompactionHarvest,
+                        "personal:alice",
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .lifecycle_effect_failures("mob-a", 0, usize::MAX)
+                        .await
+                        .unwrap(),
+                    vec![distillation.clone()],
+                    "the clear removes the harvest's failure alone, and clearing none is no error"
+                );
+            }
+            store
+                .record_lifecycle_effect_failure(&harvest)
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .prune_lifecycle_effect_failures("mob-a", 1)
+                    .await
+                    .unwrap(),
+                1,
+                "a prune counts the harvest's failure among the others"
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_failures("mob-a", 0, usize::MAX)
+                    .await
+                    .unwrap(),
+                vec![distillation.clone()]
+            );
+        }
+        sqlite
+            .record_lifecycle_effect_failure(&harvest)
+            .await
+            .unwrap();
+        let conn = sqlite.lock_conn().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT key FROM meta_metadata WHERE mob_id = 'mob-a' ORDER BY key")
+            .unwrap();
+        let keys = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "lifecycle_failure/2/distillation/personal:alice".to_string(),
+                "lifecycle_harvest_failure/2/personal:alice".to_string(),
+            ]
         );
     }
 

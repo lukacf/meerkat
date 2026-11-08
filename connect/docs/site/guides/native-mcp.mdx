@@ -29,12 +29,12 @@ until their semantics have a supported mapping. In particular, do not drop a
 native TOML loader would expand.
 
 <Note>
-In the current development Core source, a host enforcing process confinement
-refuses servers from an `mcp.toml` that a confined process can modify. The CLI
-reports that a confined process can write the file; those servers do not launch.
-Have the host keep the configuration outside process write grants, or select the
-server through its existing realm configuration. This is a development-source
-requirement, not a claim about every released 0.9.4 runtime.
+When the host enforces process confinement, Core 0.9.10 refuses servers from an
+`mcp.toml` that a confined process can modify. `rkat` warns that a confined
+process can write the file, and on a governed realm reports the server's failed
+setup to the model with the typed `untrusted_configuration_source` refusal; those
+servers do not launch. Have the host keep the configuration outside process
+write grants, or select the server through its existing realm configuration.
 </Note>
 
 The host supplies the minimal process environment. Empty `env` does not clear

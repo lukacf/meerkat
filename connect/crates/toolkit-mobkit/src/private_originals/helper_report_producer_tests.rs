@@ -131,8 +131,11 @@ async fn configured_report_parent_reaches_actual_helper_report_and_consumed_inpu
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout_at(deadline, Box::pin(async {
         let helper = AgentIdentity::parse(crate::installed_host::controller_first_input_fixture::HELPER).unwrap();
         let helper_member = MemberIdentity::from(helper.as_str());
-        assert!(fixture.native.mob_handle().get_member(&helper_member).await.unwrap().is_none(),
-            "the configured report producer must not require a materialized helper");
+        // Core seats a declared roster identity Dormant with nothing built:
+        // the helper has no member, or one Core holds unmaterialized.
+        let helper_seat = fixture.native.mob_handle().get_member(&helper_member).await.unwrap();
+        assert!(helper_seat.is_none() || fixture.native.mob_handle().member_unmaterialized(&helper_member),
+            "the configured report producer must not require a materialized helper: {helper_seat:?}");
         assert!(fixture.source.helper_sources.lock().unwrap().is_empty());
 
         // The constructor called the actual stopped-host producer before any

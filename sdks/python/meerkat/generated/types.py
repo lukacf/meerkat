@@ -1214,6 +1214,276 @@ class WireToolGrantAuditEventUnknown(TypedDict, total=False):
 
 WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
 
+# The closed vocabulary of operator-instruction write refusals, as hosts
+# and SDKs read it.
+InstructionSetErrorCode = Literal['invalid_request', 'digest_mismatch', 'stale_revision', 'revision_conflict', 'unknown_slot', 'slot_limit_exceeded', 'body_too_large', 'active_set_budget_exceeded', 'owned_by_mob', 'owned_by_session', 'owned_by_other_mob', 'slot_managed_by_activation', 'durability_unavailable', 'mob_terminal', 'malformed_instruction_history', 'prepared_authorization_required']
+
+# Whether a slot's body applies: `Active`, or `Absent` (revoked, or not
+# targeted at this agent).
+InstructionEffect = Literal['absent', 'active']
+
+# Whether an entry carries the changes since the previous entry (appended
+# at a fresh run start) or the whole active set (a compaction fold).
+InstructionEntryKind = Literal['delta', 'snapshot']
+
+# Wire payload for WireInstructionPendingReason.
+WireInstructionPendingReason = Literal['awaiting_run_start', 'leading_prefix_only_lowering', 'lowering_unavailable', 'session_unborn', 'delivery_owed']
+
+# Wire payload for WireInstructionBlockReason.
+WireInstructionBlockReason = Literal['member_host_unsupported', 'slot_managed_by_activation', 'durability_unavailable', 'owned_by_session', 'owned_by_other_mob']
+
+# Wire payload for WireInstructionResidency.
+WireInstructionResidency = Literal['live', 'dormant', 'unborn']
+
+# Wire payload for WireInstructionLowering.
+WireInstructionLowering = Literal['mid_conversation', 'leading_prefix_only', 'unavailable']
+
+# What a session-owned write or revoke did.
+WireSessionInstructionDisposition = Literal['recorded', 'duplicate']
+
+# What a mob operator-instruction write or revoke did.
+WireMobInstructionDisposition = Literal['committed', 'duplicate']
+
+# Which members of a mob an operator instruction targets: every member, the
+# members of one profile, or one member. A target is a predicate over the
+# roster: a profile or member that does not exist yet selects nobody until
+# it does. A target refuses a field its kind does not have (`Mob` is a
+# struct variant for that: serde lets a unit variant ignore extra fields),
+# so a member or profile name sent with the wrong kind never widens a
+# write to every member.
+class WireInstructionTargetMob(TypedDict, total=False):
+    kind: Required[Literal['mob']]
+
+class WireInstructionTargetProfile(TypedDict, total=False):
+    kind: Required[Literal['profile']]
+    profile: Required[str]
+
+class WireInstructionTargetMember(TypedDict, total=False):
+    agent_identity: Required[str]
+    kind: Required[Literal['member']]
+
+WireInstructionTarget = WireInstructionTargetMob | WireInstructionTargetProfile | WireInstructionTargetMember
+
+# A slot's state for one member or session.
+class WireInstructionSlotStateEffective(TypedDict, total=False):
+    state: Required[Literal['effective']]
+
+class WireInstructionSlotStatePending(TypedDict, total=False):
+    reason: Required[WireInstructionPendingReason]
+    state: Required[Literal['pending']]
+
+class WireInstructionSlotStateBlocked(TypedDict, total=False):
+    reason: Required[WireInstructionBlockReason]
+    state: Required[Literal['blocked']]
+
+class WireInstructionSlotStateNotTargeted(TypedDict, total=False):
+    state: Required[Literal['not_targeted']]
+
+WireInstructionSlotState = WireInstructionSlotStateEffective | WireInstructionSlotStatePending | WireInstructionSlotStateBlocked | WireInstructionSlotStateNotTargeted
+
+# Who owns a session's recorded operator-instruction target.
+class WireInstructionTargetOwnerUnowned(TypedDict, total=False):
+    kind: Required[Literal['unowned']]
+
+class WireInstructionTargetOwnerSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+
+class WireInstructionTargetOwnerMob(TypedDict, total=False):
+    agent_identity: Required[str]
+    kind: Required[Literal['mob']]
+    mob_id: Required[str]
+
+WireInstructionTargetOwner = WireInstructionTargetOwnerUnowned | WireInstructionTargetOwnerSession | WireInstructionTargetOwnerMob
+
+# A member's delivery state.
+class WireMemberInstructionDeliveryStateCurrent(TypedDict, total=False):
+    state: Required[Literal['current']]
+
+class WireMemberInstructionDeliveryStateOwed(TypedDict, total=False):
+    generation: Required[int]
+    last_failure: NotRequired[Optional[str]]
+    state: Required[Literal['owed']]
+
+class WireMemberInstructionDeliveryStateBlocked(TypedDict, total=False):
+    reason: Required[WireInstructionBlockReason]
+    state: Required[Literal['blocked']]
+
+WireMemberInstructionDeliveryState = WireMemberInstructionDeliveryStateCurrent | WireMemberInstructionDeliveryStateOwed | WireMemberInstructionDeliveryStateBlocked
+
+# Whether a member's committed session state could be read. An unreadable
+# member keeps its row with the reason; nothing of its session is
+# reported, and the page still answers.
+class WireInstructionEffectiveReadOk(TypedDict, total=False):
+    status: Required[Literal['ok']]
+
+class WireInstructionEffectiveReadUnreadable(TypedDict, total=False):
+    reason: Required[str]
+    status: Required[Literal['unreadable']]
+
+WireInstructionEffectiveRead = WireInstructionEffectiveReadOk | WireInstructionEffectiveReadUnreadable
+
+# Who a presenter showed a rendering to. Closed.
+class DecisionAudienceApprover(TypedDict, total=False):
+    approver_id: Required[str]
+    kind: Required[Literal['approver']]
+
+class DecisionAudienceReviewer(TypedDict, total=False):
+    kind: Required[Literal['reviewer']]
+    reviewer: Required[str]
+
+DecisionAudienceRequest = DecisionAudienceApprover | DecisionAudienceReviewer
+
+# Where a decision stands.
+WireDecisionPhase = Literal['open', 'approved', 'rejected', 'expired', 'withdrawn', 'executed', 'execution_refused', 'unknown']
+
+# Who decides an open decision now.
+WireDecisionStage = Literal['human', 'review', 'unknown']
+
+# Where the requester notice of a decision stands.
+WireDecisionNoticeState = Literal['not_required', 'not_due', 'owed', 'delivered', 'failed', 'unknown']
+
+# What a decision notice reports.
+WireDecisionNoticeEvent = Literal['presented', 'unknown']
+
+# Who decided a decision.
+WireDecisionTier = Literal['human', 'review', 'unknown']
+
+# How the human who decided was authenticated on the decision event.
+WireDecisionAssurance = Literal['person_authenticated', 'service_credential', 'device_trusted', 'unknown']
+
+# A reviewer's verdict.
+WireDecisionReviewVerdict = Literal['allow', 'deny', 'escalate', 'unknown']
+
+# Who a recorded presentation was shown to.
+class WirePresentationAudienceApprover(TypedDict, total=False):
+    approver_id: Required[str]
+    kind: Required[Literal['approver']]
+
+class WirePresentationAudienceReviewer(TypedDict, total=False):
+    kind: Required[Literal['reviewer']]
+    reviewer: Required[str]
+
+class WirePresentationAudienceUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown
+
+# The durable evidence a decision was decided with. An authentication
+# scope is never projected.
+class WireDecisionEvidenceHuman(TypedDict, total=False):
+    approve: Required[bool]
+    approver_id: Required[str]
+    assurance: Required[WireDecisionAssurance]
+    decider: Required[str]
+    event_ref: Required[str]
+    ingress: Required[str]
+    kind: Required[Literal['human']]
+    observed_at_ms: NotRequired[Optional[int]]
+    presentation: NotRequired[Optional[dict[str, Any]]]
+    presented_digest: Required[str]
+    reason: NotRequired[Optional[str]]
+
+class WireDecisionEvidenceReview(TypedDict, total=False):
+    feedback: NotRequired[Optional[str]]
+    kind: Required[Literal['review']]
+    origin_session: Required[str]
+    presented_digest: Required[str]
+    reviewer: Required[str]
+    verdict: Required[WireDecisionReviewVerdict]
+    verdict_call_ref: Required[str]
+
+class WireDecisionEvidenceUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireDecisionEvidence = WireDecisionEvidenceHuman | WireDecisionEvidenceReview | WireDecisionEvidenceUnknown
+
+# Why a decision refused a call. Closed: a refusal bears authority, so a
+# client never reads one it does not know as another.
+class WireDecisionRefusalInvalidWindow(TypedDict, total=False):
+    kind: Required[Literal['invalid_window']]
+
+class WireDecisionRefusalSelfReview(TypedDict, total=False):
+    kind: Required[Literal['self_review']]
+
+class WireDecisionRefusalHoldConflict(TypedDict, total=False):
+    kind: Required[Literal['hold_conflict']]
+
+class WireDecisionRefusalNotOpen(TypedDict, total=False):
+    kind: Required[Literal['not_open']]
+
+class WireDecisionRefusalExpired(TypedDict, total=False):
+    kind: Required[Literal['expired']]
+
+class WireDecisionRefusalSubjectChanged(TypedDict, total=False):
+    kind: Required[Literal['subject_changed']]
+
+class WireDecisionRefusalPresentationIncomplete(TypedDict, total=False):
+    kind: Required[Literal['presentation_incomplete']]
+
+class WireDecisionRefusalWrongAudience(TypedDict, total=False):
+    kind: Required[Literal['wrong_audience']]
+
+class WireDecisionRefusalReviewStage(TypedDict, total=False):
+    kind: Required[Literal['review_stage']]
+
+class WireDecisionRefusalHumanStage(TypedDict, total=False):
+    kind: Required[Literal['human_stage']]
+
+class WireDecisionRefusalEvidenceRequired(TypedDict, total=False):
+    kind: Required[Literal['evidence_required']]
+
+class WireDecisionRefusalNotEligible(TypedDict, total=False):
+    kind: Required[Literal['not_eligible']]
+
+class WireDecisionRefusalSelfApproval(TypedDict, total=False):
+    kind: Required[Literal['self_approval']]
+
+class WireDecisionRefusalWrongReviewer(TypedDict, total=False):
+    kind: Required[Literal['wrong_reviewer']]
+
+class WireDecisionRefusalNotRequester(TypedDict, total=False):
+    kind: Required[Literal['not_requester']]
+
+class WireDecisionRefusalNotApproved(TypedDict, total=False):
+    kind: Required[Literal['not_approved']]
+
+class WireDecisionRefusalBindingMismatch(TypedDict, total=False):
+    kind: Required[Literal['binding_mismatch']]
+
+class WireDecisionRefusalNotAuthorized(TypedDict, total=False):
+    kind: Required[Literal['not_authorized']]
+
+class WireDecisionRefusalSettlementOwed(TypedDict, total=False):
+    kind: Required[Literal['settlement_owed']]
+
+class WireDecisionRefusalNotOwed(TypedDict, total=False):
+    kind: Required[Literal['not_owed']]
+
+class WireDecisionRefusalDecidedBeforePresentation(TypedDict, total=False):
+    kind: Required[Literal['decided_before_presentation']]
+
+WireDecisionRefusal = WireDecisionRefusalInvalidWindow | WireDecisionRefusalSelfReview | WireDecisionRefusalHoldConflict | WireDecisionRefusalNotOpen | WireDecisionRefusalExpired | WireDecisionRefusalSubjectChanged | WireDecisionRefusalPresentationIncomplete | WireDecisionRefusalWrongAudience | WireDecisionRefusalReviewStage | WireDecisionRefusalHumanStage | WireDecisionRefusalEvidenceRequired | WireDecisionRefusalNotEligible | WireDecisionRefusalSelfApproval | WireDecisionRefusalWrongReviewer | WireDecisionRefusalNotRequester | WireDecisionRefusalNotApproved | WireDecisionRefusalBindingMismatch | WireDecisionRefusalNotAuthorized | WireDecisionRefusalSettlementOwed | WireDecisionRefusalNotOwed | WireDecisionRefusalDecidedBeforePresentation
+
+# The typed `data` of a `decision/*` error. Closed, like the refusals it
+# carries.
+class WireDecisionErrorDataDecisionRefused(TypedDict, total=False):
+    decision_refusal: Required[WireDecisionRefusal]
+    kind: Required[Literal['decision_refused']]
+
+class WireDecisionErrorDataDecisionNotFound(TypedDict, total=False):
+    kind: Required[Literal['decision_not_found']]
+
+class WireDecisionErrorDataDecisionUnreadable(TypedDict, total=False):
+    kind: Required[Literal['decision_unreadable']]
+
+class WireDecisionErrorDataCandidateLaunch(TypedDict, total=False):
+    kind: Required[Literal['candidate_launch']]
+
+class WireDecisionErrorDataNoDecisionStore(TypedDict, total=False):
+    kind: Required[Literal['no_decision_store']]
+
+WireDecisionErrorData = WireDecisionErrorDataDecisionRefused | WireDecisionErrorDataDecisionNotFound | WireDecisionErrorDataDecisionUnreadable | WireDecisionErrorDataCandidateLaunch | WireDecisionErrorDataNoDecisionStore
+
 @dataclass
 class ActivateInstructionParams:
     """Request payload for `session/activate_instruction`."""
@@ -2082,6 +2352,381 @@ the next page while more rows may follow."""
     rows: list[WireToolGrantAuditRow]
     next_sequence: Optional[int] = None
     unreadable: Optional[list[WireUnreadableToolGrantAuditRow]] = None
+
+
+@dataclass
+class InstructionSetErrorData:
+    """The `data` of a JSON-RPC error that refuses an operator-instruction write
+or read: its code in the closed refusal vocabulary."""
+    instruction_set_code: InstructionSetErrorCode
+
+
+@dataclass
+class WireInstructionSlotView:
+    """A slot's revision and effect."""
+    effect: InstructionEffect
+    revision: int
+
+
+@dataclass
+class WireInstructionEffectiveSlot:
+    """The committed entry that put a slot's state in effect in a session."""
+    effect: InstructionEffect
+    entry_sequence: int
+    kind: InstructionEntryKind
+    message_index: int
+    revision: int
+    run_id: Optional[RunId] = None
+
+
+@dataclass
+class WireSessionInstructionSlot:
+    """One slot of a session: its recorded target and the entry in effect."""
+    key: str
+    namespace: str
+    state: WireInstructionSlotState
+    effective: Optional[WireInstructionEffectiveSlot] = None
+    recorded: Optional[WireInstructionSlotView] = None
+
+
+@dataclass
+class SetSessionInstructionParams:
+    """Request payload for `session/set_instruction`: one session-owned write of
+a slot's body at a revision."""
+    body: str
+    key: str
+    namespace: str
+    revision: int
+    session_id: str
+    content_sha256: Optional[str] = None
+
+
+@dataclass
+class RevokeSessionInstructionParams:
+    """Request payload for `session/revoke_instruction`: revoke one session-owned
+slot at a higher revision."""
+    key: str
+    namespace: str
+    revision: int
+    session_id: str
+
+
+@dataclass
+class SessionInstructionStatusParams:
+    """Request payload for `session/instruction_status`."""
+    session_id: str
+
+
+@dataclass
+class SessionInstructionWriteResult:
+    """Response payload for `session/set_instruction` and
+`session/revoke_instruction`, returned once the target is durable in the
+session document. The change applies at the session's next fresh run
+start."""
+    disposition: WireSessionInstructionDisposition
+    key: str
+    namespace: str
+    revision: int
+    session_id: str
+    target_generation: int
+
+
+@dataclass
+class SessionInstructionStatusResult:
+    """Response payload for `session/instruction_status`: the session's
+committed operator-instruction state, read without materializing it."""
+    entry_sequence: int
+    owner: WireInstructionTargetOwner
+    session_id: str
+    slots: list[WireSessionInstructionSlot]
+    target_generation: int
+    lowering: Optional[WireInstructionLowering] = None
+
+
+@dataclass
+class WireInstructionRecord:
+    """One desired record of a mob."""
+    effect: InstructionEffect
+    key: str
+    namespace: str
+    revision: int
+    target: WireInstructionTarget
+    body_bytes: Optional[int] = None
+    content_sha256: Optional[str] = None
+
+
+@dataclass
+class WireMemberInstructionSlot:
+    """One slot of one mob member."""
+    desired: WireInstructionSlotView
+    key: str
+    namespace: str
+    state: WireInstructionSlotState
+    effective: Optional[WireInstructionEffectiveSlot] = None
+    recorded: Optional[WireInstructionSlotView] = None
+
+
+@dataclass
+class WireMemberInstructionDelivery:
+    """A member's delivery facts."""
+    state: WireMemberInstructionDeliveryState
+    recorded_generation: Optional[int] = None
+
+
+@dataclass
+class WireMemberInstructionStatus:
+    """One member's operator-instruction status."""
+    agent_identity: str
+    delivery: WireMemberInstructionDelivery
+    effective_read: WireInstructionEffectiveRead
+    live_channel_open: bool
+    profile: str
+    residency: WireInstructionResidency
+    slots: list[WireMemberInstructionSlot]
+
+
+@dataclass
+class MobSetInstructionParams:
+    """Request payload for `mob/set_instruction`: one slot's body at a revision,
+for the members the target selects."""
+    body: str
+    key: str
+    mob_id: str
+    namespace: str
+    revision: int
+    target: WireInstructionTarget
+    content_sha256: Optional[str] = None
+
+
+@dataclass
+class MobRevokeInstructionParams:
+    """Request payload for `mob/revoke_instruction`: revoke one slot at a higher
+revision. The record keeps its target."""
+    key: str
+    mob_id: str
+    namespace: str
+    revision: int
+
+
+@dataclass
+class MobInstructionStatusParams:
+    """Request payload for `mob/instruction_status`: the mob's records
+(optionally one namespace or slot) and one page of members (optionally
+one member or one profile)."""
+    mob_id: str
+    agent_identity: Optional[str] = None
+    key: Optional[str] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    offset: Optional[int] = None
+    profile: Optional[str] = None
+
+
+@dataclass
+class MobInstructionWriteResult:
+    """Response payload for `mob/set_instruction` and `mob/revoke_instruction`,
+returned once the committed record is durable in the mob's journal.
+Delivery to the members is asynchronous: `mob/instruction_status` reports
+it."""
+    disposition: WireMobInstructionDisposition
+    generation: int
+    key: str
+    matched_members: int
+    mob_id: str
+    namespace: str
+    revision: int
+
+
+@dataclass
+class MobInstructionStatusResult:
+    """Response payload for `mob/instruction_status`. Reads the committed session
+documents and never wakes or materializes a member."""
+    desired: list[WireInstructionRecord]
+    generation: int
+    members: list[WireMemberInstructionStatus]
+    mob_id: str
+    next_offset: Optional[int] = None
+
+
+@dataclass
+class WireCanonicalPart:
+    """One canonical part of a rendering: consecutive byte ranges on character
+boundaries of at most the presenter's part size, each with its own
+digest."""
+    count: int
+    index: int
+    part_digest: str
+
+
+@dataclass
+class WirePresentationRecord:
+    """One recorded presentation of a decision's rendering."""
+    at_ms: int
+    audience: WirePresentationAudience
+    channel_ref: str
+    message_ref: str
+    parts_shown: list[WireCanonicalPart]
+    subject_digest: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class WireDecisionOutcome:
+    """A decided decision's outcome: who decided, and the evidence."""
+    evidence: WireDecisionEvidence
+    tier: WireDecisionTier
+
+
+@dataclass
+class WireDecision:
+    """One durable decision, as its row stands at the read."""
+    approver_id: str
+    created_at_ms: int
+    deadline_at_ms: int
+    decision_id: str
+    kind: str
+    notice: WireDecisionNoticeState
+    operation_id: str
+    permit_issued: bool
+    phase: WireDecisionPhase
+    renderer: str
+    request_digest: str
+    requester: str
+    revision: int
+    stage: WireDecisionStage
+    subject_digest: str
+    subject_key: str
+    decided_at_ms: Optional[int] = None
+    ended_at_ms: Optional[int] = None
+    execution_refusal: Optional[str] = None
+    first_presented_to_approver_at_ms: Optional[int] = None
+    outcome: Optional[WireDecisionOutcome] = None
+    presentations: Optional[list[WirePresentationRecord]] = None
+    request: Optional[Any] = None
+    reviewer: Optional[str] = None
+
+
+@dataclass
+class WireUnreadableDecision:
+    """A stored decision row the server cannot read (written by a newer
+version, or torn). Nothing executes it."""
+    decision_id: str
+    detail: str
+
+
+@dataclass
+class DecisionPresentationRequest:
+    """What a host presenter showed. Closed."""
+    at_ms: int
+    audience: DecisionAudienceRequest
+    channel_ref: str
+    message_ref: str
+    parts_shown: list[WireCanonicalPart]
+    subject_digest: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class DecisionListParams:
+    """`decision/list` parameters: every field set must match. The page holds
+at most `limit` decisions (100 when absent, at most 500), in decision id
+order after `after`."""
+    after: Optional[str] = None
+    approver_id: Optional[str] = None
+    kind: Optional[str] = None
+    limit: Optional[int] = None
+    phase: Optional[WireDecisionPhase] = None
+    requester: Optional[str] = None
+
+
+@dataclass
+class DecisionListResult:
+    """`decision/list` result. Each decision is read at the server's clock: one
+past its deadline reads as expired."""
+    decisions: list[WireDecision]
+    next_after: Optional[str] = None
+    unreadable: Optional[list[WireUnreadableDecision]] = None
+
+
+@dataclass
+class DecisionGetParams:
+    """`decision/get` parameters."""
+    decision_id: str
+    include_request: Optional[bool] = None
+
+
+@dataclass
+class DecisionResult:
+    """The result of `decision/get`, `decision/present`, `decision/withdraw`
+and `decision/decide`: the decision as it stands after the call."""
+    decision: WireDecision
+
+
+@dataclass
+class DecisionRenderingParams:
+    """`decision/rendering` parameters. `max_part_bytes` splits the rendering
+into canonical parts of at most that many bytes; absent, it is one part."""
+    decision_id: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class DecisionRenderingResult:
+    """`decision/rendering` result: the one canonical rendering of the held
+request and its canonical parts for the asked part size."""
+    decision_id: str
+    parts: list[WireCanonicalPart]
+    renderer: str
+    rendering: str
+    subject_digest: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class DecisionPresentParams:
+    """`decision/present` parameters: record what a host presenter showed. It
+counts only when it shows every canonical part of the held rendering to
+the party that decides now."""
+    decision_id: str
+    presentation: DecisionPresentationRequest
+
+
+@dataclass
+class DecisionWithdrawParams:
+    """`decision/withdraw` parameters: the connection withdraws as the host."""
+    decision_id: str
+
+
+@dataclass
+class WireDecisionNoticePresentation:
+    """The rendering a `presented` notice showed: the decision's whole
+rendering, its renderer and digest, and its canonical parts (one part:
+the whole rendering)."""
+    parts: list[WireCanonicalPart]
+    renderer: str
+    rendering: str
+    subject_digest: str
+
+
+@dataclass
+class WireDecisionNotice:
+    """`decision/notice` parameters: what an `rkat-rpc` stdio connection showed
+its operator about one durable decision. When its client lists
+(`decision/list`), the connection presents each open decision of the
+returned page that is addressed to an approver id its operator acts for
+and that it has not presented yet: it writes a `presented` notice
+carrying the whole rendering, then records that presentation (to the
+approver, with this notice's id as its message reference) before it
+answers the list. A notice grants nothing: the operator decides with
+`decision/decide` on the same connection."""
+    approver_id: str
+    decision_id: str
+    event: WireDecisionNoticeEvent
+    kind: str
+    notice_id: str
+    phase: WireDecisionPhase
+    requester: str
+    presentation: Optional[WireDecisionNoticePresentation] = None
 
 
 # Private host/gateway execution declaration for a callback tool.
@@ -7354,7 +7999,7 @@ WireNonPortableResourceKind = Literal['rust_bundles', 'per_spawn_external_tools'
 
 # Why a member status read carries no observation of the member's session
 # view.
-WireMemberPreviewUnavailable = Literal['observation_deadline', 'read_failed', 'session_absent', 'not_observed_while_retiring']
+WireMemberPreviewUnavailable = Literal['observation_deadline', 'read_failed', 'session_absent', 'not_observed_while_retiring', 'store_refused']
 
 # The member registration hook call that refused a restored member's
 # registration.
@@ -9140,6 +9785,7 @@ class BridgeCommandMaterializeMember(TypedDict, total=False):
     fence_token: Required[int]
     forked_participant_attachment: NotRequired[Optional[dict[str, Any]]]
     generation: Required[int]
+    instruction_target: NotRequired[Optional[dict[str, Any]]]
     launch: Required[dict[str, Literal['fresh']] | dict[str, Any]]
     prompt_context_fork: NotRequired[Optional[dict[str, Any]]]
     protocol_version: Required[BridgeProtocolVersion]
@@ -9255,7 +9901,26 @@ class BridgeCommandReadMemberVisibleTools(TypedDict, total=False):
     protocol_version: Required[BridgeProtocolVersion]
     supervisor: Required[BridgePeerSpec]
 
-BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools
+class BridgeCommandRecordMemberInstructionTarget(TypedDict, total=False):
+    binding_generation: Required[int]
+    command: Required[Literal['record_member_instruction_target']]
+    epoch: Required[int]
+    member: Required[BridgeMemberIncarnation]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+    target: Required[dict[str, Any]]
+
+class BridgeCommandReleaseMemberInstructionTarget(TypedDict, total=False):
+    agent_identity: Required[str]
+    binding_generation: Required[int]
+    command: Required[Literal['release_member_instruction_target']]
+    epoch: Required[int]
+    member_session_id: Required[str]
+    mob_id: Required[str]
+    protocol_version: Required[BridgeProtocolVersion]
+    supervisor: Required[BridgePeerSpec]
+
+BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools | BridgeCommandRecordMemberInstructionTarget | BridgeCommandReleaseMemberInstructionTarget
 
 # Outcome of a delivery attempt.
 class BridgeDeliveryOutcomeAccepted(TypedDict, total=False):
@@ -9449,7 +10114,13 @@ class BridgeRejectionCauseForkInstructionRefusedPayload(TypedDict, total=False):
 class BridgeRejectionCauseForkInstructionRefused(TypedDict, total=False):
     fork_instruction_refused: Required[BridgeRejectionCauseForkInstructionRefusedPayload]
 
-BridgeRejectionCause = Literal['forked_participant_not_found'] | Literal['forked_participant_tampered'] | Literal['forked_participant_expired'] | Literal['forked_participant_revoked'] | Literal['forked_participant_exhausted'] | Literal['forked_participant_busy'] | Literal['forked_participant_source_mismatch'] | Literal['forked_participant_route_mismatch'] | Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['forked_participant_protocol_unsupported'] | Literal['forked_participant_cleanup_debt'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused
+class BridgeRejectionCauseInstructionTargetRefusedPayload(TypedDict, total=False):
+    code: Required[Literal['invalid_request', 'digest_mismatch', 'stale_revision', 'revision_conflict', 'unknown_slot', 'slot_limit_exceeded', 'body_too_large', 'active_set_budget_exceeded', 'owned_by_mob', 'owned_by_session', 'owned_by_other_mob', 'slot_managed_by_activation', 'durability_unavailable', 'mob_terminal', 'malformed_instruction_history', 'prepared_authorization_required']]
+
+class BridgeRejectionCauseInstructionTargetRefused(TypedDict, total=False):
+    instruction_target_refused: Required[BridgeRejectionCauseInstructionTargetRefusedPayload]
+
+BridgeRejectionCause = Literal['forked_participant_not_found'] | Literal['forked_participant_tampered'] | Literal['forked_participant_expired'] | Literal['forked_participant_revoked'] | Literal['forked_participant_exhausted'] | Literal['forked_participant_busy'] | Literal['forked_participant_source_mismatch'] | Literal['forked_participant_route_mismatch'] | Literal['not_bound'] | Literal['stale_supervisor'] | Literal['sender_mismatch'] | Literal['already_bound'] | Literal['invalid_bootstrap_token'] | Literal['unsupported_protocol_version'] | Literal['forked_participant_protocol_unsupported'] | Literal['forked_participant_cleanup_debt'] | Literal['invalid_supervisor_spec'] | Literal['invalid_peer_spec'] | Literal['address_mismatch'] | Literal['unsupported'] | Literal['internal'] | Literal['bind_admission_outcome_unknown'] | Literal['stale_fence'] | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | Literal['unavailable'] | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | Literal['spec_digest_mismatch'] | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | Literal['realm_backend_unavailable'] | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | Literal['live_transport_unavailable'] | Literal['live_channel_already_bound'] | Literal['live_channel_not_found'] | BridgeRejectionCauseLiveTransportUnsupported | Literal['resume_session_not_found'] | BridgeRejectionCauseCapabilityMissing | Literal['launch_mode_unsupported'] | Literal['launch_mode_placement_mismatch'] | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused | BridgeRejectionCauseInstructionTargetRefused
 
 # A typed reply from a member runtime (or mob host daemon) back to the
 # supervisor, and — for `MemberOperatorReply` — from the controlling host
@@ -9630,7 +10301,16 @@ class BridgeReplyMemberVisibleTools(TypedDict, total=False):
     names: NotRequired[Optional[list[str]]]
     result: Required[Literal['member_visible_tools']]
 
-BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools
+class BridgeReplyMemberInstructionTargetRecorded(TypedDict, total=False):
+    disposition: Required[Literal['recorded', 'already_recorded']]
+    result: Required[Literal['member_instruction_target_recorded']]
+    target_generation: Required[int]
+
+class BridgeReplyMemberInstructionTargetReleased(TypedDict, total=False):
+    disposition: NotRequired[Optional[Literal['released', 'already_unowned']]]
+    result: Required[Literal['member_instruction_target_released']]
+
+BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools | BridgeReplyMemberInstructionTargetRecorded | BridgeReplyMemberInstructionTargetReleased
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #

@@ -547,6 +547,12 @@ function handleEvent(event: AgentEvent): string {
       return `${event.type}:${event.run_id}:${event.axis}:${event.results
         .map((result) => `${result.tool_name}/${result.tool_use_id}:${result.kept_bytes}/${result.total_bytes}`)
         .join(',')}`;
+    case 'operator_instructions_applied':
+      // An observation of one applied operator-instruction entry: a delta
+      // a fresh run start appended (its `run_id` and `changes`) or a
+      // compaction's snapshot, with the whole active set after it. The
+      // session's instruction status read is the authority.
+      return `${event.type}:${event.session_id}:${event.entry_sequence}:${event.kind}:${event.run_id ?? 'none'}:${(event.active ?? []).length}:${(event.changes ?? []).length}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

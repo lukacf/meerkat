@@ -21,7 +21,7 @@ from .errors import (
     meerkat_error_from_jsonrpc_code,
 )
 from .events import Event, StreamTruncated, TextDelta
-from .tools import ToolCallDedupeKey
+from .tools import ToolCallDedupeKey, ToolCallRequester
 
 if TYPE_CHECKING:
     from .session import Session
@@ -422,12 +422,17 @@ class _StdoutDispatcher:
             # Present when an agent-loop round dispatched the call; absent or
             # unparseable is no key, never a failed call.
             dedupe_key = ToolCallDedupeKey.from_wire(params.get("dedupe_key"))
-            if dedupe_key is None:
-                content, is_error = await self._tool_handler.handle(tool_name, arguments)
-            else:
-                content, is_error = await self._tool_handler.handle(
-                    tool_name, arguments, dedupe_key=dedupe_key
-                )
+            # The runtime names the run's requester here, never in the
+            # arguments; absent or malformed is no requester.
+            requester = ToolCallRequester.from_wire(params.get("requester"))
+            keywords: dict[str, Any] = {}
+            if dedupe_key is not None:
+                keywords["dedupe_key"] = dedupe_key
+            if requester is not None:
+                keywords["requester"] = requester
+            content, is_error = await self._tool_handler.handle(
+                tool_name, arguments, **keywords
+            )
             response = {
                 "jsonrpc": "2.0",
                 "id": request_id,

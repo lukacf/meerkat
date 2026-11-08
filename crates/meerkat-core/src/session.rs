@@ -5658,6 +5658,7 @@ impl Session {
             messages_after: self.messages.len(),
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         };
         self.add_compaction_projection_intent(intent.clone())
             .map_err(|error| error.to_string())?;
@@ -12138,6 +12139,7 @@ mod tests {
                     run_id: Some(crate::lifecycle::RunId::new()),
                     objective_id: None,
                     turn_input: None,
+                    requester: None,
                 },
                 created_at: base_time,
                 assistant_message_id: None,
@@ -12156,6 +12158,7 @@ mod tests {
                         run_id: Some(crate::lifecycle::RunId::new()),
                         objective_id: None,
                         turn_input: None,
+                        requester: None,
                     };
                     assistant.created_at = base_time + chrono::Duration::hours(2);
                 }

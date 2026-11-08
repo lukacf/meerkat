@@ -411,6 +411,53 @@ struct SourceRecord {
         Option<meerkat_authorization_contracts::work_association::InputAuthorityAssociation>,
 }
 
+impl SourceRecord {
+    /// The governed work a peer delivery was sent under, when governed work
+    /// sent it in process.
+    fn governed_peer(&self) -> Option<&peer_ingress::GovernedPeerFacts> {
+        self.peer_ingress
+            .as_ref()
+            .and_then(peer_ingress::PeerSource::governed)
+    }
+    /// The requester this original is bound under: the sending work's for a
+    /// delivery that governed work sent, else its route's.
+    fn bound_requester(&self) -> &PrincipalRef {
+        self.governed_peer().map_or(
+            &self.source.requester,
+            peer_ingress::GovernedPeerFacts::requester,
+        )
+    }
+    /// The ingress actor this original is bound under: the sending agent for
+    /// a delivery that governed work sent, else its route's.
+    fn bound_ingress_actor(&self) -> &PrincipalRef {
+        self.governed_peer().map_or(
+            &self.source.ingress_actor,
+            peer_ingress::GovernedPeerFacts::sending_agent,
+        )
+    }
+    /// The contributors this original's binding names: the sending work of
+    /// a delivery that governed work sent, else the event's contributors
+    /// under its route's source authority.
+    fn bound_contributors(
+        &self,
+    ) -> Vec<meerkat_authorization_contracts::work_association::OriginalWorkRef> {
+        match self.governed_peer() {
+            Some(governed) => governed.sending_work().to_vec(),
+            None => self
+                .event
+                .contributors
+                .iter()
+                .map(
+                    |work| meerkat_authorization_contracts::work_association::OriginalWorkRef {
+                        authority: self.source.source_authority.clone(),
+                        work: work.clone(),
+                    },
+                )
+                .collect(),
+        }
+    }
+}
+
 /// Process-local custody alongside the existing canonical original. Native
 /// unresolved submissions remain here until their native owner can settle them.
 /// This is neither another input ledger nor a permission or completion record.
@@ -1674,8 +1721,8 @@ impl PrivateOriginals {
             || c.ingress_namespace.occurrence_scope != record.event.occurrence
             || c.ingress_namespace.realm != route.realm
             || c.ingress_namespace.ingress != route.ingress
-            || c.requester != route.requester
-            || c.ingress_actor != route.ingress_actor
+            || c.requester != *record.bound_requester()
+            || c.ingress_actor != *record.bound_ingress_actor()
             || c.represented_subject != route.represented_subject
             || c.logical_executor != route.logical_executor
             || c.original_work.authority != route.source_authority
@@ -1685,13 +1732,7 @@ impl PrivateOriginals {
                 &record.event.original_authentication,
             )
             || !evidence_matches(&c.root_event, &route.event_domain, &record.event.root_event)
-            || c.contributing_work.len() != record.event.contributors.len()
-            || c.contributing_work
-                .iter()
-                .zip(&record.event.contributors)
-                .any(|(actual, expected)| {
-                    actual.authority != route.source_authority || &actual.work != expected
-                })
+            || c.contributing_work != record.bound_contributors()
         {
             return Err(OriginalWriterError::WrongOwner);
         }

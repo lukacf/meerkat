@@ -428,7 +428,17 @@ fn uncertain_write_makes_the_owner_unavailable_and_invalidates_observations() {
             try_issue(&owner, "uncertain"),
             Err(GrantRefusal::Unavailable)
         );
-        assert_eq!(state(&owner), before, "the candidate is never installed");
+        let after = state(&owner);
+        assert_eq!(
+            after.lifecycle_phase,
+            dsl::GrantAuthorityPhase::Uncertain,
+            "the owner's custody ends at the uncertain append"
+        );
+        assert_eq!(
+            (&after.records, after.revision, &after.revoked),
+            (&before.records, before.revision, &before.revoked),
+            "the candidate is never installed"
+        );
         assert_eq!(
             resolved.check_current(),
             Err(PublicationError::Changed),
@@ -824,6 +834,158 @@ fn a_lookup_waiting_behind_an_uncertain_append_is_unavailable() {
             "never a stale answer from memory the uncertain append left unchanged"
         );
     });
+}
+
+/// The close of an owner's host while a task of that host still holds a
+/// reference to the owner: the store restores at once, the straggler's later
+/// changes and uses are refused without extending the lease, and the
+/// successor never sees them. `opener` gives a fresh opener of the same store.
+fn release_while_referenced(opener: impl Fn() -> Arc<dyn GrantOwnerStore>) {
+    let owner = Arc::new(durable(opener()));
+    let kept = issue(&owner, "kept");
+    let ((), stamp) = owner.publication.observe(|| ()).expect("stamp");
+    let straggler = Arc::clone(&owner);
+    owner
+        .release_custody()
+        .expect("the host's close releases custody");
+    drop(owner);
+    assert_eq!(
+        stamp.check_current(),
+        Err(PublicationError::Changed),
+        "an observation taken before the close is not current after it"
+    );
+
+    let successor = restart(opener()).expect("the released store restores at once");
+    assert_eq!(
+        try_issue(&straggler, "late"),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert_eq!(
+        straggler.revoke(&who("root"), &kept, &mut IsolatedGrantTestCustody),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert!(matches!(
+        straggler.resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None),
+        Err(GrantRefusal::Unavailable)
+    ));
+    assert_eq!(
+        straggler.issued_reference(&id("kept")),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert_eq!(
+        straggler.release_custody(),
+        Ok(()),
+        "a second close releases nothing more"
+    );
+    successor
+        .resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None)
+        .expect("the successor keeps every acknowledged grant");
+    issue(&successor, "after");
+    drop(straggler);
+    assert!(
+        matches!(
+            restart(opener()),
+            Err(GrantDurabilityError::StoreUnavailable)
+        ),
+        "dropping the straggler leaves the successor's lease intact"
+    );
+    drop(successor);
+
+    let last = restart(opener()).expect("restore after the successor");
+    assert!(!state(&last).records.contains_key(&id("late")));
+    assert!(state(&last).records.contains_key(&id("after")));
+}
+
+#[test]
+fn a_released_owner_frees_its_lease_while_a_reference_is_still_held() {
+    let shared = Arc::new(InMemoryGrantOwnerStore::new());
+    release_while_referenced(|| -> Arc<dyn GrantOwnerStore> { shared.clone() });
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("grant-owner.jsonl");
+    release_while_referenced(|| -> Arc<dyn GrantOwnerStore> {
+        Arc::new(FileGrantOwnerStore::new(&path))
+    });
+}
+
+/// An owner whose append was uncertain refuses every later change and use,
+/// and its host's close still hands its lease back while another reference
+/// to it is held: a successor restores what the store retained at once.
+#[test]
+fn an_uncertain_owner_still_releases_its_lease_at_close() {
+    for outcome in [Append::UncertainLanded, Append::UncertainLost] {
+        let store = Scripted::new();
+        let owner = Arc::new(durable(store.clone()));
+        let kept = issue(&owner, "kept");
+        store.set(outcome);
+        assert_eq!(
+            try_issue(&owner, "uncertain"),
+            Err(GrantRefusal::Unavailable)
+        );
+        store.set(Append::Acknowledge);
+        assert_eq!(
+            state(&owner).lifecycle_phase,
+            dsl::GrantAuthorityPhase::Uncertain
+        );
+        assert_eq!(try_issue(&owner, "after"), Err(GrantRefusal::Unavailable));
+        assert!(matches!(
+            restart(store.clone()),
+            Err(GrantDurabilityError::StoreUnavailable)
+        ));
+
+        let straggler = Arc::clone(&owner);
+        owner
+            .release_custody()
+            .expect("the host's close releases custody");
+        drop(owner);
+        assert_eq!(
+            state(&straggler).lifecycle_phase,
+            dsl::GrantAuthorityPhase::Released
+        );
+        let successor = restart(store.clone()).expect("the released store restores at once");
+        successor
+            .resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None)
+            .expect("the acknowledged grant survives");
+        let landed = state(&successor).records.contains_key(&id("uncertain"));
+        assert_eq!(landed, outcome == Append::UncertainLanded);
+        assert!(!state(&successor).records.contains_key(&id("after")));
+        assert_eq!(
+            straggler.issued_reference(&id("kept")),
+            Err(GrantRefusal::Unavailable)
+        );
+    }
+}
+
+/// A revoke on an owner whose custody ended answers `Unavailable` for every
+/// caller, before the controller mutation custody is entered: a caller who
+/// could not revoke is not told `Denied`, and the configured root never
+/// reaches the controller custody.
+#[test]
+fn a_released_owner_refuses_every_revoke_before_the_controller_custody() {
+    struct NeverEntered;
+    impl ControllerGrantMutationCustody for NeverEntered {
+        fn with_unreferenced_controller_grant<T, E>(
+            &mut self,
+            _reference: &GrantLineageRef,
+            _mutate: impl FnOnce() -> Result<T, E>,
+        ) -> Result<Result<T, E>, ControllerCustodyRefusal> {
+            Err(ControllerCustodyRefusal::ControllerInUse)
+        }
+    }
+    let owner = durable(Arc::new(InMemoryGrantOwnerStore::new()));
+    let kept = issue(&owner, "kept");
+    owner
+        .release_custody()
+        .expect("the host's close releases custody");
+    assert_eq!(
+        owner.revoke(&who("stranger"), &kept, &mut NeverEntered),
+        Err(GrantRefusal::Unavailable),
+        "a caller who could not revoke learns only that the owner is unavailable"
+    );
+    assert_eq!(
+        owner.revoke(&who("root"), &kept, &mut NeverEntered),
+        Err(GrantRefusal::Unavailable),
+        "the configured root never enters the controller custody"
+    );
 }
 
 /// A conjunct window open far beyond the fixture clock.

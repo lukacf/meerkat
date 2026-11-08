@@ -347,24 +347,32 @@ async fn run_implicit_delegate_retirement(
                     .clone();
                 let retire_result = if is_primary_mob {
                     if let Some(identity_runtime) = identity_runtime.as_ref() {
-                        if let Some(durable_identity) = identity_runtime
+                        match identity_runtime
                             .identity_for_member_mutation(&public_alias)
                             .await
                         {
-                            identity_runtime
+                            Ok(Some(durable_identity)) => identity_runtime
                                 .retire_member_alias_tracked(&durable_identity, &public_alias)
                                 .await
-                                .map_err(|error| error.to_string())
-                        } else if crate::member_comms_id::is_reserved_generated_alias(&public_alias)
-                        {
-                            Err(format!(
-                                "generated alias is not owned by IdentityRuntime: {public_alias}"
-                            ))
-                        } else {
-                            handle
+                                .map_err(|error| error.to_string()),
+                            // Core holds the name for an identity the runtime
+                            // has not registered, or its entry could not be
+                            // read: never a raw retire on a read that could
+                            // not tell.
+                            Err(error) => Err(error.to_string()),
+                            Ok(None)
+                                if crate::member_comms_id::is_reserved_generated_alias(
+                                    &public_alias,
+                                ) =>
+                            {
+                                Err(format!(
+                                    "generated alias is not owned by IdentityRuntime: {public_alias}"
+                                ))
+                            }
+                            Ok(None) => handle
                                 .retire(AgentIdentity::from(identity.as_str()))
                                 .await
-                                .map_err(|error| error.to_string())
+                                .map_err(|error| error.to_string()),
                         }
                     } else if crate::member_comms_id::is_reserved_generated_alias(&public_alias) {
                         Err(format!(
@@ -1145,21 +1153,25 @@ comms = true
 
         let identity = DurableIdentity::parse("domain:late-bound").expect("identity");
         // Seated at the roster row of its durable identity, as identity-first
-        // materialization seats it: Core's journal binds the member there.
+        // materialization seats it, under the durable-identity continuity
+        // marker: Core's journal binds the member there, and the declaration
+        // of the identity's registration adopts it.
         let roster_member =
             crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
         let handle = runtime.mob_handle();
+        let mut member_spec = meerkat_mob::SpawnMemberSpec::new(
+            meerkat_mob::ProfileName::from("worker"),
+            roster_member.clone(),
+        )
+        .with_labels(BTreeMap::from([(
+            DELEGATE_IDLE_RETIRE_SECS_LABEL.to_string(),
+            "0".to_string(),
+        )]));
+        member_spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: roster_member.to_string(),
+        };
         handle
-            .ensure_member(
-                meerkat_mob::SpawnMemberSpec::new(
-                    meerkat_mob::ProfileName::from("worker"),
-                    roster_member.clone(),
-                )
-                .with_labels(BTreeMap::from([(
-                    DELEGATE_IDLE_RETIRE_SECS_LABEL.to_string(),
-                    "0".to_string(),
-                )])),
-            )
+            .ensure_member(member_spec)
             .await
             .expect("spawn pre-attached identity member");
 
@@ -1189,7 +1201,10 @@ comms = true
             binding: None,
             placement: None,
         };
-        identity_runtime.register(spec.clone()).await;
+        identity_runtime
+            .register(spec.clone())
+            .await
+            .expect("the identity registers");
         // The identity's retirement hook hears of each retire made through
         // the identity authority; a raw retire of the member tells it nothing.
         let (retired_tx, mut retirements) = tokio::sync::mpsc::unbounded_channel();
@@ -2069,7 +2084,10 @@ comms = true
             binding: None,
             placement: None,
         };
-        identity_runtime.register(spec.clone()).await;
+        identity_runtime
+            .register(spec.clone())
+            .await
+            .expect("the identity registers");
         runtime.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(
             Arc::clone(&identity_runtime),
             Arc::new(FixedRoster(vec![spec])),

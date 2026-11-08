@@ -253,6 +253,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_steer_delivered_by_continuation`: `Map<String, Bool>`
 - `live_delegation_operation_by_interaction`: `Map<String, OperationId>`
 - `live_delegation_channel_by_operation`: `Map<OperationId, String>`
+- `live_delegation_member_turn_reasoning_by_operation`: `Map<OperationId, LiveMemberTurnReasoning>`
+- `live_delegation_intake_closed_channels`: `Set<String>`
 - `live_delegation_schedule_state_by_operation`: `Map<OperationId, LiveDelegationScheduleState>`
 - `live_delegation_active_worker_count_by_channel`: `Map<String, u64>`
 - `live_delegation_channel_worker_cap`: `u64`
@@ -915,6 +917,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReleaseInputController`(input_id: String)
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
+- `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
+- `SettleRetainedRun`(run_id: Option<RunId>)
+- `CloseLiveDelegationIntake`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `BindInputRequesterBatchKey`(input_id: String, authority_batch_key: String)
 
 ## Signals
 - `Initialize`
@@ -1190,6 +1196,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeRegistrationReleased`(agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 - `InputControllerReleased`
+- `RetainedRunSettleResolved`(verdict: RetainedRunSettleVerdict, run_id: Option<RunId>)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1306,11 +1313,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `StageForRun`
 - Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
 - Guard Expansion:
-  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
 - Emitted By Transitions: `RecordRunAssociation`
 
 ### `AuthorizedResumedRun`
@@ -2922,6 +2929,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -2930,6 +2938,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -2938,6 +2947,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestFiniteSwitchTurn`(request_id, target_model, turns, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -2946,6 +2956,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -2954,6 +2965,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -2962,6 +2974,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
 - Guards:
   - `transcript_not_carried`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -2972,6 +2985,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -2982,6 +2996,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -2992,6 +3007,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -3002,6 +3018,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
@@ -3012,6 +3029,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
@@ -3022,6 +3040,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Running`
 
@@ -3031,6 +3050,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `transcript_carried`
   - `scoped_conflict`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -3040,6 +3060,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `transcript_carried`
   - `scoped_conflict`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -3049,6 +3070,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `transcript_carried`
   - `scoped_conflict`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -3061,6 +3083,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `positive_turns`
   - `approval_satisfied`
   - `no_scoped_conflict`
+  - `request_not_denied`
 - To: `Idle`
 
 ### `RequestFiniteSwitchTurnAcceptedAttached`
@@ -3072,6 +3095,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `positive_turns`
   - `approval_satisfied`
   - `no_scoped_conflict`
+  - `request_not_denied`
 - To: `Attached`
 
 ### `RequestFiniteSwitchTurnAcceptedRunning`
@@ -3083,6 +3107,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `positive_turns`
   - `approval_satisfied`
   - `no_scoped_conflict`
+  - `request_not_denied`
 - To: `Running`
 
 ### `RequestUntilChangedSwitchTurnAcceptedIdle`
@@ -3092,6 +3117,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
+  - `no_other_pending_switch`
+  - `request_not_denied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
 - To: `Idle`
 
@@ -3102,6 +3129,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
+  - `no_other_pending_switch`
+  - `request_not_denied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
 - To: `Attached`
 
@@ -3112,6 +3141,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_satisfied`
+  - `no_other_pending_switch`
+  - `request_not_denied`
 - Emits: `SwitchTurnPersistentReconfigureRequested`
 - To: `Running`
 
@@ -3122,6 +3153,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Idle`
 
@@ -3132,6 +3164,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Attached`
 
@@ -3142,6 +3175,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `baseline_known`
   - `approval_unavailable`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`
 - To: `Running`
 
@@ -3152,6 +3186,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Idle`
 
@@ -3162,6 +3197,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
 - To: `Attached`
 
@@ -3172,7 +3208,38 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `transcript_carried`
   - `approval_denied`
   - `approval_reason_present`
+  - `request_not_pending`
 - Emits: `SwitchTurnDenied`, `ModelRoutingApprovalTerminalized`
+- To: `Running`
+
+### `RequestUntilChangedSwitchTurnPendingConflictIdle`
+- From: `Idle`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_carried`
+  - `approval_satisfied`
+  - `pending_switch_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Idle`
+
+### `RequestUntilChangedSwitchTurnPendingConflictAttached`
+- From: `Attached`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_carried`
+  - `approval_satisfied`
+  - `pending_switch_conflict`
+- Emits: `SwitchTurnDenied`
+- To: `Attached`
+
+### `RequestUntilChangedSwitchTurnPendingConflictRunning`
+- From: `Running`
+- On: `RequestUntilChangedSwitchTurn`(request_id, target_model, target_realtime_capable, requires_approval, approval_available, approval_denied, approval_reason, realtime_detach_allowed, target_carries_transcript)
+- Guards:
+  - `transcript_carried`
+  - `approval_satisfied`
+  - `pending_switch_conflict`
+- Emits: `SwitchTurnDenied`
 - To: `Running`
 
 ### `CompleteUntilChangedSwitchTurnReconfigureIdle`
@@ -3198,6 +3265,57 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `pending_until_changed_reconfigure`
 - Emits: `ModelRoutingStatusChanged`
 - To: `Running`
+
+### `CompleteUntilChangedSwitchTurnReconfigureRetired`
+- From: `Retired`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Retired`
+
+### `CompleteUntilChangedSwitchTurnReconfigureStopped`
+- From: `Stopped`
+- On: `CompleteUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- Emits: `ModelRoutingStatusChanged`
+- To: `Stopped`
+
+### `AbortUntilChangedSwitchTurnReconfigureIdle`
+- From: `Idle`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Idle`
+
+### `AbortUntilChangedSwitchTurnReconfigureAttached`
+- From: `Attached`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Attached`
+
+### `AbortUntilChangedSwitchTurnReconfigureRunning`
+- From: `Running`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Running`
+
+### `AbortUntilChangedSwitchTurnReconfigureRetired`
+- From: `Retired`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Retired`
+
+### `AbortUntilChangedSwitchTurnReconfigureStopped`
+- From: `Stopped`
+- On: `AbortUntilChangedSwitchTurnReconfigure`(request_id)
+- Guards:
+  - `pending_until_changed_reconfigure`
+- To: `Stopped`
 
 ### `ImportCommittedModelRoutingHandoffFirstIdle`
 - From: `Idle`
@@ -9906,6 +10024,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `immutable_batch_key`
 - To: `Stopped`
 
+### `BindInputRequesterBatchKeyIdle`
+- From: `Idle`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Idle`
+
+### `BindInputRequesterBatchKeyAttached`
+- From: `Attached`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Attached`
+
+### `BindInputRequesterBatchKeyRunning`
+- From: `Running`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Running`
+
+### `BindInputRequesterBatchKeyRetired`
+- From: `Retired`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Retired`
+
+### `BindInputRequesterBatchKeyStopped`
+- From: `Stopped`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Stopped`
+
 ### `BindScopedContextIdle`
 - From: `Idle`
 - On: `BindScopedContext`(binding, scope, generation)
@@ -12832,6 +13000,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -12847,6 +13016,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -12862,6 +13032,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -12877,6 +13048,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -12892,6 +13064,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 
@@ -13466,6 +13639,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `current_run_matches`
   - `input_tracked`
+  - `live_join_same_requester`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `LiveBoundaryContextReceiptResolved`
 - To: `Running`
 
@@ -13512,6 +13687,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `live_join_input_is_ungoverned`
   - `live_join_run_is_ungoverned`
+  - `live_join_same_requester`
+  - `steer_lane_fifo_across_requesters`
   - `turn_at_model_boundary`
   - `no_cancel_after_boundary`
   - `run_not_stopped`
@@ -16457,6 +16634,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Idle`
 
@@ -16473,6 +16651,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Attached`
 
@@ -16489,6 +16668,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Running`
 
@@ -16504,6 +16684,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Idle`
 
@@ -16519,6 +16700,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Attached`
 
@@ -16534,6 +16716,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Running`
 
@@ -17643,6 +17826,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `schedule_state_is_queued`
   - `no_live_worker`
 - Emits: `LiveDelegationQueuedCancelled`
+- To: `Stopped`
+
+### `CloseLiveDelegationIntakeIdle`
+- From: `Idle`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Idle`
+
+### `CloseLiveDelegationIntakeAttached`
+- From: `Attached`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Attached`
+
+### `CloseLiveDelegationIntakeRunning`
+- From: `Running`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Running`
+
+### `CloseLiveDelegationIntakeRetired`
+- From: `Retired`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Retired`
+
+### `CloseLiveDelegationIntakeStopped`
+- From: `Stopped`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
 - To: `Stopped`
 
 ### `AuthorizeLiveDelegationNarrationIdle`
@@ -29142,6 +29370,214 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `input_controller_held`
 - Emits: `InputControllerReleased`
 - To: `Stopped`
+
+### `SettleRetainedRunAcceptedIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_not_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunAcceptedAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_not_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyRunCurrentInitializing`
+- From: `Initializing`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Initializing`
+
+### `SettleRetainedRunBusyRunCurrentIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunBusyRunCurrentAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyRunCurrentRunning`
+- From: `Running`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Running`
+
+### `SettleRetainedRunBusyRunCurrentRetired`
+- From: `Retired`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Retired`
+
+### `SettleRetainedRunBusyRunCurrentStopped`
+- From: `Stopped`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `run_current`
+- Emits: `RetainedRunSettleResolved`
+- To: `Stopped`
+
+### `SettleRetainedRunBusyDrainingIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunBusyDrainingAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_retained`
+  - `registration_draining`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyStaleRunIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_not_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunBusyStaleRunAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+  - `observed_run_not_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunBusyNotServingInitializing`
+- From: `Initializing`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Initializing`
+
+### `SettleRetainedRunBusyNotServingRunning`
+- From: `Running`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Running`
+
+### `SettleRetainedRunBusyNotServingRetired`
+- From: `Retired`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Retired`
+
+### `SettleRetainedRunBusyNotServingStopped`
+- From: `Stopped`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Stopped`
+
+### `SettleRetainedRunNotRetainedInitializing`
+- From: `Initializing`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Initializing`
+
+### `SettleRetainedRunNotRetainedIdle`
+- From: `Idle`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Idle`
+
+### `SettleRetainedRunNotRetainedAttached`
+- From: `Attached`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Attached`
+
+### `SettleRetainedRunNotRetainedRunning`
+- From: `Running`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Running`
+
+### `SettleRetainedRunNotRetainedRetired`
+- From: `Retired`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Retired`
+
+### `SettleRetainedRunNotRetainedStopped`
+- From: `Stopped`
+- On: `SettleRetainedRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_run_retained`
+- Emits: `RetainedRunSettleResolved`
+- To: `Stopped`
+
+### `SettleRetainedRunInertDestroyed`
+- From: `Destroyed`
+- On: `SettleRetainedRun`(run_id)
+- Emits: `RetainedRunSettleResolved`
+- To: `Destroyed`
 
 ## Coverage
 ### Code Anchors

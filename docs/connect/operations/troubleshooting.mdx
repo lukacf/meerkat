@@ -220,19 +220,18 @@ account. Inspect the host policy-owner integration and current source/lifetime
 state. An available consent route does not establish that this context is
 available.
 
-Core 0.9.6 has known forwarding omissions in two external-dispatcher filters.
-Both lose the owner's `review_entry_support` and `tool_mutation_class`, returning
-`Unsupported` and `Unknown` for every surviving tool, not only colliding or MCP
-names. Required review can refuse before consent, and read-only policy can deny
-owner-declared `ReadOnly` tools.
+Since Core 0.9.7 the two external-dispatcher filters pass each allowed tool's
+`review_entry_support` and `tool_mutation_class` through; only filtered-out tools
+answer `Unsupported` and `Unknown`:
 
 - A nonempty resolved profile `tools.mcp` restriction selects
   `McpProvenanceFilter` when the host supplies a default external dispatcher.
 - Actual tool-name collisions select `NameFilteredDispatcher` for a per-spawn
-  or default external dispatcher. A surviving tool can lose both declarations
-  even when its own name was not excluded.
+  or default external dispatcher.
 
-Inspect every wrapper in the dispatcher chain that actually owns the selected
+If required review still refuses before consent, or read-only policy denies an
+owner-declared `ReadOnly` tool, another wrapper in the chain may drop the
+declarations. Inspect every wrapper in the dispatcher chain that actually owns the selected
 tool, including profile overrides and routing precedence. Check the owner's
 native mutation declaration; a read-looking name or MCP annotation is not that
 declaration. The shared `setup_state` configured-MCP route is composed as a
@@ -240,10 +239,7 @@ sibling of those external dispatchers, so a `mcp_servers` entry alone does not
 establish filter exposure. See [host composition](/connect/guides/host-composition) and
 [native MCP attachment](/connect/guides/native-mcp).
 
-The release plan includes these forwarding fixes in Core 0.9.7, alongside Meta
-0.9.6's requirement for Core 0.9.7. Confirm the exact source identities and
-publication evidence before treating an installed release as fixed. Preserve
-exact Connect, Core and Meta versions or source revisions,
+Preserve exact Connect, Core and Meta versions or source revisions,
 archive hashes, tool name, resolved profile, operation and access policies, and
 the fixed error with a bounded, redacted composition trace for the maintainer.
 Keep policy unchanged while diagnosing: do not broaden `tools.mcp` or access,

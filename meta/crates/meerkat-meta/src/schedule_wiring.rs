@@ -1334,6 +1334,9 @@ enum IdentityFireRefusal {
 /// `identity`. Any refusal of a member Core holds broken is final, whatever
 /// its kind: the member does not clear on its own, and a final wake refusal
 /// of it (Core's restore failure) reaches the submit path as plain text.
+/// Whether Core holds it Broken is read from Core's entry of its name for
+/// the fire; a read Core could not serve leaves the fire reclaimable, never
+/// read as "not Broken".
 async fn classify_identity_fire_refusal(
     identity_runtime: &crate::identity_first::IdentityRuntime,
     identity: &crate::identity_first::AgentIdentity,
@@ -1347,20 +1350,20 @@ async fn classify_identity_fire_refusal(
         Refusal::IdentityUnresumable { .. } => {
             IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMaterializationFailed)
         }
-        _ => {
-            let broken = identity_runtime.status(identity).await.is_ok_and(|status| {
-                status.state == crate::identity_first::IdentityLifecycleState::Broken
-            });
-            if broken {
+        _ => match identity_runtime.core_entry_state(identity).await {
+            Ok(crate::identity_first::IdentityLifecycleState::Broken) => {
                 IdentityFireRefusal::Final(
                     meerkat::DeliveryFailureReason::TargetMaterializationFailed,
                 )
-            } else if error.clears_on_its_own() {
-                IdentityFireRefusal::Retry
-            } else {
-                IdentityFireRefusal::Rejected
             }
-        }
+            Ok(_) if error.clears_on_its_own() => IdentityFireRefusal::Retry,
+            Ok(_) => IdentityFireRefusal::Rejected,
+            // Unregistered since the refusal: no target to deliver to.
+            Err(Refusal::UnknownIdentity(_)) => {
+                IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMissing)
+            }
+            Err(_) => IdentityFireRefusal::Retry,
+        },
     }
 }
 
@@ -1391,10 +1394,43 @@ impl InternalDeliveryScheduleMobHost {
         // door). Decode-then-encode canonicalizes both spaces to the roster
         // key; it is the identity on plain member names.
         let member_alias = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
-        if let Some(identity_runtime) = self.identity_runtime.as_ref()
-            && let Some(identity) = identity_runtime
+        // A name the identity runtime refuses (Core holds it for an identity
+        // the runtime has not registered, or its entry could not be read)
+        // ends the fire typed, or leaves it reclaimable when the refusal
+        // clears on its own: never the raw member door.
+        let identity = match self.identity_runtime.as_ref() {
+            Some(identity_runtime) => match identity_runtime
                 .identity_for_member_mutation(&member_alias)
                 .await
+            {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let detail =
+                        format!("identity schedule delivery refused (member {member_id}): {error}");
+                    if error.clears_on_its_own() {
+                        return Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred {
+                            detail,
+                        }));
+                    }
+                    let reason = match error {
+                        crate::identity_first::IdentityRuntimeError::UnknownIdentity(_) => {
+                            meerkat::DeliveryFailureReason::TargetMissing
+                        }
+                        _ => meerkat::DeliveryFailureReason::RuntimeRejected,
+                    };
+                    return Some(Ok(immediate_delivery_failure(
+                        occurrence,
+                        detail,
+                        reason,
+                        Some(delivery_identity.correlation_id.clone()),
+                        None,
+                    )));
+                }
+            },
+            None => None,
+        };
+        if let Some(identity_runtime) = self.identity_runtime.as_ref()
+            && let Some(identity) = identity
         {
             // meerkat 0.8.15: the driver replays this exact identity on every
             // lease-expiry reclaim, and the identity dispatch path now
@@ -3670,11 +3706,18 @@ comms = true
             "precondition: identity-first roster ids are marker-encoded"
         );
         let roster_identity = meerkat_mob::ids::AgentIdentity::from(roster_id.clone());
+        // Seated under the durable-identity continuity marker, as
+        // identity-first materialization seats a member, so the declaration
+        // of the identity's registration below adopts it.
+        let mut member_spec = meerkat_mob::SpawnMemberSpec::new(
+            meerkat_mob::ProfileName::from("general"),
+            roster_identity.clone(),
+        );
+        member_spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: roster_id.clone(),
+        };
         handle
-            .ensure_member(meerkat_mob::SpawnMemberSpec::new(
-                meerkat_mob::ProfileName::from("general"),
-                roster_identity.clone(),
-            ))
+            .ensure_member(member_spec)
             .await
             .expect("spawn identity-first member");
         handle
@@ -3727,7 +3770,8 @@ comms = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("schedule-dedup-identity-carrier".to_string()),
@@ -3929,7 +3973,8 @@ external_addressable = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
 
         let schedule = Schedule::new(CreateScheduleRequest {
             name: Some("identity-no-bridge".to_string()),
@@ -3999,6 +4044,186 @@ external_addressable = true
             terminal.detail
         );
 
+        runtime.shutdown().await;
+    }
+
+    /// A schedule fire addressed to a name this runtime has not registered,
+    /// which Core holds for an identity, is answered at the internal door by
+    /// the identity's refusal, never by a member door: an identity created at
+    /// runtime (a created entry, which no roster pass of this runtime
+    /// registers) ends the fire `TargetMissing`, and an entry a host
+    /// declared, before this process's roster pass registered it, leaves the
+    /// fire reclaimable (`DeliveryRepairDeferred`). Nothing reaches either
+    /// member.
+    ///
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
+    /// (the fire is then not the internal door's, and falls back to the
+    /// surface's member door), or keep a final refusal reclaimable (the fire
+    /// of a created entry is then retried for good).
+    #[tokio::test]
+    async fn a_schedule_fire_to_an_unregistered_identity_name_ends_typed_or_stays_reclaimable() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let factory = AgentFactory::new(temp_dir.path()).comms(true);
+        let session_service = Arc::new(meerkat::build_ephemeral_service(
+            factory,
+            Config::default(),
+            4,
+        ));
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "schedule-unregistered"
+
+[profiles.general]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .expect("schedule test mob definition");
+        let mob_spec = crate::mob_handle_runtime::MobBootstrapSpec::new(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            session_service,
+        )
+        .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(meerkat_client::TestClient::for_provider(
+                meerkat_core::Provider::OpenAI,
+            ))),
+        });
+        let runtime = crate::UnifiedRuntime::bootstrap(
+            mob_spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: "schedule-unregistered".to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("bootstrap schedule test runtime");
+
+        let bridge = Arc::new(crate::identity_first::core_test_bridge::CoreReadsBridge::default());
+        let created =
+            crate::identity_first::AgentIdentity::parse("sched-created").expect("identity");
+        let declared =
+            crate::identity_first::AgentIdentity::parse("sched-declared").expect("identity");
+        // Core holds a member of the created entry and of the declared one.
+        for identity in [&created, &declared] {
+            crate::identity_first::core_test_bridge::bind_live(
+                &bridge.core,
+                identity,
+                &meerkat_mob::ProfileName::from("general"),
+                1,
+                Some(SessionId::new()),
+            )
+            .expect("Core's member");
+        }
+        bridge.hold_created(&created);
+        bridge.hold_declared(&declared);
+        // This process has run no roster pass: it registered nothing.
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("identity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-unregistered".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        let schedule = Schedule::new(CreateScheduleRequest {
+            name: Some("identity-unregistered".to_string()),
+            description: None,
+            trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("deliver".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("schedule");
+        let occurrence = Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("occurrence");
+        let host = InternalDeliveryScheduleMobHost {
+            inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
+            handle: runtime.mob_handle(),
+            identity_runtime: Some(identity_runtime),
+        };
+        let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        let content = meerkat_core::ContentInput::Text("deliver".to_string());
+
+        // A created entry: the fire ends typed, its target missing.
+        let dispatch = host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-unregistered",
+                "sched-created",
+                &content,
+            )
+            .await
+            .expect("the identity's refusal answers the fire, never a member door")
+            .expect("a final refusal ends the fire, it is not deferred");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(meerkat::DeliveryFailureReason::TargetMissing),
+            "{:?}",
+            terminal.detail
+        );
+
+        // A declared entry before its roster pass: the fire stays reclaimable.
+        match host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-unregistered",
+                "sched-declared",
+                &content,
+            )
+            .await
+        {
+            Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred { detail, .. })) => {
+                assert!(detail.contains("sched-declared"), "{detail}");
+            }
+            Some(Err(other)) => panic!("the fire stays reclaimable, not {other:?}"),
+            Some(Ok(_)) => panic!("the fire of an entry before its roster pass is deferred"),
+            None => panic!("the identity's refusal answers the fire, never a member door"),
+        }
+        assert!(
+            bridge.delivered().is_empty(),
+            "nothing reaches either member"
+        );
         runtime.shutdown().await;
     }
 
@@ -4193,7 +4418,8 @@ schedule = true
                         binding: None,
                         placement: None,
                     })
-                    .await;
+                    .await
+                    .expect("the identity registers");
                 Some(identity_runtime)
             } else {
                 None
@@ -7848,7 +8074,6 @@ schedule = true
         #[derive(Default)]
         struct FireCore {
             core: crate::identity_first::core_test_members::CoreTestMembers,
-            broken: std::sync::Mutex<BTreeMap<meerkat_mob::AgentIdentity, String>>,
         }
 
         #[async_trait::async_trait]
@@ -7900,17 +8125,12 @@ schedule = true
                 self.core.history()
             }
 
-            async fn broken_members(
+            async fn identity_entry(
                 &self,
-            ) -> Result<
-                BTreeMap<meerkat_mob::AgentIdentity, String>,
-                crate::identity_first::BridgeError,
-            > {
-                Ok(self
-                    .broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone())
+                identity: &crate::identity_first::AgentIdentity,
+            ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+            {
+                Ok(self.core.identity_entry(identity, false))
             }
 
             async fn deliver_admitted(
@@ -7940,6 +8160,18 @@ schedule = true
             ) -> Result<(), crate::identity_first::BridgeError> {
                 self.core.retire(runtime_id);
                 Ok(())
+            }
+
+            async fn apply_declared_roster(
+                &self,
+                roster: crate::identity_first::DeclaredRosterRequest,
+            ) -> Result<
+                crate::identity_first::DeclaredRosterAnswer,
+                crate::identity_first::BridgeError,
+            > {
+                Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                    &roster,
+                ))
             }
         }
 
@@ -7982,13 +8214,10 @@ schedule = true
             )
             .await?;
             if broken {
-                core.broken
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        crate::member_comms_id::roster_member_id_for_identity(alice.as_str()),
-                        "the session cannot be restored".to_string(),
-                    );
+                core.core.mark_broken(
+                    &alice,
+                    crate::identity_first::CoreBrokenMember::new("the session cannot be restored"),
+                );
             }
             let retryable = [
                 Refusal::IdentityHistoryUnavailable {
@@ -8076,6 +8305,86 @@ schedule = true
                 );
             }
         }
+        Ok(())
+    }
+
+    /// A schedule fire's refusal class comes from Core's entry of the
+    /// identity, read for the fire, never from a read that stood in for it.
+    /// While Core's member history cannot be read and Core holds the member
+    /// Broken, Core's final refusal of the member's wake ends the fire as a
+    /// member that cannot be materialized; and while Core's entry of the
+    /// identity cannot be read either, the fire stays reclaimable (retried),
+    /// never rejected.
+    ///
+    /// RED before the class read Core's entry: it read the identity's whole
+    /// status, took a read that failed for "not Broken", and rejected the
+    /// fire (`RuntimeRejected`) of a member Core holds Broken.
+    #[tokio::test]
+    async fn schedule_fire_refusal_class_comes_from_core_not_a_defaulted_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::identity_first::IdentityRuntimeError as Refusal;
+        use crate::identity_first::core_test_bridge::CoreReadsBridge;
+
+        let bridge = Arc::new(CoreReadsBridge::default());
+        let runtime = crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()?
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-fire-refusal-class".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        );
+        let alice = crate::identity_first::AgentIdentity::parse("personal:alice")?;
+        crate::identity_first::core_test_bridge::register_live(
+            &runtime,
+            &bridge.core,
+            crate::identity_first::DurableAgentSpec {
+                identity: alice.clone(),
+                profile: meerkat_mob::ProfileName::from("personal"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            },
+            1,
+            SessionId::new(),
+        )
+        .await?;
+        bridge.core.mark_broken(
+            &alice,
+            crate::identity_first::CoreBrokenMember::new("the member's restore failed"),
+        );
+        // Core's final refusal of the wake of a member it holds Broken, as
+        // the identity runtime answers it.
+        let refusal = Refusal::AdmissionFailed {
+            identity: alice.clone(),
+            detail: "Core holds the member Broken: its restore failed".to_string(),
+        };
+
+        bridge.fail_history_reads(0, u64::MAX);
+        assert_eq!(
+            classify_identity_fire_refusal(&runtime, &alice, &refusal).await,
+            IdentityFireRefusal::Final(meerkat::DeliveryFailureReason::TargetMaterializationFailed),
+            "Core's entry says the member is Broken: the fire ends typed"
+        );
+
+        bridge.fail_entry_reads(0, u64::MAX);
+        assert_eq!(
+            classify_identity_fire_refusal(&runtime, &alice, &refusal).await,
+            IdentityFireRefusal::Retry,
+            "an entry read Core could not serve leaves the fire reclaimable"
+        );
         Ok(())
     }
 }

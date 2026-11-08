@@ -27,6 +27,27 @@ export class MetaError extends Error {
   }
 }
 
+/** The kind of {@link DecideInsideToolCallbackError}. */
+export const DECIDE_INSIDE_TOOL_CALLBACK_KIND = "decide_inside_tool_callback";
+
+/**
+ * A durable decision's decide was called while this SDK serves a host tool
+ * callback. An agent's tool call must never become the operator's (or an
+ * attested person's) decision, so `decisionsDecide` refuses before anything
+ * is sent. Decide from the host's own code, outside the tool's handler.
+ */
+export class DecideInsideToolCallbackError extends MetaError {
+  readonly kind = DECIDE_INSIDE_TOOL_CALLBACK_KIND;
+
+  constructor() {
+    super(
+      "meta/decisions/decide is refused inside a host tool callback: an " +
+        "agent's tool call never decides a durable decision",
+    );
+    this.name = "DecideInsideToolCallbackError";
+  }
+}
+
 // -- Transport errors -----------------------------------------------------
 
 /** Raised when the transport layer fails (subprocess died, connection refused, etc.). */
@@ -465,6 +486,13 @@ export class ConsoleTimelineReplayUnavailableError extends RpcError {
  *   `waitingFor` says what it waits for, and `remedy` what to do:
  *   `"add_to_roster"` (no roster lists the identity) or `"wake_identity"`
  *   (the roster lists it and its row waits to be carried out). Retryable.
+ *
+ * A send, a dispatch or a member mutation by a name the gateway has not
+ * registered whose record Core cannot read (written by a newer release, or
+ * contradicted by the mob's journal) is refused for good with `kind`
+ * `"identity_name_unreadable"`, the name in `identity` and `remedy`
+ * `"repair_or_upgrade"`: repair the mob's store, or run a release that reads
+ * the record.
  *
  * `retryable` is `true` only when the gateway says so. The other fields are
  * `null` when the gateway did not send them; the full refusal stays

@@ -6,6 +6,7 @@ const os = require("node:os");
 const { randomUUID } = require("node:crypto");
 const { chromium } = require("playwright");
 const { startFixture, eventually, rpc, snapshot } = require("../acceptance-runtime.cjs");
+const { browserFailureMonitor, navigation } = require("./browser-failure-monitor.cjs");
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
 const answer = "Routine workspace review complete. Two initial reads succeeded, the missing file stayed visible, and the delayed review arrived intact.";
 const notes = "  Release notes\nKeep both spaces and this final newline.\n";
@@ -111,32 +112,29 @@ async function routineScenario(host) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), `meta-${host || "api"}-routine-`));
   const fixture = await startFixture({ mode: "identity", routineTools: true, stateDir });
   const result = { host: host || "api", runId: `routine-${randomUUID().slice(0, 8)}`, errors: [], checks: [] };
-  let browser, page, live; let initializing = true;
+  let browser, page, live, monitor;
   const viewport = () => page.locator(host === "stock" ? ".conv__body" : '[data-testid="shared-pane-0"] .cc-conversation-pane__scroll').first();
+  // An open or a reload aborts the requests of the document it replaces; the
+  // failure monitor accepts exactly those (and the new document's first stream
+  // and timeline read), and reports every other failed request.
   async function open(reload = false) {
-    initializing = true;
-    if (reload) await page.reload(); else await page.goto(fixture.baseUrl + (host === "stock" ? "/console" : "/shared"));
-    if (host === "stock" && !await page.locator(".conv__body").count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router/i }).first().click();
-    await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor();
-    await viewport().waitFor(); initializing = false;
+    await navigation(page, `${reload ? "reload" : "open"} ${host} routine tools host`, async () => {
+      const response = reload ? await page.reload() : await page.goto(fixture.baseUrl + (host === "stock" ? "/console" : "/shared"));
+      if (host === "stock" && !await page.locator(".conv__body").count()) await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: /router/i }).first().click();
+      await page.locator('[data-testid="console-transport-status"][data-phase="live"]').waitFor(); await viewport().waitFor();
+      return response;
+    });
   }
   async function screenshot(label) { await fs.mkdir(evidence, { recursive: true }); await page.screenshot({ path: path.join(evidence, `${host}-real-routine-tools-${label}.png`), fullPage: true }); }
   try {
     if (host) {
       browser = await chromium.launch({ headless: true });
       const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, permissions: ["clipboard-read", "clipboard-write"] });
+      monitor = browserFailureMonitor(context, { origin: fixture.baseUrl });
+      result.errors = monitor.errors; result.expectedFailures = monitor.expected; result.requestFailures = monitor.failures;
       page = await context.newPage();
-      page.on("pageerror", error => result.errors.push(error.message));
-      page.on("requestfailed", request => {
-        if (initializing && request.failure()?.errorText?.includes("ERR_ABORTED")) {
-          if (new URL(request.url()).pathname.endsWith("/timeline/stream")) return;
-          try {
-            const body = JSON.parse(request.postData() || "{}");
-            if (body.method === "meta/console/query_timeline" && body.params?.mode === "recent" && body.params?.limit === 200 && !body.params?.identity) return;
-          } catch {}
-        }
-        result.errors.push({ url: request.url(), error: request.failure()?.errorText });
-      });
+      // A real server error is no request failure: record every error status.
+      page.on("response", response => { if (response.status() >= 400) result.errors.push({ url: response.url(), status: response.status() }); });
       await open();
     }
     const seed = Array.from({ length: 18 }, (_, index) => `### Review checkpoint ${index + 1}\n\nThe candidate needs a careful review of the release notes, uploaded diagram, and dependency graph before the final report. Record the evidence and keep each conclusion explicit.\n\n`).join("");
@@ -247,7 +245,7 @@ async function routineScenario(host) {
       assert(await missing.isVisible(), "durable failed result remains exposed after reload");
       await viewport().getByText(answer, { exact: true }).scrollIntoViewIfNeeded();
       await screenshot("reloaded");
-      assert.deepEqual(result.errors, [], "no unexpected browser errors");
+      monitor.assertClean();
     }
   } catch (error) {
     result.failure = error.stack || String(error);
@@ -256,7 +254,7 @@ async function routineScenario(host) {
   } finally {
     result.stream = live?.events; result.observations = fixture.observations; result.logs = fixture.logs();
     await fs.mkdir(evidence, { recursive: true }); await fs.writeFile(path.join(evidence, `${host || "api"}-real-routine-tools.json`), JSON.stringify(result, null, 2));
-    await live?.close(); await browser?.close(); await fixture.close(); await fs.rm(stateDir, { recursive: true, force: true });
+    monitor?.stop(); await live?.close(); await browser?.close(); await fixture.close(); await fs.rm(stateDir, { recursive: true, force: true });
   }
 }
 const apiScenarios = [{ id: "api-routine-tool-owner", family: "routine-tools", backend: "real", run: () => routineScenario(null) }];

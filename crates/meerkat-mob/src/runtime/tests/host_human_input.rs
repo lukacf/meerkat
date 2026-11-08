@@ -43,6 +43,9 @@ struct ScriptedClient {
     /// How many of the next requests answer at once with a `peers` tool
     /// call, released or not ([`Self::call_a_tool_next`]).
     tool_rounds: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many of the next requests answer with a `peers` tool call once
+    /// released ([`Self::call_a_tool_when_released`]).
+    held_tool_rounds: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ScriptedClient {
@@ -52,6 +55,7 @@ impl ScriptedClient {
             requests: Arc::new(Mutex::new(Vec::new())),
             released,
             tool_rounds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            held_tool_rounds: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -60,6 +64,14 @@ impl ScriptedClient {
     /// blocked on that next request has a committed round to continue from.
     fn call_a_tool_next(&self) {
         self.tool_rounds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Answer the next request with a `peers` tool call once released: the
+    /// run then reaches a boundary it continues from, where input admitted
+    /// while the request was held can join the running turn.
+    fn call_a_tool_when_released(&self) {
+        self.held_tool_rounds
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -115,9 +127,25 @@ impl meerkat_client::LlmClient for ScriptedClient {
                 |rounds| rounds.checked_sub(1),
             )
             .is_ok();
+        let held_tool_round = !tool_round
+            && self
+                .held_tool_rounds
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |rounds| rounds.checked_sub(1),
+                )
+                .is_ok();
         let mut released = self.released.subscribe();
         Box::pin(async_stream::try_stream! {
-            if tool_round {
+            if !tool_round {
+                while !*released.borrow_and_update() {
+                    if released.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+            if tool_round || held_tool_round {
                 yield meerkat_client::LlmEvent::ToolCallComplete {
                     id: format!("round-call-{sequence}"),
                     name: "peers".to_string(),
@@ -125,11 +153,6 @@ impl meerkat_client::LlmClient for ScriptedClient {
                     meta: None,
                 };
             } else {
-                while !*released.borrow_and_update() {
-                    if released.changed().await.is_err() {
-                        break;
-                    }
-                }
                 yield meerkat_client::LlmEvent::TextDelta {
                     delta: format!("executor-answer-{sequence}"),
                     meta: None,
@@ -142,7 +165,7 @@ impl meerkat_client::LlmClient for ScriptedClient {
                     Usage::default(),
                 ),
             };
-            let stop = if tool_round {
+            let stop = if tool_round || held_tool_round {
                 meerkat_core::StopReason::ToolUse
             } else {
                 meerkat_core::StopReason::EndTurn
@@ -831,6 +854,297 @@ async fn generic_autonomous_work_remains_external_event_not_mirrored_human() {
         assert_eq!(mirrored, conversational_rows(appended));
         assert!(!mirrored.iter().any(|row| row.text == HUMAN));
     }
+    fixture.finish().await;
+}
+
+fn person(subject: &str) -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject,
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+            .expect("trust domain"),
+    )
+    .expect("qualified requester")
+}
+
+/// The requester a host authenticated rides its host human input onto the
+/// member's admitted runtime input and the turn's transcript rows. Work that
+/// is not host human input refuses a requester before any admission, rather
+/// than delivering the turn without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_human_requester_reaches_the_member_input_and_its_turn() {
+    let fixture = Fixture::new().await;
+    let before = fixture.durable().await;
+    let requester = person("a");
+    let human = delivery("requester-human");
+    let id = interaction(&human);
+    let turn = fixture
+        .start(
+            WorkSpec::new(HUMAN, WorkOrigin::External)
+                .with_interaction_id(id)
+                .with_requester(requester.clone()),
+            HandlingMode::Queue,
+            human.clone(),
+        )
+        .await
+        .expect("host human input carries its requester");
+    completed(turn).await;
+    let observed = fixture.input_for_delivery(&human).await;
+    assert_eq!(
+        observed.state().state.requester(),
+        Some(&requester),
+        "the member's admitted input names the requester"
+    );
+    let durable = fixture.durable().await;
+    let appended = &durable.messages()[before.messages().len()..];
+    let row = appended
+        .iter()
+        .find_map(|message| match message {
+            Message::User(user) if user.text_content() == HUMAN => Some(user),
+            _ => None,
+        })
+        .expect("the human row");
+    assert_eq!(
+        row.identity.requester,
+        Some(meerkat_core::TurnRequester::direct(requester.clone())),
+        "the turn's transcript names its direct requester"
+    );
+
+    let rows_before = fixture.input_count().await;
+    let scope = fixture
+        .handle
+        .capture_member_delivery_scope(&fixture.entry.agent_identity)
+        .await
+        .expect("capture the member's delivery scope");
+    let refused = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("generic work", WorkOrigin::External).with_requester(requester),
+            HandlingMode::Queue,
+            delivery("requester-generic"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason == "a requester rides only host human input"
+        ),
+        "generic work refuses a requester: {:?}",
+        refused.as_ref().map(|_| ())
+    );
+    assert_eq!(
+        fixture.input_count().await,
+        rows_before,
+        "the refused work admitted nothing"
+    );
+    fixture.finish().await;
+}
+
+fn label(text: &str) -> crate::SenderLabel {
+    crate::SenderLabel::new(text).expect("a sender label")
+}
+
+/// The text of the injected-context row right before the conversational row
+/// whose text is `text`, if there is one.
+fn label_before(messages: &[Message], text: &str) -> Option<String> {
+    let index = messages.iter().position(|message| {
+        matches!(message, Message::User(user)
+            if user.transcript_role == TranscriptUserRole::Conversational
+                && user.text_content() == text)
+    })?;
+    match messages.get(index.checked_sub(1)?)? {
+        Message::User(user) if user.transcript_role == TranscriptUserRole::InjectedContext => {
+            Some(user.text_content())
+        }
+        _ => None,
+    }
+}
+
+/// The run that consumed the host human input of `delivery`.
+async fn run_of(
+    fixture: &Fixture,
+    delivery: &MobDeliveryIdentity,
+) -> Option<meerkat_core::lifecycle::RunId> {
+    fixture
+        .input_for_delivery(delivery)
+        .await
+        .state()
+        .seed
+        .last_run_id
+        .clone()
+}
+
+/// A steer from another person than the running turn's waits for a turn of
+/// its own, and that turn carries the person's sender label: an
+/// injected-context row of its own right before the person's message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn different_person_steer_turn_carries_its_sender_label() {
+    let fixture = Fixture::new().await;
+    let before = fixture.durable().await;
+    let requests_before = fixture.client.requests().len();
+    fixture.client.block();
+    // Alice's first request is held, then calls a tool: her run reaches a
+    // boundary it continues from after Bob's steer was admitted.
+    fixture.client.call_a_tool_when_released();
+    let alice = delivery("label-alice");
+    let running = fixture
+        .start(
+            WorkSpec::new("alice asks", WorkOrigin::External)
+                .with_interaction_id(interaction(&alice))
+                .with_requester(person("alice"))
+                .with_sender_label(label("Message from alice")),
+            HandlingMode::Queue,
+            alice.clone(),
+        )
+        .await
+        .expect("alice's turn");
+    fixture.client.wait_for_requests(requests_before + 1).await;
+    let bob = delivery("label-bob");
+    let steer = fixture
+        .start(
+            WorkSpec::new("bob steers", WorkOrigin::External)
+                .with_interaction_id(interaction(&bob))
+                .with_requester(person("bob"))
+                .with_sender_label(label("Message from bob")),
+            HandlingMode::Steer,
+            bob.clone(),
+        )
+        .await
+        .expect("bob's steer is admitted");
+    fixture.client.release();
+    completed(running).await;
+    completed(steer).await;
+    let durable = fixture.durable().await;
+    let appended = &durable.messages()[before.messages().len()..];
+    assert_eq!(
+        label_before(appended, "bob steers").as_deref(),
+        Some("Message from bob"),
+        "bob's own turn carries his label right before his message: {appended:#?}"
+    );
+    assert_ne!(
+        run_of(&fixture, &bob).await,
+        run_of(&fixture, &alice).await,
+        "bob's steer ran in a turn of its own"
+    );
+    fixture.finish().await;
+}
+
+/// A steer from the person whose turn is running joins that turn, and it
+/// carries its own sender label: an injected-context row right before the
+/// steered message, as every human message of the conversation has one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_person_merged_steer_carries_its_sender_label() {
+    let fixture = Fixture::new().await;
+    let before = fixture.durable().await;
+    let requests_before = fixture.client.requests().len();
+    fixture.client.block();
+    // Alice's first request is held, then calls a tool: her run reaches a
+    // boundary it continues from after her steer was admitted, where the
+    // steer joins.
+    fixture.client.call_a_tool_when_released();
+    let first = delivery("label-alice-first");
+    let running = fixture
+        .start(
+            WorkSpec::new("alice asks first", WorkOrigin::External)
+                .with_interaction_id(interaction(&first))
+                .with_requester(person("alice"))
+                .with_sender_label(label("Message from alice")),
+            HandlingMode::Queue,
+            first.clone(),
+        )
+        .await
+        .expect("alice's turn");
+    fixture.client.wait_for_requests(requests_before + 1).await;
+    let second = delivery("label-alice-steer");
+    let steer = fixture
+        .start(
+            WorkSpec::new("alice steers", WorkOrigin::External)
+                .with_interaction_id(interaction(&second))
+                .with_requester(person("alice"))
+                .with_sender_label(label("Message from alice")),
+            HandlingMode::Steer,
+            second.clone(),
+        )
+        .await
+        .expect("alice's steer is admitted");
+    fixture.client.release();
+    completed(running).await;
+    completed(steer).await;
+    let durable = fixture.durable().await;
+    let appended = &durable.messages()[before.messages().len()..];
+    assert_eq!(
+        label_before(appended, "alice steers").as_deref(),
+        Some("Message from alice"),
+        "the merged steer carries its label on its own row: {appended:#?}"
+    );
+    assert_eq!(
+        label_before(appended, "alice asks first").as_deref(),
+        Some("Message from alice"),
+        "the turn's first message carries its label too"
+    );
+    assert_eq!(
+        run_of(&fixture, &second).await,
+        run_of(&fixture, &first).await,
+        "alice's steer joined her running turn"
+    );
+    fixture.finish().await;
+}
+
+/// The sender label opens no door for ordinary injected context: a steer
+/// that carries both is refused before admission, as a steer with ordinary
+/// injected context always is. Work that is not host human input refuses a
+/// sender label (an agent's or a schedule's input names no person).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sender_label_rides_only_host_human_input() {
+    let fixture = Fixture::new().await;
+    let rows_before = fixture.input_count().await;
+    let refused = fixture
+        .start(
+            WorkSpec::new(HUMAN, WorkOrigin::External)
+                .with_sender_label(label("Message from alice"))
+                .with_injected_context(vec![INJECTED.into()]),
+            HandlingMode::Steer,
+            delivery("label-with-injected"),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(MobError::InjectedContextUndeliverable { .. })),
+        "ordinary injected context on a steer stays refused: {:?}",
+        refused.as_ref().map(|_| ())
+    );
+    let scope = fixture
+        .handle
+        .capture_member_delivery_scope(&fixture.entry.agent_identity)
+        .await
+        .expect("capture the member's delivery scope");
+    let generic = fixture
+        .handle
+        .submit_work_with_mode_and_delivery_identity_bounded(
+            &scope,
+            WorkSpec::new("generic work", WorkOrigin::External)
+                .with_sender_label(label("Message from alice")),
+            HandlingMode::Queue,
+            delivery("label-generic"),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(
+            &generic,
+            Err(MobError::UnsupportedForMode { reason, .. })
+                if reason == "a sender label rides only host human input"
+        ),
+        "work that is not host human input refuses a sender label: {:?}",
+        generic.as_ref().map(|_| ())
+    );
+    assert_eq!(
+        fixture.input_count().await,
+        rows_before,
+        "the refused work admitted nothing"
+    );
     fixture.finish().await;
 }
 
@@ -3171,10 +3485,11 @@ async fn a_keep_shutdown_of_a_held_member_leaves_its_work_as_the_store_held_it()
         .expect("mob shutdown");
 }
 
-/// A requeued input older than the requeue bound when the next start
-/// recovers it ends as expired instead of running: payload retired, no run,
-/// no model request, and a same-key replay answers the expiry. A later start
-/// serves nothing: the expiry's commit left the row terminal.
+/// A requeued input kept longer than the requeue bound, counted from the
+/// stop, when the next start recovers it ends as expired instead of running:
+/// payload retired, no run, no model request, and a same-key replay answers
+/// the expiry. A later start serves nothing: the expiry's commit left the row
+/// terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requeue_shutdown_expires_a_queued_human_input_older_than_the_bound_at_restart() {
     use meerkat_runtime::input_state::InputLifecycleState;
@@ -3829,6 +4144,7 @@ async fn requeue_shutdown_does_not_keep_a_queued_event_or_a_directed_step() {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "build".into(),
         payload: serde_json::json!({ "status": KEPT_OUT_EVENT }),

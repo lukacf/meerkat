@@ -5,21 +5,25 @@
 //! identity, the role hold, the runtime-mode restamp, held creation and
 //! placed identities, first-boot requests, the revival of an unlisted
 //! identity on its archived session (and the two causes it can fail for),
-//! the candidate composition, the unchanged roster that writes nothing, and
-//! the rollback rows. They run on the combined candidate: the machine, the
-//! actor, the journal and the replay together.
+//! the candidate composition, the unchanged roster that writes nothing, the
+//! declaration of an identity's lifecycle facts only, the legacy members a
+//! roster adopts or retires without adopting them, and the rollback rows.
+//! They run on the combined candidate: the machine, the actor, the journal
+//! and the replay together.
 
 use super::identity_entry_rows::{predating_reader_journal, write_rollback_fixture};
+use super::member_wake_rows::refused_for_build_preparation_retry;
 use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::actor::member_wake::MemberWakeFailure;
 use crate::runtime::dormant_seat::fresh_seat_session_id;
 use crate::runtime::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
-    DeclaredRoster, DeclaredRosterOutcome, DormantSeatOutcome, EntryStanding, FirstBootRequest,
-    HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX, IdentityEntryRead,
-    MemberIdentityManagement, MemberLifecycleEvent, MemberRetirementCause, MobCompositionAuthority,
-    MobJournalCursor, UnlistedEntryOutcome, UnseatedEntryCause,
+    DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
+    DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome, DormantSeatOutcome, EntryStanding,
+    FirstBootRequest, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityEntryRead, MemberIdentityManagement, MemberLifecycleEvent, MemberRetirementCause,
+    MobCompositionAuthority, MobJournalCursor, NotAdoptedReason, UnlistedEntryOutcome,
+    UnseatedEntryCause,
 };
 
 const STEP: Duration = Duration::from_mins(1);
@@ -53,6 +57,36 @@ fn declared(name: &str) -> DeclaredEntry {
 /// `name` declared under `role`, with `runtime_mode`.
 fn declared_as(name: &str, role: &str, runtime_mode: crate::MobRuntimeMode) -> DeclaredEntry {
     DeclaredEntry::new(spec_as(name, role, runtime_mode))
+}
+
+/// `name` declared as a turn-driven worker, with its lifecycle facts only.
+fn declared_facts_only(name: &str) -> DeclaredEntry {
+    declared(name).with_build(DeclaredBuild::FactsOnly)
+}
+
+/// `spec` labelled, as a legacy host labels its members, with the identity
+/// it names.
+fn labelled(mut spec: SpawnMemberSpec, identity: &str) -> SpawnMemberSpec {
+    spec.labels = Some(BTreeMap::from([(
+        crate::runtime::identity_entry::LEGACY_IDENTITY_LABEL.to_string(),
+        identity.to_string(),
+    )]));
+    spec
+}
+
+/// `worker_spec(name)` labelled, as a legacy host labels its members, with
+/// the identity it names.
+fn identity_labelled(name: &str, identity: &str) -> SpawnMemberSpec {
+    labelled(worker_spec(name), identity)
+}
+
+/// `worker_spec(name)` with the durable-identity continuity marker, as a
+/// legacy host spawned the members it held under their identities.
+fn durably_marked(mut spec: SpawnMemberSpec) -> SpawnMemberSpec {
+    spec.continuity_intent = SpawnContinuityIntent::DurableIdentity {
+        continuity_key: spec.identity.to_string(),
+    };
+    spec
 }
 
 /// A complete roster that lists no identity.
@@ -105,6 +139,9 @@ struct ApplyMob {
     storage: MobStorage,
     handle: MobHandle,
     service: Arc<MockSessionService>,
+    /// The host's build preparer and the mob's wake retry backoff, at
+    /// every start, when set.
+    preparer: Option<(Arc<dyn crate::runtime::MemberBuildPreparer>, Duration)>,
 }
 
 impl ApplyMob {
@@ -115,26 +152,80 @@ impl ApplyMob {
     /// A new mob whose host owes the first-boot preparation of every
     /// identity of `pending` ([`MobBuilder::with_host_pending_members`]).
     async fn host_pending(label: &str, pending: &[&str]) -> Self {
+        Self::created(label, pending, None).await
+    }
+
+    /// [`Self::new`], with the host's build `preparer` and the mob's wake
+    /// retry backoff at `backoff`, at this start and every restart.
+    async fn with_preparer(
+        label: &str,
+        preparer: Arc<dyn crate::runtime::MemberBuildPreparer>,
+        backoff: Duration,
+    ) -> Self {
+        Self::created(label, &[], Some((preparer, backoff))).await
+    }
+
+    async fn created(
+        label: &str,
+        pending: &[&str],
+        preparer: Option<(Arc<dyn crate::runtime::MemberBuildPreparer>, Duration)>,
+    ) -> Self {
         let keys = tempfile::tempdir().expect("a comms identity root");
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let storage = MobStorage::in_memory();
-        let handle = MobBuilder::new(
+        let mut builder = MobBuilder::new(
             with_unique_mob_id(sample_definition(), label),
             storage.clone(),
         )
         .with_session_service(service.clone())
         .with_member_comms_identity_root(keys.path())
-        .with_host_pending_members(pending.iter().copied().map(id))
-        .create()
-        .await
-        .expect("create the mob");
+        .with_host_pending_members(pending.iter().copied().map(id));
+        if let Some((preparer, backoff)) = &preparer {
+            builder = builder
+                .with_member_build_preparer(preparer.clone())
+                .with_member_wake_retry_backoff(*backoff, *backoff);
+        }
+        let handle = builder.create().await.expect("create the mob");
         Self {
             keys,
             storage,
             handle,
             service,
+            preparer,
         }
+    }
+
+    /// A new mob that also reaches peers outside it: its definition names an
+    /// external backend and its owner bridge session may create sessions, so
+    /// a spec bound to a peer's endpoint spawns a member bound to no session.
+    /// Answers the owner bridge session such a spawn names.
+    async fn with_external_peers(label: &str) -> (Self, SessionId) {
+        let keys = tempfile::tempdir().expect("a comms identity root");
+        let service = Arc::new(MockSessionService::new());
+        let _adapter = service.enable_runtime_adapter();
+        let storage = MobStorage::in_memory();
+        let owner_bridge_session_id = SessionId::new();
+        let handle = MobBuilder::new(
+            with_unique_mob_id(sample_definition_with_external_backend(), label),
+            storage.clone(),
+        )
+        .with_session_service(service.clone())
+        .with_member_comms_identity_root(keys.path())
+        .with_owner_bridge_session_create_authority(owner_bridge_session_id.clone(), false, false)
+        .create()
+        .await
+        .expect("create the mob");
+        (
+            Self {
+                keys,
+                storage,
+                handle,
+                service,
+                preparer: None,
+            },
+            owner_bridge_session_id,
+        )
     }
 
     /// Crash the mob, restart its session service and resume `storage` as
@@ -164,21 +255,21 @@ impl ApplyMob {
         let _ = restarted.enable_runtime_adapter();
         crash_stop_and_release_routes(self.handle.clone()).await;
         self.service = restarted;
-        self.handle = tokio::time::timeout(
-            STEP,
-            Box::pin(
-                MobBuilder::for_resume(storage.clone())
-                    .with_session_service(self.service.clone())
-                    .with_member_comms_identity_root(self.keys.path())
-                    .with_composition_authority(authority)
-                    .with_host_pending_members(pending.iter().copied().map(id))
-                    .notify_orchestrator_on_resume(false)
-                    .resume(),
-            ),
-        )
-        .await
-        .expect("the restart answers")
-        .expect("the restart succeeds");
+        let mut builder = MobBuilder::for_resume(storage.clone())
+            .with_session_service(self.service.clone())
+            .with_member_comms_identity_root(self.keys.path())
+            .with_composition_authority(authority)
+            .with_host_pending_members(pending.iter().copied().map(id))
+            .notify_orchestrator_on_resume(false);
+        if let Some((preparer, backoff)) = &self.preparer {
+            builder = builder
+                .with_member_build_preparer(preparer.clone())
+                .with_member_wake_retry_backoff(*backoff, *backoff);
+        }
+        self.handle = tokio::time::timeout(STEP, Box::pin(builder.resume()))
+            .await
+            .expect("the restart answers")
+            .expect("the restart succeeds");
         self.storage = storage;
     }
 
@@ -282,6 +373,14 @@ impl ApplyMob {
             .await
             .expect("roster read")
             .map(|entry| entry.generation)
+    }
+
+    async fn role(&self, name: &str) -> Option<ProfileName> {
+        self.handle
+            .get_member(&id(name))
+            .await
+            .expect("roster read")
+            .map(|entry| entry.role)
     }
 
     async fn is_member(&self, name: &str) -> bool {
@@ -960,8 +1059,10 @@ async fn a_placed_identity_is_hosted_on_its_first_use_and_never_seated_dormant()
 
 /// A candidate composition (non-authoritative, over the mob's store)
 /// declares nothing: every identity of its apply is answered `Refused` with
-/// `NonAuthoritative`, typed, its seal unlists nothing, and the journal, the
-/// roster and the entries are as they were.
+/// `NonAuthoritative`, typed, carrying the verdict an authoritative
+/// composition would give it (the listed member is kept, the new identity is
+/// owed its seat); its seal unlists nothing, and the journal, the roster and
+/// the entries are as they were.
 ///
 /// RED: drop the composition authority from the verdict helper (decide a
 /// candidate's declarations as an authoritative composition's): the listed
@@ -990,13 +1091,16 @@ async fn candidate_apply_writes_nothing_and_answers_every_identity_typed() {
             declared("new"),
         ]))
         .await;
-    for name in ["listed", "new"] {
+    for (name, would_be) in [
+        ("listed", DeclaredEntryVerdict::Kept),
+        ("new", DeclaredEntryVerdict::SeatOwed),
+    ] {
         assert!(
             matches!(
                 answer(&outcome, name),
                 DeclaredEntryOutcome::Refused {
-                    refusal: DeclaredEntryRefusal::NonAuthoritative
-                }
+                    refusal: DeclaredEntryRefusal::NonAuthoritative { would_be: answered }
+                } if *answered == would_be
             ),
             "{name}: {outcome:?}"
         );
@@ -1017,6 +1121,72 @@ async fn candidate_apply_writes_nothing_and_answers_every_identity_typed() {
         mob.standing("left-out"),
         Some(EntryStanding::Seated(_))
     ));
+}
+
+/// A candidate composition over a store a host filled before identity
+/// entries existed reports, for each listed member, the verdict the
+/// authoritative apply gives it once its adoption decided the member: the
+/// declaration carries the observation the adoption decided on, so MobMachine
+/// decides on the basis that adoption gives. A legacy member with both marks
+/// is kept (`would_be` `Kept`), one the roster moves to another role with no
+/// migration declared is held (`RoleMigrationHeld`), and a raw member with
+/// no mark keeps the name a worker's (`NameHeldByWorker`). The candidate
+/// adopts nothing and writes nothing.
+///
+/// RED (`RED-B-shell-drops-observation.patch`): the declaration carries no
+/// observation: both legacy members report `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_candidate_reports_a_listed_legacy_members_verdict_after_its_adoption() {
+    let mut mob = ApplyMob::new("apply-candidate-legacy").await;
+    for spec in [
+        durably_marked(identity_labelled("legacy", "legacy")),
+        durably_marked(identity_labelled("moved", "moved")),
+        worker_spec("raw"),
+    ] {
+        mob.handle
+            .spawn_spec(spec)
+            .await
+            .expect("a host's member, seated before identity entries existed");
+    }
+    mob.restart_as(MobCompositionAuthority::NonAuthoritative)
+        .await;
+    let journal = mob.journal().await.len();
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([
+            declared("legacy"),
+            declared_as("moved", "lead", crate::MobRuntimeMode::TurnDriven),
+            declared("raw"),
+        ]))
+        .await;
+    for (name, would_be) in [
+        ("legacy", DeclaredEntryVerdict::Kept),
+        ("moved", DeclaredEntryVerdict::RoleMigrationHeld),
+        ("raw", DeclaredEntryVerdict::NameHeldByWorker),
+    ] {
+        assert!(
+            matches!(
+                answer(&outcome, name),
+                DeclaredEntryOutcome::Refused {
+                    refusal: DeclaredEntryRefusal::NonAuthoritative { would_be: answered }
+                } if *answered == would_be
+            ),
+            "{name}: {outcome:?}"
+        );
+    }
+    assert_eq!(
+        mob.journal().await.len(),
+        journal,
+        "a candidate writes no row"
+    );
+    for name in ["legacy", "moved", "raw"] {
+        assert!(mob.is_member(name).await, "{name} keeps its member");
+        assert_eq!(
+            mob.standing(name),
+            None,
+            "{name}: a candidate adopts nothing"
+        );
+    }
 }
 
 /// Apply a complete roster of `members` declared identities, restart, and
@@ -2086,6 +2256,1704 @@ async fn a_descriptive_facet_change_is_never_a_new_life() {
     );
 }
 
+/// No member is built from a declaration of the identity's lifecycle facts
+/// only. An identity no member holds, declared with its facts only, is
+/// answered `BuildRequired`: no seat is taken, nothing materializes, and the
+/// entry stays owed its seat. A seated identity declared with its facts only
+/// keeps its seat, since its verdict builds nothing. Declared again with its
+/// composed build, the owed identity is seated.
+///
+/// RED: drop the facts-only arm of the owed seat (seat a facts-only
+/// declaration as a composed one): the identity is seated from its facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declaration_of_facts_only_seats_no_member_and_answers_build_required() {
+    let mob = ApplyMob::new("apply-facts-only").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    let (session, _) = seated_on(&seated, "kept").expect("the identity is seated");
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([
+            declared_facts_only("kept"),
+            declared_facts_only("owed"),
+        ]))
+        .await;
+    assert!(
+        matches!(answer(&outcome, "kept"), DeclaredEntryOutcome::Kept),
+        "a verdict that builds nothing answers as for a composed declaration: {outcome:?}"
+    );
+    assert!(
+        matches!(
+            answer(&outcome, "owed"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{outcome:?}"
+    );
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        !mob.is_member("owed").await,
+        "no member is seated from facts only"
+    );
+    assert_eq!(mob.materialization("owed"), None, "nothing materializes");
+    assert_eq!(
+        mob.standing("owed"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)),
+        "the entry stays owed its seat"
+    );
+    assert_eq!(mob.session("kept").await, session);
+    assert_eq!(mob.generation("kept").await, Some(Generation::new(0)));
+
+    let composed = mob
+        .apply(DeclaredRoster::complete([
+            declared("kept"),
+            declared("owed"),
+        ]))
+        .await;
+    assert!(
+        matches!(seated_on(&composed, "owed"), Some((_, None))),
+        "declared again with its composed build, the identity is seated: {composed:?}"
+    );
+    assert!(mob.is_member("owed").await);
+}
+
+/// A first-boot `Fresh` request starts its identity's fresh life with a seat
+/// or a rotation built from the spec. Declared with their facts only, an
+/// unseated identity and a seated member both answer `BuildRequired`: the
+/// seated member keeps its session, the unseated identity keeps its archived
+/// session record, neither request is carried out, and both still owe their
+/// first-boot preparation. Declared again with their composed builds, both
+/// start their fresh lives and the host consumes both requests.
+///
+/// RED: drop the facts-only arm of the seated member's fresh life (rotate a
+/// facts-only declaration as a composed one): the seated member starts its
+/// fresh life from its facts, and its request is carried out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_request_declared_with_facts_only_starts_no_fresh_life() {
+    let mut mob = ApplyMob::new("apply-facts-only-fresh").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([
+            declared("fresh-unseated"),
+            declared("fresh-seated"),
+        ]))
+        .await;
+    let (unseated_session, _) = seated_on(&seated, "fresh-unseated").expect("seated");
+    let (seated_session, _) = seated_on(&seated, "fresh-seated").expect("seated");
+    mob.wake("fresh-unseated").await;
+    mob.apply(DeclaredRoster::complete([declared("fresh-seated")]))
+        .await;
+    assert_eq!(
+        mob.archived_record("fresh-unseated"),
+        Some(dsl::SessionId::from_domain(&unseated_session))
+    );
+    mob.restart_host_pending(&["fresh-unseated", "fresh-seated"])
+        .await;
+    let requests = |roster: DeclaredRoster| {
+        roster
+            .with_first_boot_request("fresh-unseated", FirstBootRequest::Fresh)
+            .with_first_boot_request("fresh-seated", FirstBootRequest::Fresh)
+    };
+
+    let facts_only = mob
+        .apply(requests(DeclaredRoster::complete([
+            declared_facts_only("fresh-unseated"),
+            declared_facts_only("fresh-seated"),
+        ])))
+        .await;
+    for name in ["fresh-unseated", "fresh-seated"] {
+        assert!(
+            matches!(
+                answer(&facts_only, name),
+                DeclaredEntryOutcome::BuildRequired
+            ),
+            "{name}: {facts_only:?}"
+        );
+        assert_eq!(
+            mob.preparation_owed(name),
+            Some(dsl::HostPreparationCause::FirstBootRow),
+            "{name}: the request is left to the host"
+        );
+    }
+    assert!(
+        facts_only.first_boot_requests_carried_out.is_empty(),
+        "{facts_only:?}"
+    );
+    assert_eq!(
+        mob.session("fresh-seated").await,
+        seated_session,
+        "nothing is rotated"
+    );
+    assert_eq!(
+        mob.archived_record("fresh-unseated"),
+        Some(dsl::SessionId::from_domain(&unseated_session)),
+        "the archived session record is kept"
+    );
+
+    let fresh = mob
+        .apply(requests(DeclaredRoster::complete([
+            declared("fresh-unseated"),
+            declared("fresh-seated"),
+        ])))
+        .await;
+    for (name, previous) in [
+        ("fresh-unseated", &unseated_session),
+        ("fresh-seated", &seated_session),
+    ] {
+        let session = match answer(&fresh, name) {
+            DeclaredEntryOutcome::FreshLife { session_id } => session_id.clone(),
+            other => panic!("{name} starts its fresh life: {other:?}"),
+        };
+        assert_ne!(&session, previous, "{name}");
+    }
+    assert_eq!(
+        fresh.first_boot_requests_carried_out,
+        BTreeSet::from([id("fresh-unseated"), id("fresh-seated")]),
+        "{fresh:?}"
+    );
+}
+
+/// A rotation onto a fresh session builds the member's next incarnation
+/// from the spec: on a service whose member sessions live in memory only, a
+/// seated member declared under another role is rotated. Declared under the
+/// other role with its lifecycle facts only, it answers `BuildRequired` and
+/// keeps its session, its generation and its role. Declared again with its
+/// composed build, it is rotated onto a fresh session under the declared
+/// role.
+///
+/// RED: drop the facts-only arm of the rotation (rotate a facts-only
+/// declaration as a composed one): the member is rotated from its facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rotation_declared_with_facts_only_rotates_no_member() {
+    let mob = ApplyMob::new("apply-facts-only-rotation").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([declared("rotating")]))
+        .await;
+    let (session, _) = seated_on(&seated, "rotating").expect("the identity is seated");
+    mob.service.keep_member_sessions_in_memory();
+    let moved = || declared_as("rotating", "lead", crate::MobRuntimeMode::TurnDriven);
+
+    let facts_only = mob
+        .apply(DeclaredRoster::complete([
+            moved().with_build(DeclaredBuild::FactsOnly)
+        ]))
+        .await;
+    assert!(
+        matches!(
+            answer(&facts_only, "rotating"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{facts_only:?}"
+    );
+    assert_eq!(mob.session("rotating").await, session, "nothing is rotated");
+    assert_eq!(
+        mob.role("rotating").await,
+        Some(ProfileName::from("worker"))
+    );
+    assert_eq!(mob.generation("rotating").await, Some(Generation::new(0)));
+
+    let rotated = mob.apply(DeclaredRoster::complete([moved()])).await;
+    let fresh = match answer(&rotated, "rotating") {
+        DeclaredEntryOutcome::RoleRotated { session_id } => session_id.clone(),
+        other => panic!("declared with its composed build, the member is rotated: {other:?}"),
+    };
+    assert_ne!(fresh, session);
+    assert_eq!(mob.session("rotating").await, fresh);
+    assert_eq!(mob.role("rotating").await, Some(ProfileName::from("lead")));
+}
+
+/// A first-boot `Resume` request seats its unseated identity on the session
+/// it names, a seat built from the spec. Declared with its lifecycle facts
+/// only, the identity answers `BuildRequired`: nothing is seated, no session
+/// is created, the request is not carried out, and the identity still owes
+/// its first-boot preparation. Declared again with its composed build, it is
+/// seated on the request's session, which carries the request out.
+///
+/// RED (`RED-S0-seat-arm.patch`): drop the facts-only arm of the owed seat:
+/// the identity is seated from its facts, and the request is carried out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_boot_resume_declared_with_facts_only_seats_nothing() {
+    let mob = ApplyMob::host_pending("apply-facts-only-resume", &["imported"]).await;
+    let committed = SessionId::new();
+    mob.service
+        .replace_persisted_session(Session::with_id(committed.clone()))
+        .await;
+    let resume = |roster: DeclaredRoster| {
+        roster.with_first_boot_request(
+            "imported",
+            FirstBootRequest::Resume {
+                session_id: committed.clone(),
+            },
+        )
+    };
+
+    let facts_only = mob
+        .apply(resume(DeclaredRoster::complete([declared_facts_only(
+            "imported",
+        )])))
+        .await;
+    assert!(
+        matches!(
+            answer(&facts_only, "imported"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{facts_only:?}"
+    );
+    assert!(
+        facts_only.first_boot_requests_carried_out.is_empty(),
+        "{facts_only:?}"
+    );
+    assert!(!mob.is_member("imported").await, "nothing is seated");
+    assert_eq!(
+        mob.preparation_owed("imported"),
+        Some(dsl::HostPreparationCause::FirstBootRow),
+        "the request is left to the host"
+    );
+    assert!(
+        mob.service.recorded_create_requests().await.is_empty(),
+        "no session was created"
+    );
+
+    let composed = mob
+        .apply(resume(DeclaredRoster::complete([declared("imported")])))
+        .await;
+    assert_eq!(
+        seated_on(&composed, "imported"),
+        Some((committed.clone(), None)),
+        "{composed:?}"
+    );
+    assert_eq!(
+        composed.first_boot_requests_carried_out,
+        BTreeSet::from([id("imported")]),
+        "{composed:?}"
+    );
+    assert_eq!(mob.preparation_owed("imported"), None);
+}
+
+/// On a service whose member sessions live in memory only, a change of the
+/// runtime mode alone moves the member onto a fresh session: a rotation
+/// built from the spec. Declared with its lifecycle facts only, the member
+/// answers `BuildRequired` and keeps its session and its generation.
+/// Declared again with its composed build, it is rotated onto a fresh
+/// session.
+///
+/// RED (`RED-S0-rotation-arm.patch`): drop the facts-only arm of the
+/// rotation: the member is rotated from its facts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mode_change_declared_with_facts_only_on_memory_only_sessions_rotates_no_member() {
+    let mob = ApplyMob::new("apply-facts-only-mode-rotation").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([declared("moded")]))
+        .await;
+    let (session, _) = seated_on(&seated, "moded").expect("the identity is seated");
+    mob.service.keep_member_sessions_in_memory();
+    let moved = || declared_as("moded", "worker", crate::MobRuntimeMode::AutonomousHost);
+
+    let facts_only = mob
+        .apply(DeclaredRoster::complete([
+            moved().with_build(DeclaredBuild::FactsOnly)
+        ]))
+        .await;
+    assert!(
+        matches!(
+            answer(&facts_only, "moded"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{facts_only:?}"
+    );
+    assert_eq!(mob.session("moded").await, session, "nothing is rotated");
+    assert_eq!(mob.generation("moded").await, Some(Generation::new(0)));
+
+    let rotated = mob.apply(DeclaredRoster::complete([moved()])).await;
+    match answer(&rotated, "moded") {
+        DeclaredEntryOutcome::RoleRotated { session_id } => assert_ne!(session_id, &session),
+        other => panic!("declared with its composed build, the member is rotated: {other:?}"),
+    }
+}
+
+/// A restamp of the runtime mode on the member's own session builds nothing
+/// from the spec: the session keeps the build inputs its seat recorded.
+/// Declared with its lifecycle facts only, the member is restamped as for a
+/// composed declaration, at its next generation on its own session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mode_restamp_declared_with_facts_only_goes_ahead() {
+    let mob = ApplyMob::new("apply-facts-only-restamp").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared("restamped")]))
+        .await;
+    let (session, _) = seated_on(&seated, "restamped").expect("the identity is seated");
+    mob.wake("restamped").await;
+
+    let restamped = mob
+        .apply_settled(
+            DeclaredRoster::partial([declared_as(
+                "restamped",
+                "worker",
+                crate::MobRuntimeMode::AutonomousHost,
+            )
+            .with_build(DeclaredBuild::FactsOnly)]),
+            "restamped",
+        )
+        .await;
+    assert!(
+        matches!(
+            answer(&restamped, "restamped"),
+            DeclaredEntryOutcome::Restamped { generation } if *generation == Generation::new(1)
+        ),
+        "{restamped:?}"
+    );
+    assert_eq!(mob.session("restamped").await, session);
+}
+
+/// `name` declared as a turn-driven `role` member whose spec names `desk`
+/// as its context: a build input the member's builds apply.
+fn declared_with_desk(name: &str, role: &str, desk: &str) -> DeclaredEntry {
+    let mut entry = declared_as(name, role, crate::MobRuntimeMode::TurnDriven);
+    entry.spec.context = Some(serde_json::json!({ "desk": desk }));
+    entry
+}
+
+/// The context of the last build that `mob`'s session service ran on
+/// `session`.
+async fn last_build_context(mob: &ApplyMob, session: &SessionId) -> Option<serde_json::Value> {
+    mob.service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .rfind(|build| &build.session_id == session)
+        .expect("a build ran on the session")
+        .app_context
+}
+
+/// A role migration seats the member's successor under the new role on the
+/// member's own session, built from the spec's build inputs. Declared with
+/// its lifecycle facts only, the migration takes no member step: the
+/// identity answers `BuildRequired`, and its member keeps its role, its
+/// generation and its session. Declared with its composed build, the same
+/// migration goes ahead.
+///
+/// RED (`RED-P24-facts-only-migrates.patch`): drop the role migration's
+/// facts-only arm: the member is migrated from facts only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_migration_declared_with_facts_only_migrates_no_member() {
+    let mob = ApplyMob::new("apply-facts-only-migration").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared("migrating")]))
+        .await;
+    let (session, _) = seated_on(&seated, "migrating").expect("the identity is seated");
+    mob.wake("migrating").await;
+    let moved = |build: DeclaredBuild| {
+        DeclaredRoster::partial([declared_as(
+            "migrating",
+            "lead",
+            crate::MobRuntimeMode::TurnDriven,
+        )
+        .with_build(build)])
+        .with_role_migration("migrating", "worker")
+    };
+
+    let facts_only = mob.apply(moved(DeclaredBuild::FactsOnly)).await;
+    assert!(
+        matches!(
+            answer(&facts_only, "migrating"),
+            DeclaredEntryOutcome::BuildRequired
+        ),
+        "{facts_only:?}"
+    );
+    let member = mob
+        .handle
+        .get_member(&id("migrating"))
+        .await
+        .expect("roster read")
+        .expect("the member is seated");
+    assert_eq!(
+        (member.role.as_str(), member.generation),
+        ("worker", Generation::new(0)),
+        "no member step was taken"
+    );
+    assert_eq!(mob.session("migrating").await, session);
+
+    let migrated = mob
+        .apply_settled(moved(DeclaredBuild::Composed), "migrating")
+        .await;
+    assert!(
+        matches!(
+            answer(&migrated, "migrating"),
+            DeclaredEntryOutcome::RoleMigrated { generation } if *generation == Generation::new(1)
+        ),
+        "{migrated:?}"
+    );
+    assert_eq!(mob.session("migrating").await, session);
+}
+
+/// A role migration carries the spec's build inputs to the successor: its
+/// build on the member's own session, under the new role, applies the
+/// declared context, as a resume of the session built from that spec does,
+/// and never the context the session's earlier build recorded.
+///
+/// RED (`RED-P24-build-not-carried.patch`): the migration's request carries
+/// no build: the successor's build keeps the context the session recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_migration_carries_its_declared_build_to_the_successor() {
+    let mob = ApplyMob::new("apply-migration-build").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared_with_desk(
+            "migrating",
+            "worker",
+            "north",
+        )]))
+        .await;
+    let (session, _) = seated_on(&seated, "migrating").expect("the identity is seated");
+    mob.wake("migrating").await;
+    assert_eq!(
+        last_build_context(&mob, &session).await,
+        Some(serde_json::json!({ "desk": "north" })),
+        "the first build applies the seat's context"
+    );
+
+    let migrated = mob
+        .apply_settled(
+            DeclaredRoster::partial([declared_with_desk("migrating", "lead", "south")])
+                .with_role_migration("migrating", "worker"),
+            "migrating",
+        )
+        .await;
+    assert!(
+        matches!(
+            answer(&migrated, "migrating"),
+            DeclaredEntryOutcome::RoleMigrated { generation } if *generation == Generation::new(1)
+        ),
+        "{migrated:?}"
+    );
+    mob.wake("migrating").await;
+    assert_eq!(
+        last_build_context(&mob, &session).await,
+        Some(serde_json::json!({ "desk": "south" })),
+        "the successor builds with the declared context"
+    );
+    assert_eq!(mob.session("migrating").await, session);
+}
+
+/// The build a role migration carries is journaled with the successor's
+/// seat: a restart before the successor's first build replays it, and that
+/// build applies the declared context.
+///
+/// RED (`RED-P24-build-not-carried.patch`): the successor's row journals no
+/// build, and its build after the restart keeps the context the session
+/// recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_role_migrations_build_reaches_the_successor_after_a_restart() {
+    let mut mob = ApplyMob::new("apply-migration-build-restart").await;
+    let seated = mob
+        .apply(DeclaredRoster::partial([declared_with_desk(
+            "migrating",
+            "worker",
+            "north",
+        )]))
+        .await;
+    let (session, _) = seated_on(&seated, "migrating").expect("the identity is seated");
+    mob.wake("migrating").await;
+    let migrated = mob
+        .apply_settled(
+            DeclaredRoster::partial([declared_with_desk("migrating", "lead", "south")])
+                .with_role_migration("migrating", "worker"),
+            "migrating",
+        )
+        .await;
+    assert!(
+        matches!(
+            answer(&migrated, "migrating"),
+            DeclaredEntryOutcome::RoleMigrated { .. }
+        ),
+        "{migrated:?}"
+    );
+
+    mob.restart().await;
+    mob.wake("migrating").await;
+    assert_eq!(
+        last_build_context(&mob, &session).await,
+        Some(serde_json::json!({ "desk": "south" })),
+        "the replayed successor builds with the declared context"
+    );
+    assert_eq!(mob.generation("migrating").await, Some(Generation::new(1)));
+}
+
+/// A host that names its identities in a form no member id can spell seats
+/// each under the identity's member id in the one encoding of a name into a
+/// member id, and labels the member with the identity. A legacy member so
+/// seated and so labelled, with no durable-identity marker, is adopted by
+/// the declared apply that lists its member id, and keeps its seat.
+///
+/// RED: compare the label with the member id byte for byte (drop the
+/// encoded comparison from `names_member_id`): the member is no legacy
+/// member, and the apply refuses its name `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_labelled_with_the_identity_its_id_encodes_is_adopted() {
+    let mob = ApplyMob::new("apply-encoded-label").await;
+    let member_id = crate::ids::member_id_for_name("team:alice").into_owned();
+    mob.handle
+        .spawn_spec(identity_labelled(&member_id, "team:alice"))
+        .await
+        .expect("a legacy host's member, labelled with its identity");
+    let session = mob.session(&member_id).await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([declared(&member_id)]))
+        .await;
+    assert!(
+        matches!(answer(&outcome, &member_id), DeclaredEntryOutcome::Kept),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(mob.standing(&member_id), Some(EntryStanding::Seated(_))),
+        "the member is adopted as its identity's entry"
+    );
+    assert_eq!(mob.session(&member_id).await, session);
+    assert_eq!(mob.generation(&member_id).await, Some(Generation::new(0)));
+}
+
+/// A raw member a host spawned under an identity's member id refuses that
+/// identity (`NameHeldByWorker`). Once the host spawns the member again
+/// labelled with the identity it names, the identity no member id can
+/// spell, the next apply adopts it, on the session it was spawned on.
+///
+/// RED: compare the label with the member id byte for byte (drop the
+/// encoded comparison from `names_member_id`): the labelled member is still
+/// refused `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_raw_member_is_adopted_once_its_host_labels_it_with_the_identity() {
+    let mob = ApplyMob::new("apply-labelled-raw").await;
+    let member_id = crate::ids::member_id_for_name("team:bob").into_owned();
+    mob.handle
+        .spawn_spec(worker_spec(&member_id))
+        .await
+        .expect("a host's raw member under the identity's member id");
+    let roster = || DeclaredRoster::partial([declared(&member_id)]);
+
+    let refused = mob.apply(roster()).await;
+    assert!(
+        matches!(
+            answer(&refused, &member_id),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{refused:?}"
+    );
+
+    tokio::time::timeout(STEP, mob.handle.retire(id(&member_id)))
+        .await
+        .expect("the retirement answers")
+        .expect("the host retires its raw member");
+    // Wait for the retirement's end, not only for the member to leave the
+    // listing, which a retiring member does at once.
+    mob.retirement_ended(&member_id).await;
+    mob.handle
+        .spawn_spec(identity_labelled(&member_id, "team:bob"))
+        .await
+        .expect("the host spawns it again, labelled with the identity");
+    let session = mob.session(&member_id).await;
+
+    let adopted = mob.apply(roster()).await;
+    assert!(
+        matches!(answer(&adopted, &member_id), DeclaredEntryOutcome::Kept),
+        "{adopted:?}"
+    );
+    assert!(
+        matches!(mob.standing(&member_id), Some(EntryStanding::Seated(_))),
+        "the labelled member is adopted as its identity's entry"
+    );
+    assert_eq!(
+        mob.session(&member_id).await,
+        session,
+        "the adoption keeps the session"
+    );
+}
+
+/// An identity whose name begins with the encoding's marker is seated under
+/// its member id in the one encoding (`mk--ops` as `mk--mk--ops`), and its
+/// legacy label spells the identity. Such a legacy member, labelled and with
+/// no durable-identity marker, is adopted by the declared apply that lists
+/// its member id, and keeps its seat.
+///
+/// RED (`RED-F2-decoded-label.patch`): decode the label as if it were a
+/// member id: the label names no member, and the apply refuses the name
+/// `NameHeldByWorker`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_labelled_with_a_marker_prefixed_identity_is_adopted() {
+    let mob = ApplyMob::new("apply-marker-label").await;
+    let member_id = crate::ids::member_id_for_name("mk--ops").into_owned();
+    assert_eq!(member_id, "mk--mk--ops");
+    mob.handle
+        .spawn_spec(identity_labelled(&member_id, "mk--ops"))
+        .await
+        .expect("a legacy host's member, labelled with its identity");
+    let session = mob.session(&member_id).await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([declared(&member_id)]))
+        .await;
+    assert!(
+        matches!(answer(&outcome, &member_id), DeclaredEntryOutcome::Kept),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(mob.standing(&member_id), Some(EntryStanding::Seated(_))),
+        "the member is adopted as its identity's entry"
+    );
+    assert_eq!(mob.session(&member_id).await, session);
+}
+
+/// A legacy label marks a member only when it names the member's own
+/// identity: the label `mk--worker-1` names the identity `mk--worker-1`,
+/// seated as `mk--mk--worker-1`, never the member `worker-1`. A complete
+/// roster that does not list `worker-1`, a member with the durable-identity
+/// marker and that label, leaves it as it is: it carries one legacy mark.
+///
+/// RED (`RED-F2-decoded-label.patch`): decode the label as if it were a
+/// member id: the label names `worker-1`, the member carries both marks, and
+/// the complete roster retires it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_label_naming_another_identity_never_marks_a_member() {
+    let mob = ApplyMob::new("apply-marker-label-other").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled(
+            "worker-1",
+            "mk--worker-1",
+        )))
+        .await
+        .expect("a member its host marked, labelled with another identity");
+    let session = mob.session("worker-1").await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(mob.is_member("worker-1").await, "the member keeps serving");
+    assert_eq!(mob.standing("worker-1"), None, "it is no entry");
+    assert_eq!(mob.session("worker-1").await, session);
+    assert!(
+        retirement_causes(&mob.journal().await).is_empty(),
+        "nothing is retired"
+    );
+}
+
+/// A legacy label marks a member only when it names the member's own
+/// identity: the label `mk--worker-1` names the identity `mk--worker-1`,
+/// seated as `mk--mk--worker-1`, never the member `worker-1`. A declared
+/// apply that lists `worker-1`, a raw member with that label and no
+/// durable-identity marker, refuses the name `NameHeldByWorker` and leaves
+/// the member as it is.
+///
+/// RED (`RED-F2-decoded-label.patch`): decode the label as if it were a
+/// member id: the label names `worker-1`, the member is a legacy member, and
+/// the apply adopts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listed_member_labelled_with_another_identity_is_refused() {
+    let mob = ApplyMob::new("apply-marker-label-other").await;
+    mob.handle
+        .spawn_spec(identity_labelled("worker-1", "mk--worker-1"))
+        .await
+        .expect("a host's raw member, labelled with another identity");
+    let session = mob.session("worker-1").await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([declared("worker-1")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&outcome, "worker-1"),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(mob.is_member("worker-1").await, "the member keeps serving");
+    assert_eq!(mob.standing("worker-1"), None, "it is no entry");
+    assert_eq!(mob.session("worker-1").await, session);
+}
+
+/// A member a legacy host seated under its identity before identity
+/// entries existed (its spawn row carries the durable-identity marker and
+/// the legacy label naming it), whose identity the roster dropped before the
+/// host first applied it, is no entry and is not listed. A complete roster
+/// adopts it and its seal unlists the entry: the member is retired, the
+/// retirement journals the cause `Unlisted`, and the listed identity is
+/// seated.
+///
+/// RED (`RED-F1-unlisted-adoption-r3.patch`): drop the complete apply's
+/// offer of its unlisted legacy members to MobMachine: the member is no
+/// entry, the seal leaves it, and it keeps serving as a worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_retires_an_unlisted_legacy_member_with_both_marks() {
+    let mob = ApplyMob::new("apply-unlisted-legacy").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled("dropped", "dropped")))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        matches!(seated_on(&outcome, "kept"), Some((_, None))),
+        "{outcome:?}"
+    );
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("dropped")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    assert!(!mob.is_member("dropped").await, "the member is retired");
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("dropped"), Some(MemberRetirementCause::Unlisted))],
+        "one retirement, of the unlisted entry"
+    );
+}
+
+/// A complete roster leaves a member it does not list that carries one
+/// legacy mark only: the durable-identity marker alone (a member its host
+/// marked and keeps), or the legacy label naming it alone (a raw member its
+/// host labelled). Neither is adopted, unlisted or retired; both keep their
+/// sessions and generations.
+///
+/// RED (`RED-F1-either-candidate-r3.patch`): observe an unlisted member
+/// with either mark as carrying both: MobMachine adopts both members, and
+/// the seal retires both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_leaves_an_unlisted_member_with_one_legacy_mark() {
+    let mob = ApplyMob::new("apply-unlisted-one-mark").await;
+    mob.handle
+        .spawn_spec(durably_marked(worker_spec("marked")))
+        .await
+        .expect("a member its host marked");
+    mob.handle
+        .spawn_spec(identity_labelled("labelled", "labelled"))
+        .await
+        .expect("a member its host labelled");
+    let sessions = [mob.session("marked").await, mob.session("labelled").await];
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    for (name, session) in ["marked", "labelled"].into_iter().zip(sessions) {
+        assert!(mob.is_member(name).await, "{name}");
+        assert_eq!(mob.standing(name), None, "{name} is no entry");
+        assert_eq!(mob.session(name).await, session, "{name}");
+        assert_eq!(
+            mob.generation(name).await,
+            Some(Generation::new(0)),
+            "{name}"
+        );
+    }
+    assert!(
+        retirement_causes(&mob.journal().await).is_empty(),
+        "nothing is retired"
+    );
+}
+
+/// A partial roster adopts no member it does not list: a member with both
+/// legacy marks keeps serving as it is, no entry, and nothing is retired.
+///
+/// RED (`RED-F1-partial-adopts-r3.patch`): offer the unlisted legacy
+/// members to MobMachine on every apply, partial ones included: the member
+/// is adopted as an entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_partial_roster_adopts_no_unlisted_legacy_member() {
+    let mob = ApplyMob::new("apply-partial-unlisted-legacy").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled("dropped", "dropped")))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+    let session = mob.session("dropped").await;
+
+    let outcome = mob.apply(DeclaredRoster::partial([declared("kept")])).await;
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(mob.is_member("dropped").await, "the member keeps serving");
+    assert_eq!(mob.standing("dropped"), None, "it is no entry");
+    assert_eq!(mob.session("dropped").await, session);
+    assert!(
+        retirement_causes(&mob.journal().await).is_empty(),
+        "nothing is retired"
+    );
+}
+
+/// A member a host adopted (its identity intent row names it) is the
+/// host's, whatever its marks: a complete roster that does not list it
+/// leaves it as it is, though its spawn row carries both legacy marks. An
+/// adoption needs a persistent session runtime and states the member's
+/// labels, so Core realizes the adopted member again with both marks.
+///
+/// RED (`RED-F1-intent-ignored-r3.patch`): drop the intent row from the
+/// adoption's observation: the host-adopted member is adopted, unlisted and
+/// retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_marks() {
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-unlisted-host-adopted"),
+        storage.clone(),
+    )
+    .with_session_service(service)
+    .create()
+    .await
+    .expect("create the mob");
+    let spec = durably_marked(identity_labelled("adopted", "adopted"));
+    let labels = spec.labels.clone();
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("a member with both legacy marks");
+    let session = handle
+        .resolve_bridge_session_id(&id("adopted"))
+        .await
+        .expect("a session-backed member");
+    super::member_history::adopt_existing_labelled_member(
+        &handle,
+        &id("adopted"),
+        &session,
+        "worker",
+        labels,
+    )
+    .await;
+    super::member_history::await_adoption_convergence(&handle, &id("adopted")).await;
+    // The member Core realized for the adoption still carries both legacy
+    // marks, and the host's intent row names it: it is left as it is for the
+    // row alone, not for want of a mark.
+    let history = handle
+        .member_binding_history()
+        .await
+        .expect("Core's member history");
+    let adopted = history
+        .last_binding(&id("adopted"))
+        .expect("Core binds the adopted member");
+    assert!(
+        matches!(
+            adopted.continuity_intent(),
+            SpawnContinuityIntent::DurableIdentity { .. }
+        ),
+        "the adopted member carries the durable-identity marker: {adopted:?}"
+    );
+    assert_eq!(
+        adopted
+            .labels()
+            .get(crate::runtime::identity_entry::LEGACY_IDENTITY_LABEL)
+            .map(String::as_str),
+        Some("adopted"),
+        "the adopted member carries the identity's label: {adopted:?}"
+    );
+    assert!(
+        matches!(
+            adopted.identity_management(),
+            crate::MemberIdentityManagement::IntentManaged
+        ),
+        "the host's intent row names the member: {adopted:?}"
+    );
+
+    let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs");
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("adopted")),
+        "the host's member keeps serving"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert!(
+        !retirement_causes(&journal)
+            .iter()
+            .any(|(_, cause)| *cause == Some(MemberRetirementCause::Unlisted)),
+        "nothing is unlisted"
+    );
+}
+
+/// A host's adoption that the complete roster's history read did not see
+/// keeps the host's member. The pass reads the member binding history once,
+/// before its unlisted members' steps; a host that adopts an unlisted member
+/// after that read (its intent row names the member, and the member's
+/// generation has not moved yet) leaves the pass with an observation of the
+/// member without the intent row. The row commits the host's adoption, then
+/// has the pass observe the member as such an earlier read does
+/// (`legacy_observation_hold::force_no_intent_row`): the legacy adoption reads
+/// the host's intent row in its own step, so MobMachine leaves the member as
+/// it is: the identity is no identity entry, and the seal retires nothing.
+///
+/// RED (before the step reads the intent row): MobMachine decides on the
+/// pass's observation alone and adopts the host's member as a Declared
+/// identity entry (`AdoptedUnlisted`). The seal, which reads the pass's own
+/// history read, then spares that entry only when the read already names
+/// the host's intent row (as it does here); otherwise it retires the host's
+/// member with the cause `Unlisted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_adoption_the_pass_read_missed_keeps_the_member() {
+    use crate::runtime::handle::legacy_observation_hold;
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-unlisted-adoption-missed"),
+        storage.clone(),
+    )
+    .with_session_service(service)
+    .create()
+    .await
+    .expect("create the mob");
+    let spec = durably_marked(identity_labelled("missed", "missed"));
+    let labels = spec.labels.clone();
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("a member with both legacy marks");
+    let session = handle
+        .resolve_bridge_session_id(&id("missed"))
+        .await
+        .expect("a session-backed member");
+    super::member_history::adopt_existing_labelled_member(
+        &handle,
+        &id("missed"),
+        &session,
+        "worker",
+        labels,
+    )
+    .await;
+    super::member_history::await_adoption_convergence(&handle, &id("missed")).await;
+    assert!(
+        matches!(
+            handle
+                .member_binding_history()
+                .await
+                .expect("Core's member history")
+                .identity_management(&id("missed")),
+            crate::MemberIdentityManagement::IntentManaged
+        ),
+        "the host's intent row names the member"
+    );
+
+    // The pass observes the member as a history read before the adoption.
+    legacy_observation_hold::force_no_intent_row(&id("missed"), 1);
+    let outcome = tokio::time::timeout(STEP, handle.apply_declared_roster(empty_roster()))
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs");
+    assert!(
+        crate::runtime::identity_entry::machine_entry_origin(
+            &handle.machine_state_watch_rx.borrow(),
+            &id("missed"),
+        )
+        .is_none(),
+        "MobMachine adopted nothing: the identity is no identity entry"
+    );
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("missed")),
+        "the host's member keeps serving"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert!(
+        !retirement_causes(&journal)
+            .iter()
+            .any(|(_, cause)| *cause == Some(MemberRetirementCause::Unlisted)),
+        "nothing is unlisted"
+    );
+}
+
+/// A host's adoption of a declared identity entry takes the entry over. The
+/// identity reconciler marks the entry (`TakeOverIdentityEntry`) before it
+/// retires the member to materialize it again under the host's intent; that
+/// retirement's start row records the cause `HostAdopted`, and its end ends
+/// the entry and keeps the machine topology for the host's member, which
+/// the reconciler materializes again on its own session, as no entry. A
+/// complete roster that still lists the identity is then answered for it as
+/// a host-adopted identity and changes nothing.
+///
+/// RED: let the reconciler retire the member without the takeover (the
+/// entry unmarked): MobMachine refuses the entry at the end of that
+/// retirement, whose archive keeps the topology as a legacy fresh-life
+/// respawn's does, and the adoption never converges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_adoption_of_a_declared_entry_ends_the_entry_and_its_member_stands() {
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-host-adopts-entry"),
+        storage.clone(),
+    )
+    .with_session_service(service)
+    .create()
+    .await
+    .expect("create the mob");
+    handle
+        .spawn_spec(worker_spec("taken").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    assert!(
+        matches!(
+            handle.identity_entry(&id("taken")),
+            Ok(IdentityEntryRead::Entry(view)) if view.origin == crate::runtime::IdentityEntryOrigin::Declared
+        ),
+        "a declared entry before the adoption"
+    );
+    let session = handle
+        .resolve_bridge_session_id(&id("taken"))
+        .await
+        .expect("a session-backed member");
+    super::member_history::adopt_existing_member(&handle, &id("taken"), &session, "worker").await;
+    super::member_history::await_adoption_convergence(&handle, &id("taken")).await;
+
+    assert!(
+        matches!(
+            handle.identity_entry(&id("taken")),
+            Ok(IdentityEntryRead::NotAnEntry { .. })
+        ),
+        "the adoption ended the entry: {:?}",
+        handle.identity_entry(&id("taken"))
+    );
+    assert_eq!(
+        handle.resolve_bridge_session_id(&id("taken")).await,
+        Some(session),
+        "the host's member serves on the member's own session"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert_eq!(
+        retirement_causes(&journal),
+        vec![(id("taken"), Some(MemberRetirementCause::HostAdopted))],
+        "the reconciler's retirement records the adoption's cause"
+    );
+
+    let outcome = tokio::time::timeout(
+        STEP,
+        handle.apply_declared_roster(DeclaredRoster::complete([declared("taken")])),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(
+        matches!(
+            answer(&outcome, "taken"),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::HostAdopted
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(outcome.unlisted.is_empty(), "{outcome:?}");
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("taken")),
+        "the host's member keeps serving"
+    );
+}
+
+/// A host's adoption of a declared identity entry no member holds takes the
+/// entry over too. The host adopts the identity while its own retirement of
+/// the entry's member is in flight, so the reconciler waits for that
+/// retirement instead of taking the entry over: its end leaves the entry
+/// unseated, owed its seat, with the host's intent row naming the identity
+/// (the state an earlier build, whose adoption took no entry over, left
+/// behind). The next start's reconcile (the stopped incarnation's lease let
+/// go, as its expiry would) then finds no member: before it materializes the
+/// host's member it asks MobMachine for the takeover
+/// (`TakeOverIdentityEntry`), whose verdict ends the unseated entry, and the
+/// member it spawns on the adopted session holds the name as no entry. No
+/// retirement carries the adoption's cause: no member held the identity.
+///
+/// RED: let the reconciler materialize the member without the takeover:
+/// MobMachine refuses the spawn of the entry's name (`IdentityMember`), the
+/// reconcile backs off, and the adoption never converges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_adoption_of_an_unseated_declared_entry_ends_the_entry_and_materializes_its_member()
+{
+    let session_store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        PersistentMockBuilder,
+        16,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "apply-host-adopts-unseated-entry"),
+        storage.clone(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create the mob");
+    handle
+        .spawn_spec(worker_spec("unseated").with_entry_custody(true))
+        .await
+        .expect("the host declares its entry");
+    let session = handle
+        .resolve_bridge_session_id(&id("unseated"))
+        .await
+        .expect("a session-backed member");
+
+    // The host retires the entry's member, and adopts the identity while
+    // that retirement is in flight.
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("unseated"),
+        "retire-runtime-quiesce",
+    );
+    let retiring = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.retire(id("unseated")).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the host's retirement is in flight");
+    super::member_history::adopt_existing_member(&handle, &id("unseated"), &session, "worker")
+        .await;
+    hold.release();
+    tokio::time::timeout(STEP, retiring)
+        .await
+        .expect("the retire answers")
+        .expect("the retire task")
+        .expect("the host's retirement ends");
+    assert!(
+        matches!(
+            handle.identity_entry(&id("unseated")),
+            Ok(IdentityEntryRead::Entry(view))
+                if view.origin == crate::runtime::IdentityEntryOrigin::Declared
+                    && view.standing == EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+        ),
+        "the host's retirement leaves a declared entry no member holds: {:?}",
+        handle.identity_entry(&id("unseated"))
+    );
+
+    // The next start's reconcile takes the intent row up.
+    let mob_id = handle.mob_id().clone();
+    tokio::time::timeout(STEP, handle.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("shut the mob down");
+    // The stopped incarnation's reconcile claimed the identity's lease, and
+    // its Shutdown kept it (no member held the identity): the next start
+    // would wait out its TTL (`AwaitLease`). Let it go, as its expiry would.
+    if let crate::identity::IdentityStoredObservation::Valid(record) = storage
+        .identity
+        .observe_identity_lease(&mob_id, &id("unseated"))
+        .await
+        .expect("read the identity lease")
+        && let Some(held) = record.active
+    {
+        assert!(
+            storage
+                .identity
+                .release_identity_lease(&mob_id, &id("unseated"), &held)
+                .await
+                .expect("release the lease"),
+            "the stopped incarnation's lease is released"
+        );
+    }
+    let handle = tokio::time::timeout(
+        STEP,
+        MobBuilder::for_resume(storage.clone())
+            .with_session_service(service.clone())
+            .notify_orchestrator_on_resume(false)
+            .resume(),
+    )
+    .await
+    .expect("the resume answers")
+    .expect("resume the mob");
+    super::member_history::await_adoption_convergence(&handle, &id("unseated")).await;
+
+    assert!(
+        matches!(
+            handle.identity_entry(&id("unseated")),
+            Ok(IdentityEntryRead::NotAnEntry { .. })
+        ),
+        "the takeover ended the entry: {:?}",
+        handle.identity_entry(&id("unseated"))
+    );
+    assert!(
+        handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("unseated")),
+        "the host's member materialized"
+    );
+    assert_eq!(
+        handle.resolve_bridge_session_id(&id("unseated")).await,
+        Some(session),
+        "the host's member serves on the adopted session"
+    );
+    let journal = storage
+        .events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    let causes = retirement_causes(&journal);
+    assert!(
+        causes
+            .iter()
+            .all(|(_, cause)| *cause != Some(MemberRetirementCause::HostAdopted)),
+        "no retirement carries the adoption's cause: {causes:?}"
+    );
+    tokio::time::timeout(STEP, handle.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("shut the resumed mob down");
+}
+
+/// The shape a host that names its identities in a form no member id can
+/// spell leaves behind: the member id encodes the identity (`team:carol` as
+/// `mk--team_ccarol`), the label spells the identity, and the spawn row
+/// carries the durable-identity marker. A complete roster that no longer
+/// lists the identity adopts the member, and its seal retires it.
+///
+/// RED (`RED-F2-byte-comparison.patch`): compare the label with the member
+/// id byte for byte: the member carries one mark only, and it keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_retires_an_unlisted_legacy_member_whose_id_encodes_its_identity() {
+    let mob = ApplyMob::new("apply-unlisted-encoded-legacy").await;
+    let member_id = crate::ids::member_id_for_name("team:carol").into_owned();
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled(&member_id, "team:carol")))
+        .await
+        .expect("a legacy host's member, marked and labelled with its identity");
+
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id(&member_id)),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    assert!(!mob.is_member(&member_id).await, "the member is retired");
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id(&member_id), Some(MemberRetirementCause::Unlisted))]
+    );
+}
+
+/// A legacy member adopted as an entry that no seal reached (the state a
+/// crash between a complete roster's adoption and its seal leaves) comes
+/// back from its adoption row after a restart, as an entry. A partial roster
+/// that does not list it leaves it seated; the next complete roster unlists
+/// the entry and retires the member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_legacy_member_left_unsealed_is_retired_by_the_next_complete_roster() {
+    let mut mob = ApplyMob::new("apply-adopted-unsealed").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled("left", "left")))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+    assert_eq!(
+        mob.handle
+            .adopt_legacy_identity_entry(&id("left"))
+            .await
+            .expect("the adoption answers"),
+        crate::runtime::LegacyIdentityEntryAdoption::Adopted
+    );
+    mob.restart().await;
+    assert!(
+        matches!(mob.standing("left"), Some(EntryStanding::Seated(_))),
+        "the adoption row restores the entry"
+    );
+
+    let partial = mob.apply(DeclaredRoster::partial([declared("kept")])).await;
+    assert!(partial.unlisted.is_empty(), "{partial:?}");
+    assert!(
+        mob.is_member("left").await,
+        "a partial roster unlists nothing"
+    );
+
+    let complete = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        matches!(
+            complete.unlisted.get(&id("left")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{complete:?}"
+    );
+    assert!(!mob.is_member("left").await, "the member is retired");
+}
+
+/// An unlisted legacy member whose adoption fails (its incarnation kept
+/// changing while it was observed) is answered `Failed` and left as it is:
+/// it stays a member, no entry, and nothing is retired. The next complete
+/// roster adopts it and retires it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unlisted_legacy_member_whose_adoption_fails_is_answered_failed_and_stays() {
+    use crate::runtime::handle::legacy_observation_hold;
+
+    let mob = ApplyMob::new("apply-unlisted-adoption-fails").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled(
+            "unlisted-stale",
+            "unlisted-stale",
+        )))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+    legacy_observation_hold::force_stale(&id("unlisted-stale"), 3);
+
+    let failed = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        matches!(
+            failed.unlisted.get(&id("unlisted-stale")),
+            Some(UnlistedEntryOutcome::Failed {
+                error: MobError::LifecycleOperationPending { .. }
+            })
+        ),
+        "{failed:?}"
+    );
+    assert!(mob.is_member("unlisted-stale").await, "the member stays");
+    assert_eq!(mob.standing("unlisted-stale"), None, "it is no entry");
+    assert!(
+        retirement_causes(&mob.journal().await).is_empty(),
+        "nothing is retired"
+    );
+
+    let retired = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        matches!(
+            retired.unlisted.get(&id("unlisted-stale")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{retired:?}"
+    );
+}
+
+/// An unlisted legacy member bound to no session (a peer the mob reaches at
+/// its own endpoint, spawned with both legacy marks and named by no host's
+/// intent row) is never adopted: an identity entry's member is local and
+/// bound to a session. MobMachine answers it `RetireUnadopted`, and the
+/// complete roster retires it through the ordinary retirement, at the
+/// incarnation MobMachine decided on, answered `Retired`. It was no entry,
+/// so its retirement records no cause, and its name is left free: no entry,
+/// no mark and no reserved name, and a later roster that lists the identity
+/// seats its entry.
+///
+/// RED (`RED-P35-unadopted-kept.patch`): leave a member MobMachine answers
+/// `RetireUnadopted` as it is (the shape before MobMachine decided its
+/// retirement): the roster answers it nothing, and it keeps serving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_retires_an_unlisted_legacy_member_bound_to_no_session() {
+    let _serial = lock_real_comms_tests();
+    let (mob, owner_bridge_session_id) = ApplyMob::with_external_peers("apply-unlisted-peer").await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(mob.handle.mob_id(), "worker", "peer")).await;
+    let mut spec = durably_marked(identity_labelled("peer", "peer"));
+    spec.binding = Some(external.binding());
+    mob.handle
+        .spawn_spec_receipt_with_generated_owner_context(spec, owner_bridge_session_id)
+        .await
+        .expect("a legacy host's peer, marked and labelled");
+    assert_eq!(
+        mob.handle.resolve_bridge_session_id(&id("peer")).await,
+        None,
+        "the peer is bound to no session"
+    );
+
+    let outcome = mob.apply(empty_roster()).await;
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("peer")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    mob.retirement_ended("peer").await;
+    assert!(!mob.is_member("peer").await, "the peer is retired");
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("peer"), None)],
+        "one plain retirement: the peer was no entry"
+    );
+    assert!(
+        matches!(
+            mob.handle
+                .identity_entry(&id("peer"))
+                .expect("the entry read answers"),
+            IdentityEntryRead::NotAnEntry { .. }
+        ),
+        "the name is no entry"
+    );
+    {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        let peer = dsl_id("peer");
+        assert!(
+            !state.identity_entry_origins.contains_key(&peer)
+                && !state.identity_entry_retiring.contains(&peer)
+                && !state.identity_entry_tombstones.contains(&peer),
+            "MobMachine records no entry, mark or reserved name for it"
+        );
+    }
+
+    let listed = mob
+        .apply(DeclaredRoster::complete([declared("peer")]))
+        .await;
+    assert!(
+        matches!(answer(&listed, "peer"), DeclaredEntryOutcome::Seated { .. }),
+        "the free name seats its entry: {listed:?}"
+    );
+    assert!(
+        matches!(mob.standing("peer"), Some(EntryStanding::Seated(_))),
+        "the identity is an entry now"
+    );
+}
+
+/// The retirement of an unlisted legacy member bound to no session is
+/// pinned to the generation MobMachine decided on
+/// (`MobHandle::retire_at_generation`): its own step retires the exact
+/// incarnation it read, so an incarnation a respawn seated after the
+/// verdict is never retired by it. The pin to the replaced generation is
+/// refused, retryable, and retires nothing; the pin to the current one
+/// retires the member.
+///
+/// RED (`RED-S2-pinned-retire.patch`): retire whatever incarnation the
+/// identity holds (the plain retirement the session-less branch used
+/// before): the respawned incarnation is retired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retirement_pinned_to_a_generation_never_retires_a_respawned_incarnation() {
+    let mob = ApplyMob::new("apply-pinned-retire").await;
+    mob.handle
+        .spawn_spec(worker_spec("pinned"))
+        .await
+        .expect("a member");
+    let decided = mob.generation("pinned").await.expect("its generation");
+    mob.handle
+        .respawn(id("pinned"), None)
+        .await
+        .expect("a respawn seats its next incarnation");
+    let respawned = mob.generation("pinned").await.expect("the next generation");
+    assert_ne!(decided, respawned, "the respawn moved the incarnation");
+
+    let refused = mob.handle.retire_at_generation(id("pinned"), decided).await;
+    assert!(
+        matches!(refused, Err(MobError::LifecycleOperationPending { .. })),
+        "a pin to the replaced generation is refused, retryable: {refused:?}"
+    );
+    assert_eq!(
+        mob.generation("pinned").await,
+        Some(respawned),
+        "the respawned incarnation is not retired"
+    );
+
+    mob.handle
+        .retire_at_generation(id("pinned"), respawned)
+        .await
+        .expect("the pin to the current generation retires the member");
+    mob.retirement_ended("pinned").await;
+    assert!(!mob.is_member("pinned").await, "the member is retired");
+}
+
+/// An unlisted legacy member placed on a member host is never adopted: an
+/// identity entry's member is local. MobMachine answers it
+/// `RetireUnadopted`, and the complete roster retires it at its delivery
+/// scope, captured at the incarnation MobMachine decided on, through its
+/// member host, answered `Retired`. It was no entry, so its retirement
+/// records no cause.
+///
+/// RED (`RED-P35-unadopted-kept.patch`): leave a member MobMachine answers
+/// `RetireUnadopted` as it is: the roster answers it nothing, and it keeps
+/// serving.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_complete_roster_retires_an_unlisted_placed_legacy_member_through_its_host() {
+    use super::placement_support as placement;
+    let _guard = placement::REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = placement::spawn_scripted_host_peer("apply-placed-legacy-host").await;
+    let member = Arc::new(
+        placement::spawn_peer_comms_endpoint("apply-placed-legacy-member", true, None).await,
+    );
+    scripted.script_member_identity("placed", placement::member_identity_of(&member));
+    scripted.bind_member_endpoint("placed", Arc::clone(&member));
+    let responder = placement::spawn_scripted_member_turn_responder(member);
+    // The apply reads the members' binding history from the identity store
+    // paired with the event store, which the fixture's custom composition
+    // leaves out.
+    let controlling = placement::create_controlling_mob_with_storage(
+        "apply-placed-legacy",
+        |events, mut storage, _custom| {
+            let paired = InMemoryMobIdentityStore::paired_with_event_store(
+                events,
+                Arc::new(crate::store::SystemMobIdentityStoreClock),
+            );
+            let identity: Arc<dyn MobIdentityStore> = Arc::new(paired.clone());
+            let identity_member: Arc<dyn crate::store::MobIdentityMemberStore> = Arc::new(paired);
+            storage.identity = Arc::clone(&identity);
+            storage.identity_member = Some(identity_member);
+            (storage, identity)
+        },
+    )
+    .await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .handle
+        .spawn_spec(durably_marked(labelled(
+            placement::placed_spawn_spec("worker", "placed", &report.host_id),
+            "placed",
+        )))
+        .await
+        .expect("a legacy host's placed member, marked and labelled");
+
+    let outcome = tokio::time::timeout(
+        STEP,
+        controlling.handle.apply_declared_roster(empty_roster()),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("placed")),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        !controlling
+            .handle
+            .list_members()
+            .await
+            .iter()
+            .any(|member| member.agent_identity == id("placed")),
+        "the placed member is retired"
+    );
+    let journal = controlling
+        .storage_events
+        .poll(0, usize::MAX)
+        .await
+        .expect("read the journal");
+    assert_eq!(
+        retirement_causes(&journal),
+        vec![(id("placed"), None)],
+        "one plain retirement: the member was no entry"
+    );
+    responder.shutdown();
+    scripted.shutdown();
+}
+
+/// An unlisted legacy member whose retirement started already is neither
+/// adopted nor retired again: MobMachine answers it not adoptable, and the
+/// complete roster answers it `NotAdopted { reason: Retiring }`. Its own
+/// retirement ends it, as a plain retirement: it was no entry, so the
+/// retirement records no cause.
+///
+/// RED (`RED-P35-retiring-untyped.patch`): leave a member MobMachine
+/// answers not adoptable unanswered (the shape before the typed outcome):
+/// the roster answers it nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_answers_a_retiring_unlisted_legacy_member_not_adopted() {
+    let mob = ApplyMob::new("apply-unlisted-retiring").await;
+    mob.handle
+        .spawn_spec(durably_marked(identity_labelled("retiring", "retiring")))
+        .await
+        .expect("a legacy host's member, marked and labelled");
+    let hold = crate::runtime::actor::retirement_stage_hold::install(
+        &id("retiring"),
+        "retire-runtime-quiesce",
+    );
+    let retiring = {
+        let handle = mob.handle.clone();
+        tokio::spawn(async move { handle.retire(id("retiring")).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the member's retirement starts");
+
+    let outcome = mob.apply(empty_roster()).await;
+    assert!(
+        matches!(
+            outcome.unlisted.get(&id("retiring")),
+            Some(UnlistedEntryOutcome::NotAdopted {
+                reason: NotAdoptedReason::Retiring
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(mob.standing("retiring"), None, "it is no entry");
+
+    hold.release();
+    tokio::time::timeout(STEP, retiring)
+        .await
+        .expect("the retirement answers")
+        .expect("the retirement task ends")
+        .expect("the member is retired");
+    mob.retirement_ended("retiring").await;
+    assert_eq!(
+        retirement_causes(&mob.journal().await),
+        vec![(id("retiring"), None)],
+        "one plain retirement, its own"
+    );
+}
+
 /// Rollback of an unlisted retirement, in-process leg: a retirement start
 /// row that records the cause `Unlisted`, read by a reader that predates
 /// the cause (its decoder ignores the key), replays as a plain retirement.
@@ -2576,6 +4444,64 @@ async fn declared_apply_rows_are_served_by_097() {
     .await;
 }
 
+/// Rollback of Meta's roster pass onto the declared apply, Core leg (the
+/// support window is the previous matched release). The previous Meta
+/// release seats an identity Core holds no member for with a dormant seat
+/// that carries no entry custody. Over an identity entry that a retirement
+/// outside a seal left unseated, that seat is refused typed
+/// (`IdentityMember`) and writes nothing: the entry stays the identity's,
+/// unseated, every pass is refused the same way with nothing moved, and no
+/// second member takes the identity's name. The upgrade guide's step for a
+/// rollback wakes such identities first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_previous_meta_seat_of_an_unseated_entry_is_refused_typed_and_writes_nothing() {
+    let mob = ApplyMob::new("apply-rollback-unseated").await;
+    let outcome = mob
+        .apply(DeclaredRoster::complete([declared("unseated")]))
+        .await;
+    assert!(
+        matches!(seated_on(&outcome, "unseated"), Some((_, None))),
+        "{outcome:?}"
+    );
+    mob.handle
+        .retire(id("unseated"))
+        .await
+        .expect("a retirement outside a seal");
+    mob.retirement_ended("unseated").await;
+    assert!(
+        matches!(mob.standing("unseated"), Some(EntryStanding::Unseated(_))),
+        "the retirement leaves the entry unseated"
+    );
+    let journal = mob.journal().await.len();
+
+    for pass in 0..2 {
+        let outcomes = mob
+            .handle
+            .seat_dormant_members(vec![worker_spec("unseated")])
+            .await
+            .expect("the seat batch answers");
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [DormantSeatOutcome::Refused {
+                    error: MobError::IdentityMember { member_id },
+                    ..
+                }] if *member_id == id("unseated")
+            ),
+            "pass {pass}: {outcomes:?}"
+        );
+    }
+    assert_eq!(mob.journal().await.len(), journal, "no refusal wrote a row");
+    assert!(
+        !mob.is_member("unseated").await,
+        "no member takes the identity's name"
+    );
+    assert!(
+        matches!(mob.standing("unseated"), Some(EntryStanding::Unseated(_))),
+        "the entry stays the identity's, unseated"
+    );
+}
+
 fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
@@ -2602,4 +4528,104 @@ async fn open_apply_fixture(dir: &std::path::Path, mob_id: &str) -> MobHandle {
     .create()
     .await
     .expect("create the fixture mob")
+}
+
+/// A host's build preparer that asks to retry every preparation and records
+/// the identity of each.
+#[derive(Default)]
+struct RetryingPreparer {
+    asked: Mutex<Vec<AgentIdentity>>,
+}
+
+impl RetryingPreparer {
+    fn asked(&self) -> Vec<AgentIdentity> {
+        self.asked.lock().expect("preparations").clone()
+    }
+}
+
+#[async_trait]
+impl crate::runtime::MemberBuildPreparer for RetryingPreparer {
+    async fn prepare_member_build(
+        &self,
+        request: crate::runtime::MemberBuildPreparation,
+    ) -> Result<crate::runtime::MemberBuildPrepared, crate::runtime::MemberBuildPreparationRefusal>
+    {
+        self.asked
+            .lock()
+            .expect("preparations")
+            .push(request.agent_identity.clone());
+        Err(crate::runtime::MemberBuildPreparationRefusal::Retryable {
+            reason: "the host is not ready for this member yet".to_string(),
+        })
+    }
+}
+
+/// A build preparation the host asked to retry and a first-boot preparation
+/// the host owes are told apart by MobMachine, and typed apart to the host.
+/// The first-boot identity's wakes are refused `HostPreparationPending` and
+/// never ask the host's build preparer; a seated member whose preparer asked
+/// to retry is recorded owing `BuildPreparationRetry`, and its wakes are
+/// refused `BuildPreparationRetry` without asking the preparer again. On the
+/// wire both are `host_preparation_pending`.
+///
+/// RED before MobMachine recorded the retry: the retried member owed nothing
+/// MobMachine knew of, its refusal was `HostPreparationPending`, and its
+/// next wake asked the preparer again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retryable_build_preparation_and_a_first_boot_request_are_told_apart_by_core() {
+    let preparer = Arc::new(RetryingPreparer::default());
+    let mut mob = ApplyMob::with_preparer(
+        "apply-preparations-told-apart",
+        preparer.clone(),
+        Duration::from_mins(10),
+    )
+    .await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([
+            declared("imported"),
+            declared("retried"),
+        ]))
+        .await;
+    for name in ["imported", "retried"] {
+        assert!(seated_on(&seated, name).is_some(), "{name}: {seated:?}");
+    }
+    mob.restart_host_pending(&["imported"]).await;
+    assert_eq!(
+        mob.preparation_owed("imported"),
+        Some(dsl::HostPreparationCause::FirstBootRow),
+        "the host owes the first-boot preparation of imported"
+    );
+    assert_eq!(mob.preparation_owed("retried"), None);
+
+    mob.wake_refused_for_host_preparation("imported").await;
+    assert!(
+        preparer.asked().is_empty(),
+        "a wake refused for a first-boot preparation never asks the build preparer"
+    );
+
+    for attempt in 1..=2 {
+        let refused = tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("retried")))
+            .await
+            .expect("the wake answers");
+        assert!(
+            refused_for_build_preparation_retry(&refused),
+            "wake {attempt} of retried is refused for the retry: {refused:?}"
+        );
+        assert_eq!(
+            mob.preparation_owed("retried"),
+            Some(dsl::HostPreparationCause::BuildPreparationRetry),
+            "wake {attempt}: MobMachine records the build preparation the host asked to retry"
+        );
+        assert_eq!(
+            preparer.asked(),
+            vec![id("retried")],
+            "wake {attempt}: the build preparer is asked once, by the first wake"
+        );
+    }
+    assert_eq!(
+        mob.preparation_owed("imported"),
+        Some(dsl::HostPreparationCause::FirstBootRow),
+        "the first-boot preparation is unchanged"
+    );
+    mob.wake_refused_for_host_preparation("imported").await;
 }

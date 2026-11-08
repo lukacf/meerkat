@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Compose the generated offer and component lifetime owners with the planned driver.
+
+Usage: generate-driver-composition GENERATED_ORIGINALS NEW_DIRECTORY
+The owner module headers are renamed for TLA INSTANCE; their bodies stay exact,
+and only generated owner transitions change owner state. The environment is
+the planned driver (effect runner, restart scan), the declared composition
+mode (I12), admission closure with the driver's join (I11), a dropped guard
+(I8), a lost CAS reply, and the B controller-grant preparation that looks the
+child up again on Duplicate. The owner records the preparation's
+epoch, each dispatch start before the call, a lost answer against its dispatch,
+a read by key that finds the admission, the restart withdrawal of an ended
+process's preparation and the close's unresolved record. A bounded contract
+slice, not all thirteen controls or native conformance.
+"""
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+ENV = ['mode', 'alive', 'epoch', 'scanned', 'outbox', 'parked', 'inflight', 'dispatch_epochs',
+       'native_keys', 'driver_view', 'prepared_count', 'joined',
+       'entered_after_close', 'claimed', 'dropped', 'lost_seen', 'crashed_offered',
+       'grant_issues', 'p_orphan', 'p_current', 'dup_seen', 'prep_refused']
+KEY = '"session1:key1"'
+
+PROFILES = {
+    'none': ('base', 'none', ['production', 'fixture'], None),
+    'omit-driver-undeclared': ('mutant', 'none', ['undeclared'], 'I12_DeclaredMode'),
+    'drop-mutates-phase': ('mutant', 'drop-mutates-phase', ['production'], 'I8_MachineOnlyLifecycle'),
+    'admit-after-close': ('mutant', 'admit-after-close', ['production'], 'I11_NoAdmissionAfterClose'),
+    'close-without-join': ('mutant', 'close-without-join', ['production'], 'I11_CloseJoinsDriver'),
+    'close-forgets-unresolved': ('mutant', 'close-forgets-unresolved', ['production'], 'I11_CloseJoinsDriver'),
+    'skip-restart-scan': ('mutant', 'skip-restart-scan', ['production'], 'I11_RestartEnumerates'),
+    'lost-reply-reprepare': ('mutant', 'lost-reply-reprepare', ['production'], 'I3_OneOfferPerSource'),
+    'no-relookup-b': ('mutant', 'no-relookup-b', ['production'], 'NoDuplicateRefusalB'),
+    'row-production-claimed': ('row', 'none', ['production'], 'NotRowProductionClaimed'),
+    'row-fixture-unclaimed': ('row', 'none', ['fixture'], 'NotRowFixtureUnclaimed'),
+    'row-close-records-unresolved': ('row', 'none', ['production'], 'NotRowCloseRecordsUnresolved'),
+    'row-lost-reply-readback': ('row', 'none', ['production'], 'NotRowLostReplyReadback'),
+    'row-restart-redrive': ('row', 'none', ['production'], 'NotRowRestartRedrive'),
+    'row-b-duplicate-relookup': ('row', 'none', ['production'], 'NotRowDuplicateRelookup'),
+}
+
+
+def owner(root, directory, prefix, output, name):
+    raw = (root / directory / 'model.tla').read_bytes()
+    header = b'---- MODULE model ----\n'
+    if not raw.startswith(header):
+        raise ValueError('unexpected generated module header')
+    renamed = f'---- MODULE {name} ----\n'.encode() + raw[len(header):]
+    (output / (name + '.tla')).write_bytes(renamed)
+    text = raw.decode()
+    fields = re.search(r'^VARIABLES (.+)$', text, re.MULTILINE)[1].split(', ')
+    constants = re.search(r'^CONSTANTS (.+)$', text, re.MULTILINE)[1].split(', ')
+    config = (root / directory / 'ci.cfg').read_text()
+    invariants = config.split('INVARIANTS\n', 1)[1].split('CONSTRAINTS\n', 1)[0].split()
+    instance = (f'{prefix} == INSTANCE {name} WITH\n    '
+                + ',\n    '.join(f'{field} <- {prefix}_{field}' for field in fields))
+    provenance = {'generated_sha256': sha(raw), 'renamed_sha256': sha(renamed),
+                  'body_sha256': sha(raw[len(header):])}
+    return [f'{prefix}_{field}' for field in fields], constants, invariants, instance, provenance
+
+
+def main():
+    root, output = map(Path, sys.argv[1:])
+    output.mkdir(exist_ok=False)
+    offer_vars, offer_consts, offer_invs, offer_instance, offer_prov = owner(
+        root, 'original_offer', 'offer', output, 'offer_owner')
+    life_vars, life_consts, life_invs, life_instance, life_prov = owner(
+        root, 'component_lifetime', 'life', output, 'lifetime_owner')
+    variables = offer_vars + life_vars + ENV
+    constants = sorted(set(offer_consts) | set(life_consts))
+    actions, definitions = [], []
+
+    def frame(changed):
+        return '    /\\ UNCHANGED <<' + ', '.join(v for v in variables if v not in changed) + '>>'
+
+    def action(name, expressions, changed):
+        actions.append(name)
+        definitions.append(name + ' ==\n' + '\n'.join('    /\\ ' + e for e in expressions) + '\n' + frame(changed))
+
+    O, L = set(offer_vars), set(life_vars)
+    keep_offer = 'UNCHANGED <<' + ', '.join(offer_vars) + '>>'
+    admission = '(life_phase = "Open" \\/ (Fault = "admit-after-close" /\\ life_phase = "Closing"))'
+    # This process's last dispatch, recorded and not yet answered unresolved.
+    own_dispatch = ('offer_dispatch_count \\in DOMAIN offer_dispatch_epochs'
+                    ' /\\ offer_dispatch_epochs[offer_dispatch_count] = epoch')
+    # Component lifetime: stage, open, close admission, settle after the driver's join, which
+    # records an Offered record unresolved through its owner (RecordCloseUnresolved, with this
+    # process's epoch).
+    action('LifeStage', ['life!StageComponent("inc1", "component1", "activation1")'], L)
+    action('LifeOpen', ['life!OpenComponent(life_incarnation, life_revision)'], L)
+    action('LifeBeginClose', ['life!CloseAdmission(life_incarnation, life_revision, "close1", "stop", FALSE)'], L)
+    action('JoinDriver', ['life_phase = "Closing"', '~joined', '~inflight', "joined' = TRUE",
+                          'IF offer_phase = "Offered" /\\ Fault # "close-forgets-unresolved"\n'
+                          '       THEN offer!RecordCloseUnresolved(offer_offer_key, offer_revision, "close1", epoch)\n'
+                          '       ELSE ' + keep_offer],
+           O | {'joined'})
+    action('LifeSettle', ['joined \\/ Fault = "close-without-join"',
+                          'life!SettleClosed(life_incarnation, life_revision, life_close_id)'], L)
+    # B preparation of the deterministic controller child: an orphan preparer from a dropped
+    # earlier preparation and the current one; lookup, then issue; Duplicate looks up again.
+    for who in ('orphan', 'current'):
+        p = 'p_' + who
+        action('PrepLookup_' + who, [f'{p} = "Idle"',
+                                     f"{p}' = IF grant_issues > 0 THEN \"Done\" ELSE \"Looked\""], {p})
+        action('PrepIssue_' + who, [
+            f'{p} = "Looked"',
+            "grant_issues' = IF grant_issues > 0 THEN grant_issues ELSE grant_issues + 1",
+            "dup_seen' = (dup_seen \\/ grant_issues > 0)",
+            f"{p}' = IF grant_issues > 0 /\\ Fault = \"no-relookup-b\" THEN \"Refused\" ELSE \"Done\"",
+            "prep_refused' = (prep_refused \\/ (grant_issues > 0 /\\ Fault = \"no-relookup-b\" /\\ \"" + who + "\" = \"current\"))"],
+            {p, 'grant_issues', 'dup_seen', 'prep_refused'})
+    # The offer: prepared after the grant in this process's epoch, sealed, committed with its
+    # send intent (the authority current: the authority slice checks it).
+    action('Prepare', ['alive', admission, 'p_current = "Done"',
+                       'offer!PrepareOriginalOffer("offer1", "source1", 1, "inc1", "input1", "digest1", "binding1", "prep1", epoch)',
+                       "prepared_count' = prepared_count + 1",
+                       "entered_after_close' = (entered_after_close \\/ life_phase # \"Open\")"],
+           O | {'prepared_count', 'entered_after_close'})
+    action('Seal', ['alive', 'scanned',
+                    'offer!SealOriginalPreparation(offer_offer_key, offer_revision, offer_preparation_id, offer_input_digest, "sealed1")'], O)
+    action('Commit', ['alive', 'scanned', admission,
+                      'offer!RecordOriginalSendIntent(offer_offer_key, offer_revision, offer_source_key, offer_source_revision, "inc1", TRUE, TRUE, ' + admission + ', TRUE)',
+                      "outbox' = TRUE", "parked' = (mode = \"production\")",
+                      "driver_view' \\in {\"offered\", \"lost\"}",
+                      "lost_seen' = (lost_seen \\/ driver_view' = \"lost\")",
+                      "entered_after_close' = (entered_after_close \\/ life_phase # \"Open\")"],
+           O | {'outbox', 'parked', 'driver_view', 'lost_seen', 'entered_after_close'})
+    # A lost CAS reply: the driver reads the record back; never a second offer.
+    action('ReadBack', ['alive', 'driver_view = "lost"', 'offer_phase = "Offered"', "driver_view' = \"offered\""],
+           {'driver_view'})
+    action('Reprepare', ['Fault = "lost-reply-reprepare"', 'alive', 'driver_view = "lost"',
+                         "prepared_count' = prepared_count + 1", "driver_view' = \"offered\""],
+           {'prepared_count', 'driver_view'})
+    # A dropped guard submits no state change itself (its preparer runs on); the restart
+    # withdraws an ended process's preparation through the owner, which accepts only an
+    # earlier epoch's (WithdrawUnsentPreparation), before the scan completes. The
+    # drop-mutates-phase mutant withdraws the record, its cause included, without a transition.
+    action('DropGuard', ['alive', 'offer_phase = "Prepared"', '~dropped', "dropped' = TRUE",
+                         "offer_phase' = IF Fault = \"drop-mutates-phase\" THEN \"Withdrawn\" ELSE offer_phase",
+                         "offer_withdrawal_cause' = IF Fault = \"drop-mutates-phase\" THEN \"ProcessEnded\"\n"
+                         "                                  ELSE offer_withdrawal_cause"],
+           {'dropped', 'offer_phase', 'offer_withdrawal_cause'})
+    action('ScanWithdraw', ['alive', '~scanned', 'offer!WithdrawUnsentPreparation(offer_offer_key, offer_revision, epoch)'], O)
+    # The production driver (effect runner) and the declared fixture's stand-in: each records
+    # the dispatch start (its id and this process's epoch) through the owner before the call.
+    action('Dispatch', ['mode = "production"', 'alive', 'scanned', 'parked', '~inflight', '~joined',
+                        'driver_view = "offered"', 'offer_phase = "Offered"', 'epoch \\notin dispatch_epochs',
+                        'offer!RecordDispatchStart(offer_offer_key, offer_revision, epoch, offer_dispatch_count + 1)',
+                        "inflight' = TRUE", "dispatch_epochs' = dispatch_epochs \\cup {epoch}"],
+           O | {'inflight', 'dispatch_epochs'})
+    action('FixtureDispatch', ['mode = "fixture"', 'alive', '~inflight', '~joined', 'offer_phase = "Offered"',
+                               'epoch \\notin dispatch_epochs',
+                               'offer!RecordDispatchStart(offer_offer_key, offer_revision, epoch, offer_dispatch_count + 1)',
+                               "inflight' = TRUE", "dispatch_epochs' = dispatch_epochs \\cup {epoch}"],
+           O | {'inflight', 'dispatch_epochs'})
+    action('CoreCommit', ['alive', 'inflight', f"native_keys' = native_keys \\cup {{{KEY}}}", "inflight' = FALSE"],
+           {'native_keys', 'inflight'})
+    # The call's answer: Core's admission of this process's dispatch (RetainCoreReceipt), or a
+    # lost answer recorded against it (PreserveUnresolvedOffer: before Core, or after its
+    # commit); a read by key that finds the admission settles without naming a dispatch.
+    action('Observe', ['alive', 'scanned', '~joined', '~inflight', f'{KEY} \\in native_keys', own_dispatch,
+                       'offer!RetainCoreReceipt(offer_offer_key, offer_revision, offer_input_digest, offer_incarnation, offer_dispatch_count, "Admitted", "receipt1")',
+                       "outbox' = FALSE", "parked' = FALSE", "claimed' = (mode = \"production\")"],
+           O | {'outbox', 'parked', 'claimed'})
+    action('LostAnswer', ['alive', 'scanned', '~joined', own_dispatch,
+                          'offer!PreserveUnresolvedOffer(offer_offer_key, offer_revision, offer_input_digest, offer_incarnation, offer_dispatch_count, "Unresolved", "")',
+                          "inflight' = FALSE"],
+           O | {'inflight'})
+    action('Find', ['alive', 'scanned', '~joined', '~inflight', f'{KEY} \\in native_keys',
+                    'offer!RetainFoundReceipt(offer_offer_key, offer_revision, offer_input_digest, offer_incarnation, epoch, "Admitted", "receipt1", "Live")',
+                    "outbox' = FALSE", "parked' = FALSE", "claimed' = (mode = \"production\")"],
+           O | {'outbox', 'parked', 'claimed'})
+    # One crash and restart; restart enumerates every non-terminal record for the driver.
+    action('Crash', ['alive', 'epoch = 1', 'offer_phase \\in {"Prepared", "Offered"}',
+                     "alive' = FALSE", "inflight' = FALSE", "parked' = FALSE", "driver_view' = \"unknown\"",
+                     "crashed_offered' = (offer_phase = \"Offered\")"],
+           {'alive', 'inflight', 'parked', 'driver_view', 'crashed_offered'})
+    action('Restart', ['~alive', 'epoch = 1', "alive' = TRUE", "epoch' = 2", "scanned' = FALSE"],
+           {'alive', 'epoch', 'scanned'})
+    action('Scan', ['alive', '~scanned', '~(offer_phase = "Prepared" /\\ offer_preparation_epoch < epoch)',
+                    "scanned' = TRUE",
+                    "parked' = (mode = \"production\" /\\ offer_phase = \"Offered\" /\\ outbox /\\ Fault # \"skip-restart-scan\")",
+                    "driver_view' = IF offer_phase = \"Offered\" THEN \"offered\" ELSE driver_view"],
+           {'scanned', 'parked', 'driver_view'})
+    action('Finished', ['~inflight',
+                        'life_phase \\in {"Closed", "Quarantined", "Uncertain", "Failed"} \\/ offer_phase \\in {"CoreObserved", "Withdrawn"}'],
+           set())
+
+    init = ['offer!Init', 'life!Init', 'mode \\in ModeValues', 'alive = TRUE', 'epoch = 1', 'scanned = TRUE',
+            'outbox = FALSE', 'parked = FALSE', 'inflight = FALSE', 'dispatch_epochs = {}', 'native_keys = {}',
+            'driver_view = "unknown"', 'prepared_count = 0', 'joined = FALSE',
+            'entered_after_close = FALSE', 'claimed = FALSE', 'dropped = FALSE', 'lost_seen = FALSE',
+            'crashed_offered = FALSE', 'grant_issues = 0', 'p_orphan = "Idle"', 'p_current = "Idle"',
+            'dup_seen = FALSE', 'prep_refused = FALSE']
+    invariants = {
+        'OwnerCanonical': ' /\\ '.join(['offer!' + i for i in offer_invs] + ['life!' + i for i in life_invs]),
+        'I12_DeclaredMode': 'mode \\in {"production", "fixture"} /\\ (claimed => mode = "production")',
+        'I12_NoOrphanOffer': '(offer_phase = "Offered" /\\ ~joined) => mode \\in {"production", "fixture"}',
+        'I11_NoAdmissionAfterClose': '~entered_after_close',
+        'I11_CloseJoinsDriver': 'life_phase = "Closed" => (joined /\\ ~inflight /\\ (offer_phase = "Offered" => offer_close_epoch > 0))',
+        'I11_RestartEnumerates': '(alive /\\ epoch = 2 /\\ scanned /\\ mode = "production" /\\ offer_phase = "Offered" /\\ ~joined) => (outbox /\\ parked)',
+        'I3_OneOfferPerSource': 'prepared_count <= 1 /\\ Cardinality(native_keys) <= 1',
+        'DurableOutbox': 'offer_phase = "Offered" => outbox',
+        'NoDuplicateRefusalB': '~prep_refused',
+        'GrantUniqueB': 'grant_issues <= 1',
+        'NotRowProductionClaimed': '~(mode = "production" /\\ claimed /\\ offer_phase = "CoreObserved" /\\ Cardinality(native_keys) = 1)',
+        'NotRowFixtureUnclaimed': '~(mode = "fixture" /\\ offer_phase = "CoreObserved" /\\ ~claimed)',
+        'NotRowCloseRecordsUnresolved': '~(life_phase = "Closed" /\\ offer_phase = "Offered" /\\ offer_close_epoch > 0)',
+        'NotRowLostReplyReadback': '~(lost_seen /\\ offer_phase = "CoreObserved" /\\ prepared_count = 1)',
+        'NotRowRestartRedrive': '~(epoch = 2 /\\ crashed_offered /\\ offer_phase = "CoreObserved" /\\ Cardinality(native_keys) = 1)',
+        'NotRowDuplicateRelookup': '~(dup_seen /\\ ~prep_refused /\\ p_current = "Done" /\\ p_orphan = "Done" /\\ grant_issues = 1)',
+    }
+    safety = [n for n in invariants if not n.startswith('NotRow')]
+    properties = {
+        # I8: an owner's phase changes only through a generated transition, each of which
+        # advances that owner's revision and step count by one.
+        'I8_MachineOnlyLifecycle':
+            '[][((offer_phase\' # offer_phase) => (offer_revision\' = offer_revision + 1 /\\ offer_model_step_count\' = offer_model_step_count + 1))\n'
+            '    /\\ ((life_phase\' # life_phase) => (life_revision\' = life_revision + 1 /\\ life_model_step_count\' = life_model_step_count + 1))]_vars',
+    }
+    text = '\n\n'.join([
+        '---- MODULE driver_composition ----\nEXTENDS TLC, Naturals, Sequences, FiniteSets',
+        '\\* One canonical offer owner and one component lifetime owner with the planned driver.\n'
+        '\\* Only generated owner transitions change owner state. Core commit and dedup are\n'
+        '\\* assumptions. No lock, bind, all-door, liveness or full I1-I13 acceptance here.',
+        'CONSTANTS ' + ', '.join(constants) + ', Fault, ModeValues',
+        'VARIABLES ' + ', '.join(variables),
+        'vars == <<' + ', '.join(variables) + '>>',
+        offer_instance, life_instance,
+        'Init ==\n' + '\n'.join('    /\\ ' + e for e in init),
+        *definitions,
+        'Next ==\n' + '\n'.join('    \\/ ' + a for a in actions),
+        'Spec == Init /\\ [][Next]_vars',
+        *[name + ' == ' + expr for name, expr in invariants.items()],
+        *[name + ' ==\n    ' + expr for name, expr in properties.items()],
+        'Bound == offer_model_step_count <= 10 /\\ life_model_step_count <= 8',
+        '=============================================================================',
+    ]) + '\n'
+    (output / 'driver_composition.tla').write_text(text)
+    exported = {}
+    for name, (kind, fault, modes, expected) in PROFILES.items():
+        checked = [expected] if kind == 'row' else safety
+        config = ('SPECIFICATION Spec\nCONSTANTS\n'
+                  '  BooleanValues = {TRUE,FALSE}\n  NatValues = {0,1,2}\n  StringValues = {"","alpha"}\n'
+                  '  SetOfU64Values = {{},{1}}\n  RustU64Max = 16\n'
+                  '  ToolkitCoreObservationValues = {"Unresolved","Admitted","NotAdmitted","Absent","Unavailable"}\n'
+                  '  ToolkitDispatchAnswerValues = {"NotSubmitted","Admitted","CoreRefused","EntryRefused","Unresolved"}\n'
+                  '  ToolkitReceiptKindValues = {"Unsettled","Admitted","Found","CoreRefused","EntryRefused"}\n'
+                  '  ToolkitWithdrawalCauseValues = {"NotWithdrawn","PolicyDenied","SourceClosed","AdmissionClosed",'
+                  '"PreparationStale","ProcessEnded"}\n'
+                  '  ToolkitCoreReadValues = {"Durable","Live"}\n'
+                  f'  Fault = "{fault}"\n'
+                  '  ModeValues = {' + ','.join(json.dumps(m) for m in modes) + '}\n'
+                  'INVARIANTS\n' + ''.join(f'  {inv}\n' for inv in checked)
+                  + ('' if kind == 'row' else 'PROPERTIES\n  I8_MachineOnlyLifecycle\n')
+                  + 'CONSTRAINT Bound\n')
+        (output / (name + '.cfg')).write_text(config)
+        exported[name] = {'kind': kind, 'fault': fault, 'modes': modes, 'expected': expected}
+    manifest = {
+        'scope': 'one offer and one component lifetime owner, the planned driver with one crash and '
+                 'restart, declared composition mode, admission closure with the driver join, a dropped '
+                 'guard, a lost CAS reply, and the B controller-grant preparation with an orphan preparer; '
+                 'dispatch starts, lost answers, found reads, the restart withdrawal and the close '
+                 'record through the owner',
+        'full_b1_acceptance': False,
+        'owners': {'offer': offer_prov, 'lifetime': life_prov},
+        'actions': actions, 'profiles': exported,
+        'generator_sha256': sha(Path(__file__).read_bytes()),
+        'artifact_hashes': {f.name: sha(f.read_bytes()) for f in sorted(output.iterdir()) if f.is_file()},
+    }
+    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    main()

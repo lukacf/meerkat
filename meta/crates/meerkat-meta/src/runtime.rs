@@ -78,7 +78,8 @@ pub use console_ingress::{
     validate_console_token_under_session_fences,
 };
 pub(crate) use console_ingress::{
-    ConsoleCallerVerification, ResolvedConsoleCaller, authorize_console_rest_json_route,
+    ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
+    ResolvedConsoleCaller, authorize_console_rest_json_route, console_human_principal,
     console_member_access_attributes, fold_console_member_attributes,
     render_console_rest_json_route, resolve_authorized_console_caller_from_token,
     session_fence_first_accepted_iat,
@@ -91,9 +92,9 @@ pub use metadata::{
     LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
     LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionBacklog, LifecycleProjectionCursor,
     MemberIdleRetireOverrideRecord, MetadataScope, MetadataStoreError, PersistentMetadataStore,
-    RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method, dispatch_labels_delete,
-    dispatch_labels_get, dispatch_labels_set, labels_to_json_value, parse_labels_param,
-    parse_run_id_param,
+    RecordRetention, RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method,
+    dispatch_labels_delete, dispatch_labels_get, dispatch_labels_set, labels_to_json_value,
+    parse_labels_param, parse_run_id_param,
 };
 pub(crate) use metadata::{
     METADATA_TABLE, create_metadata_table, decode_identity_record, encode_identity_record,
@@ -531,6 +532,7 @@ impl RuntimeDecisionState {
                 jwks_json: LOCAL_CONSOLE_JWKS_JSON.to_string(),
                 audience: LOCAL_CONSOLE_AUDIENCE.to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console,
             ops: RuntimeOpsPolicy::default(),
@@ -570,6 +572,15 @@ pub struct TrustedOidcRuntimeConfig {
     /// issuer and hand-built states.
     #[serde(default)]
     pub require_verified_email: bool,
+    /// The tokens this issuer mints name a shared account, not a person: a
+    /// front that signs everyone in as one account mints every holder of its
+    /// password the same `sub`. Such a token identifies a principal and
+    /// never counts as a person: it is never a Console human. Set by
+    /// `provider: "jwt"` configurations unless they declare
+    /// `accounts: "personal"`. Off for `provider: "oidc"` and for hand-built
+    /// states, which keep the historical behaviour.
+    #[serde(default)]
+    pub shared_account_tokens: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1064,6 +1075,15 @@ pub struct GatingDecider {
     pub held_approver_ids: BTreeSet<String>,
 }
 
+/// What the caller established about a decider's authentication, recorded
+/// with the decision: the assurance and a digest of the login the decision
+/// was made in. Never the token or the login itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatingDecisionEvidence {
+    pub(crate) assurance: meerkat_core::ApprovalAssurance,
+    pub(crate) login_scope_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatingDecideRequest {
     pub pending_id: String,
@@ -1357,6 +1377,9 @@ pub struct MetaRuntimeHandle {
     gating_escalation_routes: GatingEscalationRoutes,
     /// Wakes live readers when the audit changes. Carries no data.
     gating_changes: tokio::sync::broadcast::Sender<()>,
+    /// How long this owner's gating state is kept: `Durable` once the
+    /// runtime keeps it in a durable metadata store, `Process` otherwise.
+    gating_retention: RecordRetention,
     memory_sequence: u64,
     memory_assertions: Vec<MemoryAssertion>,
     memory_conflicts: BTreeMap<MemoryConflictKey, MemoryConflictSignal>,
@@ -1869,6 +1892,7 @@ mod decision_state_tests {
             jwks_json: r#"{"keys":[]}"#.to_string(),
             audience: String::new(),
             require_verified_email: false,
+            shared_account_tokens: false,
         }
     }
 
@@ -1878,6 +1902,7 @@ mod decision_state_tests {
             jwks_json: ONE_KEY_JWKS_JSON.to_string(),
             audience: "tests".to_string(),
             require_verified_email: false,
+            shared_account_tokens: false,
         }
     }
 

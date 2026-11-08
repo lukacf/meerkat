@@ -419,6 +419,8 @@ impl InstalledToolkitHost {
             .await?;
         originals.bind_service_tool_policy(service_policy)?;
         owner.bind_native_authorization_publication(source.publication())?;
+        owner.bind_native_grant_custody(&source.grants())?;
+        owner.bind_native_store_custody(&store)?;
         owner.validate_current_selection()?;
         Ok((
             owner,
@@ -1338,6 +1340,16 @@ impl InstalledApplicationPolicy {
         let (member_binding, requester, actor) = route
             .source_binding(&self.selected)
             .map_err(|_| OperationAuthorizationError::Unavailable)?;
+        // A delivery that governed work sent is bound under that work's
+        // requester and sending agent, which its source retained from Core's
+        // typed origin; every other original under its route's.
+        let governed = self
+            .originals
+            .governed_peer_principals(association)
+            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+        let (requester, actor) = governed
+            .as_ref()
+            .map_or((requester, actor), |(requester, actor)| (requester, actor));
         if &member.member == member_binding
             && context
                 .as_ref()

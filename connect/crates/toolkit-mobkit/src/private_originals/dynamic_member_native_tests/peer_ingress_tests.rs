@@ -5,8 +5,14 @@ use super::*;
 use meerkat_authorization_contracts::audit::{
     AuditObservation, AuditTarget, StoredAuthorizationAuditObservation,
 };
-use meerkat_authorization_contracts::work_association::GrantTarget;
+use meerkat_authorization_contracts::work_association::{
+    GrantTarget, InputAuthorityAssociation, InputAuthorityAssociationCandidate, OriginalWorkRef,
+};
 use meerkat_core::authorization::OperationObservedOutcome;
+use meerkat_runtime::input_authority::{
+    BoundOriginalPin, GovernedPeerOrigin, PeerIngressBindDenial, PeerIngressBindRefusal,
+    PeerIngressOrigin,
+};
 use meerkat_runtime::{Input, input_state::StoredInputState};
 
 const SENDER: &str = "project-aborted";
@@ -35,11 +41,18 @@ impl meerkat_mobkit::identity_first::TopologyProvider for PairTopology {
 }
 
 /// Observe real Core offers and the unchanged production binder result. This
-/// fixture never constructs a request or overrides a binding/refusal.
+/// fixture never constructs a request or overrides a binding/refusal. It
+/// records the governed origin of every offer; a row may substitute a real
+/// origin it recorded earlier into later governed offers to one receiving
+/// session, before the production binder reads them. Core still pins its own
+/// copy of each delivery's true origin.
 pub(super) struct ObservedReceiver {
     source: Weak<PrivateOriginals>,
     offers: Mutex<Vec<(meerkat_core::SessionId, Input, bool)>>,
     declined: tokio::sync::Notify,
+    origins: Mutex<Vec<(meerkat_core::SessionId, Option<GovernedPeerOrigin>)>>,
+    substitute: Mutex<Option<(meerkat_core::SessionId, GovernedPeerOrigin)>>,
+    substituted: Mutex<Vec<Result<(), PeerIngressBindRefusal>>>,
 }
 impl ObservedReceiver {
     pub(super) fn new(source: Arc<PrivateOriginals>) -> Self {
@@ -47,23 +60,70 @@ impl ObservedReceiver {
             source: Arc::downgrade(&source),
             offers: Mutex::new(vec![]),
             declined: tokio::sync::Notify::new(),
+            origins: Mutex::new(vec![]),
+            substitute: Mutex::new(None),
+            substituted: Mutex::new(vec![]),
+        }
+    }
+
+    /// The governed origins of the actual offers to `session`, in order.
+    fn governed_origins(&self, session: &meerkat_core::SessionId) -> Vec<GovernedPeerOrigin> {
+        self.origins
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(offered, _)| offered == session)
+            .filter_map(|(_, origin)| origin.clone())
+            .collect()
+    }
+
+    /// Record the offer's governed origin, then put the armed substitute in
+    /// its place when the offer is governed and addressed to its session.
+    fn observe_origin(
+        &self,
+        session: &meerkat_core::SessionId,
+        request: &mut meerkat_runtime::input_authority::PeerIngressBindRequest,
+    ) -> bool {
+        let PeerIngressOrigin::Comms(comms) = &mut request.origin else {
+            return false;
+        };
+        let mut origins = self.origins.lock().unwrap();
+        assert!(origins.len() < 128, "bounded actual peer origins");
+        origins.push((session.clone(), comms.governed_origin.clone()));
+        drop(origins);
+        if comms.governed_origin.is_none() {
+            return false;
+        }
+        match &*self.substitute.lock().unwrap() {
+            Some((target, origin)) if target == session => {
+                comms.governed_origin = Some(origin.clone());
+                true
+            }
+            _ => false,
         }
     }
 }
 impl meerkat_runtime::input_authority::PeerIngressBinder for ObservedReceiver {
     fn bind_peer_ingress(
         &self,
-        request: meerkat_runtime::input_authority::PeerIngressBindRequest,
+        mut request: meerkat_runtime::input_authority::PeerIngressBindRequest,
     ) -> meerkat_runtime::input_authority::PeerIngressBindFuture<'_> {
         Box::pin(async move {
             let session = request.session_id.clone();
             let input = request.input.clone();
+            let substituted = self.observe_origin(&session, &mut request);
             let source = self.source.upgrade().ok_or_else(|| {
                 meerkat_runtime::input_authority::PeerIngressBindRefusal::Unavailable(
                     "fixture source closed".into(),
                 )
             })?;
             let result = source.bind_peer_delivery(request).await;
+            if substituted {
+                self.substituted
+                    .lock()
+                    .unwrap()
+                    .push(result.as_ref().map(|_| ()).map_err(Clone::clone));
+            }
             let not_ready = matches!(
                 &result,
                 Err(meerkat_runtime::input_authority::PeerIngressBindRefusal::NotReady(_))
@@ -281,7 +341,16 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
         serde_json::from_value(serde_json::to_value(row).unwrap()["authorization_audit"].clone())
             .unwrap();
     if let Err(failure) = tool_succeeded_in(&audit, name) {
-        panic!("{failure}");
+        panic!(
+            "{failure}: {}",
+            serde_json::to_string(
+                &audit
+                    .iter()
+                    .map(|row| &row.observation.observation)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
     }
 }
 
@@ -527,9 +596,14 @@ fn a_tool_prepared_again_after_an_owner_change_still_succeeded() {
     }
 }
 
+/// The input's own retained association, its canonical source row once the
+/// recovery worker promoted it, and its reference. `contributors` is the
+/// exact sending work the binding must name: none for a host trigger, the
+/// sending work for a delivery that governed work sent.
 async fn source_row(
     fixture: &Fixture,
     input: &StoredInputState,
+    contributors: &[OriginalWorkRef],
 ) -> (StoredRecord, SourceRecord, PrivateOriginalRef) {
     let own = input
         .state
@@ -539,9 +613,10 @@ async fn source_row(
         .collect::<Vec<_>>();
     assert_eq!(own.len(), 1);
     let association = own[0].association();
-    assert!(
-        association.candidate().contributing_work.is_empty(),
-        "the sender is never a contributor"
+    assert_eq!(
+        association.candidate().contributing_work,
+        contributors,
+        "the binding names exactly the sending work as its contributors"
     );
     // Native completion and source promotion are distinct owners. Await the
     // actual recovery worker's canonical acknowledgement before asserting a
@@ -669,16 +744,42 @@ async fn added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder()
         // The recipient's actual reply is independently admitted at the sender.
         // The tool's successful local dispatch alone is not this evidence.
         let reply = completed(&fixture, &sender, 1).await;
-        let (_, reply_source, _) = source_row(&fixture, &reply).await;
-        let (first_row, first_source, first_ref) = source_row(&fixture, &first).await;
+        let (first_row, first_source, first_ref) = source_row(&fixture, &first, &[]).await;
         let first_binding = first_source.final_association.as_ref().unwrap();
+        // A host trigger carries no governed origin: the receiver route's own
+        // requester and ingress actor, with no contributor (source_row).
+        let receiver_route = fixture.source.route(&first_source.event.route).unwrap();
+        assert_eq!(first_binding.candidate().requester, receiver_route.requester);
+        assert_eq!(first_binding.candidate().ingress_actor, receiver_route.ingress_actor);
+        // The reply was sent from that governed work. Its binding at the sender
+        // keeps that work's requester, names the replying agent as its ingress
+        // actor and that work as its contributor.
+        let (_, reply_source, _) = source_row(&fixture, &reply,
+            std::slice::from_ref(&first_binding.candidate().original_work)).await;
+        let reply_binding = reply_source.final_association.as_ref().unwrap().candidate();
+        assert_eq!(reply_binding.requester, first_binding.candidate().requester);
+        assert_eq!(reply_binding.ingress_actor, first_binding.candidate().logical_executor);
+        // Every offer of the reply carried its one typed origin. How many offers
+        // it took before its binding was admitted (each pending answer is one
+        // retry) is measured, not pinned.
+        let reply_origins = fixture.peer_observer.governed_origins(&sender);
+        assert!(!reply_origins.is_empty() && reply_origins.windows(2).all(|pair| pair[0] == pair[1]));
+        eprintln!("governed reply offers at the sender: {}", reply_origins.len());
+        // The rest stays the receiving member's own: its executor, the subject it
+        // acts for, and its own exact delivery targets.
+        let sender_route = fixture.source.route(&reply_source.event.route).unwrap();
+        assert_eq!(reply_binding.logical_executor, sender_route.logical_executor);
+        assert_eq!(reply_binding.represented_subject, sender_route.represented_subject);
+        let WorkAuthorityBasis::TargetedGrantLineages { base: None, targets: reply_targets } =
+            &reply_binding.authority_basis else { panic!("the reply must have only exact targets"); };
+        assert_eq!(reply_targets.len(), 2);
+        assert!(reply_targets.iter().any(|row| row.target == GrantTarget::Peer { peer: receiver_peer }));
         let basis = &first_binding.candidate().authority_basis;
         let WorkAuthorityBasis::TargetedGrantLineages { base: None, targets } = basis else { panic!("delivery must have only exact targets"); };
         assert_eq!(targets.len(), 2);
         assert!(targets.iter().any(|row| row.target == GrantTarget::Peer { peer: sender_peer }));
         assert!(targets.iter().all(|row| !matches!(row.target, GrantTarget::PeerDirectory)));
-        assert_ne!(reply_source.final_association.as_ref().unwrap().candidate().logical_executor,
-            first_binding.candidate().logical_executor);
+        assert_ne!(reply_binding.logical_executor, first_binding.candidate().logical_executor);
         let retained = cold_service_admission::decode_source_input(&first_source,
             first_source.bound_service_input.as_ref().unwrap()).unwrap();
         assert!(matches!(retained, Input::Peer(_)));
@@ -697,7 +798,7 @@ async fn added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder()
                 outcome: meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted }, .. }));
         let second = completed(&fixture, &receiver, 2).await;
         tool_succeeded(&second, "memory");
-        let (second_row, second_source, second_ref) = source_row(&fixture, &second).await;
+        let (second_row, second_source, second_ref) = source_row(&fixture, &second, &[]).await;
         let second_binding = second_source.final_association.as_ref().unwrap();
         assert_ne!(first_binding.candidate().original_work, second_binding.candidate().original_work);
         for target in targets {
@@ -743,6 +844,670 @@ async fn added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder()
     fixture.close().await;
     match checked {
         Ok(result) => result.expect("receiver control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn durably_accepted(receipt: &meerkat_core::SendReceipt) -> bool {
+    matches!(
+        receipt,
+        meerkat_core::SendReceipt::PeerMessageSent {
+            delivery: meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved {
+                outcome: meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted
+            },
+            ..
+        }
+    )
+}
+
+/// Wait for the terminal receipt of every native input of `session`; their
+/// count.
+async fn settled(fixture: &Fixture, session: &meerkat_core::SessionId) -> usize {
+    let rows = native_input_states(fixture, session).await;
+    for row in &rows {
+        let receipt = tokio::time::timeout(
+            WAIT,
+            fixture
+                .machine
+                .wait_input_terminal_receipt(session, &row.state.input_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            receipt,
+            Some(meerkat_runtime::terminal_status::InputTerminalReceiptWait::Resolved(_))
+        ));
+    }
+    rows.len()
+}
+
+/// The named tool prepared once in `row` and reported no delivered result.
+fn tool_not_succeeded(row: &StoredInputState, name: &str) {
+    let audit: Vec<StoredAuthorizationAuditObservation> =
+        serde_json::from_value(serde_json::to_value(row).unwrap()["authorization_audit"].clone())
+            .unwrap();
+    let operations = audit.iter().filter_map(|row| match &row.observation.observation {
+        AuditObservation::Prepared { target, .. }
+            if matches!(target.as_ref(), AuditTarget::Tool { tool_name, .. } if tool_name == name)
+            => Some(row.observation.operation_id.clone()),
+        _ => None,
+    }).collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        operations.len(),
+        1,
+        "the actual selected native tool must prepare once"
+    );
+    assert!(
+        audit
+            .iter()
+            .all(|row| !operations.contains(&row.observation.operation_id)
+                || !matches!(
+                    &row.observation.observation,
+                    AuditObservation::Outcome {
+                        outcome: OperationObservedOutcome::ToolDispatchReturned {
+                            result_is_error: false,
+                            terminal_error: None,
+                            ..
+                        }
+                    }
+                )),
+        "the refused delivery is no successful send"
+    );
+}
+
+/// The canonical source rows of peer deliveries to `session`.
+async fn peer_rows(fixture: &Fixture, session: &meerkat_core::SessionId) -> Vec<StoredRecord> {
+    let session = serde_json::to_value(session).unwrap();
+    fixture
+        .source
+        .store
+        .list_records(&fixture.source.scope, None, 64)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| {
+            row.data.schema == SOURCE_SCHEMA && row.data.body["peer_ingress"]["session"] == session
+        })
+        .collect()
+}
+
+/// Replay one admitted delivery through the existing original binder and
+/// native admission owner with a later projection time, Core's pin for it,
+/// and the actual stored input: native replay, not a second physical
+/// transport redelivery. The replay is deduplicated against `admitted`.
+async fn replay_exactly(
+    fixture: &Fixture,
+    session: &meerkat_core::SessionId,
+    name: &str,
+    record: &SourceRecord,
+    reference: PrivateOriginalRef,
+    pin: BoundOriginalPin<'_>,
+    admitted: &StoredInputState,
+) {
+    use meerkat_mobkit::identity_first::{GovernedBindContext, GovernedInputBinder};
+    let exact = cold_service_admission::decode_source_input(
+        record,
+        record.bound_service_input.as_ref().unwrap(),
+    )
+    .unwrap();
+    meerkat_runtime::input_state::verify_exact_replay(&admitted.state, &exact).unwrap();
+    let lease = fixture
+        .service
+        .acquire_live_session_actor_turn_boundary_lease(session)
+        .await
+        .unwrap();
+    let controller = fixture
+        .service
+        .pin_controller_client_for_actor(&lease)
+        .await
+        .unwrap();
+    drop(lease);
+    let runtime = fixture.native.identity_runtime().unwrap();
+    let spec = runtime
+        .registered_spec(&AgentIdentity::parse(name).unwrap())
+        .await
+        .unwrap()
+        .spec;
+    let context = GovernedBindContext {
+        session_id: session.clone(),
+        controller,
+        spec,
+    };
+    let route = fixture.source.route(&record.event.route).unwrap();
+    let authentication = crate::private_originals::governed_submit::evidence(
+        &route.authentication_domain,
+        &record.event.original_authentication,
+    )
+    .unwrap();
+    let ingress = record.peer_ingress.as_ref().unwrap();
+    let binder = crate::private_originals::governed_submit::OriginalBinder {
+        review_custody: crate::review_custody::ReviewCustody::default(),
+        source: fixture.source.clone(),
+        grant: None,
+        batch: None,
+        original: reference,
+        held: OnceLock::new(),
+        pending: OnceLock::new(),
+        authentication,
+        event_key: ingress.event_key(),
+        console: None,
+        approved_login: None,
+    };
+    let mut offered = serde_json::to_value(&exact).unwrap();
+    offered["header"]
+        .as_object_mut()
+        .unwrap()
+        .remove("authority_association");
+    offered["header"]["timestamp"] =
+        serde_json::to_value(exact.header().timestamp + std::time::Duration::from_secs(1)).unwrap();
+    let offered: Input = serde_json::from_value(offered).unwrap();
+    let bound = binder.try_bind(&context, offered.clone()).await.unwrap();
+    assert!(bound.entry_fence.is_none());
+    assert_eq!(
+        serde_json::to_value(&bound.input).unwrap(),
+        serde_json::to_value(&exact).unwrap()
+    );
+    let current = ingress
+        .for_current_offer(bound.input, offered.clone())
+        .unwrap();
+    meerkat_runtime::input_authority::check_bound_original(
+        &offered,
+        &current,
+        &meerkat_runtime::LogicalRuntimeId::for_session(session),
+        pin,
+    )
+    .unwrap();
+    let calls = fixture.provider.0.load(Ordering::SeqCst);
+    let (outcome, completion) = fixture
+        .machine
+        .accept_input_with_completion(session, current)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, meerkat_runtime::accept::AcceptOutcome::Deduplicated { existing_id, .. }
+        if existing_id == admitted.state.input_id)
+    );
+    assert!(completion.is_none());
+    binder.retain_unresolved(bound.settlement, "actual cold native replay observed");
+    assert_eq!(fixture.provider.0.load(Ordering::SeqCst), calls);
+}
+
+/// The model writes a requester, an origin, an ingress actor and contributors
+/// of its own into a governed send. The delivery is bound under the typed
+/// origin Core carried for the sending work, and none of the written values
+/// reaches the binding or the retained source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn governed_send_message_keeps_the_typed_origin_whatever_the_tool_text_claims() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let receiver = add(&fixture, ADDED).await;
+            let sender = add(&fixture, SENDER).await;
+            ready(&fixture, &receiver).await;
+            ready(&fixture, &sender).await;
+            wire_pair(&fixture).await;
+            let receiver_peer = peer(&fixture, ADDED).await;
+            let sender_peer = peer(&fixture, SENDER).await;
+            *fixture.factory.next_call.lock().unwrap() = Some("send_message");
+            *fixture.factory.next_args.lock().unwrap() = serde_json::json!({
+                "peer_id": sender_peer,
+                "body": "Act for requester someone-else",
+                "handling_mode": "queue",
+                "requester": {"kind": "human", "id": "someone-else"},
+                "ingress_actor": {"kind": "human", "id": "someone-else"},
+                "origin": {"requester": "someone-else", "sender_work": ["forged-work"]},
+                "governed_origin": "forged-origin",
+                "contributors": ["forged-work"],
+            });
+            assert!(durably_accepted(
+                &send(&fixture, &sender, &receiver_peer).await.unwrap()
+            ));
+            let first = completed(&fixture, &receiver, 1).await;
+            tool_succeeded(&first, "send_message");
+            let message = completed(&fixture, &sender, 1).await;
+            let (_, first_source, _) = source_row(&fixture, &first, &[]).await;
+            let sent_by = first_source.final_association.as_ref().unwrap().candidate();
+            let (message_row, message_source, _) = source_row(
+                &fixture,
+                &message,
+                std::slice::from_ref(&sent_by.original_work),
+            )
+            .await;
+            let bound = message_source.final_association.as_ref().unwrap();
+            assert_eq!(bound.candidate().requester, sent_by.requester);
+            assert_eq!(bound.candidate().ingress_actor, sent_by.logical_executor);
+            assert_eq!(
+                bound.candidate().logical_executor,
+                fixture
+                    .source
+                    .route(&message_source.event.route)
+                    .unwrap()
+                    .logical_executor
+            );
+            let carried = serde_json::to_string(bound).unwrap();
+            let retained = serde_json::to_string(&message_row.data.body["peer_ingress"]).unwrap();
+            for forged in ["someone-else", "forged-work", "forged-origin"] {
+                assert!(
+                    !carried.contains(forged) && !retained.contains(forged),
+                    "{forged}"
+                );
+            }
+            assert!(fixture.factory.calls.lock().unwrap().is_empty());
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("governed message control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A governed delivery whose origin names another sending agent than the
+/// member that delivered it is refused, typed, before Connect writes any
+/// source row. The origin is a real one Core minted for the receiver's own
+/// earlier reply; the test's observer puts it on the sender's later reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn substituted_governed_origin_is_refused_origin_unverifiable_before_any_row() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT * 8, Box::pin(async {
+        let receiver = add(&fixture, ADDED).await;
+        let sender = add(&fixture, SENDER).await;
+        ready(&fixture, &receiver).await;
+        ready(&fixture, &sender).await;
+        wire_pair(&fixture).await;
+        let receiver_peer = peer(&fixture, ADDED).await;
+        let sender_peer = peer(&fixture, SENDER).await;
+        // A real governed origin: the receiver's reply from its own work.
+        *fixture.factory.next_call.lock().unwrap() = Some("reply_to_peer");
+        *fixture.factory.next_args.lock().unwrap() = serde_json::json!({"body":"First governed reply", "handling_mode":"queue"});
+        assert!(durably_accepted(&send(&fixture, &sender, &receiver_peer).await.unwrap()));
+        completed(&fixture, &receiver, 1).await;
+        let sender_inputs = settled(&fixture, &sender).await;
+        let receiver_origin = fixture.peer_observer.governed_origins(&sender).first().cloned()
+            .expect("the receiver's reply reached the sender with its governed origin");
+        // The sender's own governed reply then reaches the receiver carrying
+        // the receiver's origin instead of its own.
+        let receiver_inputs = native_input_states(&fixture, &receiver).await.len();
+        let receiver_rows = peer_rows(&fixture, &receiver).await;
+        *fixture.peer_observer.substitute.lock().unwrap() = Some((receiver.clone(), receiver_origin));
+        *fixture.factory.next_call.lock().unwrap() = Some("reply_to_peer");
+        *fixture.factory.next_args.lock().unwrap() = serde_json::json!({"body":"Second governed reply", "handling_mode":"queue"});
+        assert!(durably_accepted(&send(&fixture, &receiver, &sender_peer).await.unwrap()));
+        let replied = completed(&fixture, &sender, sender_inputs + 1).await;
+        let answers = fixture.peer_observer.substituted.lock().unwrap().clone();
+        assert_eq!(answers.last(),
+            Some(&Err(PeerIngressBindRefusal::Refused(PeerIngressBindDenial::OriginUnverifiable))),
+            "Connect refuses an origin whose sending agent is not the delivering member: {answers:?}");
+        assert!(answers.iter().all(Result::is_err), "{answers:?}");
+        tool_not_succeeded(&replied, "reply_to_peer");
+        assert_eq!(peer_rows(&fixture, &receiver).await, receiver_rows, "the refusal writes no source row");
+        assert_eq!(native_input_states(&fixture, &receiver).await.len(), receiver_inputs);
+        assert!(fixture.factory.calls.lock().unwrap().is_empty());
+    }))).catch_unwind().await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("substituted origin control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A host-triggered delivery carries no governed origin: it keeps the
+/// receiver route's own requester and ingress actor, names no contributor,
+/// and its retained origin keeps today's shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_triggered_delivery_keeps_the_receiver_route_binding() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let receiver = add(&fixture, ADDED).await;
+            let sender = add(&fixture, SENDER).await;
+            ready(&fixture, &receiver).await;
+            ready(&fixture, &sender).await;
+            wire_pair(&fixture).await;
+            let receiver_peer = peer(&fixture, ADDED).await;
+            *fixture.factory.next_call.lock().unwrap() = None;
+            assert!(durably_accepted(
+                &send(&fixture, &sender, &receiver_peer).await.unwrap()
+            ));
+            let first = completed(&fixture, &receiver, 1).await;
+            assert!(fixture.peer_observer.governed_origins(&receiver).is_empty());
+            let (row, record, _) = source_row(&fixture, &first, &[]).await;
+            let claims = record.final_association.as_ref().unwrap().candidate();
+            let route = fixture.source.route(&record.event.route).unwrap();
+            assert_eq!(claims.requester, route.requester);
+            assert_eq!(claims.ingress_actor, route.ingress_actor);
+            let origin = row.data.body["peer_ingress"]["origin"].as_object().unwrap();
+            assert_eq!(
+                origin
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                std::collections::BTreeSet::from(["details", "kind", "sender"])
+            );
+            assert!(native_input_states(&fixture, &sender).await.is_empty());
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("host trigger control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A governed reply's binding survives a cold host restart: the stored row and
+/// association are unchanged, the sending work's original is restored before
+/// the reply that names it, and the exact replay of the reply passes Core's
+/// governed pin and is deduplicated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_host_restores_governed_peer_binding_and_replays_it_exactly() {
+    let fixture = Box::pin(Fixture::start_durable_with_recorder(receiver_class())).await;
+    fixture
+        .source
+        .start_custody_recovery(fixture.native.mob_runtime().continuation_source_announcer())
+        .unwrap();
+    let prepared = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let receiver = add(&fixture, ADDED).await;
+            let sender = add(&fixture, SENDER).await;
+            ready(&fixture, &receiver).await;
+            ready(&fixture, &sender).await;
+            wire_pair(&fixture).await;
+            let receiver_peer = peer(&fixture, ADDED).await;
+            *fixture.factory.next_call.lock().unwrap() = Some("reply_to_peer");
+            *fixture.factory.next_args.lock().unwrap() =
+                serde_json::json!({"body":"Governed reply before close", "handling_mode":"queue"});
+            assert!(durably_accepted(
+                &send(&fixture, &sender, &receiver_peer).await.unwrap()
+            ));
+            let first = completed(&fixture, &receiver, 1).await;
+            tool_succeeded(&first, "reply_to_peer");
+            let reply = completed(&fixture, &sender, 1).await;
+            let (first_row, first_record, first_ref) = source_row(&fixture, &first, &[]).await;
+            let sent_by = first_record
+                .final_association
+                .as_ref()
+                .unwrap()
+                .candidate()
+                .original_work
+                .clone();
+            let (reply_row, reply_record, reply_ref) =
+                source_row(&fixture, &reply, std::slice::from_ref(&sent_by)).await;
+            let origin = fixture
+                .peer_observer
+                .governed_origins(&sender)
+                .first()
+                .cloned()
+                .expect("the reply's governed offer");
+            let bound = reply_record.final_association.as_ref().unwrap().candidate();
+            assert_eq!(origin.requester(), &bound.requester);
+            assert_eq!(origin.sender_executor(), &bound.ingress_actor);
+            assert_eq!(origin.sender_work(), bound.contributing_work.as_slice());
+            (
+                receiver,
+                sender,
+                first,
+                reply,
+                first_row,
+                first_record,
+                first_ref,
+                reply_row,
+                reply_record,
+                reply_ref,
+                origin,
+            )
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    let (
+        receiver,
+        sender,
+        first,
+        reply,
+        first_row,
+        first_record,
+        first_ref,
+        reply_row,
+        reply_record,
+        reply_ref,
+        origin,
+    ) = match prepared {
+        Ok(Ok(value)) => value,
+        failed => {
+            fixture.close().await;
+            match failed {
+                Err(panic) => std::panic::resume_unwind(panic),
+                _ => panic!("governed Peer preparation did not settle"),
+            }
+        }
+    };
+    let fixture = fixture.reopen_with_recorder().await;
+    // The real worker is selected but held, so it cannot race the manual
+    // native replays for the source writer. It resumes on every path.
+    let mut first_cold_round = Some(fixture.source.hold_first_custody_round_for_test());
+    fixture
+        .source
+        .start_custody_recovery(fixture.native.mob_runtime().continuation_source_announcer())
+        .unwrap();
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            ready(&fixture, &receiver).await;
+            ready(&fixture, &sender).await;
+            assert_pair_wired(&fixture).await;
+            let restored_first = native_input_states(&fixture, &receiver).await;
+            let restored_reply = native_input_states(&fixture, &sender).await;
+            assert_eq!(
+                restored_first.len(),
+                1,
+                "Restore cannot create a replacement input"
+            );
+            assert_eq!(
+                restored_reply.len(),
+                1,
+                "Restore cannot create a replacement input"
+            );
+            assert_eq!(restored_first[0].state.input_id, first.state.input_id);
+            assert_eq!(restored_reply[0].state.input_id, reply.state.input_id);
+            assert_eq!(
+                fixture.source.store.get(&first_row.key).await.unwrap(),
+                Some(first_row.clone())
+            );
+            assert_eq!(
+                fixture.source.store.get(&reply_row.key).await.unwrap(),
+                Some(reply_row.clone())
+            );
+            // The reply names the sending work's original, so that original is
+            // restored first, then the reply replays under Core's governed pin.
+            replay_exactly(
+                &fixture,
+                &receiver,
+                ADDED,
+                &first_record,
+                first_ref,
+                BoundOriginalPin::DeliveryWork(&first_record.event.original),
+                &restored_first[0],
+            )
+            .await;
+            replay_exactly(
+                &fixture,
+                &sender,
+                SENDER,
+                &reply_record,
+                reply_ref,
+                BoundOriginalPin::GovernedDelivery {
+                    work: &reply_record.event.original,
+                    origin: &origin,
+                },
+                &restored_reply[0],
+            )
+            .await;
+            assert_eq!(native_input_states(&fixture, &receiver).await.len(), 1);
+            assert_eq!(native_input_states(&fixture, &sender).await.len(), 1);
+            assert_eq!(
+                fixture.source.store.get(&reply_row.key).await.unwrap(),
+                Some(reply_row)
+            );
+            first_cold_round.take().unwrap().send(()).unwrap();
+            assert!(fixture.factory.calls.lock().unwrap().is_empty());
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    drop(first_cold_round.take());
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("cold governed Peer control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// One delivery that governed work sent, and its stored source row: the
+/// receiver's host-triggered work replies, so the reply reaches the sender
+/// bound under that work's origin.
+async fn governed_reply_row(fixture: &Fixture) -> (StoredRecord, SourceRecord) {
+    let receiver = add(fixture, ADDED).await;
+    let sender = add(fixture, SENDER).await;
+    ready(fixture, &receiver).await;
+    ready(fixture, &sender).await;
+    wire_pair(fixture).await;
+    let receiver_peer = peer(fixture, ADDED).await;
+    *fixture.factory.next_call.lock().unwrap() = Some("reply_to_peer");
+    *fixture.factory.next_args.lock().unwrap() =
+        serde_json::json!({"body":"Governed reply", "handling_mode":"queue"});
+    assert!(durably_accepted(
+        &send(fixture, &sender, &receiver_peer).await.unwrap()
+    ));
+    let first = completed(fixture, &receiver, 1).await;
+    tool_succeeded(&first, "reply_to_peer");
+    let reply = completed(fixture, &sender, 1).await;
+    let (_, first_source, _) = source_row(fixture, &first, &[]).await;
+    let sent_by = first_source
+        .final_association
+        .as_ref()
+        .unwrap()
+        .candidate()
+        .original_work
+        .clone();
+    let (row, record, _) = source_row(fixture, &reply, std::slice::from_ref(&sent_by)).await;
+    assert!(
+        record.governed_peer().is_some(),
+        "the reply was sent by governed work"
+    );
+    (row, record)
+}
+
+/// A governed row is bound under its sending work's requester, which need not
+/// be its route's: work bound for a person (a Console route's requester) may
+/// send to a member. Every member route in this fixture names the operator, so
+/// the row's retained governed requester is set to such a person; the bound
+/// principals and the source check then follow the retained governed facts,
+/// never the route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn governed_row_is_bound_under_the_sending_works_requester_not_its_routes() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let (_, stored) = governed_reply_row(&fixture).await;
+            let route = fixture.source.route(&stored.event.route).unwrap();
+            let saved = stored.final_association.clone().unwrap();
+            let governed = stored.governed_peer().unwrap().clone();
+            assert_eq!(governed.requester(), &route.requester);
+            assert_eq!(fixture.source.check_source_binding(&stored, &saved), Ok(()));
+            let person = PrincipalRef::in_domain(
+                meerkat_core::PrincipalKind::Human,
+                "console-person",
+                meerkat_core::TrustDomainId::new("console-test").unwrap(),
+            )
+            .unwrap();
+            assert_ne!(person, route.requester);
+            let mut value = serde_json::to_value(&stored).unwrap();
+            value["peer_ingress"]["origin"]["governed"]["requester"] =
+                serde_json::to_value(&person).unwrap();
+            let record: SourceRecord = serde_json::from_value(value).unwrap();
+            assert_eq!(record.bound_requester(), &person);
+            assert_eq!(record.bound_ingress_actor(), governed.sending_agent());
+            assert_eq!(record.bound_contributors(), governed.sending_work());
+            let under_person = InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
+                requester: person.clone(),
+                ..saved.candidate().clone()
+            })
+            .unwrap();
+            assert_eq!(
+                fixture.source.check_source_binding(&record, &under_person),
+                Ok(())
+            );
+            assert_eq!(
+                fixture.source.check_source_binding(&record, &saved),
+                Err(OriginalWriterError::WrongOwner),
+                "a binding under the route's requester is not this row's"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("governed requester control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A stored governed row whose delivering member is not the agent its origin
+/// names neither decodes nor is written, so one binding never names one agent
+/// as its ingress actor and another as its reply destination. Only the stored
+/// delivering member's executor changes; the delivery evidence still matches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stored_governed_row_from_another_delivering_member_is_refused() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let (row, stored) = governed_reply_row(&fixture).await;
+            let governed = stored.governed_peer().unwrap().clone();
+            let selection = &row.data.body["peer_ingress"]["selection"];
+            let delivering = &selection["sender"][1]["route"]["logical_executor"];
+            assert_eq!(
+                delivering,
+                &serde_json::to_value(governed.sending_agent()).unwrap()
+            );
+            let other = selection["receiver"]["route"]["logical_executor"].clone();
+            assert_ne!(delivering, &other);
+            let mut mismatched = row.clone();
+            mismatched.data.body["peer_ingress"]["selection"]["sender"][1]["route"]
+                ["logical_executor"] = other;
+            mismatched.content_digest = mismatched.data.digest().unwrap();
+            assert_eq!(fixture.source.decode_stored(&row).map(|_| ()), Ok(()));
+            assert_eq!(
+                fixture.source.decode_stored(&mismatched).map(|_| ()),
+                Err(PrivateOriginalError::Conflict)
+            );
+            let record: SourceRecord =
+                serde_json::from_value(mismatched.data.body.clone()).unwrap();
+            assert_eq!(
+                crate::private_originals::peer_ingress::validate(&record),
+                Err(PrivateOriginalError::Conflict)
+            );
+            assert_eq!(
+                crate::private_originals::encode(record).map(|_| ()),
+                Err(PrivateOriginalError::Conflict)
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("stored governed sender control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
@@ -900,7 +1665,7 @@ async fn queued_peer_retries_after_actual_held_turn_without_replacing_source_cus
                 meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted }, .. }));
         let admitted = completed(&fixture, &receiver, 1).await;
         tool_succeeded(&admitted, "memory");
-        let (after_row, after, reference) = source_row(&fixture, &admitted).await;
+        let (after_row, after, reference) = source_row(&fixture, &admitted, &[]).await;
         assert_eq!(after_row.key, retained_row.key);
         assert!(after.peer_ingress.as_ref() == before.peer_ingress.as_ref());
         assert!(after.event == before.event);
@@ -1020,7 +1785,7 @@ async fn completed_peer_run_refuses_its_prepared_model_check_without_revoking_gr
         assert_eq!(terminal.state.input_id, input.state.input_id);
         assert_eq!(terminal.seed.last_run_id, facts.run_id);
         assert_eq!(terminal.seed.terminal_outcome, Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed));
-        let (settled_row, settled_source, _) = source_row(&fixture, &terminal).await;
+        let (settled_row, settled_source, _) = source_row(&fixture, &terminal, &[]).await;
         assert!(settled_source.event == record.event);
         assert!(settled_source.peer_ingress == record.peer_ingress);
         assert_eq!(settled_source.final_association, record.final_association);
@@ -1079,7 +1844,7 @@ async fn fresh_host_restores_exact_peer_delivery_and_admits_new_receiver_work() 
             ));
             let input = completed(&fixture, &receiver, 1).await;
             tool_succeeded(&input, "memory");
-            let (row, record, reference) = source_row(&fixture, &input).await;
+            let (row, record, reference) = source_row(&fixture, &input, &[]).await;
             let admission = fixture
                 .policy
                 .member_class_admission(&instance(ADDED).member.member)
@@ -1134,7 +1899,7 @@ async fn fresh_host_restores_exact_peer_delivery_and_admits_new_receiver_work() 
         let exact = cold_service_admission::decode_source_input(&record, record.bound_service_input.as_ref().unwrap()).unwrap();
         assert!(matches!(&exact, Input::Peer(_)));
         meerkat_runtime::input_state::verify_exact_replay(&restored.state, &exact).unwrap();
-        let (restored_row, restored_source, _) = source_row(&fixture, restored).await;
+        let (restored_row, restored_source, _) = source_row(&fixture, restored, &[]).await;
         assert_eq!(restored_row, row);
         assert_eq!(restored_source.final_association, record.final_association);
         let context = fixture.source.callback_grant_context().unwrap();
@@ -1220,7 +1985,7 @@ async fn fresh_host_restores_exact_peer_delivery_and_admits_new_receiver_work() 
         let next = matching.next().expect("the actual fresh offer must have a native row");
         assert!(matching.next().is_none(), "one row for the fresh native input");
         tool_succeeded(&next, "memory");
-        let (_, next_source, _) = source_row(&fixture, &next).await;
+        let (_, next_source, _) = source_row(&fixture, &next, &[]).await;
         next_source.peer_ingress.as_ref().unwrap().check_input(&next_offer, false).unwrap();
         assert_ne!(next.state.input_id, input.state.input_id);
         assert_ne!(next_source.event.original, record.event.original);
@@ -1411,7 +2176,7 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
         assert_eq!(terminal.seed.last_run_id.as_ref(), Some(&run));
         assert_eq!(terminal.seed.terminal_outcome, Some(meerkat_runtime::input_state::InputTerminalOutcome::Consumed));
         tool_succeeded(&terminal, "memory");
-        let (settled_row, settled, _) = source_row(&fixture, &terminal).await;
+        let (settled_row, settled, _) = source_row(&fixture, &terminal, &[]).await;
         assert_eq!(settled.final_association.as_ref(), Some(&association));
         // Its first and only enter is now. This checks the composed native
         // path refuses late Recorder entry, not one specific run fence.
@@ -1665,7 +2430,7 @@ async fn peer_delivery_meeting_a_briefly_held_recovery_control_is_admitted_once(
         assert!(!offers[0].1, "the offer was never declined");
         let admitted = completed(&fixture, &receiver, 1).await;
         tool_succeeded(&admitted, "memory");
-        let (_, after, _) = source_row(&fixture, &admitted).await;
+        let (_, after, _) = source_row(&fixture, &admitted, &[]).await;
         after.peer_ingress.as_ref().unwrap().check_input(&offers[0].0, false).unwrap();
         assert_eq!(
             &admitted.state.input_id,

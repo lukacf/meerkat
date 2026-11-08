@@ -1448,7 +1448,7 @@ fn read_lineage<T>(
 /// replay versus conflict.
 #[allow(clippy::too_many_arguments)]
 pub fn bind_scoped_original(
-    mut input: Input,
+    input: Input,
     association: InputAuthorityAssociation,
     event_key: IdempotencyKey,
     requester: PrincipalRef,
@@ -1457,17 +1457,16 @@ pub fn bind_scoped_original(
     authentication: HistoricalEvidenceRef,
     controller: meerkat_core::ControllerModelClient,
 ) -> Result<Input, RuntimeDriverError> {
-    input.header_mut().authority_association = Some(association);
-    input.header_mut().idempotency_key = Some(event_key);
-    let ingress = NativeIngressContext::from_trusted_ingress(
-        &input,
+    crate::input_authority::bind_original_input(
+        input,
+        association,
+        event_key,
         requester,
         ingress_actor,
         realm,
         authentication,
-    )?
-    .with_controller_client(&input, controller)?;
-    input.with_ingress_context(ingress)
+        controller,
+    )
 }
 
 fn refused(kind: OperationRefusalKind) -> NativeAdmissionError {

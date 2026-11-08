@@ -536,7 +536,8 @@ pub fn incident_model() -> String {
 }
 
 pub fn incident_image_model() -> String {
-    std::env::var("RKAT_INCIDENT_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-2".to_string())
+    std::env::var("RKAT_INCIDENT_IMAGE_MODEL")
+        .unwrap_or_else(|_| "gpt-image-2.6-sunburst".to_string())
 }
 
 pub(crate) fn incident_definition() -> Result<MobDefinition> {
@@ -1082,6 +1083,7 @@ fn trusted_oidc() -> TrustedOidcRuntimeConfig {
             .to_string(),
         audience: "meerkat-console".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     }
 }
 

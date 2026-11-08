@@ -1,12 +1,18 @@
 //! Core-authenticated deliveries select only their receiving Add's mandate.
-//! Sender facts name a reply destination, never authority or a contributor.
+//! Transport sender facts name a reply destination, never authority or a
+//! contributor. A delivery that governed work sent in process is bound under
+//! that work's typed origin, as Core established it
+//! (`PeerIngressCommsOrigin::governed_origin`): its requester, the sending
+//! agent as ingress actor and the sending work as contributors, which only
+//! narrow the receiving work. Nothing of it is read from message text.
 use super::native_operations::SelectedMember;
 use super::*;
 use crate::installed_host::application_operations;
 use meerkat_authorization_contracts::{
     constraints::{ActionRef, DelegationDepth, DomainRestriction, ExactRestriction},
     work_association::{
-        GrantTarget, InputAuthorityAssociation, TargetGrantLineage, WorkAuthorityBasis,
+        GrantTarget, InputAuthorityAssociation, MAX_ASSOCIATION_REFERENCES, OriginalWorkRef,
+        TargetGrantLineage, WorkAuthorityBasis,
     },
 };
 use meerkat_core::{MemoryOperation, PeerSendKind, ToolOperationTarget};
@@ -15,8 +21,9 @@ use meerkat_runtime::{
     Input, LogicalRuntimeId,
     identifiers::IdempotencyKey,
     input_authority::{
-        PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest, PeerIngressBinder,
-        PeerIngressBinding, PeerIngressClaimKind, PeerIngressOrigin,
+        GovernedPeerOrigin, PeerIngressBindDenial, PeerIngressBindFuture, PeerIngressBindRefusal,
+        PeerIngressBindRequest, PeerIngressBinder, PeerIngressBinding, PeerIngressClaimKind,
+        PeerIngressOrigin,
     },
 };
 
@@ -44,10 +51,93 @@ enum PeerOrigin {
     Comms {
         sender: meerkat_core::comms::PeerId,
         details: serde_json::Value,
+        /// The governed work the delivery was sent under, when Core carried
+        /// one. Absent for every other delivery, which keeps its shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        governed: Option<GovernedPeerFacts>,
     },
     Supervisor {
         details: serde_json::Value,
     },
+}
+
+/// The requester, sending agent and sending work of a delivery that governed
+/// work sent in process, read from Core's typed origin through its accessors
+/// only. A binding of the delivery keeps the requester, names the agent as
+/// its ingress actor and every work as a contributor, in this order, as Core
+/// pins it (`BoundOriginalPin::GovernedDelivery`).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GovernedPeerFacts {
+    requester: PrincipalRef,
+    sending_agent: PrincipalRef,
+    sending_work: Vec<OriginalWorkRef>,
+}
+impl GovernedPeerFacts {
+    pub(super) fn requester(&self) -> &PrincipalRef {
+        &self.requester
+    }
+    pub(super) fn sending_agent(&self) -> &PrincipalRef {
+        &self.sending_agent
+    }
+    pub(super) fn sending_work(&self) -> &[OriginalWorkRef] {
+        &self.sending_work
+    }
+    /// The member that delivered the work is the agent its origin names as
+    /// the sender, so one binding never names one agent as its ingress actor
+    /// and another as its reply destination.
+    fn check_sending_agent(&self, delivering: &PrincipalRef) -> Result<(), PeerIngressBindDenial> {
+        if &self.sending_agent == delivering {
+            Ok(())
+        } else {
+            Err(PeerIngressBindDenial::OriginUnverifiable)
+        }
+    }
+}
+
+/// What Connect reads of a governed origin: the values of its accessors.
+struct GovernedOriginView<'a> {
+    requester: &'a PrincipalRef,
+    sending_agent: &'a PrincipalRef,
+    sending_work: &'a [OriginalWorkRef],
+    namespace: Option<(&'a RealmId, &'a ResourceDomain)>,
+    bounded_by_grants: bool,
+}
+impl<'a> GovernedOriginView<'a> {
+    fn of(origin: &'a GovernedPeerOrigin) -> Self {
+        Self {
+            requester: origin.requester(),
+            sending_agent: origin.sender_executor(),
+            sending_work: origin.sender_work(),
+            namespace: origin.namespace(),
+            bounded_by_grants: origin.bounded_by_grants(),
+        }
+    }
+    /// The facts a binding keeps, or why Connect binds no such delivery: a
+    /// sending work outside this source's realm and ingress domain, one with
+    /// an original that narrows nothing, or one that names more works than an
+    /// association may. Derived from the origin alone, so a redelivery
+    /// derives the same answer and nothing is recorded.
+    fn check(
+        self,
+        realm: &RealmId,
+        ingress: &ResourceDomain,
+    ) -> Result<GovernedPeerFacts, PeerIngressBindDenial> {
+        if self.namespace != Some((realm, ingress)) {
+            return Err(PeerIngressBindDenial::OriginUnverifiable);
+        }
+        if !self.bounded_by_grants {
+            return Err(PeerIngressBindDenial::SenderBasisUnbounded);
+        }
+        if self.sending_work.len() > MAX_ASSOCIATION_REFERENCES {
+            return Err(PeerIngressBindDenial::ContributorBoundExceeded);
+        }
+        Ok(GovernedPeerFacts {
+            requester: self.requester.clone(),
+            sending_agent: self.sending_agent.clone(),
+            sending_work: self.sending_work.to_vec(),
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +184,15 @@ fn raw_digest(
         .map(|bytes| digest(&bytes))
         .map_err(|_| PrivateOriginalError::Conflict)
 }
-fn origin(request: &PeerIngressBindRequest) -> Result<PeerOrigin, PeerIngressBindRefusal> {
+/// The delivery's typed origin facts. A delivery that governed work sent is
+/// checked against this source's `realm` and `ingress` domain, and refused
+/// for a typed cause (`PeerIngressBindRefusal::Refused`) before anything is
+/// written; every other delivery keeps its facts as before.
+fn origin(
+    request: &PeerIngressBindRequest,
+    realm: &RealmId,
+    ingress: &ResourceDomain,
+) -> Result<PeerOrigin, PeerIngressBindRefusal> {
     use meerkat_core::interaction::{
         PeerIngressAuthDecision, PeerIngressAuthExemption, PeerIngressKind,
         PeerIngressSenderAuthentication, PeerInputClass,
@@ -139,14 +237,22 @@ fn origin(request: &PeerIngressBindRequest) -> Result<PeerOrigin, PeerIngressBin
                 PeerIngressKind::Ack => "ack",
                 PeerIngressKind::PlainEvent => "plain_event",
             };
+            let details = serde_json::json!({
+            "signing_key":value.signing_key,"route_label":value.route_label,
+            "sender_authentication":authentication(value.sender_authentication)?,
+            "auth":auth,"class":class,"ingress_kind":kind,
+            "interaction_id":value.interaction_id,"in_reply_to":value.in_reply_to,"claim":claim,
+            "expected_member":request.expected_member});
+            let governed = value
+                .governed_origin
+                .as_ref()
+                .map(|origin| GovernedOriginView::of(origin).check(realm, ingress))
+                .transpose()
+                .map_err(PeerIngressBindRefusal::Refused)?;
             PeerOrigin::Comms {
                 sender: value.sender,
-                details: serde_json::json!({
-                "signing_key":value.signing_key,"route_label":value.route_label,
-                "sender_authentication":authentication(value.sender_authentication)?,
-                "auth":auth,"class":class,"ingress_kind":kind,
-                "interaction_id":value.interaction_id,"in_reply_to":value.in_reply_to,"claim":claim,
-                "expected_member":request.expected_member}),
+                details,
+                governed,
             }
         }
         PeerIngressOrigin::SupervisorDelivery(value) => PeerOrigin::Supervisor {
@@ -160,6 +266,19 @@ fn origin(request: &PeerIngressBindRequest) -> Result<PeerOrigin, PeerIngressBin
 impl PeerSource {
     pub(super) fn refused_sender(&self) -> bool {
         matches!(self.origin, PeerOrigin::Comms { .. }) && self.selection.sender.is_none()
+    }
+    /// The governed work a delivery was sent under, when governed work sent
+    /// it in process.
+    pub(super) fn governed(&self) -> Option<&GovernedPeerFacts> {
+        match &self.origin {
+            PeerOrigin::Comms { governed, .. } => governed.as_ref(),
+            PeerOrigin::Supervisor { .. } => None,
+        }
+    }
+    /// The contributors a binding of this delivery names: the sending work
+    /// of a governed delivery, else none.
+    fn contributors(&self) -> &[OriginalWorkRef] {
+        self.governed().map_or(&[], GovernedPeerFacts::sending_work)
     }
     pub(super) fn event_key(&self) -> IdempotencyKey {
         IdempotencyKey::new(self.event_key.clone())
@@ -460,6 +579,13 @@ pub(super) fn validate(record: &SourceRecord) -> Result<(), PrivateOriginalError
         (PeerOrigin::Supervisor { .. }, None) => (),
         _ => return Err(PrivateOriginalError::Conflict),
     }
+    if let (Some(governed), Some((_, delivering))) = (peer.governed(), &peer.selection.sender)
+        && governed
+            .check_sending_agent(&delivering.route.logical_executor)
+            .is_err()
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
     if let Some(association) = &record.final_association {
         check_binding(record, association)?;
     }
@@ -484,7 +610,7 @@ pub(super) fn check_binding(
         || c.target.context.as_str() != peer.session.to_string()
         || c.target.logical_runtime.as_str() != peer.runtime
         || c.target.audience != peer.selection.receiver.member.audience
-        || !c.contributing_work.is_empty()
+        || c.contributing_work != peer.contributors()
         || targets.len() != peer.targets()?.len()
     {
         return Err(PrivateOriginalError::Conflict);
@@ -522,6 +648,22 @@ impl PrivateOriginals {
         machine
             .install_peer_ingress_binder(Arc::new(ReceiverBinder(Arc::downgrade(self))))
             .map_err(|_| PrivateOriginalError::Denied)
+    }
+    /// The requester and sending agent a retained delivery that governed
+    /// work sent is bound under; `None` for every other original.
+    pub(crate) fn governed_peer_principals(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) -> Result<Option<(PrincipalRef, PrincipalRef)>, PrivateOriginalError> {
+        Ok(self
+            .retained
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .iter()
+            .find(|held| held.original.association() == association)
+            .and_then(|held| held.peer_ingress.as_ref())
+            .and_then(PeerSource::governed)
+            .map(|governed| (governed.requester.clone(), governed.sending_agent.clone())))
     }
     fn check_peer_selection(&self, peer: &PeerSource) -> Result<(), PrivateOriginalError> {
         if self.native_selected_member(&peer.selection.receiver.route.id)?
@@ -730,7 +872,8 @@ impl PrivateOriginals {
         {
             return Err(PeerIngressBindRefusal::NotOffered);
         }
-        let origin = origin(&request)?;
+        let realm = RealmId::parse(&self.scope.realm).map_err(|_| unavailable())?;
+        let origin = origin(&request, &realm, self.owner.ingress_domain())?;
         let raw = raw_digest(&request.input, &request.input.header().idempotency_key)
             .map_err(|_| unavailable())?;
         // Ordinary Add sources all use the installed ingress authority. This
@@ -739,7 +882,7 @@ impl PrivateOriginals {
             realm: self.scope.realm.clone(),
             owner: self.scope.owner.clone(),
             id: source_key_id(
-                &RealmId::parse(&self.scope.realm).map_err(|_| unavailable())?,
+                &realm,
                 self.owner.ingress_domain(),
                 &self.owner.ingress_domain().authority,
                 &request.delivery_work,
@@ -865,6 +1008,16 @@ impl PrivateOriginals {
                 },
             }
         };
+        // A governed delivery's origin names the agent that sent it: the
+        // member the transport delivered it from, never another. Refused
+        // before any write, and derived again identically on redelivery.
+        if let (Some(governed), Some((_, delivering))) =
+            (observed.governed(), &observed.selection.sender)
+        {
+            governed
+                .check_sending_agent(&delivering.route.logical_executor)
+                .map_err(PeerIngressBindRefusal::Refused)?;
+        }
         let peer = if let Some(record) = historical.as_ref() {
             let saved = record.peer_ingress.as_ref().ok_or_else(unavailable)?;
             if saved != &observed {
@@ -1048,5 +1201,172 @@ fn grant_error(
     match error {
         GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
         _ => HostLifetimeError::Denied,
+    }
+}
+
+/// The typed origin checks over plain accessor values: Core alone mints a
+/// governed origin, so the forms a real offer cannot reach are checked here.
+#[cfg(test)]
+mod governed_origin_tests {
+    use super::*;
+    use meerkat_core::PrincipalKind;
+
+    fn principal(kind: PrincipalKind, id: &str) -> PrincipalRef {
+        PrincipalRef::in_domain(
+            kind,
+            id,
+            meerkat_core::TrustDomainId::new("governed-origin-test").unwrap(),
+        )
+        .unwrap()
+    }
+    fn realm() -> RealmId {
+        RealmId::parse("governed-realm").unwrap()
+    }
+    fn ingress() -> ResourceDomain {
+        ResourceDomain {
+            authority: principal(PrincipalKind::ServiceAccount, "ingress"),
+            namespace: "originals".into(),
+        }
+    }
+    fn works(count: usize) -> Vec<OriginalWorkRef> {
+        (0..count)
+            .map(|index| OriginalWorkRef {
+                authority: principal(PrincipalKind::ServiceAccount, "ingress"),
+                work: EvidenceId::new(format!("work-{index}")).unwrap(),
+            })
+            .collect()
+    }
+    fn view<'a>(
+        requester: &'a PrincipalRef,
+        agent: &'a PrincipalRef,
+        work: &'a [OriginalWorkRef],
+        namespace: Option<(&'a RealmId, &'a ResourceDomain)>,
+        bounded_by_grants: bool,
+    ) -> GovernedOriginView<'a> {
+        GovernedOriginView {
+            requester,
+            sending_agent: agent,
+            sending_work: work,
+            namespace,
+            bounded_by_grants,
+        }
+    }
+
+    #[test]
+    fn a_governed_origin_in_this_namespace_keeps_its_exact_facts() {
+        let (realm, ingress) = (realm(), ingress());
+        let requester = principal(PrincipalKind::Human, "requester");
+        let agent = principal(PrincipalKind::SharedAgent, "sending-agent");
+        let work = works(3);
+        let facts = view(&requester, &agent, &work, Some((&realm, &ingress)), true)
+            .check(&realm, &ingress)
+            .unwrap();
+        assert_eq!(facts.requester(), &requester);
+        assert_eq!(facts.sending_agent(), &agent);
+        assert_eq!(facts.sending_work(), work.as_slice());
+        assert_eq!(facts.check_sending_agent(&agent), Ok(()));
+        let full = works(MAX_ASSOCIATION_REFERENCES);
+        assert!(
+            view(&requester, &agent, &full, Some((&realm, &ingress)), true)
+                .check(&realm, &ingress)
+                .is_ok(),
+            "exactly the association bound is accepted"
+        );
+    }
+
+    #[test]
+    fn an_origin_outside_this_namespace_is_unverifiable() {
+        let (realm, ingress) = (realm(), ingress());
+        let requester = principal(PrincipalKind::Human, "requester");
+        let agent = principal(PrincipalKind::SharedAgent, "sending-agent");
+        let work = works(1);
+        let other_realm = RealmId::parse("other-realm").unwrap();
+        let other_ingress = ResourceDomain {
+            namespace: "other-originals".into(),
+            ..ingress.clone()
+        };
+        for namespace in [
+            None,
+            Some((&other_realm, &ingress)),
+            Some((&realm, &other_ingress)),
+        ] {
+            assert_eq!(
+                view(&requester, &agent, &work, namespace, true)
+                    .check(&realm, &ingress)
+                    .err(),
+                Some(PeerIngressBindDenial::OriginUnverifiable)
+            );
+        }
+    }
+
+    #[test]
+    fn a_sending_work_that_narrows_nothing_or_names_too_much_is_refused() {
+        let (realm, ingress) = (realm(), ingress());
+        let requester = principal(PrincipalKind::Human, "requester");
+        let agent = principal(PrincipalKind::SharedAgent, "sending-agent");
+        let work = works(1);
+        assert_eq!(
+            view(&requester, &agent, &work, Some((&realm, &ingress)), false)
+                .check(&realm, &ingress)
+                .err(),
+            Some(PeerIngressBindDenial::SenderBasisUnbounded)
+        );
+        let beyond = works(MAX_ASSOCIATION_REFERENCES + 1);
+        assert_eq!(
+            view(&requester, &agent, &beyond, Some((&realm, &ingress)), true)
+                .check(&realm, &ingress)
+                .err(),
+            Some(PeerIngressBindDenial::ContributorBoundExceeded)
+        );
+    }
+
+    #[test]
+    fn another_agent_than_the_delivering_member_is_unverifiable() {
+        let (realm, ingress) = (realm(), ingress());
+        let requester = principal(PrincipalKind::Human, "requester");
+        let agent = principal(PrincipalKind::SharedAgent, "sending-agent");
+        let work = works(1);
+        let facts = view(&requester, &agent, &work, Some((&realm, &ingress)), true)
+            .check(&realm, &ingress)
+            .unwrap();
+        assert_eq!(
+            facts.check_sending_agent(&principal(PrincipalKind::SharedAgent, "delivering-agent")),
+            Err(PeerIngressBindDenial::OriginUnverifiable)
+        );
+    }
+
+    #[test]
+    fn retained_governed_facts_keep_a_delivery_without_them_unchanged() {
+        let plain = PeerOrigin::Supervisor {
+            details: serde_json::json!({}),
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({"kind": "supervisor", "details": {}})
+        );
+        let comms: PeerOrigin = serde_json::from_value(serde_json::json!({
+            "kind": "comms",
+            "sender": serde_json::to_value(meerkat_core::comms::PeerId::from_uuid(uuid::Uuid::nil())).unwrap(),
+            "details": {},
+        }))
+        .unwrap();
+        let PeerOrigin::Comms { governed, .. } = &comms else {
+            panic!("a comms origin");
+        };
+        assert!(
+            governed.is_none(),
+            "a row without governed facts reads as before"
+        );
+        let value = serde_json::to_value(&comms).unwrap();
+        assert_eq!(
+            value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["details", "kind", "sender"]),
+            "a delivery without governed facts serializes as before"
+        );
     }
 }

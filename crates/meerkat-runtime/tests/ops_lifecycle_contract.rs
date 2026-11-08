@@ -325,6 +325,7 @@ fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         operation_id,
         event,

@@ -6,6 +6,7 @@ mod auth;
 mod comms;
 mod config;
 mod connection;
+mod decision;
 mod error;
 mod event;
 mod help;
@@ -16,6 +17,7 @@ mod live;
 mod mcp_live;
 mod mob;
 mod models;
+mod operator_instruction;
 mod params;
 mod portable_spec;
 mod realtime;
@@ -83,6 +85,28 @@ pub use connection::{
     WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
     WireScopeEvidence,
+};
+pub use decision::{
+    DECISION_NOTICE_NOTIFICATION, DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams,
+    DecisionListParams, DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
+    DecisionRenderingParams, DecisionRenderingResult, DecisionResult, DecisionWithdrawParams,
+    WireCanonicalPart, WireDecision, WireDecisionAssurance, WireDecisionErrorData,
+    WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
+    WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
+    WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
+    WireDecisionTier, WirePresentationAudience, WirePresentationRecord, WireUnreadableDecision,
+};
+pub use operator_instruction::{
+    InstructionSetErrorData, MobInstructionStatusParams, MobInstructionStatusResult,
+    MobInstructionWriteResult, MobRevokeInstructionParams, MobSetInstructionParams,
+    RevokeSessionInstructionParams, SessionInstructionStatusParams, SessionInstructionStatusResult,
+    SessionInstructionWriteResult, SetSessionInstructionParams, WireInstructionBlockReason,
+    WireInstructionEffectiveRead, WireInstructionEffectiveSlot, WireInstructionLowering,
+    WireInstructionPendingReason, WireInstructionRecord, WireInstructionResidency,
+    WireInstructionSlotState, WireInstructionSlotView, WireInstructionTarget,
+    WireInstructionTargetOwner, WireMemberInstructionDelivery, WireMemberInstructionDeliveryState,
+    WireMemberInstructionSlot, WireMemberInstructionStatus, WireMobInstructionDisposition,
+    WireSessionInstructionDisposition, WireSessionInstructionSlot,
 };
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,

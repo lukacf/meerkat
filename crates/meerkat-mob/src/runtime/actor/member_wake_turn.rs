@@ -514,12 +514,14 @@ impl MobActor {
         self.begin_running_member_wake(&identity, cause, attempt);
 
         // The seat's build inputs ride the member's first build, as a
-        // spawn's do; a member whose session a build created has none.
+        // spawn's do, and a same-session successor's declared build rides
+        // each build of its incarnation; any other member whose session a
+        // build created has none.
         let (entry, seat_build, resume_from_role) = {
             let roster = self.roster.read().await;
             (
                 roster.get(&identity).cloned(),
-                roster.seat_build(&identity),
+                roster.next_build(&identity),
                 roster.resume_from_role(&identity).cloned(),
             )
         };
@@ -1347,6 +1349,7 @@ impl MobActor {
             mob_dsl::MemberWakeFeedbackVerdict::Applied => {
                 self.member_wakes.running.remove(&run.attempt);
                 self.clear_member_restore_failure(&run.identity).await;
+                self.reset_member_build_preparation_retry(&run.identity);
                 self.member_wakes
                     .answer(run.attempt, Ok(MemberWakeOutcome::Ready));
                 self.report_member_built_after_wake(&run.identity).await;
@@ -1421,6 +1424,7 @@ impl MobActor {
             bridge_session_id: session_id,
             reason: error.to_string(),
             hold: error.durable_resume_hold(),
+            cause_data: error.structured_data(),
             registration_refusal: match error {
                 MobError::MemberRegistrationRefused { call, .. } => Some(*call),
                 _ => None,
@@ -1549,6 +1553,7 @@ impl MobActor {
                     bridge_session_id: session_id,
                     reason: reason_text,
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             )

@@ -137,16 +137,20 @@ recovery acceptance remain under validation.
 
 ### Withdrawn approvals and a fresh human request
 
-On the published Core 0.9.7 / Meta 0.9.6 pair, an unrelated owner-context
-publication can withdraw a pending consent as `ContextChanged`. A parked
-consent notice that ends during the affected Requeue path can be withdrawn as
-`NoticeInputEnded`. These remain documented limitations; a fresh request is a
-separate operation, not a successful resume of the old approval.
+Since Core 0.9.9 a pending or approved consent is kept across unrelated
+authorization changes. It is withdrawn only when its binding, review tier or
+presented material changes (`ContextChanged`), when its owners refuse the
+operation or its approver is revoked (`AuthorityChanged`), when it expires
+(`DeadlineExpired`), when its run closes with no resumed run to take it over
+(`RunEnded`), or when the notice input that carries it into a resumed run ends
+(`NoticeInputEnded`). A fresh request is a separate operation, not a successful
+resume of the old approval.
 
 Within the same selected Console route, an authenticated
 `POST /host/toolkit/consent/read` can return an additional `recovery` object
-beside the actual `approval`. It appears only for those exact unspent
-withdrawals, excludes transferred custody, and requires parked custody for
+beside the actual `approval`. It appears only for unspent `ContextChanged` and
+`NoticeInputEnded` withdrawals, excludes transferred custody, and requires
+parked custody for
 `NoticeInputEnded`. Its action is `review_current_state_then_request_again`,
 with `new_request_required` and `new_human_approval_required` true and
 `automatic_retry` false. `original_liveness` and `other_effects` remain
@@ -182,6 +186,8 @@ single-approval and Hold/Requeue/Resume controls.
 ## Delegation
 
 Work retains its authenticated requester or explicit service mandate, acting agent, tenant, selected account, audience and actual permissions across peers, forks and continuations. Each hop preserves or narrows the incoming authority and intersects it with local grants.
+
+Between members in one process, a delivery that governed work sends carries that work's origin, which Core establishes. The receiving work keeps that work's requester, names the sending member as its ingress actor and the sending work as its contributors, and each of its operations is narrowed by the sending work's current grants for that target. A delivery over a network carries no origin, so it runs under the receiving member's own standing grants.
 
 An immediate sender, session ID, objective ID or signed piece of model prose does not replace that association. Missing or unverifiable context cannot fall back to the receiving agent owner's private access. Use the native authority APIs to preserve that association.
 

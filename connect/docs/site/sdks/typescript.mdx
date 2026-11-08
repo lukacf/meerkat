@@ -4,25 +4,25 @@ description: "Use Node service operations, native application composition and a 
 icon: "js"
 ---
 
-`@rkat/toolkit` version `0.9.4` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
+`@rkat/toolkit` version `0.9.10` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
 
 ## Install
 
 ```sh
-npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/rkat-toolkit-0.9.4.tgz
+npm install https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10/rkat-toolkit-0.9.10.tgz
 ```
 
 ## Build from source
 
-From `sdk/typescript/` in the source checkout, install the locked tooling:
+From `connect/sdk/typescript/` in a checkout of this repository, install the locked tooling:
 
 ```sh
 npm ci --ignore-scripts
 ```
 
-Current source locks published `@rkat/sdk` 0.9.8 and `@rkat/meta-sdk` 0.9.7.
+Current source locks published `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10.
 Native development compositions also require a matching gateway and explicit
-SDK provenance; see [BUILDING.md](https://github.com/lukacf/meerkat-connect/blob/main/BUILDING.md#sdks).
+SDK provenance; see [BUILDING.md](https://github.com/lukacf/meerkat/blob/main/connect/BUILDING.md#sdks).
 Then build and pack:
 
 ```sh
@@ -45,7 +45,8 @@ connector imports remain independent of this entrypoint.
 | Fresh application | `new ToolkitApplicationPreparation(preparation, finalize).build(builder, { signal })` |
 | Admitted replacement (development only) | `new ToolkitApplicationUpdate(startup).configure(builder)` |
 
-The released 0.9.4 installation does not support in-place application updates.
+Connect 0.9.10 does not support in-place updates that change an application's
+tool policy, definition, instructions or runtime.
 Replacement requires a matching development SDK and gateway; see the
 [release limits](/availability).
 

@@ -110,7 +110,8 @@ async fn governed_identity_runtime_with(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     (runtime, identity)
 }
 
@@ -381,6 +382,7 @@ async fn send(
         &governance,
     )
     .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
 }
 
 /// The frame's settled delivery status.
@@ -865,7 +867,12 @@ async fn a_held_send_that_recorded_no_session_is_dispatched_again_on_replay() {
     let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unbound-original"));
     let scope = super::ConsoleSendGovernance::default().scope;
     let accepted = match aggregator
-        .reserve_identity_first_interaction_scoped(request("unbound-original", HUMAN), None, &scope)
+        .reserve_identity_first_interaction_scoped(
+            request("unbound-original", HUMAN),
+            None,
+            &scope,
+            None,
+        )
         .await
         .expect("the Console reserves the send")
     {
@@ -1185,7 +1192,12 @@ async fn an_admitted_governed_send_settles_delivered_on_replay_without_a_dispatc
     let session = fixture.session_id.to_string();
     let scope = super::ConsoleSendGovernance::default().scope;
     let accepted = match aggregator
-        .reserve_identity_first_interaction_scoped(sent.clone(), Some(session.as_str()), &scope)
+        .reserve_identity_first_interaction_scoped(
+            sent.clone(),
+            Some(session.as_str()),
+            &scope,
+            None,
+        )
         .await
         .expect("the Console reserves the send")
     {
@@ -1212,6 +1224,7 @@ async fn an_admitted_governed_send_settles_delivered_on_replay_without_a_dispatc
             meerkat_core::types::HandlingMode::Queue,
             &[],
             &accepted,
+            &crate::console_aggregator::ConsoleHumanAttribution::default(),
             Some(binder),
         )
         .await
@@ -1340,6 +1353,7 @@ async fn a_submitted_send_whose_input_never_reached_the_runtime_fails_on_replay(
             request("lost-original", HUMAN),
             Some(session.as_str()),
             &scope,
+            None,
         )
         .await
         .expect("the Console reserves the send")
@@ -2294,7 +2308,12 @@ async fn an_earlier_versions_unowned_accepted_send_is_never_dispatched_again() {
     let scope = super::ConsoleSendGovernance::default().scope;
     // The earlier version reserved the send as it reserved every send ...
     let accepted = match aggregator
-        .reserve_identity_first_interaction_scoped(sent.clone(), Some(session.as_str()), &scope)
+        .reserve_identity_first_interaction_scoped(
+            sent.clone(),
+            Some(session.as_str()),
+            &scope,
+            None,
+        )
         .await
         .expect("the Console reserves the send")
     {
@@ -2376,6 +2395,7 @@ async fn a_governed_send_stopped_before_its_first_dispatch_is_dispatched_once_on
             request("unstarted-original", HUMAN),
             Some(session.as_str()),
             &scope,
+            None,
         )
         .await
         .expect("the Console reserves the send")

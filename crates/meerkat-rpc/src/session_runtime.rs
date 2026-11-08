@@ -1783,6 +1783,17 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat::OwedCompactionSettlement, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_owed_compaction_projections(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat::LiveSessionActorWitness,
@@ -3460,6 +3471,21 @@ impl meerkat::RuntimeDeliveryHost for SessionRuntimeDeliveryHost {
     ) -> Result<meerkat::AddressObservation, String> {
         match self.runtime.upgrade() {
             Some(runtime) => runtime.continuation_bindings.observe_address(address).await,
+            None => Err("the session runtime is gone".into()),
+        }
+    }
+
+    async fn external_work_refusal(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        match self.runtime.upgrade() {
+            Some(runtime) => {
+                runtime
+                    .continuation_bindings
+                    .external_work_refusal(address)
+                    .await
+            }
             None => Err("the session runtime is gone".into()),
         }
     }
@@ -9927,6 +9953,7 @@ impl SessionRuntime {
                 idempotency_key: context.idempotency_key,
                 supersession_key: None,
                 correlation_id: context.correlation_id,
+                requester: None,
             },
             event_type,
             payload,
@@ -13766,6 +13793,54 @@ impl SessionRuntime {
             .map_err(instruction_activation_host_error_to_rpc)
     }
 
+    /// Record one session-owned operator-instruction write
+    /// (`session/set_instruction`, `session/revoke_instruction`) through the
+    /// session service's instruction extension: durable in the session
+    /// document when this answers, applied at the session's next fresh run
+    /// start. A staged session is not materialized yet and takes none.
+    pub async fn set_session_instruction(
+        &self,
+        session_id: &SessionId,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<meerkat_core::SessionInstructionReceipt, RpcError> {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+        self.refuse_staged_operator_instructions(session_id).await?;
+        Arc::clone(&self.service)
+            .set_session_instruction(session_id, write)
+            .await
+            .map_err(session_instruction_error_to_rpc)
+    }
+
+    /// Read a session's committed operator-instruction state
+    /// (`session/instruction_status`) without materializing it.
+    pub async fn read_session_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::service::SessionInstructionRead, RpcError> {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+        self.refuse_staged_operator_instructions(session_id).await?;
+        self.service
+            .read_session_instructions(session_id)
+            .await
+            .map_err(session_instruction_error_to_rpc)
+    }
+
+    async fn refuse_staged_operator_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; operator instructions are available only for materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
     /// Restore a retained transcript revision through typed service authority.
     pub async fn restore_session_transcript_revision(
         &self,
@@ -15992,6 +16067,28 @@ fn instruction_activation_host_error_to_rpc(
             code: error::INTERNAL_ERROR,
             message: format!("instruction activation owner failed: {message}"),
             data: None,
+        },
+    }
+}
+
+/// The JSON-RPC error of an operator-instruction failure: a typed refusal
+/// carries its closed code in `data.instruction_set_code`
+/// ([`crate::handlers::instruction_set_rpc_error`]); a session that cannot be
+/// found, read or written maps as every session error does.
+pub(crate) fn session_instruction_error_to_rpc(
+    failure: meerkat_core::service::SessionInstructionError,
+) -> RpcError {
+    match failure {
+        meerkat_core::service::SessionInstructionError::Session(session) => {
+            session_error_to_rpc(session)
+        }
+        refused => match refused.code() {
+            Some(code) => crate::handlers::instruction_set_rpc_error(code, refused.to_string()),
+            None => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: refused.to_string(),
+                data: None,
+            },
         },
     }
 }
@@ -24793,6 +24890,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -24915,6 +25013,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -25093,6 +25192,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -25217,6 +25317,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -26702,10 +26803,10 @@ mod tests {
         use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 
         const RESPONSES_SSE: &str = concat!(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",",
-            "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n",
-            "data: [DONE]\n",
+            "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+            "data: [DONE]\n\n",
         );
         async fn capture(
             State(bodies): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
@@ -30974,6 +31075,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::ResponseProgress {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -31049,6 +31151,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             operation_id: operation_id.clone(),
             event: meerkat_core::OpEvent::Cancelled { id: operation_id },
@@ -44410,3 +44513,39 @@ mod governed_host_original_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[path = "session_runtime/resumed_run_tests.rs"]
 mod resumed_run_tests;
+
+/// The RPC `MobSessionService` wrapper forwards the cold settle of a member
+/// session's owed compaction projections to the persistent service it
+/// wraps. The trait default refuses it for a service that keeps durable
+/// sessions, so a wrapper without the forward compiles and leaves a dormant
+/// member's owed compaction unsettled when its mob rotates it.
+#[cfg(test)]
+mod owed_compaction_forward_guard {
+    /// The `MobSessionService` impl block of `wrapper` in `source`, up to
+    /// its closing brace, whatever form its header takes (the trait's path
+    /// with or without a leading `::`, or an imported name). Only the source
+    /// before this module is read, so the guard's own text never stands for
+    /// a wrapper's.
+    fn wrapper_impl<'a>(source: &'a str, wrapper: &str) -> Option<&'a str> {
+        let source = &source[..source
+            .find("mod owed_compaction_forward_guard")
+            .unwrap_or(source.len())];
+        let at = source.find(&format!("MobSessionService for {wrapper} {{"))?;
+        let line = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if !source[line..at].trim_start().starts_with("impl") {
+            return None;
+        }
+        let body = &source[at..];
+        Some(&body[..body.find("\n}\n")?])
+    }
+
+    #[test]
+    fn the_rpc_wrapper_forwards_the_owed_compaction_settle() {
+        let block = wrapper_impl(include_str!("session_runtime.rs"), "RpcMobSessionService");
+        assert!(block.is_some(), "the RPC wrapper is in the source");
+        assert!(
+            block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
+            "the RPC wrapper forwards the owed compaction settle to the service it wraps"
+        );
+    }
+}

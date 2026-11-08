@@ -6,11 +6,12 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tower::limit::GlobalConcurrencyLimitLayer;
 
 use crate::access::{ACTION_MOBPACK_AUTHOR, ACTION_MOBPACK_DEPLOY, AccessController, AccessView};
+use crate::console_audit::ConsoleAuditLog;
 use crate::http_console::ACCESS_DENIED_RPC_CODE;
-use crate::http_sse::sse_access_context;
 use crate::mobpack::MobpackRuntimeCatalogState;
 use crate::rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::runtime::RuntimeDecisionState;
@@ -84,7 +85,10 @@ pub fn protected_flow_editor_router(decisions: RuntimeDecisionState) -> Router {
 /// authoritative launch reads. A runtime whose agent factories hold a
 /// host-chosen provider credential store (`explicit_provider_credentials`)
 /// refuses typed every deploy with `execute`, whose `rkat` process could not
-/// carry that store.
+/// carry that store. Each change (a draft store write, a deploy with
+/// `execute`, a validation through `rkat`) writes a row in `console_audit`,
+/// the runtime's console audit log, when it keeps one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn protected_flow_editor_router_with_runtime_catalog(
     decisions: RuntimeDecisionState,
     runtime_catalog: MobpackRuntimeCatalogState,
@@ -93,6 +97,7 @@ pub(crate) fn protected_flow_editor_router_with_runtime_catalog(
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     candidate: Option<FlowEditorCandidate>,
     explicit_provider_credentials: bool,
+    console_audit: Option<Arc<ConsoleAuditLog>>,
 ) -> Router {
     flow_editor_frontend_router::<()>().merge(flow_editor_rpc_router_with_runtime_catalog(
         decisions,
@@ -102,6 +107,7 @@ pub(crate) fn protected_flow_editor_router_with_runtime_catalog(
         session_fences,
         candidate,
         explicit_provider_credentials,
+        console_audit,
     ))
 }
 
@@ -165,9 +171,11 @@ pub fn flow_editor_rpc_router_with_decisions(decisions: RuntimeDecisionState) ->
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         None,
         false,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flow_editor_rpc_router_with_runtime_catalog(
     decisions: RuntimeDecisionState,
     runtime_catalog: Option<MobpackRuntimeCatalogState>,
@@ -176,6 +184,7 @@ fn flow_editor_rpc_router_with_runtime_catalog(
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     candidate: Option<FlowEditorCandidate>,
     explicit_provider_credentials: bool,
+    console_audit: Option<Arc<ConsoleAuditLog>>,
 ) -> Router {
     Router::new()
         .route("/flow-editor/rpc", post(protected_flow_editor_rpc_handler))
@@ -187,6 +196,7 @@ fn flow_editor_rpc_router_with_runtime_catalog(
             host_deploy_without_access_control,
             candidate,
             explicit_provider_credentials,
+            console_audit,
         })
 }
 
@@ -272,7 +282,7 @@ async fn flow_editor_rpc_handler_with_policy(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(store_path.to_string());
     }
-    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -285,6 +295,11 @@ async fn flow_editor_rpc_handler_with_policy(
             );
         }
     };
+    // The standalone server has no caller, so a change names none: the
+    // field the Console's Flow Editor takes is no method's param here either.
+    if let Err(response) = take_expected_caller_scope(&mut parsed_request) {
+        return (StatusCode::OK, Json::<Value>(response));
+    }
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
     let response = dispatch_flow_editor_rpc_blocking(
         parsed_request,
@@ -306,6 +321,7 @@ async fn flow_editor_rpc_handler_with_policy(
         },
         None,
         response_id,
+        None,
     )
     .await;
     (StatusCode::OK, Json::<Value>(response))
@@ -318,14 +334,38 @@ async fn flow_editor_rpc_handler_with_policy(
 /// execution timeout; parking that wait on a tokio worker thread would
 /// starve the async runtime, so every HTTP entry point routes through
 /// `spawn_blocking` here.
+///
+/// With `caller` (the Console's Flow Editor), each change the request makes
+/// is admitted only while that caller is still current, checked right
+/// before the change is made (after the draft store's reads, and before a
+/// deploy or a validation writes its archive and runs `rkat`); a refused
+/// change answers `caller_not_current` and nothing of it was written or
+/// run.
 async fn dispatch_flow_editor_rpc_blocking(
     request: JsonRpcRequest,
     auth: FlowEditorAuthReport,
     runtime_catalog: Option<MobpackRuntimeCatalogState>,
     response_id: Value,
+    caller: Option<crate::http_console::ConsoleCallerCurrentCheck>,
 ) -> Value {
-    match tokio::task::spawn_blocking(move || {
-        handle_flow_editor_rpc_with_auth(request, auth, runtime_catalog.as_ref())
+    let refused_id = response_id.clone();
+    match tokio::task::spawn_blocking(move || match caller {
+        None => handle_flow_editor_rpc_with_auth(request, auth, runtime_catalog.as_ref()),
+        Some(caller) => {
+            let (response, refused) = crate::mobpack::with_change_admission(
+                move || caller.refuse_unless_current().is_ok(),
+                || handle_flow_editor_rpc_with_auth(request, auth, runtime_catalog.as_ref()),
+            );
+            if refused {
+                response_value(
+                    refused_id,
+                    None,
+                    Some(crate::http_console::ConsoleCallerRefusal::NotCurrent.json_rpc_error()),
+                )
+            } else {
+                response
+            }
+        }
     })
     .await
     {
@@ -359,6 +399,9 @@ struct FlowEditorRpcState {
     /// Whether the runtime's agent factories hold a host-chosen provider
     /// credential store, which a deploy's `rkat` process could not carry.
     explicit_provider_credentials: bool,
+    /// The runtime's console audit log: each Flow Editor change writes a
+    /// row, as each console change does.
+    console_audit: Option<Arc<ConsoleAuditLog>>,
 }
 
 /// The `auth.mode` the runtime-mounted Flow Editor reports.
@@ -389,7 +432,7 @@ async fn protected_flow_editor_rpc_handler(
     uri: Uri,
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
-    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -402,36 +445,124 @@ async fn protected_flow_editor_rpc_handler(
             );
         }
     };
-    let access_view = match sse_access_context(
-        Some(&state.decisions),
+    // The caller is resolved as the Console resolves a write's: a write on
+    // the Console's listener takes its token only from the `Authorization`
+    // header, so a request whose only token is in the query string is
+    // refused before its caller is resolved, on an open Console too.
+    let Some(caller) = crate::http_console::ConsoleChangeCaller::resolve(
+        &state.decisions,
         &state.session_fences,
         state.access.as_ref(),
         &headers,
         &uri,
-    ) {
-        Ok(caller) => caller.access_view,
-        Err(()) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json::<Value>(serde_json::json!({
-                    "jsonrpc": JSONRPC_VERSION,
-                    "id": parsed_request.id.unwrap_or(Value::Null),
-                    "error": {
-                        "code": -32600,
-                        "message": "unauthorized: flow editor rpc requires a valid auth token",
-                    }
-                })),
-            );
-        }
-    };
-    if let Some(error) = flow_editor_rpc_access_violation(access_view.as_ref(), &parsed_request) {
+    ) else {
         return (
-            StatusCode::OK,
+            StatusCode::UNAUTHORIZED,
             Json::<Value>(serde_json::json!({
                 "jsonrpc": JSONRPC_VERSION,
                 "id": parsed_request.id.unwrap_or(Value::Null),
-                "error": error,
+                "error": {
+                    "code": -32600,
+                    "message": "unauthorized: flow editor rpc requires a valid auth token",
+                }
             })),
+        );
+    };
+    // A change names the caller it was made for (`expected_caller_scope`,
+    // the `caller_scope` this route's `meta/capabilities` reports): one made
+    // for another caller than the request's token is refused before
+    // anything is read or written. A read ignores the field.
+    let expected_caller_scope = take_expected_caller_scope(&mut parsed_request);
+    // A Flow Editor change (a draft store write, a deploy with `execute`, a
+    // validation through `rkat`) writes a row in the console audit log, a
+    // refusal included; the change and its row run on the server, so a
+    // caller that goes away cuts neither short.
+    let intent = state
+        .console_audit
+        .as_ref()
+        .filter(|_| {
+            crate::rpc::is_mobpack_authoring_change(&parsed_request.method, &parsed_request.params)
+        })
+        .and_then(|log| {
+            let auth = crate::http_console::console_request_auth_context_for(
+                &state.decisions,
+                &state.session_fences,
+                state.access.as_ref(),
+                &headers,
+                &uri,
+            )?;
+            Some(crate::http_console::audit::ConsoleAuditIntent::new(
+                Arc::clone(log),
+                &auth,
+                parsed_request.method.clone(),
+                crate::console_audit::audit_target(&parsed_request.params),
+            ))
+        });
+    let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let lost = || {
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": response_id.clone(),
+                "error": {
+                    "code": -32603,
+                    "message": "the flow editor change ended without an answer",
+                }
+            }),
+        )
+    };
+    let (status, response) = match intent {
+        None => flow_editor_rpc_answer(state, parsed_request, caller, expected_caller_scope).await,
+        Some(intent) => intent
+            .run(
+                flow_editor_rpc_answer(state, parsed_request, caller, expected_caller_scope),
+                lost(),
+                crate::http_console::audit::status_json_rpc_row,
+            )
+            .await
+            .unwrap_or_else(lost),
+    };
+    (status, Json::<Value>(response))
+}
+
+/// The answer to an authenticated Flow Editor RPC request: its caller check
+/// (`expected_caller_scope`, as [`take_expected_caller_scope`] read it), its
+/// access, candidate launch and provider credential refusals, then the
+/// dispatch, which checks the caller again right before the change is made.
+async fn flow_editor_rpc_answer(
+    state: FlowEditorRpcState,
+    parsed_request: JsonRpcRequest,
+    caller: crate::http_console::ConsoleChangeCaller,
+    expected_caller_scope: Result<Option<String>, Value>,
+) -> (StatusCode, Value) {
+    let expected_caller_scope = match expected_caller_scope {
+        Ok(scope) => scope,
+        Err(response) => return (StatusCode::OK, response),
+    };
+    if crate::rpc::is_mobpack_authoring_change(
+        parsed_request.method.as_str(),
+        &parsed_request.params,
+    ) && let Err(refusal) = caller.refuse_other_caller(expected_caller_scope.as_deref())
+    {
+        return (
+            StatusCode::OK,
+            response_value(
+                parsed_request.id.unwrap_or(Value::Null),
+                None,
+                Some(refusal.json_rpc_error()),
+            ),
+        );
+    }
+    let access_view = caller.access_view().cloned();
+    if let Some(error) = flow_editor_rpc_access_violation(access_view.as_ref(), &parsed_request) {
+        return (
+            StatusCode::OK,
+            serde_json::json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": parsed_request.id.unwrap_or(Value::Null),
+                "error": error,
+            }),
         );
     }
     // A candidate launch runs nothing on the host and writes no draft store
@@ -450,7 +581,7 @@ async fn protected_flow_editor_rpc_handler(
     ) {
         return (
             StatusCode::OK,
-            Json::<Value>(serde_json::to_value(refusal).unwrap_or(Value::Null)),
+            serde_json::to_value(refusal).unwrap_or(Value::Null),
         );
     }
     // A deploy that runs `rkat` could not carry the runtime's host-chosen
@@ -463,7 +594,7 @@ async fn protected_flow_editor_rpc_handler(
     ) {
         return (
             StatusCode::OK,
-            Json::<Value>(serde_json::to_value(refusal).unwrap_or(Value::Null)),
+            serde_json::to_value(refusal).unwrap_or(Value::Null),
         );
     }
     // Host access (running `rkat` on this host, choosing the draft store
@@ -489,6 +620,7 @@ async fn protected_flow_editor_rpc_handler(
             ),
         };
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let capabilities = parsed_request.method == "meta/capabilities";
     let response = dispatch_flow_editor_rpc_blocking(
         parsed_request,
         FlowEditorAuthReport {
@@ -503,16 +635,58 @@ async fn protected_flow_editor_rpc_handler(
         },
         state.runtime_catalog.clone(),
         response_id,
+        Some(caller.current_check()),
     )
     .await;
-    (StatusCode::OK, Json::<Value>(response))
+    let response = if capabilities {
+        with_caller_scope(response, caller.caller_scope())
+    } else {
+        response
+    };
+    (StatusCode::OK, response)
+}
+
+/// Take the `expected_caller_scope` field out of a Flow Editor request's
+/// params, as the Console does
+/// ([`take_expected_caller_scope`](crate::http_console::take_expected_caller_scope)):
+/// no method's params see it. A field that is not a string is answered
+/// invalid params.
+fn take_expected_caller_scope(request: &mut JsonRpcRequest) -> Result<Option<String>, Value> {
+    crate::http_console::take_expected_caller_scope(&mut request.params).map_err(|message| {
+        response_value(
+            request.id.clone().unwrap_or(Value::Null),
+            None,
+            Some(JsonRpcError {
+                code: -32602,
+                message,
+                data: Some(serde_json::json!({ "param": "expected_caller_scope" })),
+            }),
+        )
+    })
+}
+
+/// The Flow Editor's `meta/capabilities` on the Console's listener, naming
+/// the caller the request resolved to (`auth.caller_scope`, the scope
+/// `meta/console/whoami` reports to the same caller): the editor sends it
+/// back with each change as `expected_caller_scope`.
+fn with_caller_scope(mut response: Value, caller_scope: String) -> Value {
+    if let Some(auth) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("auth"))
+        .and_then(Value::as_object_mut)
+    {
+        auth.insert("caller_scope".to_string(), Value::String(caller_scope));
+    }
+    response
 }
 
 /// Map a flow-editor RPC method to the ABAC action it requires. Mirrors the
 /// console's `console_rpc_access_requirement`: `meta/capabilities` stays
 /// open (it only describes the method surface), every mobpack-authoring
-/// method requires `mobpack.author`, and a deploy with `execute: true`
-/// requires `mobpack.deploy` instead.
+/// method requires `mobpack.author`, and a change that runs `rkat` on the
+/// host (a deploy with `execute: true`, a validation with `rkat_validate:
+/// true`, which writes a rendered mobpack archive to a caller-controlled
+/// path and spawns `rkat`) requires `mobpack.deploy` instead.
 fn flow_editor_rpc_access_requirement(method: &str, params: &Value) -> Option<&'static str> {
     if method == "meta/capabilities" {
         return None;
@@ -521,34 +695,12 @@ fn flow_editor_rpc_access_requirement(method: &str, params: &Value) -> Option<&'
         // Unknown methods fall through to the dispatcher's method-not-found.
         return None;
     }
-    if method == "meta/mobpacks/deploy"
-        && params
-            .get("execute")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    if crate::rpc::mobpack_authoring_change(method, params)
+        == Some(crate::rpc::MobpackAuthoringChange::HostRun)
     {
         return Some(ACTION_MOBPACK_DEPLOY);
     }
-    // `validate` with `rkat_validate: true` writes a rendered mobpack archive
-    // to a caller-controlled path and spawns `rkat mob validate` — a
-    // host-mutating side effect, not a pure authoring read. Gate it behind
-    // the same deploy grant as host-executing deploys.
-    if method == "meta/mobpacks/validate" && validate_rkat_execution_requested(params) {
-        return Some(ACTION_MOBPACK_DEPLOY);
-    }
     Some(ACTION_MOBPACK_AUTHOR)
-}
-
-/// True when a `meta/mobpacks/validate` request asks to render the pack and
-/// run `rkat mob validate` on the host (mirrors
-/// `mobpack::validate_with_rkat_requested`). This is the host-mutating arm:
-/// it writes a mobpack archive and spawns a child process.
-fn validate_rkat_execution_requested(params: &Value) -> bool {
-    params
-        .get("rkat_validate")
-        .or_else(|| params.get("rkatValidate"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn flow_editor_rpc_access_violation(
@@ -719,7 +871,7 @@ fn dispatch_flow_editor_rpc(
             None,
         ),
         "meta/mobpacks/deploy"
-            if !auth.host_access && deploy_execute_requested(&request.params) =>
+            if !auth.host_access && crate::mobpack::deploy_execute_requested(&request.params) =>
         {
             response_value(
                 response_id,
@@ -743,7 +895,8 @@ fn dispatch_flow_editor_rpc(
         // standalone surface (no `--allow-host-deploy`) and any caller lacking
         // `mobpack.deploy` can never reach the file-write/exec sink.
         "meta/mobpacks/validate"
-            if !auth.host_access && validate_rkat_execution_requested(&request.params) =>
+            if !auth.host_access
+                && crate::mobpack::validate_with_rkat_requested(&request.params) =>
         {
             let mut params = request.params.clone();
             if let Some(object) = params.as_object_mut() {
@@ -826,13 +979,6 @@ fn host_deploy_refusal(auth: &FlowEditorAuthReport) -> &'static str {
         "standalone Flow Editor RPC cannot execute host deploys; use deploy planning or run rkat \
          mob run manually"
     }
-}
-
-fn deploy_execute_requested(params: &Value) -> bool {
-    params
-        .get("execute")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn response_value(id: Value, result: Option<Value>, error: Option<JsonRpcError>) -> Value {
@@ -935,6 +1081,7 @@ mod tests {
                 jwks_json: r#"{"keys":[]}"#.to_string(),
                 audience: "flow-editor-tests".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::decisions::ConsolePolicy {
                 require_app_auth: false,
@@ -977,6 +1124,7 @@ mod tests {
             crate::auth::session_fence::ConsoleSessionFences::detached(),
             candidate,
             false,
+            None,
         );
         rpc_response_of(router, body).await
     }
@@ -993,6 +1141,7 @@ mod tests {
             crate::auth::session_fence::ConsoleSessionFences::detached(),
             None,
             true,
+            None,
         );
         rpc_response_of(router, body).await
     }

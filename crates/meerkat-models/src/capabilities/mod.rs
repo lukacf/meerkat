@@ -12,6 +12,8 @@ mod anthropic;
 mod gemini;
 mod openai;
 
+pub use anthropic::ANTHROPIC_THINKING_BINDING_CONTROLS_BETA;
+
 use meerkat_core::Provider;
 use meerkat_core::model_profile::capabilities::ModelCapabilities;
 use std::sync::OnceLock;

@@ -699,10 +699,12 @@ fn rkat_rpc_mcp_auth_refuses_a_server_only_an_untrusted_mcp_toml_defines() {
         "{}",
         responses[&2]
     );
+    let refusal =
+        meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource.to_string();
     assert!(
         error["message"]
             .as_str()
-            .is_some_and(|text| text.contains("confined process")),
+            .is_some_and(|text| text.contains(&refusal)),
         "{}",
         responses[&2]
     );

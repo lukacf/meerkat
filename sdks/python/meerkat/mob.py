@@ -48,6 +48,11 @@ from .generated.types import (
     WireMemberProgressSnapshot,
 )
 from .streaming import EventSubscription
+from .instructions import (
+    InstructionTarget,
+    MobInstructionStatus,
+    MobInstructionWriteResult,
+)
 from .types import (
     MobControlScope,
     MobGrantRecord,
@@ -203,6 +208,12 @@ MobMemberLifecycleCapabilities = TypedDict(
 # refused.
 MobMemberCustodyUnknown = TypedDict("MobMemberCustodyUnknown", {"unknown": str})
 
+# A preview-unavailable reason this SDK does not know, as the server sent it:
+# the vocabulary may grow, and an unknown reason is surfaced, not refused.
+MobMemberPreviewUnavailableUnknown = TypedDict(
+    "MobMemberPreviewUnavailableUnknown", {"unknown": str}
+)
+
 # A member's custody restore a mob start deferred: the restore and the cause
 # its last attempt met.
 MobMemberCustodyDeferral = TypedDict(
@@ -240,8 +251,11 @@ MobMemberSnapshot = TypedDict(
         "non_portable_disabled": NotRequired[list[WireNonPortableResourceKind]],
         # Set when this read did not observe the member's session:
         # output_preview and tokens_used are then missing, not an empty
-        # preview and a zero count. Absent when they are observations.
-        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
+        # preview and a zero count. Absent when they are observations. A
+        # reason this SDK does not know reads as {"unknown": <the value>}.
+        "preview_unavailable": NotRequired[
+            WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown
+        ],
         # Set when the member's host refused its restored registration: the
         # hook call that refused it. The member stays broken until an
         # explicit repair.
@@ -268,7 +282,9 @@ MobKickoffMemberSnapshot = TypedDict(
         "peer_connectivity": NotRequired[MobPeerConnectivity],
         "kickoff": NotRequired[dict[str, Any]],
         # As on MobMemberSnapshot.
-        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
+        "preview_unavailable": NotRequired[
+            WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown
+        ],
         "registration_refusal": NotRequired[WireMemberRegistrationHookCall],
         "custody_deferred": NotRequired[MobMemberCustodyDeferral],
     },
@@ -766,6 +782,59 @@ class Mob:
             text,
             source=source,
             idempotency_key=idempotency_key,
+        )
+
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: InstructionTarget,
+        *,
+        content_sha256: str | None = None,
+    ) -> MobInstructionWriteResult:
+        """Write one operator instruction for the members ``target`` selects;
+        delivery to them is asynchronous."""
+        return await self._client.set_mob_instruction(
+            self.id,
+            namespace,
+            key,
+            revision,
+            body,
+            target,
+            content_sha256=content_sha256,
+        )
+
+    async def revoke_instruction(
+        self, namespace: str, key: str, revision: int
+    ) -> MobInstructionWriteResult:
+        """Revoke one operator instruction at a higher revision; the record
+        keeps its target."""
+        return await self._client.revoke_mob_instruction(
+            self.id, namespace, key, revision
+        )
+
+    async def instruction_status(
+        self,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        agent_identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> MobInstructionStatus:
+        """Read the mob's operator-instruction records and one page of
+        members, without waking a member."""
+        return await self._client.mob_instruction_status(
+            self.id,
+            namespace=namespace,
+            key=key,
+            agent_identity=agent_identity,
+            profile=profile,
+            offset=offset,
+            limit=limit,
         )
 
     async def flows(self) -> list[str]:

@@ -1655,10 +1655,18 @@ impl RoutedRpcResponse {
 /// [`MethodRouter::dispatch_with_consent_event`].
 pub const CONSENT_DECIDE_METHOD: &str = "approval/consent_decide";
 
+/// The host-only durable decision method, reachable only through
+/// [`MethodRouter::dispatch_with_decision_event`].
+pub const DECISION_DECIDE_METHOD: &str = "decision/decide";
+
 #[derive(Clone)]
 pub struct MethodRouter {
     #[cfg(feature = "local-authorization")]
     governed_connection: Option<Arc<crate::governed_jsonl::GovernedConnection>>,
+    /// The operator of this router's stdio connection, who decides durable
+    /// decisions on it. `None` everywhere else (TCP, plain dispatch).
+    #[cfg(all(unix, feature = "local-authorization"))]
+    decision_operator: Option<Arc<handlers::decision::operator::DecisionOperator>>,
     runtime: Arc<SessionRuntime>,
     /// The callback route owned by this router's connection. `None` falls
     /// back to the runtime's process-default route.
@@ -1754,6 +1762,8 @@ impl MethodRouter {
         Ok(Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
+            #[cfg(all(unix, feature = "local-authorization"))]
+            decision_operator: None,
             runtime,
             config_store,
             notification_sink,
@@ -1823,6 +1833,27 @@ impl MethodRouter {
     pub(crate) fn close_governed_connection(&self) {
         if let Some(connection) = &self.governed_connection {
             connection.close();
+        }
+    }
+
+    /// Give this router's stdio connection its operator for durable
+    /// decisions: `decision/list` presents the decisions of each page the
+    /// operator acts for, and `decision/decide` decides as the operator.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn with_decision_operator(
+        mut self,
+        operator: Arc<handlers::decision::operator::DecisionOperator>,
+    ) -> Self {
+        self.decision_operator = Some(operator);
+        self
+    }
+
+    /// The connection this router serves closed: no decide on it is
+    /// eligible any more.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn close_decision_operator(&self) {
+        if let Some(operator) = &self.decision_operator {
+            operator.close();
         }
     }
 
@@ -2311,6 +2342,8 @@ impl MethodRouter {
         Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
+            #[cfg(all(unix, feature = "local-authorization"))]
+            decision_operator: None,
             runtime,
             config_store,
             notification_sink,
@@ -2549,6 +2582,49 @@ impl MethodRouter {
         )
     }
 
+    /// Dispatch one durable decision whose human event the embedding host's
+    /// trusted transport adapter authenticated.
+    ///
+    /// This is the only entry to [`DECISION_DECIDE_METHOD`]: plain dispatch
+    /// has no route for it, so caller JSON or a request context can never
+    /// decide a durable decision. The request names the decision, the
+    /// answer, the presented digest and the reason, and must equal what the
+    /// event binds; the event alone supplies who decided, how the decider
+    /// was authenticated and the evidence that they may act for the
+    /// decision's approver id.
+    pub async fn dispatch_with_decision_event(
+        &self,
+        request: RpcRequest,
+        event: meerkat_core::approval::decision::AuthenticatedDecisionEvent,
+    ) -> RpcResponse {
+        let id = request.id.clone();
+        // The same envelope check as plain dispatch, before any handler.
+        if !request.has_supported_version() {
+            return RpcResponse::error(
+                id,
+                error::INVALID_REQUEST,
+                format!(
+                    "Unsupported JSON-RPC version: expected \"{}\", got \"{}\"",
+                    crate::protocol::JSONRPC_VERSION,
+                    request.jsonrpc
+                ),
+            );
+        }
+        if request.method != DECISION_DECIDE_METHOD {
+            return RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("an authenticated decision event only decides {DECISION_DECIDE_METHOD}"),
+            );
+        }
+        handlers::decision::handle_decide_event(
+            id,
+            request.params.as_deref(),
+            self.runtime.clone(),
+            event,
+        )
+    }
+
     /// Dispatch a request to the appropriate handler.
     ///
     /// Returns `None` for notifications (requests without an id) that do not
@@ -2730,6 +2806,15 @@ impl MethodRouter {
             }
             "session/instruction_activations" => {
                 routed_arm(|| self.handle_session_instruction_activations(id, params)).await
+            }
+            "session/set_instruction" => {
+                routed_arm(|| self.handle_session_set_instruction(id, params)).await
+            }
+            "session/revoke_instruction" => {
+                routed_arm(|| self.handle_session_revoke_instruction(id, params)).await
+            }
+            "session/instruction_status" => {
+                routed_arm(|| self.handle_session_instruction_status(id, params)).await
             }
             "session/restore_transcript_revision" => {
                 routed_arm(|| self.handle_session_restore_transcript_revision(id, params)).await
@@ -3094,6 +3179,21 @@ impl MethodRouter {
                 .await
             }
             #[cfg(feature = "mob")]
+            "mob/set_instruction" => {
+                routed_arm(|| handlers::mob::handle_set_instruction(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/revoke_instruction" => {
+                routed_arm(|| handlers::mob::handle_revoke_instruction(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
+            "mob/instruction_status" => {
+                routed_arm(|| handlers::mob::handle_instruction_status(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
             "mob/flows" => {
                 routed_arm(|| handlers::mob::handle_flows(id, params, &self.mob_state)).await
             }
@@ -3405,6 +3505,32 @@ impl MethodRouter {
             "tool_grants/audit" => {
                 routed_arm(|| handlers::tool_grants::handle_audit(id, params, self.runtime.clone()))
                     .await
+            }
+            "decision/list" => routed_arm(|| self.handle_decision_list(id, params)).await,
+            "decision/get" => {
+                routed_arm(|| handlers::decision::handle_get(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/rendering" => {
+                routed_arm(|| {
+                    handlers::decision::handle_rendering(id, params, self.runtime.clone())
+                })
+                .await
+            }
+            "decision/present" => {
+                routed_arm(|| handlers::decision::handle_present(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/withdraw" => {
+                routed_arm(|| handlers::decision::handle_withdraw(id, params, self.runtime.clone()))
+                    .await
+            }
+            // Only a stdio connection with an operator routes a decide; it
+            // builds the authenticated event itself. Everywhere else the
+            // method is not found, as in plain dispatch.
+            #[cfg(all(unix, feature = "local-authorization"))]
+            DECISION_DECIDE_METHOD if self.decision_operator.is_some() => {
+                routed_arm(|| self.handle_operator_decision_decide(id, params)).await
             }
             // Compose the realm chain so an inherited (ancestor-realm) self-hosted
             // alias / per-provider default is listed identically to the other
@@ -3759,6 +3885,42 @@ impl MethodRouter {
     /// Access the underlying session runtime.
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
+    }
+
+    /// `decision/list`: on a stdio connection with an operator, the page is
+    /// presented to the operator before it is answered; elsewhere it is the
+    /// plain read.
+    async fn handle_decision_list(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(operator) = &self.decision_operator {
+            return operator.handle_list(id, params, &self.runtime).await;
+        }
+        handlers::decision::handle_list(id, params, self.runtime.clone()).await
+    }
+
+    /// `decision/decide` by the operator of this router's stdio connection.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    async fn handle_operator_decision_decide(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        match &self.decision_operator {
+            Some(operator) => {
+                operator
+                    .handle_decide(id, params, self.runtime.clone())
+                    .await
+            }
+            None => RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("Method not found: {DECISION_DECIDE_METHOD}"),
+            ),
+        }
     }
 
     async fn handle_tools_register(
@@ -4333,6 +4495,143 @@ impl MethodRouter {
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+        }
+    }
+
+    /// `session/set_instruction` and `session/revoke_instruction`: one
+    /// session-owned operator-instruction write. A mob member's session takes
+    /// no session-level write: its instructions come from its mob
+    /// (`mob/set_instruction` with a member target), so it answers
+    /// `owned_by_mob`, the session-document authority's own verdict for a
+    /// member session.
+    async fn handle_session_instruction_write(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        session_id: &str,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> RpcResponse {
+        let session_id =
+            match handlers::parse_session_id_for_runtime(id.clone(), session_id, &self.runtime) {
+                Ok(session_id) => session_id,
+                Err(response) => return response,
+            };
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                match self
+                    .runtime
+                    .set_session_instruction(&session_id, write)
+                    .await
+                {
+                    Ok(receipt) => RpcResponse::success(
+                        id,
+                        meerkat_contracts::SessionInstructionWriteResult::from_receipt(
+                            &session_id,
+                            &receipt,
+                        ),
+                    ),
+                    Err(error) => RpcResponse::from_error(id, error),
+                }
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => handlers::instruction_set_error_response(
+                id,
+                meerkat_core::InstructionSetErrorCode::OwnedByMob,
+                "a mob member's session takes no session-level operator-instruction write; \
+                 write to the member through mob/set_instruction"
+                    .to_string(),
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_set_instruction(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::SetSessionInstructionParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let write = params.write();
+        self.handle_session_instruction_write(id, &params.session_id, write)
+            .await
+    }
+
+    async fn handle_session_revoke_instruction(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::RevokeSessionInstructionParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let write = params.write();
+        self.handle_session_instruction_write(id, &params.session_id, write)
+            .await
+    }
+
+    /// `session/instruction_status`: the session's committed
+    /// operator-instruction state, read without materializing it. A mob
+    /// member's session is read through its mob's session service.
+    async fn handle_session_instruction_status(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::SessionInstructionStatusParams =
+            match handlers::parse_params(params) {
+                Ok(params) => params,
+                Err(response) => return response.with_id(id),
+            };
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(session_id) => session_id,
+            Err(response) => return response,
+        };
+        let read = match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => {
+                self.runtime.read_session_instructions(&session_id).await
+            }
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => self
+                .mob_state
+                .session_service()
+                .read_member_instructions(std::slice::from_ref(&session_id))
+                .await
+                .pop()
+                .unwrap_or_else(|| {
+                    Err(meerkat_core::service::SessionInstructionError::Session(
+                        meerkat_core::SessionError::NotFound {
+                            id: session_id.clone(),
+                        },
+                    ))
+                })
+                .map_err(crate::session_runtime::session_instruction_error_to_rpc),
+            None => {
+                return RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                );
+            }
+        };
+        match read {
+            Ok(read) => RpcResponse::success(
+                id,
+                meerkat_contracts::SessionInstructionStatusResult::from_read(&session_id, &read),
+            ),
+            Err(error) => RpcResponse::from_error(id, error),
         }
     }
 
@@ -10556,6 +10855,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
             content: "helper finished via comms".into(),
@@ -10614,6 +10914,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::Message),
             content: "urgent helper update via comms".into(),
@@ -10810,6 +11111,523 @@ mod tests {
             .unwrap();
         let appended = result_value(&append_resp);
         assert_eq!(appended["status"], "applied");
+    }
+
+    /// The closed operator-instruction refusal code a response carries in
+    /// its error data, when it carries one.
+    #[cfg(feature = "mob")]
+    fn instruction_set_code(response: &RpcResponse) -> Option<String> {
+        response
+            .error
+            .as_ref()
+            .and_then(|error| error.data.as_ref())
+            .and_then(|data| data.get("instruction_set_code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }
+
+    /// Read `mob/instruction_status` until `done` holds for its result: a
+    /// mob records its members' targets asynchronously.
+    #[cfg(feature = "mob")]
+    async fn poll_mob_instruction_status(
+        router: &MethodRouter,
+        params: serde_json::Value,
+        done: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let response = router
+                .dispatch(make_request("mob/instruction_status", params.clone()))
+                .await
+                .unwrap();
+            let status = result_value(&response);
+            if done(&status) {
+                return status;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "mob/instruction_status never reached the expected state: {status}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Create a mob with one `worker` profile and spawn `worker-1` in it.
+    #[cfg(feature = "mob")]
+    async fn mob_with_one_worker(router: &MethodRouter, mob_id: &str) {
+        let create = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&create)["mob_id"], mob_id);
+        let spawn = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&spawn)["agent_identity"], "worker-1");
+    }
+
+    /// The mob operator-instruction verbs over JSON-RPC: a profile write
+    /// commits and answers its receipt, an exact repeat is a duplicate, the
+    /// same revision with other content, a lower revision and an unknown
+    /// slot are refused with their closed code, the status read reports the
+    /// record and the member's recorded target, and a revoke commits at a
+    /// higher revision.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_instruction_verbs_round_trip_over_rpc() {
+        let (router, _notif_rx) = test_router().await;
+        let mob_id = "mob-operator-instructions";
+        mob_with_one_worker(&router, mob_id).await;
+
+        let write = serde_json::json!({
+            "mob_id": mob_id,
+            "namespace": "host",
+            "key": "tone",
+            "revision": 1,
+            "body": "Answer formally.",
+            "target": { "kind": "profile", "profile": "worker" }
+        });
+        let committed = result_value(
+            &router
+                .dispatch(make_request("mob/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(committed["mob_id"], mob_id);
+        assert_eq!(committed["namespace"], "host");
+        assert_eq!(committed["key"], "tone");
+        assert_eq!(committed["revision"], 1);
+        assert_eq!(committed["disposition"], "committed");
+        assert_eq!(committed["generation"], 1);
+        assert_eq!(committed["matched_members"], 1);
+
+        let repeated = result_value(
+            &router
+                .dispatch(make_request("mob/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(repeated["disposition"], "duplicate");
+        assert_eq!(repeated["generation"], 1);
+
+        let mut conflicting = write.clone();
+        conflicting["body"] = serde_json::json!("Answer casually.");
+        let conflict = router
+            .dispatch(make_request("mob/set_instruction", conflicting))
+            .await
+            .unwrap();
+        assert_eq!(
+            conflict.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        assert_eq!(
+            instruction_set_code(&conflict).as_deref(),
+            Some("revision_conflict")
+        );
+
+        let status = poll_mob_instruction_status(
+            &router,
+            serde_json::json!({ "mob_id": mob_id }),
+            |status| status["members"][0]["delivery"]["state"]["state"] == "current",
+        )
+        .await;
+        assert_eq!(status["mob_id"], mob_id);
+        assert_eq!(status["generation"], 1);
+        let record = &status["desired"][0];
+        assert_eq!(record["namespace"], "host");
+        assert_eq!(record["key"], "tone");
+        assert_eq!(record["revision"], 1);
+        assert_eq!(record["effect"], "active");
+        assert_eq!(
+            record["target"],
+            serde_json::json!({ "kind": "profile", "profile": "worker" })
+        );
+        assert_eq!(record["body_bytes"], 16);
+        let member = &status["members"][0];
+        assert_eq!(member["agent_identity"], "worker-1");
+        assert_eq!(member["profile"], "worker");
+        assert_eq!(
+            member["effective_read"],
+            serde_json::json!({ "status": "ok" })
+        );
+        assert_eq!(member["delivery"]["recorded_generation"], 1);
+        assert_eq!(member["live_channel_open"], false);
+        let slot = &member["slots"][0];
+        assert_eq!(
+            slot["desired"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+        assert_eq!(
+            slot["recorded"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+        assert_eq!(slot["state"]["state"], "pending");
+        assert!(
+            slot["state"]["reason"].is_string(),
+            "a pending slot names why: {slot}"
+        );
+        assert!(status.get("next_offset").is_none());
+
+        let revoked = result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/revoke_instruction",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 2
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(revoked["disposition"], "committed");
+        assert_eq!(revoked["revision"], 2);
+        assert_eq!(revoked["generation"], 2);
+
+        let stale = router
+            .dispatch(make_request("mob/set_instruction", write))
+            .await
+            .unwrap();
+        assert_eq!(
+            instruction_set_code(&stale).as_deref(),
+            Some("stale_revision")
+        );
+
+        let unknown = router
+            .dispatch(make_request(
+                "mob/revoke_instruction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "namespace": "host",
+                    "key": "missing",
+                    "revision": 1
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            instruction_set_code(&unknown).as_deref(),
+            Some("unknown_slot")
+        );
+
+        let zero_revision = router
+            .dispatch(make_request(
+                "mob/set_instruction",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "namespace": "host",
+                    "key": "tone",
+                    "revision": 0,
+                    "body": "x",
+                    "target": { "kind": "mob" }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            zero_revision.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+    }
+
+    /// A member whose session the mob cannot read keeps its row with the
+    /// reason, and the page still answers: an in-memory mob's member sessions
+    /// keep no durable document, so each member reads as unreadable and its
+    /// delivery is blocked `durability_unavailable`.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_instruction_status_marks_unreadable_members_and_still_answers() {
+        let (router, _notif_rx) =
+            test_router_with_mob_state(meerkat_mob_mcp::MobMcpState::new_in_memory()).await;
+        let mob_id = "mob-operator-instructions-unreadable";
+        mob_with_one_worker(&router, mob_id).await;
+
+        let committed = result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/set_instruction",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 1,
+                        "body": "Answer formally.",
+                        "target": { "kind": "mob" }
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(committed["disposition"], "committed");
+
+        let status = poll_mob_instruction_status(
+            &router,
+            serde_json::json!({ "mob_id": mob_id }),
+            |status| status["members"][0]["delivery"]["state"]["state"] == "blocked",
+        )
+        .await;
+        assert_eq!(status["generation"], 1);
+        assert_eq!(status["desired"][0]["key"], "tone");
+        let member = &status["members"][0];
+        assert_eq!(member["agent_identity"], "worker-1");
+        assert_eq!(member["effective_read"]["status"], "unreadable");
+        assert!(
+            member["effective_read"]["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()),
+            "an unreadable member names its reason: {member}"
+        );
+        assert_eq!(
+            member["delivery"]["state"],
+            serde_json::json!({ "state": "blocked", "reason": "durability_unavailable" })
+        );
+        let slot = &member["slots"][0];
+        assert!(slot.get("recorded").is_none(), "{slot}");
+        assert!(slot.get("effective").is_none(), "{slot}");
+        assert_eq!(
+            slot["state"],
+            serde_json::json!({ "state": "blocked", "reason": "durability_unavailable" })
+        );
+    }
+
+    /// The session operator-instruction verbs over JSON-RPC: a write records
+    /// the session-owned target, an exact repeat is a duplicate, a revoke
+    /// records at a higher revision, a lower revision is refused with its
+    /// closed code, and the status read reports the owner, the recorded
+    /// target and each slot's state.
+    #[tokio::test]
+    async fn session_instruction_verbs_round_trip_over_rpc() {
+        let (router, _notif_rx) = test_router().await;
+        let created = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&created)["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let write = serde_json::json!({
+            "session_id": session_id,
+            "namespace": "host",
+            "key": "tone",
+            "revision": 1,
+            "body": "Answer formally."
+        });
+        let recorded = result_value(
+            &router
+                .dispatch(make_request("session/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(recorded["session_id"], session_id);
+        assert_eq!(recorded["namespace"], "host");
+        assert_eq!(recorded["key"], "tone");
+        assert_eq!(recorded["revision"], 1);
+        assert_eq!(recorded["disposition"], "recorded");
+        assert_eq!(recorded["target_generation"], 1);
+
+        let repeated = result_value(
+            &router
+                .dispatch(make_request("session/set_instruction", write.clone()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(repeated["disposition"], "duplicate");
+        assert_eq!(repeated["target_generation"], 1);
+
+        let status = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/instruction_status",
+                    serde_json::json!({ "session_id": session_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(status["session_id"], session_id);
+        assert_eq!(status["owner"], serde_json::json!({ "kind": "session" }));
+        assert_eq!(status["target_generation"], 1);
+        let slot = &status["slots"][0];
+        assert_eq!(slot["namespace"], "host");
+        assert_eq!(slot["key"], "tone");
+        assert_eq!(
+            slot["recorded"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
+        assert!(slot.get("effective").is_none(), "{slot}");
+        assert_eq!(slot["state"]["state"], "pending");
+
+        let revoked = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/revoke_instruction",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 2
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(revoked["disposition"], "recorded");
+        assert_eq!(revoked["revision"], 2);
+        assert_eq!(revoked["target_generation"], 2);
+
+        let stale = router
+            .dispatch(make_request("session/set_instruction", write))
+            .await
+            .unwrap();
+        assert_eq!(
+            stale.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        assert_eq!(
+            stale
+                .error
+                .as_ref()
+                .and_then(|error| error.data.as_ref())
+                .and_then(|data| data.get("instruction_set_code"))
+                .and_then(serde_json::Value::as_str),
+            Some("stale_revision")
+        );
+
+        let after_revoke = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/instruction_status",
+                    serde_json::json!({ "session_id": session_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            after_revoke["slots"][0]["recorded"],
+            serde_json::json!({ "revision": 2, "effect": "absent" })
+        );
+        assert_eq!(
+            after_revoke["slots"][0]["state"],
+            serde_json::json!({ "state": "not_targeted" })
+        );
+
+        let missing = router
+            .dispatch(make_request(
+                "session/instruction_status",
+                serde_json::json!({ "session_id": SessionId::new() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            missing.error.as_ref().map(|error| error.code),
+            Some(error::SESSION_NOT_FOUND)
+        );
+    }
+
+    /// A mob member's session takes no session-level write: the session
+    /// verb answers `owned_by_mob` (write through `mob/set_instruction`),
+    /// while the session read reports the mob's recorded target.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn session_instruction_verbs_refuse_mob_owned_sessions() {
+        let (router, _notif_rx) = test_router().await;
+        let mob_id = "mob-operator-instructions-member-session";
+        mob_with_one_worker(&router, mob_id).await;
+        let session_id = resolve_mob_bridge_session_id(&router, mob_id, "worker-1").await;
+
+        let refused = router
+            .dispatch(make_request(
+                "session/set_instruction",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "namespace": "host",
+                    "key": "tone",
+                    "revision": 1,
+                    "body": "Answer formally."
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code),
+            Some(error::INVALID_PARAMS)
+        );
+        assert_eq!(
+            instruction_set_code(&refused).as_deref(),
+            Some("owned_by_mob")
+        );
+
+        result_value(
+            &router
+                .dispatch(make_request(
+                    "mob/set_instruction",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "namespace": "host",
+                        "key": "tone",
+                        "revision": 1,
+                        "body": "Answer formally.",
+                        "target": { "kind": "member", "agent_identity": "worker-1" }
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+        poll_mob_instruction_status(&router, serde_json::json!({ "mob_id": mob_id }), |status| {
+            status["members"][0]["delivery"]["state"]["state"] == "current"
+        })
+        .await;
+
+        let status = result_value(
+            &router
+                .dispatch(make_request(
+                    "session/instruction_status",
+                    serde_json::json!({ "session_id": session_id }),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            status["owner"],
+            serde_json::json!({
+                "kind": "mob",
+                "mob_id": mob_id,
+                "agent_identity": "worker-1"
+            })
+        );
+        assert_eq!(status["target_generation"], 1);
+        assert_eq!(
+            status["slots"][0]["recorded"],
+            serde_json::json!({ "revision": 1, "effect": "active" })
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -18990,6 +19808,97 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         assert_eq!(kept["config"]["confinement"], section);
     }
 
+    /// The approver ids the stdio operator decides for
+    /// (`[governance.decisions] operator_approver_ids`) are approver
+    /// authority, administered by the host in the realm document with the
+    /// rest of `[governance]`: a config write that adds, changes or removes
+    /// them is the caller's error carrying governance's typed refusal, and
+    /// writes nothing. A write that keeps them commits.
+    #[tokio::test]
+    async fn config_writes_cannot_administer_the_operators_approver_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let unstated = "max_tokens = 4096\n";
+        tokio::fs::write(&path, unstated).await.unwrap();
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(
+            meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical()),
+        ))
+        .await;
+        let refusal = |response: &RpcResponse| {
+            (
+                error_code(response),
+                response.error.as_ref().and_then(|error| error.data.clone()),
+            )
+        };
+        let governance_refusal = (
+            error::INVALID_PARAMS,
+            Some(serde_json::json!({ "type": "governance_administration_required" })),
+        );
+        let listing = |ids: serde_json::Value| serde_json::json!({ "governance": { "decisions": { "operator_approver_ids": ids } } });
+
+        let added = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!(["operator", "team:owners"])) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refusal(&added), governance_refusal);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), unstated);
+
+        let stated = "max_tokens = 4096\n\n[governance.decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n";
+        tokio::fs::write(&path, stated).await.unwrap();
+        let current = router
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let section = result_value(&current)["config"]["governance"].clone();
+        assert_eq!(
+            section["decisions"]["operator_approver_ids"],
+            serde_json::json!(["operator", "team:owners"]),
+            "{section}"
+        );
+        let mut omitted = result_value(&current)["config"].clone();
+        omitted.as_object_mut().unwrap().remove("governance");
+        let mut widened = result_value(&current)["config"].clone();
+        widened["governance"]["decisions"]["operator_approver_ids"] =
+            serde_json::json!(["operator", "team:owners", "team:admins"]);
+        for (method, params) in [
+            (
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!(["operator", "team:owners", "team:admins"])) }),
+            ),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!([])) }),
+            ),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": { "governance": null } }),
+            ),
+            ("config/set", serde_json::json!({ "config": omitted })),
+            ("config/set", serde_json::json!({ "config": widened })),
+        ] {
+            let refused = router
+                .dispatch(make_request(method, params.clone()))
+                .await
+                .unwrap();
+            assert_eq!(refusal(&refused), governance_refusal, "{method} {params}");
+            assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), stated);
+        }
+
+        let kept = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 2048 } }),
+            ))
+            .await
+            .unwrap();
+        let kept = result_value(&kept);
+        assert_eq!(kept["config"]["max_tokens"], 2048);
+        assert_eq!(kept["config"]["governance"], section);
+    }
+
     /// A credential command runs as the host, outside its confinement: a
     /// JSON-RPC config write that adds one, or changes what it runs, is the
     /// caller's error carrying confinement's typed refusal and naming the
@@ -19842,6 +20751,9 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             live_webrtc_enabled: cfg!(feature = "live-webrtc"),
             // The plain router never emits consent notices.
             consent_enabled: false,
+            // Nor decision notices: only a stdio connection's operator
+            // receives them.
+            decision_notices_enabled: false,
         };
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {
@@ -21426,7 +22338,7 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         /// A router over in-memory stores. With `realm`, construction arms
         /// the runtime's delivery owner, so committed continuations drain;
         /// without it nothing drains them until the test arms the owner.
-        async fn keyed_router(
+        pub(super) async fn keyed_router(
             realm: bool,
         ) -> (MethodRouter, Arc<SessionRuntime>, tempfile::TempDir) {
             let temp = tempfile::tempdir().unwrap();
@@ -22210,6 +23122,819 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 status,
                 meerkat::ContinuationStatus::NotCommitted,
                 "nothing was committed"
+            );
+        }
+
+        /// A mob with two worker profiles: `worker` admits external work and
+        /// `closed` admits none.
+        #[cfg(feature = "mob")]
+        pub(super) async fn create_doors_mob(router: &MethodRouter, mob: &str) -> String {
+            let create_resp = router
+                .dispatch(make_request(
+                    "mob/create",
+                    serde_json::json!({
+                        "definition": {
+                            "id": mob,
+                            "profiles": {
+                                "worker": {
+                                    "model": "claude-sonnet-4-5",
+                                    "external_addressable": true,
+                                    "tools": { "comms": true }
+                                },
+                                "closed": {
+                                    "model": "claude-sonnet-4-5",
+                                    "external_addressable": false,
+                                    "tools": { "comms": true }
+                                }
+                            }
+                        }
+                    }),
+                ))
+                .await
+                .unwrap();
+            result_value(&create_resp)["mob_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+
+        /// Seat `name` on the `worker` profile as the host's identity entry.
+        /// Entry custody is a Rust host API: no wire method takes it.
+        #[cfg(feature = "mob")]
+        pub(super) async fn seat_identity_entry(
+            router: &MethodRouter,
+            mob_id: &str,
+            name: &str,
+        ) -> meerkat_mob::MobHandle {
+            let handle = router
+                .mob_state
+                .handle_for(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .expect("the mob's handle");
+            let mut spec =
+                meerkat_mob::SpawnMemberSpec::new("worker", meerkat_mob::AgentIdentity::from(name));
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            handle
+                .spawn_spec(spec.with_entry_custody(true))
+                .await
+                .expect("the host seats its identity entry");
+            assert!(
+                matches!(
+                    handle
+                        .identity_entry(&meerkat_mob::AgentIdentity::from(name))
+                        .expect("the entry read answers"),
+                    meerkat_mob::IdentityEntryRead::Entry(_)
+                ),
+                "'{name}' is an identity entry"
+            );
+            handle
+        }
+
+        /// Spawn the worker `name` on `profile` through the wire.
+        #[cfg(feature = "mob")]
+        pub(super) async fn spawn_worker(
+            router: &MethodRouter,
+            mob_id: &str,
+            profile: &str,
+            name: &str,
+        ) {
+            let spawn_resp = router
+                .dispatch(make_request(
+                    "mob/spawn",
+                    serde_json::json!({
+                        "mob_id": mob_id,
+                        "profile": profile,
+                        "agent_identity": name,
+                        "runtime_mode": "turn_driven"
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(result_value(&spawn_resp)["agent_identity"], name);
+        }
+
+        #[cfg(feature = "mob")]
+        async fn member_send_to(
+            router: &MethodRouter,
+            mob_id: &str,
+            member: &str,
+            content: &str,
+            key: Option<&str>,
+        ) -> RpcResponse {
+            let mut params = serde_json::json!({
+                "mob_id": mob_id,
+                "agent_identity": member,
+                "content": content,
+            });
+            if let Some(key) = key {
+                params["idempotency_key"] = serde_json::json!(key);
+            }
+            router
+                .dispatch(make_request("mob/member_send", params))
+                .await
+                .unwrap()
+        }
+
+        /// The continuation status the router's service reads for `member`
+        /// under the caller key `key`.
+        #[cfg(feature = "mob")]
+        async fn keyed_send_status(
+            router: &MethodRouter,
+            mob_id: &str,
+            member: &str,
+            key: &str,
+        ) -> meerkat::ContinuationStatus {
+            router
+                .mob_state
+                .continuation_service()
+                .expect("the RPC mob state binds its continuation service")
+                .continuation_status(
+                    &meerkat::ContinuationOwner::Member {
+                        mob_id: mob_id.to_string(),
+                        identity: member.to_string(),
+                    },
+                    &meerkat::ContinuationKey::new(format!(
+                        "{}{key}",
+                        meerkat_mob_mcp::MEMBER_SEND_CONTINUATION_KEY_PREFIX
+                    ))
+                    .expect("key"),
+                )
+                .await
+                .expect("status")
+        }
+
+        /// The error `response` answers; `context` names the refusal expected.
+        #[cfg(feature = "mob")]
+        fn refused(response: &RpcResponse, context: &str) -> crate::protocol::RpcError {
+            response
+                .error
+                .clone()
+                .unwrap_or_else(|| panic!("{context}: {response:?}"))
+        }
+
+        /// The keyed and the unkeyed member send share one external
+        /// admission: a keyed send to an identity entry is refused
+        /// `identity_member` before its first commit, with exactly the
+        /// answer the unkeyed send gets, and nothing is committed under the
+        /// key.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_key_to_an_identity_entry_is_refused_like_the_unkeyed_send() {
+            let (router, _runtime, _temp) = keyed_router(true).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-entry").await;
+            seat_identity_entry(&router, &mob_id, "entry-1").await;
+
+            let unkeyed = member_send_to(&router, &mob_id, "entry-1", "unkeyed", None).await;
+            let unkeyed = refused(&unkeyed, "the unkeyed send to an entry is refused");
+            assert_eq!(
+                unkeyed.data.as_ref().map(|data| data["kind"].clone()),
+                Some(serde_json::json!("identity_member")),
+                "{unkeyed:?}"
+            );
+
+            let keyed =
+                member_send_to(&router, &mob_id, "entry-1", "keyed", Some("entry-key")).await;
+            let keyed = refused(&keyed, "the keyed send to an entry is refused");
+            assert_eq!(
+                (keyed.code, &keyed.message, &keyed.data),
+                (unkeyed.code, &unkeyed.message, &unkeyed.data),
+                "the keyed send answers exactly as the unkeyed send"
+            );
+            assert_eq!(
+                keyed_send_status(&router, &mob_id, "entry-1", "entry-key").await,
+                meerkat::ContinuationStatus::NotCommitted,
+                "nothing is committed under the key"
+            );
+        }
+
+        /// A keyed send to a worker whose profile admits no external work
+        /// answers exactly as the unkeyed send, `NotExternallyAddressable`,
+        /// and commits nothing.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_key_to_a_member_that_admits_no_external_work_answers_like_the_unkeyed_send()
+         {
+            let (router, _runtime, _temp) = keyed_router(true).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-closed").await;
+            spawn_worker(&router, &mob_id, "closed", "closed-1").await;
+
+            let unkeyed = member_send_to(&router, &mob_id, "closed-1", "unkeyed", None).await;
+            let unkeyed = refused(&unkeyed, "the unkeyed send to a closed member is refused");
+            assert!(
+                unkeyed.message.contains("not externally addressable"),
+                "{unkeyed:?}"
+            );
+
+            let keyed =
+                member_send_to(&router, &mob_id, "closed-1", "keyed", Some("closed-key")).await;
+            let keyed = refused(&keyed, "the keyed send to a closed member is refused");
+            assert_eq!(
+                (keyed.code, &keyed.message, &keyed.data),
+                (unkeyed.code, &unkeyed.message, &unkeyed.data),
+                "the keyed send answers exactly as the unkeyed send"
+            );
+            assert_eq!(
+                keyed_send_status(&router, &mob_id, "closed-1", "closed-key").await,
+                meerkat::ContinuationStatus::NotCommitted,
+                "nothing is committed under the key"
+            );
+        }
+
+        /// Delivery asks the external admission again: a keyed send
+        /// committed while its member was a worker, whose member then became
+        /// an identity entry (a legacy member's adoption) before the send
+        /// was delivered, settles refused, typed and final, and nothing is
+        /// admitted into the entry's session. Its status says so on every
+        /// replay; nothing retries it.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_key_committed_before_its_member_became_an_entry_settles_refused() {
+            let (router, runtime, _temp) = keyed_router(false).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-adopted").await;
+            let handle = router
+                .mob_state
+                .handle_for(&meerkat_mob::MobId::from(mob_id.as_str()))
+                .await
+                .expect("the mob's handle");
+            let legacy = meerkat_mob::AgentIdentity::from("legacy-1");
+            // A member a legacy host seated: its spawn row carries the legacy
+            // identity label naming its own identity.
+            let mut spec = meerkat_mob::SpawnMemberSpec::new("worker", legacy.clone());
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            spec.labels = Some(std::collections::BTreeMap::from([(
+                "agent_identity".to_string(),
+                "legacy-1".to_string(),
+            )]));
+            handle.spawn_spec(spec).await.expect("a legacy member");
+
+            let content = "Ingest item 21.";
+            let first = result_value(
+                &member_send_to(&router, &mob_id, "legacy-1", content, Some("item-21")).await,
+            );
+            let (delivery_id, _, state) = delivery(&first);
+            assert_eq!(state, "pending", "no delivery owner drains it yet: {first}");
+
+            assert_eq!(
+                handle
+                    .adopt_legacy_identity_entry(&legacy)
+                    .await
+                    .expect("the adoption answers"),
+                meerkat_mob::LegacyIdentityEntryAdoption::Adopted
+            );
+
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::global()),
+                None,
+                None,
+            );
+            runtime.arm_runtime_delivery_owner();
+            let settled = tokio::time::timeout(STATUS_WAIT, async {
+                loop {
+                    let replay = result_value(
+                        &member_send_to(&router, &mob_id, "legacy-1", content, Some("item-21"))
+                            .await,
+                    );
+                    if replay["continuation"]["status"]["state"] != "pending" {
+                        return replay;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the keyed send settles");
+            assert_eq!(
+                settled["continuation"]["status"],
+                serde_json::json!({ "state": "refused", "reason": "authority_denied" }),
+                "a keyed send to a member that became an entry settles refused: {settled}"
+            );
+            assert_eq!(
+                settled["continuation"]["delivery_id"].as_str(),
+                Some(delivery_id.as_str())
+            );
+
+            let session = handle
+                .resolve_bridge_session_id(&legacy)
+                .await
+                .expect("the entry's session");
+            use meerkat_runtime::SessionServiceRuntimeExt as _;
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .input_state_by_idempotency_key(&session, &delivery_id)
+                    .await
+                    .expect("read the entry's input ledger")
+                    .is_none(),
+                "nothing was admitted into the entry's session"
+            );
+            let again = result_value(
+                &member_send_to(&router, &mob_id, "legacy-1", content, Some("item-21")).await,
+            );
+            assert_eq!(
+                again["continuation"]["status"], settled["continuation"]["status"],
+                "the refusal is final: {again}"
+            );
+        }
+
+        /// The host's own keyed door commits its send to its identity entry
+        /// as the host's plain row: the drain asks it no external admission,
+        /// and the content is admitted into the entry's session, where an
+        /// external keyed send to the same entry is refused.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn the_hosts_keyed_send_to_its_identity_entry_is_admitted_at_delivery() {
+            let (router, runtime, _temp) = keyed_router(false).await;
+            let mob_id = create_doors_mob(&router, "mob-keyed-host").await;
+            let handle = seat_identity_entry(&router, &mob_id, "entry-1").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            let receipt = router
+                .mob_state
+                .mob_member_send_keyed_as_host(
+                    handle.mob_id(),
+                    entry.clone(),
+                    meerkat_core::types::ContentInput::from("Host item 41."),
+                    meerkat_core::types::HandlingMode::Queue,
+                    "host-41",
+                )
+                .await
+                .expect("the host's keyed send to its entry commits");
+            assert_eq!(
+                receipt.status,
+                meerkat_contracts::WireContinuationStatus::Pending,
+                "no delivery owner drains it yet"
+            );
+
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::global()),
+                None,
+                None,
+            );
+            runtime.arm_runtime_delivery_owner();
+            let settled = tokio::time::timeout(STATUS_WAIT, async {
+                loop {
+                    let status = keyed_send_status(&router, &mob_id, "entry-1", "host-41").await;
+                    if !matches!(status, meerkat::ContinuationStatus::Pending { .. }) {
+                        return status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the host's keyed send settles");
+            let meerkat::ContinuationStatus::Applied {
+                session: admitted_to,
+                ..
+            } = &settled
+            else {
+                panic!("the host's keyed send to its entry is admitted at delivery: {settled:?}");
+            };
+            let session = handle
+                .resolve_bridge_session_id(&entry)
+                .await
+                .expect("the entry's session");
+            assert_eq!(admitted_to, &session, "admitted into the entry's session");
+            use meerkat_runtime::SessionServiceRuntimeExt as _;
+            assert!(
+                runtime
+                    .runtime_adapter()
+                    .input_state_by_idempotency_key(&session, &receipt.delivery_id)
+                    .await
+                    .expect("read the entry's input ledger")
+                    .is_some(),
+                "the entry's session holds the input"
+            );
+        }
+    }
+
+    /// The doors that act on a member's session as its host
+    /// (`mob/turn_start`, `mob/append_system_context`, `mob/member_live_open`,
+    /// `mob/member_live_control`, `mob/member_live_close`) and the internal
+    /// work origin of `mob/submit_work`: an identity entry is reached through
+    /// them only with the `AdminHost` control scope, which the owner holds. A
+    /// scoped principal without it is refused before anything runs; on any
+    /// other member the doors are unchanged.
+    #[cfg(feature = "mob")]
+    mod identity_entry_host_doors {
+        use super::caller_idempotency_key::{
+            create_doors_mob, keyed_router, seat_identity_entry, spawn_worker,
+        };
+        use super::*;
+
+        /// Bounds every door call: a door that hangs fails its row.
+        const DOOR_WAIT: Duration = Duration::from_mins(1);
+
+        /// The owner's router over a mob that holds the identity entry
+        /// `entry-1` and the worker `worker-1`, both on a profile that
+        /// admits external work.
+        struct Doors {
+            owner: MethodRouter,
+            _runtime: Arc<SessionRuntime>,
+            _temp: tempfile::TempDir,
+            mob_id: String,
+            handle: meerkat_mob::MobHandle,
+        }
+
+        impl Doors {
+            async fn new(mob: &str) -> Self {
+                let (owner, runtime, temp) = keyed_router(true).await;
+                let mob_id = create_doors_mob(&owner, mob).await;
+                let handle = seat_identity_entry(&owner, &mob_id, "entry-1").await;
+                spawn_worker(&owner, &mob_id, "worker", "worker-1").await;
+                Self {
+                    owner,
+                    _runtime: runtime,
+                    _temp: temp,
+                    mob_id,
+                    handle,
+                }
+            }
+
+            /// A router serving the console principal `principal`, which
+            /// holds exactly `scopes` on the mob.
+            async fn scoped(
+                &self,
+                principal: &str,
+                scopes: &[meerkat_mob::ControlScope],
+            ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+                let id = meerkat_core::auth::PrincipalId::new(principal).expect("principal id");
+                self.handle
+                    .grant_scopes(
+                        meerkat_mob::MobControlPrincipal::Owner,
+                        id.clone(),
+                        scopes.iter().copied().collect(),
+                        None,
+                    )
+                    .await
+                    .expect("the owner grants the scopes");
+                let state = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
+                    meerkat_mob::MobControlPrincipal::External(id),
+                );
+                state
+                    .mob_insert_handle(
+                        meerkat_mob::MobId::from(self.mob_id.as_str()),
+                        self.handle.clone(),
+                    )
+                    .await;
+                test_router_with_mob_state(state).await
+            }
+
+            fn member_request(
+                &self,
+                method: &str,
+                member: &str,
+                extra: serde_json::Value,
+            ) -> RpcRequest {
+                let mut params = serde_json::json!({
+                    "mob_id": self.mob_id,
+                    "agent_identity": member,
+                });
+                if let (Some(params), Some(extra)) = (params.as_object_mut(), extra.as_object()) {
+                    params.extend(extra.clone());
+                }
+                make_request(method, params)
+            }
+        }
+
+        async fn call(router: &MethodRouter, request: RpcRequest) -> RpcResponse {
+            tokio::time::timeout(DOOR_WAIT, router.dispatch(request))
+                .await
+                .expect("the door answers")
+                .expect("a response")
+        }
+
+        /// The door refused `member` as an identity member.
+        fn assert_identity_member(response: &RpcResponse, member: &str, context: &str) {
+            let error = response.error.as_ref().unwrap_or_else(|| {
+                panic!("{context}: refused as an identity member, got {response:?}")
+            });
+            assert_eq!(
+                error.data,
+                Some(serde_json::json!({
+                    "kind": "identity_member",
+                    "member_id": member,
+                    "retryable": false
+                })),
+                "{context}: {error:?}"
+            );
+        }
+
+        /// The door passed its admission: whatever the call answers after
+        /// it, it is neither an identity member refusal nor a scope denial.
+        fn assert_passed_the_door(response: &RpcResponse, context: &str) {
+            if let Some(error) = response.error.as_ref() {
+                assert_ne!(
+                    error.data.as_ref().map(|data| data["kind"].clone()),
+                    Some(serde_json::json!("identity_member")),
+                    "{context}: {error:?}"
+                );
+                assert_ne!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{context}: {error:?}"
+                );
+            }
+        }
+
+        /// `mob/turn_start` runs a turn on the member's session as its host.
+        #[tokio::test]
+        async fn mob_turn_start_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-turn").await;
+            let turn = |member: &str| {
+                doors.member_request(
+                    "mob/turn_start",
+                    member,
+                    serde_json::json!({ "prompt": "door turn" }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("turn-operator", &[meerkat_mob::ControlScope::SendCommand])
+                .await;
+            assert_identity_member(
+                &call(&scoped, turn("entry-1")).await,
+                "entry-1",
+                "a SendCommand principal starts no turn on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, turn("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "turn-host",
+                    &[
+                        meerkat_mob::ControlScope::SendCommand,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, turn("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            let owner = call(&doors.owner, turn("entry-1")).await;
+            assert!(
+                owner.error.is_none(),
+                "the owner runs a turn on its entry: {owner:?}"
+            );
+        }
+
+        /// `mob/append_system_context` appends to the member's session as
+        /// its host.
+        #[tokio::test]
+        async fn mob_append_system_context_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-append").await;
+            let append = |member: &str, key: &str| {
+                doors.member_request(
+                    "mob/append_system_context",
+                    member,
+                    serde_json::json!({
+                        "text": "door context",
+                        "source": "mob",
+                        "idempotency_key": key
+                    }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("append-operator", &[meerkat_mob::ControlScope::SendCommand])
+                .await;
+            assert_identity_member(
+                &call(&scoped, append("entry-1", "scoped-entry")).await,
+                "entry-1",
+                "a SendCommand principal appends nothing to an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, append("worker-1", "scoped-worker")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "append-host",
+                    &[
+                        meerkat_mob::ControlScope::SendCommand,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, append("entry-1", "host-entry")).await,
+                "AdminHost reaches the entry",
+            );
+            let owner = call(&doors.owner, append("entry-1", "owner-entry")).await;
+            assert_eq!(
+                result_value(&owner)["status"],
+                "applied",
+                "the owner appends to its entry: {owner:?}"
+            );
+        }
+
+        /// `mob/member_live_open` opens a live channel on the member's
+        /// session as its host.
+        #[tokio::test]
+        async fn mob_member_live_open_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-open").await;
+            let open = |member: &str| {
+                doors.member_request("mob/member_live_open", member, serde_json::json!({}))
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("live-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, open("entry-1")).await,
+                "entry-1",
+                "a Live principal opens no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, open("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "live-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, open("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, open("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
+        /// `mob/member_live_control` drives a live channel on the member's
+        /// session as its host.
+        #[tokio::test]
+        async fn mob_member_live_control_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-control").await;
+            let control = |member: &str| {
+                doors.member_request(
+                    "mob/member_live_control",
+                    member,
+                    serde_json::json!({
+                        "channel_id": "no-such-channel",
+                        "verb": { "verb": "interrupt" }
+                    }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("control-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, control("entry-1")).await,
+                "entry-1",
+                "a Live principal drives no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, control("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "control-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, control("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, control("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
+        /// `mob/member_live_close` ends a live channel on the member's
+        /// session as its host, as the control verbs drive one: a principal
+        /// that holds only `Live` closes no channel on an entry.
+        #[tokio::test]
+        async fn mob_member_live_close_reaches_an_identity_entry_only_with_admin_host() {
+            let doors = Doors::new("mob-door-live-close").await;
+            let close = |member: &str| {
+                doors.member_request(
+                    "mob/member_live_close",
+                    member,
+                    serde_json::json!({ "channel_id": "no-such-channel" }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("close-operator", &[meerkat_mob::ControlScope::Live])
+                .await;
+            assert_identity_member(
+                &call(&scoped, close("entry-1")).await,
+                "entry-1",
+                "a Live principal closes no channel on an entry",
+            );
+            assert_passed_the_door(
+                &call(&scoped, close("worker-1")).await,
+                "the door is unchanged for a worker",
+            );
+            let (host, _host_rx) = doors
+                .scoped(
+                    "close-host",
+                    &[
+                        meerkat_mob::ControlScope::Live,
+                        meerkat_mob::ControlScope::AdminHost,
+                    ],
+                )
+                .await;
+            assert_passed_the_door(
+                &call(&host, close("entry-1")).await,
+                "AdminHost reaches the entry",
+            );
+            assert_passed_the_door(
+                &call(&doors.owner, close("entry-1")).await,
+                "the owner reaches its entry",
+            );
+        }
+
+        /// `origin: internal` on `mob/submit_work` acts as the mob's host:
+        /// it needs `AdminHost` for every member, an entry or a worker, and a
+        /// principal without it is refused `ScopeDenied { required:
+        /// admin_host }` before anything is submitted. The default external
+        /// origin is unchanged.
+        #[tokio::test]
+        async fn mob_submit_work_with_the_internal_origin_needs_admin_host() {
+            let doors = Doors::new("mob-door-submit").await;
+            let submit = |member: &str, origin: &str| {
+                make_request(
+                    "mob/submit_work",
+                    serde_json::json!({
+                        "member_ref": meerkat_contracts::WireMemberRef::encode(&doors.mob_id, member),
+                        "content": "door work",
+                        "origin": origin
+                    }),
+                )
+            };
+            let (scoped, _scoped_rx) = doors
+                .scoped("work-operator", &[meerkat_mob::ControlScope::SendCommand])
+                .await;
+            for member in ["entry-1", "worker-1"] {
+                let refused = call(&scoped, submit(member, "internal")).await;
+                let error = refused.error.as_ref().unwrap_or_else(|| {
+                    panic!("the internal origin to {member} is refused: {refused:?}")
+                });
+                assert_eq!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{member}: {error:?}"
+                );
+                assert_eq!(
+                    error.data,
+                    Some(serde_json::json!({
+                        "required": "admin_host",
+                        "presented": ["send_command"]
+                    })),
+                    "{member}: {error:?}"
+                );
+            }
+            // A principal that also lists the mob (and so can read which
+            // members are entries) is refused the same for every member: the
+            // door asks `AdminHost` of the internal origin itself, never only
+            // for the entries it can read.
+            let (lister, _lister_rx) = doors
+                .scoped(
+                    "work-lister",
+                    &[
+                        meerkat_mob::ControlScope::List,
+                        meerkat_mob::ControlScope::SendCommand,
+                    ],
+                )
+                .await;
+            for member in ["entry-1", "worker-1"] {
+                let refused = call(&lister, submit(member, "internal")).await;
+                let error = refused.error.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "the internal origin to {member} is refused for a principal that lists the mob: {refused:?}"
+                    )
+                });
+                assert_eq!(
+                    error.code,
+                    meerkat_contracts::ErrorCode::ScopeDenied.jsonrpc_code(),
+                    "{member}: {error:?}"
+                );
+                assert_eq!(
+                    error.data.as_ref().map(|data| data["required"].clone()),
+                    Some(serde_json::json!("admin_host")),
+                    "{member}: {error:?}"
+                );
+            }
+            let external = call(&scoped, submit("worker-1", "external")).await;
+            assert!(
+                result_value(&external)["work_ref"].is_string(),
+                "the default external origin is unchanged: {external:?}"
+            );
+            let owner = call(&doors.owner, submit("entry-1", "internal")).await;
+            assert!(
+                result_value(&owner)["work_ref"].is_string(),
+                "the owner submits internal work to its entry: {owner:?}"
             );
         }
     }

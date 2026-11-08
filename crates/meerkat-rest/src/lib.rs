@@ -4091,6 +4091,7 @@ fn make_runtime_external_event_input(
                 idempotency_key,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: event_type.to_string(),
             payload,
@@ -14260,10 +14261,12 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["reason"], "mcp_server_not_configured", "{body}");
+        let refusal =
+            meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource.to_string();
         assert!(
             body["error"]
                 .as_str()
-                .is_some_and(|text| text.contains("confined process")),
+                .is_some_and(|text| text.contains(&refusal)),
             "{body}"
         );
     }

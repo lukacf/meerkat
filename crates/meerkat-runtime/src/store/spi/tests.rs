@@ -3927,5 +3927,55 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
     ));
 }
 
+/// A batch left unsettled when its fence window closed stays typed through
+/// the runtime store, for a write and for a read that committed, with its
+/// account; a batch whose retry budget ran out keeps answering a write
+/// failure.
+#[test]
+fn a_batch_unsettled_at_its_fence_window_stays_typed() {
+    use meerkat_core::host_store::{FenceToken, HostStoreError};
+
+    let unsettled = SpiError::UnsettledAtFenceWindow {
+        token: FenceToken::new(3),
+        attempts: 5,
+        last: Some(HostStoreError::Indeterminate("lost".to_string())),
+    };
+    let account = unsettled.to_string();
+    assert_eq!(
+        account,
+        "host store batch is unsettled: the self-fence window of fence token 3 closed \
+         (attempts sent: 5; last answer: outcome unknown: lost)"
+    );
+    for typed in [unsettled.clone().into_write(), unsettled.into_read()] {
+        assert!(
+            matches!(
+                &typed,
+                RuntimeStoreError::UnsettledAtFenceWindow { cause } if *cause == account
+            ),
+            "{typed:?}"
+        );
+        assert!(!typed.is_refused_until_reopen());
+    }
+    let never_sent = SpiError::UnsettledAtFenceWindow {
+        token: FenceToken::new(3),
+        attempts: 0,
+        last: None,
+    };
+    assert!(
+        never_sent.to_string().ends_with("(attempts sent: 0)"),
+        "{never_sent}"
+    );
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Indeterminate("lost".to_string())).into_write(),
+        RuntimeStoreError::WriteFailed(_)
+    ));
+}
+
 /// What one poisoned scope refuses, and what it leaves serving.
 mod poison_radius;
+
+/// An acquire the realm gave up on, which the store grants anyway (H0).
+mod abandoned_acquire;
+
+/// A commit sends nothing past its token's self-fence deadline (#1550).
+mod settle_deadline;

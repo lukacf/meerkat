@@ -3237,6 +3237,10 @@ struct AutonomousDispatchMaterial {
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     content_attribution: crate::mob_machine::WorkContentAttribution,
+    /// The original requester of host human input: stamped onto the admitted
+    /// runtime turn. The inbox event carries none, so inbox delivery refuses
+    /// one.
+    requester: Option<meerkat_core::PrincipalRef>,
 }
 
 /// One member turn admission owned by that member's admission lane.
@@ -3971,6 +3975,7 @@ impl DetachedMemberReadinessContext {
             llm_identity_applied_tx,
             ack_mode,
             content_attribution,
+            requester,
         } = material;
         let render_metadata = turn_metadata
             .as_ref()
@@ -3994,6 +3999,7 @@ impl DetachedMemberReadinessContext {
                     handling_mode,
                     turn_metadata,
                     external_delivery_identity.as_ref(),
+                    requester,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -4010,6 +4016,13 @@ impl DetachedMemberReadinessContext {
             } else {
                 self.provisioner.admit_turn(&member_ref, req).await
             };
+        }
+        // The inbox event carries no requester: only host human input, which
+        // always takes the runtime turn above, may carry one.
+        if requester.is_some() {
+            return Err(MobError::Internal(format!(
+                "autonomous inbox delivery for '{agent_identity}' cannot carry a requester"
+            )));
         }
         let injector = self
             .provisioner
@@ -4336,6 +4349,9 @@ struct SubmitWorkDispatchRequest {
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     content_attribution: crate::mob_machine::WorkContentAttribution,
+    /// The original requester of host human input (validated before
+    /// admission), stamped onto the member runtime's admitted input.
+    requester: Option<meerkat_core::PrincipalRef>,
     operation_id: Option<meerkat_core::ops::OperationId>,
     /// Present only for a placed TurnCompleted dispatch. Its durable Record
     /// already exists; dispatch may realize but must never mint custody.
@@ -4372,6 +4388,7 @@ fn submit_work_turn_metadata(
                         run_id: None,
                         objective_id,
                         turn_input: None,
+                        requester: None,
                     },
                     ..Default::default()
                 },
@@ -4390,9 +4407,17 @@ fn submit_work_runtime_semantics(
     handling_mode: meerkat_core::types::HandlingMode,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     external_delivery_identity: Option<&crate::store::MobExternalDeliveryIdentity>,
+    requester: Option<meerkat_core::PrincipalRef>,
 ) -> meerkat_core::service::StartTurnRuntimeSemantics {
     let semantics =
         meerkat_core::service::StartTurnRuntimeSemantics::new(handling_mode, None, turn_metadata);
+    // A delivery path that cannot carry the requester onto an admitted
+    // runtime input refuses it (the provisioner's placed and direct-session
+    // paths); none drops it.
+    let semantics = match requester {
+        Some(requester) => semantics.with_requester(requester),
+        None => semantics,
+    };
     match external_delivery_identity {
         Some(identity) => {
             semantics.with_input_identity(meerkat_core::service::StartTurnInputIdentity {
@@ -4788,6 +4813,7 @@ fn kept_kickoff_reattach_input(agent_runtime_id: &AgentRuntimeId) -> meerkat_run
             idempotency_key: Some(local_kickoff_idempotency_key(agent_runtime_id)),
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: ContentInput::Text("re-attach the kept kickoff".to_string()),
         typed_turn_appends: Vec::new(),
@@ -5686,6 +5712,30 @@ pub(super) fn startup_registration_takeovers_for_test(
     member: &AgentIdentity,
 ) -> u64 {
     STARTUP_REGISTRATION_TAKEOVERS_FOR_TEST
+        .lock()
+        .ok()
+        .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
+        .unwrap_or_default()
+}
+
+/// How many times a start recorded each member's recovery failure (a member
+/// it left out, then could not recover), per mob.
+#[cfg(test)]
+static STARTUP_RECOVERY_FAILURES_FOR_TEST: std::sync::Mutex<BTreeMap<(MobId, AgentIdentity), u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn record_startup_recovery_failure_for_test(mob_id: &MobId, member: &AgentIdentity) {
+    if let Ok(mut counts) = STARTUP_RECOVERY_FAILURES_FOR_TEST.lock() {
+        *counts.entry((mob_id.clone(), member.clone())).or_default() += 1;
+    }
+}
+
+/// Test read: how many times a start of `mob_id` recorded `member`'s
+/// recovery failure.
+#[cfg(test)]
+pub(super) fn startup_recovery_failures_for_test(mob_id: &MobId, member: &AgentIdentity) -> u64 {
+    STARTUP_RECOVERY_FAILURES_FOR_TEST
         .lock()
         .ok()
         .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
@@ -13180,6 +13230,7 @@ impl MobActor {
                         .error
                         .unwrap_or_else(|| "member restore failed".to_string()),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             );
@@ -13195,6 +13246,7 @@ impl MobActor {
                 session_id: diag.bridge_session_id,
                 reason: diag.reason,
                 hold: diag.hold,
+                cause_data: diag.cause_data,
             });
         }
         Ok(())
@@ -14797,6 +14849,7 @@ impl MobActor {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
                                 hold: None,
+                                cause_data: None,
                                 registration_refusal: None,
                             },
                         )
@@ -15612,6 +15665,7 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15685,6 +15739,7 @@ impl MobActor {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15822,6 +15877,7 @@ impl MobActor {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
                         hold: None,
+                        cause_data: None,
                         registration_refusal: None,
                     },
                 )
@@ -15838,6 +15894,7 @@ impl MobActor {
                     session_id: Some(bridge_session_id),
                     reason: classify_reason,
                     hold: None,
+                    cause_data: None,
                 })
             }
             mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
@@ -15888,6 +15945,7 @@ impl MobActor {
                     }
                     Err(error) => {
                         let hold = error.durable_resume_hold();
+                        let cause_data = error.structured_data();
                         let failure_reason = format!(
                             "machine-authorized placed revival of '{agent_identity}' on host '{}' failed: {error}",
                             host.as_str()
@@ -15906,6 +15964,7 @@ impl MobActor {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
                                 hold,
+                                cause_data: cause_data.clone(),
                                 registration_refusal: None,
                             },
                         )
@@ -15922,6 +15981,7 @@ impl MobActor {
                             session_id: Some(bridge_session_id),
                             reason: failure_reason,
                             hold,
+                            cause_data,
                         })
                     }
                 }
@@ -16343,6 +16403,7 @@ impl MobActor {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         });
 
         // §19.L5: the ops owner for a placed member is the owner bridge
@@ -18503,6 +18564,11 @@ impl MobActor {
             }
             Some((mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable, _, _)) => {
                 MobError::NotExternallyAddressable(agent_identity.clone())
+            }
+            Some((mob_dsl::SubmitWorkRejectReasonKind::IdentityMember, _, _)) => {
+                MobError::IdentityMember {
+                    member_id: agent_identity.clone(),
+                }
             }
             Some((mob_dsl::SubmitWorkRejectReasonKind::StaleSessionBinding, _, _)) => {
                 let parse = |session: &mob_dsl::SessionId| SessionId::parse(&session.0).ok();
@@ -23409,6 +23475,7 @@ impl MobActor {
                 bridge_session_id: Some(session_id.clone()),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -28678,6 +28745,35 @@ impl MobActor {
         }
     }
 
+    /// Whether the host's adoption has taken `identity`'s declared entry
+    /// over, so the identity reconciler may act on its member
+    /// (`TakeOverIdentityEntry`): a seated entry is marked adopting, an
+    /// unseated one ended, and a name that is no Declared entry needs
+    /// nothing. An entry with a member step in flight, or one a candidate
+    /// composition holds, is left as it is: the reconcile waits and asks
+    /// again.
+    fn identity_entry_taken_over(
+        &mut self,
+        identity: &AgentIdentity,
+        intent_record: &crate::identity::IdentityIntentRecord,
+    ) -> Result<bool, MobError> {
+        match self.take_over_identity_entry(identity)? {
+            mob_dsl::HostAdoptionEntryVerdict::Adopting
+            | mob_dsl::HostAdoptionEntryVerdict::Ended
+            | mob_dsl::HostAdoptionEntryVerdict::NotADeclaredEntry => Ok(true),
+            mob_dsl::HostAdoptionEntryVerdict::Deferred
+            | mob_dsl::HostAdoptionEntryVerdict::NonAuthoritative
+            | mob_dsl::HostAdoptionEntryVerdict::MobNotRunning => {
+                self.schedule_identity_reconcile_wait(
+                    identity,
+                    IdentityReconcileAuthorityKey::from_intent(intent_record),
+                    Duration::from_millis(100),
+                );
+                Ok(false)
+            }
+        }
+    }
+
     async fn reconcile_identity_pass(
         &mut self,
         identity: &AgentIdentity,
@@ -29281,6 +29377,14 @@ impl MobActor {
                 }
                 IdentityReconcileDecision::RetireMemberMaterialization => {
                     if !self.retirements.contains_key(identity) {
+                        // The host's adoption takes the identity's declared
+                        // entry over first: the end of this retirement ends
+                        // the entry, so the member the reconcile materializes
+                        // is the host's. An entry with a member step in flight
+                        // waits for it.
+                        if !self.identity_entry_taken_over(identity, &intent_record)? {
+                            return Ok(false);
+                        }
                         self.start_retirement(
                             identity.clone(), Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                             None, retirement_io::RetirementReply::IdentityReconcile(completion_authority.clone()),
@@ -29505,6 +29609,12 @@ impl MobActor {
                         .map_err(MobError::from)?;
                     let completion_authority =
                         IdentityReconcileCompletionAuthority::from_permit(&permit);
+                    // An identity no member holds whose declared entry the
+                    // host's adoption has not taken over yet: the entry ends
+                    // now, so the host's member takes the name as no entry.
+                    if !self.identity_entry_taken_over(identity, &intent_record)? {
+                        return Ok(false);
+                    }
                     let mut spec = super::spec_compiler::spawn_spec_from_desired_member(
                         identity,
                         session,
@@ -29899,6 +30009,17 @@ impl MobActor {
                 MobCommand::RetryOwedMemberWake { agent_identity } => {
                     self.inline_step_watchdog.set_step("retry_owed_member_wake");
                     boxed_arm_future(|| self.retry_owed_member_wake(agent_identity)).await;
+                }
+                MobCommand::RetryMemberBuildPreparation { agent_identity } => {
+                    self.inline_step_watchdog
+                        .set_step("retry_member_build_preparation");
+                    boxed_arm_future(|| self.retry_member_build_preparation(agent_identity)).await;
+                }
+                MobCommand::ResolveMemberBuildPreparation {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(self.resolve_member_build_preparation(&agent_identity));
                 }
                 MobCommand::RepairOwedEdge { edge } => {
                     self.inline_step_watchdog.set_step("repair_owed_edge");
@@ -31068,10 +31189,29 @@ impl MobActor {
                     // Reaching the handler is the serialized validation ACK.
                     let _ = reply_tx.send(Ok(()));
                 }
-                MobCommand::AdmitControlScope { reply_tx, .. } => {
+                MobCommand::AdmitControlScope {
+                    subject, reply_tx, ..
+                } => {
                     // The requested scope was enforced at the serialized
-                    // mailbox gate. No projection or mutation occurs here.
-                    let _ = reply_tx.send(Ok(()));
+                    // mailbox gate. A member host door also refuses an
+                    // identity entry to a principal without AdminHost, and an
+                    // external work admission answers MobMachine's SubmitWork
+                    // admission of external work for the member, both from
+                    // this actor's state. No projection or mutation occurs
+                    // here.
+                    let result = match &subject {
+                        super::state::ScopeAdmissionSubject::MemberHost(agent_identity) => {
+                            self.member_host_door_refusal(authority, agent_identity)
+                        }
+                        super::state::ScopeAdmissionSubject::ExternalWork(agent_identity) => {
+                            self.external_work_admission(agent_identity)
+                        }
+                        super::state::ScopeAdmissionSubject::Mob
+                        | super::state::ScopeAdmissionSubject::Member(_)
+                        | super::state::ScopeAdmissionSubject::LegacyAdoption(_)
+                        | super::state::ScopeAdmissionSubject::DeclaredApply => Ok(()),
+                    };
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::PruneStaleMemberOperatorRequests { reply_tx } => {
                     let result = self.prune_stale_member_operator_requests().await;
@@ -31817,6 +31957,13 @@ impl MobActor {
                     let _ = reply_tx.send(Ok(()));
                 }
                 #[cfg(test)]
+                MobCommand::OwedMemberWakeRetryArmedForTest {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,
@@ -32083,13 +32230,13 @@ impl MobActor {
                 MobCommand::AdoptLegacyIdentityEntry {
                     agent_identity,
                     generation,
-                    legacy_roster_member,
+                    observation,
                     reply_tx,
                 } => {
                     let result = Box::pin(self.adopt_legacy_identity_entry(
                         agent_identity,
                         generation,
-                        legacy_roster_member,
+                        observation,
                     ))
                     .await;
                     let _ = reply_tx.send(result);
@@ -32106,8 +32253,12 @@ impl MobActor {
                         Box::pin(self.declare_identity_entries(declarations, change)).await;
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::SealDeclaredRoster { desired, reply_tx } => {
-                    let result = self.seal_declared_roster(desired);
+                MobCommand::SealDeclaredRoster {
+                    desired,
+                    intent_named,
+                    reply_tx,
+                } => {
+                    let result = self.seal_declared_roster(desired, intent_named);
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::OpenDeclaredApply { reply_tx } => {
@@ -32590,6 +32741,13 @@ impl MobActor {
                     reply_tx,
                 } => {
                     self.handle_stop_member_run(agent_identity, run_id, reason, reply_tx)
+                        .await;
+                }
+                MobCommand::SettleMemberRetainedRun {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    self.handle_settle_member_retained_run(agent_identity, reply_tx)
                         .await;
                 }
                 MobCommand::MemberHistory {
@@ -36048,10 +36206,13 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: error.durable_resume_hold(),
+                cause_data: error.restore_cause_data(),
                 registration_refusal: None,
             },
         )
         .await;
+        #[cfg(test)]
+        record_startup_recovery_failure_for_test(&self.definition.id, &entry.agent_identity);
     }
 
     /// Whether MobMachine records `agent_identity` Broken: its restore failed.
@@ -39263,6 +39424,35 @@ impl MobActor {
         } else {
             false
         };
+        // A member minted on a new session is born with its operator
+        // instruction snapshot. A member host that records one at birth
+        // (V7) is given it on the materialize, so the member's first turn
+        // already has the instructions; toward an older or a governed host
+        // the member receives it by delivery after the spawn, as before.
+        // Asked once, before anything is recorded, and only for a Fresh
+        // launch of a mob that has recorded instructions.
+        let instruction_target = if resume_session_id.is_none()
+            && self.dsl_authority.state().operator_instruction_generation > 0
+        {
+            match self
+                .host_serves_feature(
+                    &host,
+                    super::bridge_protocol::HOST_FEATURE_INSTRUCTION_TARGET_BIRTH,
+                )
+                .await
+            {
+                Ok(true) => match self
+                    .member_instruction_birth_target(&agent_identity, profile_name.as_str())
+                {
+                    Ok(target) => Some(target),
+                    Err(error) => fail!(error),
+                },
+                Ok(false) => None,
+                Err(error) => fail!(error),
+            }
+        } else {
+            None
+        };
 
         // Compose and persist the exact first-turn material BEFORE the
         // canonical Pending carrier. The carrier is the earliest durable
@@ -39769,19 +39959,24 @@ impl MobActor {
         // receiving host's minimum-version gate is what proves it.
         // The same for the V7 prompt-context fork, which rides only a Fresh
         // launch and so never meets the Resume-only V6 attachment, and for
-        // the V7 request to report a plain resume's adopted first turn.
-        let protocol_version = if prompt_context_fork.is_some() || report_adopted_first_turn {
-            super::bridge_protocol::BridgeProtocolVersion::V7
-        } else if forked_participant_attachment.is_some() {
-            super::forked_participant_routing::FORKED_PARTICIPANT_PROTOCOL_VERSION
-        } else {
-            super::bridge_protocol::BridgeProtocolVersion::V4
+        // the V7 request to report a plain resume's adopted first turn, and
+        // for the V7 snapshot a Fresh launch's member is born with.
+        let v7_without_snapshot = prompt_context_fork.is_some() || report_adopted_first_turn;
+        let carries_attachment = forked_participant_attachment.is_some();
+        let protocol_version_for = |carries_snapshot: bool| {
+            if v7_without_snapshot || carries_snapshot {
+                super::bridge_protocol::BridgeProtocolVersion::V7
+            } else if carries_attachment {
+                super::forked_participant_routing::FORKED_PARTICIPANT_PROTOCOL_VERSION
+            } else {
+                super::bridge_protocol::BridgeProtocolVersion::V4
+            }
         };
-        let payload = Box::new(super::bridge_protocol::BridgeMaterializePayload {
+        let mut payload = Box::new(super::bridge_protocol::BridgeMaterializePayload {
             supervisor: supervisor_spec.into(),
             epoch: authority.epoch,
             binding_generation,
-            protocol_version,
+            protocol_version: protocol_version_for(instruction_target.is_some()),
             generation: effect_generation.0,
             fence_token: effect_fence.0,
             spec: compiled.spec,
@@ -39790,7 +39985,28 @@ impl MobActor {
             forked_participant_attachment,
             prompt_context_fork,
             report_adopted_first_turn,
+            instruction_target,
         });
+        // A snapshot that would push the materialize past the comms frame
+        // could never reach the host: the materialize goes without it, in
+        // the shape it has without one, and the member's delivery takes the
+        // snapshot after the spawn (and blocks it there if its record alone
+        // is too large).
+        if payload.instruction_target.is_some() {
+            let bytes =
+                serde_json::to_vec(payload.as_ref()).map_or(usize::MAX, |encoded| encoded.len());
+            if bytes > super::placed_member_instruction::PLACED_COMMAND_FRAME_BUDGET {
+                tracing::warn!(
+                    member = %agent_identity,
+                    bytes,
+                    "a placed member's materialize with its operator-instruction snapshot is \
+                     past the bridge frame budget; it is sent without the snapshot, which the \
+                     member's delivery takes after the spawn"
+                );
+                payload.instruction_target = None;
+                payload.protocol_version = protocol_version_for(false);
+            }
+        }
 
         // Callers that don't carry an owner ops context (the embedder
         // `spawn_spec` path) re-derive the registry from the MobMachine-owned
@@ -42547,6 +42763,83 @@ impl MobActor {
                         .await
                 }
             };
+            let _ = reply_tx.send(result);
+        });
+    }
+
+    /// A host's settle of the run a local member's runtime retained: the run
+    /// a crash or a graceful stop left open, which the member's registration
+    /// kept and which has not resumed. The member runtime's machine decides
+    /// (`SettleRetainedRun`); see
+    /// [`MobHandle::settle_member_retained_run`](super::MobHandle::settle_member_retained_run).
+    /// A member the mob does not hold is `MemberNotFound`. A member not
+    /// materialized in this process (dormant, or waking) is
+    /// `MemberSessionNotLive`, and nothing wakes it: a wake while nothing
+    /// holds its run starts would resume the run. A placed member's runtime
+    /// lives on its member host (`UnsupportedForMode`). A member runtime that
+    /// needs a durability reload is refused by the member runtime's settle
+    /// itself, which tells a store realm that lost its fence
+    /// (`MemberSessionNotLive`) from any other degraded registration
+    /// (`MemberReloadRequired`). The settle waits
+    /// for the run's settlement on a DETACHED task (ADJ-P4-12).
+    async fn handle_settle_member_retained_run(
+        &mut self,
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
+    ) {
+        let projection = self.machine_projection_for_identity(&agent_identity);
+        if projection.runtime_id.is_none() {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let placed = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity));
+        if placed {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a placed member's retained run is settled on its member host".to_string(),
+            }));
+            return;
+        }
+        let Some(session_id) = entry.member_ref.bridge_session_id().cloned() else {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "settling a retained run requires a session-backed member".to_string(),
+            }));
+            return;
+        };
+        if super::boot_plan::domain_member_is_unmaterialized(
+            self.dsl_authority.state(),
+            &agent_identity,
+        ) || !projection.live_runtime
+        {
+            let _ = reply_tx.send(Err(MobError::MemberSessionNotLive {
+                agent_identity,
+                session_id,
+            }));
+            return;
+        }
+        // No durability check here: the member runtime's settle refuses a
+        // degraded registration itself, and only it tells a store realm that
+        // lost its fence, which no reload in this process can serve, from a
+        // registration a reload repairs.
+        let provisioner = self.provisioner.clone();
+        let member_ref = entry.member_ref.clone();
+        self.actor_io_tasks.spawn(async move {
+            let result = provisioner
+                .settle_member_retained_run(&member_ref, &agent_identity)
+                .await;
             let _ = reply_tx.send(result);
         });
     }
@@ -54266,26 +54559,31 @@ impl MobActor {
         self.edge_locks.prune(ctx.agent_identity.as_str()).await;
     }
 
-    /// Drop the `MobStop` a Stop staged for a member whose session is
-    /// disposed for good, by a retire or a destroy (#1500), so a later
-    /// registration of the same session is not held for it. The runtime's
+    /// Drop the run-start holds staged for a member whose session is disposed
+    /// for good, by a retire or a destroy (#1500), so a later registration
+    /// of the same session is not held for them: the `MobStop` a Stop staged,
+    /// and a host's `HostRecovery`, which the host can no longer release
+    /// through the mob once the member left the roster. The runtime's
     /// unregister keeps staged reasons on purpose: a reload unregisters and
     /// registers the same session again while the mob is Stopped. A failure
     /// is logged only: the member is gone either way.
-    async fn unstage_departed_member_mob_stop(&self, entry: &RosterEntry) {
-        if let Err(error) = self
-            .provisioner
-            .unstage_member_registration_run_start_hold(
-                &entry.member_ref,
-                meerkat_runtime::RunStartHoldReason::MobStop,
-            )
-            .await
-        {
-            tracing::warn!(
-                agent_identity = %entry.agent_identity,
-                error = %error,
-                "dropping the staged MobStop of a departed member failed"
-            );
+    async fn unstage_departed_member_run_start_holds(&self, entry: &RosterEntry) {
+        for reason in [
+            meerkat_runtime::RunStartHoldReason::MobStop,
+            meerkat_runtime::RunStartHoldReason::HostRecovery,
+        ] {
+            if let Err(error) = self
+                .provisioner
+                .unstage_member_registration_run_start_hold(&entry.member_ref, reason)
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    reason = ?reason,
+                    error = %error,
+                    "dropping a run-start hold staged for a departed member failed"
+                );
+            }
         }
     }
 
@@ -55680,7 +55978,7 @@ impl MobActor {
                 });
             }
         }
-        self.unstage_departed_member_mob_stop(&entry).await;
+        self.unstage_departed_member_run_start_holds(&entry).await;
         if let Err(error) = boxed_arm_future(|| {
             self.release_forked_participant_attachments_for_member(&entry.agent_identity)
         })
@@ -61303,6 +61601,8 @@ impl MobActor {
             llm_identity_applied_tx,
             mut ack_mode,
             content_attribution,
+            requester,
+            sender_label,
             governed_input,
         } = *payload;
         let dsl_expected_session_id = expected_session_id
@@ -61446,6 +61746,8 @@ impl MobActor {
                             llm_identity_applied_tx,
                             ack_mode,
                             content_attribution,
+                            requester,
+                            sender_label,
                             governed_input,
                         }),
                     });
@@ -61594,6 +61896,38 @@ impl MobActor {
                 ));
             }
         }
+        // The original requester rides only host human input, which always
+        // becomes a runtime input of a local session-backed member (see
+        // `validate_member_turn_carriers`), and only as a qualified
+        // principal. Any other work that carries one is refused here, before
+        // MobMachine emits an ingress effect, rather than delivered without
+        // it.
+        if let Some(requester) = requester.as_ref() {
+            if content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "a requester rides only host human input".to_string(),
+                });
+            }
+            if requester.validate_qualified().is_err() {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "a requester must be a qualified principal".to_string(),
+                });
+            }
+        }
+        // The sender label names the person who sent a message, so only host
+        // human input carries one; any other work (an agent's, a schedule's,
+        // a flow's) that carries one is refused here, before MobMachine
+        // emits an ingress effect.
+        if sender_label.is_some()
+            && content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a sender label rides only host human input".to_string(),
+            });
+        }
         validate_member_turn_carriers(
             &entry,
             remotely_hosted,
@@ -61669,6 +62003,17 @@ impl MobActor {
                 });
             }
         }
+        // The sender label leads the turn's injected context: the message's
+        // own injected-context row, right before it. Core places that row on
+        // both of a steer's paths (joined into the running turn or run as its
+        // own), so the label rides a steer too, which ordinary injected
+        // context cannot.
+        let injected_context = match sender_label {
+            Some(label) => std::iter::once(ContentInput::Text(label.as_str().to_string()))
+                .chain(injected_context)
+                .collect(),
+            None => injected_context,
+        };
         if system_prompt.is_some()
             && !remotely_hosted
             && entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
@@ -61888,6 +62233,7 @@ impl MobActor {
                     llm_identity_applied_tx,
                     ack_mode,
                     content_attribution,
+                    requester,
                     operation_id: None,
                     placed_completion_obligation: placed_completion_obligation.clone(),
                     placed_completion_context,
@@ -62487,6 +62833,7 @@ impl MobActor {
             llm_identity_applied_tx,
             ack_mode,
             content_attribution,
+            requester,
             operation_id,
             placed_completion_obligation,
             placed_completion_context,
@@ -62646,6 +62993,12 @@ impl MobActor {
                     "admitted governed input resolved to a non-local member".to_string(),
                 ));
             }
+            // A governed input's requester is its own association's.
+            if requester.is_some() {
+                return Err(MobError::Internal(
+                    "admitted governed input carried a second requester".to_string(),
+                ));
+            }
             return Ok(SubmitWorkDispatchCompletion::AwaitGovernedAdmission {
                 agent_identity: entry.agent_identity.clone(),
                 readiness,
@@ -62673,6 +63026,7 @@ impl MobActor {
                     handling_mode,
                     turn_metadata,
                     external_delivery_identity.as_ref(),
+                    requester,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -62748,6 +63102,7 @@ impl MobActor {
                     llm_identity_applied_tx,
                     ack_mode,
                     content_attribution,
+                    requester,
                 }),
             })
         } else {
@@ -62801,6 +63156,7 @@ impl MobActor {
                     handling_mode,
                     turn_metadata,
                     external_delivery_identity.as_ref(),
+                    requester,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -68351,6 +68707,8 @@ mod routed_effect_containment_tests {
                 llm_identity_applied_tx: None,
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+                requester: None,
+                sender_label: None,
                 governed_input: None,
                 expected_session_id: None,
             })

@@ -336,10 +336,10 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "grant_authority", "GrantAuthorityMachine",
                 "crates/meerkat-authorization/src/grants/mod.rs",
-                "generated local grant issuance, revocation and full-lineage resolution; no persistence or caller authentication claim",
+                "generated local grant issuance, revocation, full-lineage resolution and the custody end at the host's close or after an uncertain append; no persistence or caller authentication claim",
                 CoverageClaims::none()
-                    .transitions(&["Configure", "IssueRoot", "IssueChild", "RevokeNew", "RevokeAlready", "ResolveUse"])
-                    .effects(&["Configured", "Issued", "Revoked", "UseResolved"])
+                    .transitions(&["Configure", "IssueRoot", "IssueChild", "RevokeNew", "RevokeAlready", "ResolveUse", "ReleaseCustody", "RecordUncertainAppend", "ReleaseUncertainCustody", "ReleaseCustodyAgain"])
+                    .effects(&["Configured", "Issued", "Revoked", "UseResolved", "CustodyReleased", "CustodyUncertain"])
                     .invariants(&["configured_identity_is_present", "revoked_records_remain_present"]),
             )],
             &[
@@ -349,6 +349,20 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none()
                         .transitions(&["Configure", "IssueRoot", "IssueChild", "ResolveUse"])
                         .effects(&["Configured", "Issued", "UseResolved"]),
+                ),
+                scenario(
+                    "grant-custody-release-at-close",
+                    "grants/durable_tests.rs::a_released_owner_frees_its_lease_while_a_reference_is_still_held releases the owner's custody at its host's close while another reference is held: the store restores at once, the straggler's change, revocation, resolution and lookup are refused, a second release changes nothing, and the straggler's last drop leaves the successor's lease intact",
+                    CoverageClaims::none()
+                        .transitions(&["ReleaseCustody", "ReleaseCustodyAgain"])
+                        .effects(&["CustodyReleased"]),
+                ),
+                scenario(
+                    "grant-uncertain-append-then-close",
+                    "grants/durable_tests.rs::an_uncertain_owner_still_releases_its_lease_at_close makes an append uncertain, refuses every later change and use, then releases the lease at the host's close so a successor restores what the store retained",
+                    CoverageClaims::none()
+                        .transitions(&["RecordUncertainAppend", "ReleaseUncertainCustody"])
+                        .effects(&["CustodyUncertain", "CustodyReleased"]),
                 ),
                 scenario(
                     "grant-revoked-ancestor",
@@ -837,7 +851,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none()
                         .transitions(&[
                             "AdoptLegacyIdentityEntryAdopted",
+                            "AdoptLegacyIdentityEntryAdoptedUnlisted",
                             "AdoptLegacyIdentityEntryNameHeldByWorker",
+                            "AdoptLegacyIdentityEntryRetireUnadopted",
                             "AdoptLegacyIdentityEntryNotAdoptable",
                             "AdoptLegacyIdentityEntryStaleObservation",
                             "AdoptLegacyIdentityEntryNotSeated",
@@ -863,7 +879,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_declared_apply_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor/declared_apply.rs",
-                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects",
+                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; take a Declared entry over for a host's adoption before the identity reconciler acts on its member, marking it while its member is seated so that the end of the member's retirement, whose start row records the cause HostAdopted for replay, ends the entry, ending an unseated one at once, and leaving it to the reconciler's next pass while a member step of it is in flight, and seal no entry whose identity a host's intent row names; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, a takeover mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted, identity entry taken over and archived session forgotten effects",
                     CoverageClaims::none()
                         .transitions(&[
                             "DeclareIdentityEntryKept",
@@ -898,16 +914,24 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "UnlistIdentityEntryDeferred",
                             "UnlistIdentityEntryNotADeclaredEntry",
                             "UnlistIdentityEntryNonAuthoritative",
+                            "TakeOverIdentityEntryAdopting",
+                            "TakeOverIdentityEntryEnded",
+                            "TakeOverIdentityEntryDeferred",
+                            "TakeOverIdentityEntryNotADeclaredEntry",
+                            "TakeOverIdentityEntryNonAuthoritative",
+                            "RecoverIdentityEntryAdoptingMarkedRunning",
                         ])
                         .effects(&[
                             "IdentityEntryDeclared",
                             "DeclaredRosterSealed",
                             "ArchivedSessionForgotten",
                             "IdentityEntryUnlisted",
+                            "IdentityEntryTakenOver",
                         ])
                         .invariants(&[
                             "unseated_entry_is_not_a_member",
                             "retiring_entry_is_a_declared_entry",
+                            "adopting_entry_is_a_seated_declared_entry",
                             "marked_entry_has_no_spawn_in_flight",
                             "held_creation_entry_was_never_created",
                             "archived_session_record_is_unseated",

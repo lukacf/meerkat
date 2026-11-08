@@ -139,8 +139,11 @@ of this full catalog.
 | `session/history` | Session | `ReadSessionHistoryParams` | `WireSessionHistory` | Get committed session transcript messages |
 | `session/export_atif` | Session | `ExportAtifParams` | `Value` | Export currently projected session replay evidence as an ATIF trajectory |
 | `session/update_system_prompt` | Session | `UpdateSystemPromptParams` | `SystemPromptUpdateResult` | Explicitly replace one durable versioned system-prompt key |
-| `session/activate_instruction` | Session | `ActivateInstructionParams` | `InstructionActivationReceipt` | Append one immutable instruction revision at an admitted idle transcript boundary |
+| `session/activate_instruction` | Session | `ActivateInstructionParams` | `InstructionActivationReceipt` | Deprecated since 0.9.11: use `session/set_instruction`. Append one immutable instruction revision at an admitted idle transcript boundary |
 | `session/instruction_activations` | Session | `ReadInstructionActivationsParams` | `InstructionActivationReadPage` | Read authoritative activation records from the durable ordered transcript |
+| `session/set_instruction` | Session | `SetSessionInstructionParams` | `SessionInstructionWriteResult` | Record one session-owned operator instruction (a slot's body at a revision); it applies at the session's next fresh run start |
+| `session/revoke_instruction` | Session | `RevokeSessionInstructionParams` | `SessionInstructionWriteResult` | Revoke one session-owned operator instruction at a higher revision |
+| `session/instruction_status` | Session | `SessionInstructionStatusParams` | `SessionInstructionStatusResult` | Read a session's committed operator-instruction state without materializing the session |
 | `session/rewrite_transcript` | Session | `RewriteSessionTranscriptParams` | `SessionTranscriptRewriteResult` | Commit a same-session transcript rewrite |
 | `session/transcript_revision` | Session | `ReadSessionTranscriptRevisionParams` | `WireSessionTranscriptRevision` | Read a transcript revision by id |
 | `session/transcript_revisions` | Session | `ListSessionTranscriptRevisionsParams` | `WireSessionTranscriptRevisionList` | List retained transcript revision commits with the current head |
@@ -159,6 +162,11 @@ of this full catalog.
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
 | `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
 | `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
+| `decision/list` | Decisions | `DecisionListParams` | `DecisionListResult` | List a page of durable decisions, filtered by kind, phase, approver id or requester |
+| `decision/get` | Decisions | `DecisionGetParams` | `DecisionResult` | Get one durable decision, its expiry recorded when its deadline passed |
+| `decision/rendering` | Decisions | `DecisionRenderingParams` | `DecisionRenderingResult` | Get a durable decision's rendering and its canonical parts for a part size |
+| `decision/present` | Decisions | `DecisionPresentParams` | `DecisionResult` | Record a host presenter's presentation of a durable decision's rendering |
+| `decision/withdraw` | Decisions | `DecisionWithdrawParams` | `DecisionResult` | Withdraw an open durable decision as the host |
 | `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
@@ -205,6 +213,9 @@ of this full catalog.
 | `mob/stream_close` | Mob | `MobStreamCloseParams` | `MobStreamCloseResult` | Close mob or member event stream (mob feature) |
 | `mob/member_send` | Mob | `MobMemberSendParams` | `MobMemberSendResult` | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
 | `mob/append_system_context` | Mob | `MobAppendSystemContextParams` | `MobAppendSystemContextResult` | Append one ordinary durable ordered System message to a member session (mob feature) |
+| `mob/set_instruction` | Mob | `MobSetInstructionParams` | `MobInstructionWriteResult` | Write one operator instruction for the members a target selects (every member, a profile's members, or one member); delivery is asynchronous (mob feature) |
+| `mob/revoke_instruction` | Mob | `MobRevokeInstructionParams` | `MobInstructionWriteResult` | Revoke one operator instruction of a mob at a higher revision (mob feature) |
+| `mob/instruction_status` | Mob | `MobInstructionStatusParams` | `MobInstructionStatusResult` | Read a mob's operator-instruction records and, per member, its delivery and per-slot state, without waking a member (mob feature) |
 | `mob/flows` | Mob | `MobIdParams` | `MobFlowsResult` | List mob flows (mob feature) |
 | `mob/run` | Mob | `MobRunParams` | `MobFlowRunResult` | Invoke a mob as a typed callable run (mob feature) |
 | `mob/flow_run` | Mob | `MobFlowRunParams` | `MobFlowRunResult` | Start a mob flow run (mob feature) |
@@ -496,6 +507,21 @@ A durable run that continues after a restart sends the same call again, with
 the same key. A tool whose effect must not happen twice records the key with
 the effect and answers a repeat from that record; see
 [Durable Runs: Tools That Run Again](/guides/durable-runs#tools-that-run-again).
+
+Since 0.9.11 a request also carries `requester` when the run the call serves
+has an original requester (see
+[Authorization](/concepts/authorization#sources%2C-peers%2C-and-knowledge-services)):
+`{"principal": {"kind": "human", "id": "...", "qualification": {"kind":
+"qualified", "trust_domain_id": "..."}}}`, with `"carried": true` when the
+run's work reached its agent through another actor, such as a peer hop. The
+runtime sets it from the run's admitted inputs; a `requester` inside
+`arguments` is only an argument. A tool that acts in one person's name serves
+only that person's requester, and only when it is not carried; it refuses a
+call with another requester or none. The `callback/job/start` request of a
+detached callback tool carries the same field: the requester of the run that
+submitted the job, recorded with the job. The SDKs pass it to a handler that
+declares a `requester` parameter (Python), or as the handler's optional third
+argument (TypeScript).
 
 Keep reading and answering reverse requests while waiting for the turn's
 result, or the turn cannot finish its callback. This foreground RPC exchange
@@ -1258,6 +1284,118 @@ Remove a session from the runtime.
   Session ID to archive.
 </ParamField>
 
+### Operator instructions
+
+Operator instructions are standing System-plane instructions a host gives a
+session, or the members of a mob, by slot (a `namespace` the host owns and a
+`key`), revision and body. A write answers once it is durable; the session
+applies it at its next fresh run start as one System entry, never inside a
+run. They are host verbs: no agent tool sets, revokes or reads them. They
+replace instruction activations (`session/activate_instruction`, deprecated
+since 0.9.11).
+
+`session/set_instruction` records a session-owned write, and
+`session/revoke_instruction` revokes a slot at a higher revision:
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":6,"method":"session/set_instruction","params":{"session_id":"01936f8a-...","namespace":"app.example","key":"tone","revision":1,"body":"Answer formally."}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":6,"result":{"session_id":"01936f8a-...","namespace":"app.example","key":"tone","revision":1,"disposition":"recorded","target_generation":1}}
+```
+</CodeGroup>
+
+A revision is at least 1 and strictly increasing per slot. An exact retry
+answers `duplicate`. `content_sha256`, when given, is the body's digest
+(`sha256:` and 64 lowercase hex digits) and must match it. A body is at most
+256 KiB, and a session holds at most 64 slots and 1 MiB of Active bodies.
+
+`session/instruction_status` reads the session's committed state without
+materializing it: the `owner` (`unowned`, `session`, or `mob` with its
+`mob_id` and `agent_identity`), the `target_generation`, the highest
+`entry_sequence`, the model's `lowering` when the service can tell, and per
+slot what is `recorded`, the entry that put it in effect (`effective`: its
+`entry_sequence`, `kind` `delta` or `snapshot`, `run_id` and
+`message_index`) and its `state`: `effective`, `pending` with a `reason`, or
+`not_targeted`.
+
+A mob member's session belongs to its mob: `session/set_instruction` and
+`session/revoke_instruction` on it answer `owned_by_mob`, and
+`session/instruction_status` reads it (owner `mob`). Write to a member with
+`mob/set_instruction` and a member target.
+
+`mob/set_instruction` writes one slot for the members a `target` selects:
+`{"kind":"mob"}` (every member), `{"kind":"profile","profile":"worker"}` or
+`{"kind":"member","agent_identity":"worker-1"}`. A target is a predicate over
+the roster: a member added later, or moved to the profile later, receives the
+record then, and a target that names a missing profile or member selects
+nobody.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":7,"method":"mob/set_instruction","params":{"mob_id":"team","namespace":"app.example","key":"tone","revision":1,"body":"Answer formally.","target":{"kind":"profile","profile":"worker"}}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":7,"result":{"mob_id":"team","namespace":"app.example","key":"tone","revision":1,"disposition":"committed","generation":1,"matched_members":2}}
+```
+</CodeGroup>
+
+The result returns once the record is in the mob's journal: the
+`disposition` (`committed`, or `duplicate` for an exact repeat), the mob's
+operator-instruction `generation` after the write and `matched_members`, the
+members the target selects now. Delivery is asynchronous: the mob records
+each selected member's whole snapshot in the member's session, through the
+session while it is live and store-only while it is dormant, never waking
+it. A placed member's session is on its member host, which records the
+snapshot there over the supervisor bridge. A member placed by a spawn that
+mints its session on a 0.9.11 member host is born with the snapshot, so its
+first turn has the instructions; on an older or a governed member host it
+is born without them, and its delivery then blocks it as follows. A member
+host that runs a
+release before 0.9.11 refuses that, nothing is recorded, and the member
+reads `blocked` with reason `member_host_unsupported` until its host runs
+0.9.11 and a write selects it again. A governed member host refuses the
+record `prepared_authorization_required`, and a snapshot whose record would
+not fit the bridge's frame (about 1 MiB) is not sent; both block the member
+`member_host_unsupported` until a write selects it again. `mob/revoke_instruction` revokes a
+slot at a higher revision; the record keeps its target.
+
+`mob/instruction_status` reads the mob's records (`desired`) and one page of
+members in identity order (`offset`, and `limit` from 1 to 200, 100 when
+absent; `next_offset` names the next page), optionally for one `namespace`,
+`key`, `agent_identity` or `profile`. Each member carries its `residency`
+(`live`, `dormant` or `unborn`), its `delivery` (the `recorded_generation`,
+and `state` `current`, `owed` with the `generation` and the `last_failure`,
+or `blocked` with a `reason`), per slot the `desired`, `recorded` and
+`effective` views and the slot's `state` (as above, or `blocked` with a
+`reason`), `effective_read` (`ok`, or `unreadable` with a `reason`: the
+member's session could not be read, and the page still answers; a placed
+member's session is on its member host, which the read does not reach) and
+`live_channel_open` (operator instructions apply to the member's turns, not
+to a live channel). The read never wakes or materializes a member. Writes
+need the `AdminHost` scope, the read `ReadHistory`.
+
+A refused write answers `INVALID_PARAMS` (a malformed instruction history
+`INTERNAL_ERROR`) with its closed code in `error.data.instruction_set_code`:
+`invalid_request`, `digest_mismatch`, `stale_revision`, `revision_conflict`,
+`unknown_slot`, `slot_limit_exceeded`, `body_too_large`,
+`active_set_budget_exceeded`, `owned_by_mob`, `owned_by_session`,
+`owned_by_other_mob`, `slot_managed_by_activation`, `durability_unavailable`,
+`mob_terminal`, `malformed_instruction_history` or
+`prepared_authorization_required` (a governed runtime: see
+[Operator instructions](/reference/session-contracts#operator-instructions)).
+A mob that cannot answer fails as every mob method does.
+
+Dispositions, refusal codes, effects, entry kinds and the state kinds are
+closed. The advisory values of the status reads (a pending or blocked
+`reason`, `residency`, `lowering`) may grow: a reader keeps a value it does
+not know. A session observes each applied entry as an
+`operator_instructions_applied` event (see [Notifications](#notifications));
+the status read is the authority.
+
 ## Turn methods
 
 ### turn/start
@@ -1613,7 +1751,22 @@ delivery status, not a turn:
   Follow it with `session/input_status`.
 - `stranded`: committed and never admitted, because the member incarnation it
   was bound to was replaced. This is final: resend the content under a new key.
-- `refused`: settled as refused, never admitted; `reason` names why.
+  A member's runtime stops admitting external work only as a new incarnation
+  (a respawn or a rotation, onto a profile that admits none included), so a
+  keyed send committed before that settles `stranded`.
+- `refused`: settled as refused, never admitted; `reason` names why. A keyed
+  send whose member became an identity entry, or whose name became reserved
+  unreadable, after its commit settles `refused` with `reason`
+  `authority_denied` at delivery.
+
+A first keyed send asks the same external admission as an unkeyed one and
+answers exactly as it does, before anything is committed: a send to an
+identity entry, or to a member whose name is reserved unreadable, is refused
+with `data.kind` `identity_member`, and a send to a member whose runtime
+admits no external work is refused as not externally addressable. A
+profile's `external_addressable` defaults to false; setting it on the profile
+admits external sends, keyed or not, to its members that are no identity
+entries.
 
 Other content under a used key is refused with `-32602` and `data.kind`
 `input_idempotency_conflict`, naming the first delivery in `data.delivery_id`.
@@ -2153,6 +2306,224 @@ as an unsupported parameter.
 is recorded as an operator without a caller. Authorize grant administration in
 the trusted host or an authenticated proxy before forwarding the call.
 </Warning>
+
+## Durable decisions
+
+A durable decision holds one operation until an attested party decides it, its
+requester or the host withdraws it, or its deadline passes (see
+[durable decisions](/concepts/authorization)). The `decision/*` methods read
+and act on the decisions of the runtime's persistence, one row or one index
+page per call: `decision/list`, `decision/get`, `decision/rendering`,
+`decision/present` and `decision/withdraw`. They are served since 0.9.11; an
+older server answers them method not found (`-32601`). A runtime whose
+persistence keeps no durable decisions answers them capability unavailable,
+with `data.kind = "no_decision_store"`.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "decision/list",
+  "params": {"phase": "open", "approver_id": "team:owners", "limit": 50}
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "result": {
+    "decisions": [
+      {
+        "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+        "kind": "release",
+        "subject_key": "build-7",
+        "operation_id": "release:build-7",
+        "request_digest": "sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5",
+        "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+        "approver_id": "team:owners",
+        "phase": "open",
+        "stage": "human",
+        "notice": "not_due",
+        "deadline_at_ms": 1761739200000,
+        "created_at_ms": 1761735600000,
+        "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+        "renderer": "render.v1",
+        "permit_issued": false,
+        "revision": 1
+      }
+    ],
+    "unreadable": []
+  }
+}
+```
+
+- **`decision/list`** reads one page, in decision id order, of the decisions
+  every set filter matches: `kind`, `phase`, `approver_id` and `requester` (a
+  principal key). `limit` is 100 when absent; a larger limit reads as 500, and
+  a limit of 0 is invalid params. `next_after`
+  names the decision id to read the next page `after`. A decision past its
+  deadline reads as expired. A row this server cannot read is listed under
+  `unreadable` and nothing executes it. A phase this version does not know is
+  refused, never read as no filter.
+- **`decision/get`** reads one decision, and records its expiry when its
+  deadline passed. `include_request: true` adds the held request. A row this
+  server cannot read answers `decision_unreadable`.
+- **`decision/rendering`** returns the one canonical rendering of the held
+  request, its renderer and subject digest, and its canonical parts for
+  `max_part_bytes` (one part when absent): consecutive byte ranges on character
+  boundaries, each with its own digest. Like `decision/get`, it records the
+  decision's expiry when its deadline passed, and a row this server cannot
+  read answers `decision_unreadable`.
+- **`decision/present`** records what a host presenter showed: the
+  `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
+  "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
+  size and the parts shown, the channel and message references, and the host
+  clock reading `at_ms`. It counts only when it shows every canonical part of
+  the held rendering to the party that decides now; a presentation at 0 is no
+  reading of when it was shown and is refused.
+- **`decision/withdraw`** withdraws an open decision as the host.
+
+A failed call is a JSON-RPC error. The answers the decision methods type
+carry a closed `data.kind`:
+
+| `data.kind` | Code | Answer |
+| --- | --- | --- |
+| `no_decision_store` | `-32020` | The runtime's persistence keeps no durable decisions. |
+| `candidate_launch` | `-32020` | The runtime serves a candidate launch: it reads decisions and refuses every write. |
+| `decision_not_found` | `-32602` | No decision has the id. |
+| `decision_refused` | `-32602` | The decision refused the call; `data.decision_refusal.kind` names why. |
+| `decision_unreadable` | `-32603` | The decision's stored row cannot be read (undecodable, or torn); nothing executes it. |
+
+Store faults carry no `data` and use the approval store codes: `-32033`
+store unavailable (nothing was written), `-32034` conflict (another owner
+changed the decision) and `-32035` commit unknown (the write may have
+committed). A request value this version cannot read is invalid params
+(`-32602`) with no `data`.
+
+The refusal kinds are closed, because they bear authority: a client can
+match on every kind, and this version sends no other.
+
+| `decision_refusal.kind` | The decision refused because |
+| --- | --- |
+| `invalid_window` | the hold's deadline is not after the hold's clock reading |
+| `self_review` | the hold names the requester as its own reviewer |
+| `hold_conflict` | the decision is held with another binding |
+| `not_open` | the decision is no longer open: the first valid decision won |
+| `expired` | the deadline passed; the call recorded the expiry |
+| `subject_changed` | the presented digest is not the held subject digest |
+| `presentation_incomplete` | the presentation did not cover the whole held subject, none reached the deciding party, or it was shown at 0 |
+| `wrong_audience` | the presentation was shown to a party that does not decide now |
+| `review_stage` | a human decision came while the review stage is open |
+| `human_stage` | a review verdict came while the human stage is open |
+| `evidence_required` | the decision carries no attested evidence |
+| `not_eligible` | the decider does not act for the approver id, or is not currently eligible |
+| `self_approval` | the requester tried to decide its own request |
+| `wrong_reviewer` | the verdict is not the named reviewer's |
+| `not_requester` | only the requester or the host may withdraw |
+| `not_approved` | the decision is not approved |
+| `binding_mismatch` | the execution names another operation or request |
+| `not_authorized` | no execution permit is outstanding |
+| `settlement_owed` | the deadline passed while a permit is outstanding: the permit must be settled first |
+| `not_owed` | no notice is owed, or the receipt contradicts the settled one |
+| `decided_before_presentation` | the human decision was observed before the decision's first presentation to the approver |
+
+The vocabularies a result carries (`phase`, `stage`, `notice` and the
+others) may gain values in a later version; a client keeps a value it does
+not know as the server wrote it.
+
+No request body names who decides a decision. A host's trusted transport adapter
+decides one by dispatching `decision/decide` through
+`MethodRouter::dispatch_with_decision_event` with the
+`AuthenticatedDecisionEvent` it built from the human's authenticated event: the
+attested decision (who decided, how they were authenticated, the ingress and
+event reference, the time the ingress observed the event and the digest of the
+rendering they saw) and the evidence that they may act for the decision's
+approver id. The request names only `decision_id`, `approve`,
+`presented_digest` and an optional `reason`, and must equal what the event
+binds; a request that names an approver, actor, assurance or scope is invalid
+params. Plain dispatch answers `decision/decide` method not found, except on a
+stdio connection whose operator decides (below).
+
+### The operator of a stdio connection
+
+On a Unix build with local authorization, an `rkat-rpc` stdio connection has
+an operator who decides durable decisions on it: the operating-system user who
+started it, device trusted, in an authentication scope of the connection's
+own. The operator acts for the approver ids the realm's configuration lists
+for it, `["operator"]` unless
+[`[governance.decisions] operator_approver_ids`](/concepts/configuration#governance-settings)
+says otherwise.
+
+The connection presents decisions to its operator only when its client lists
+them. Before it answers a `decision/list`, it presents each decision of the
+returned page that is open, waits for a human, is addressed to an approver id
+the operator acts for and was not presented on this connection yet, in page
+order. Starting the connection presents nothing, and the client's own paging
+(`after`, `limit`) reaches every decision, each presented once. For each, the
+connection reads its clock, writes a `decision/notice` notification carrying
+the whole rendering as one canonical part, waits until the notice is on the
+pipe, and only then records the presentation: to the approver, on the
+connection's own channel (a `channel_ref` that starts with `rkat-rpc:stdio:`),
+under the notice's id (`message_ref` equals `notice_id`), at that clock
+reading. The notices precede the list's answer, and the answered page carries
+each presented decision as recorded. A notice that could not be written
+records nothing. The `channel_ref` is an opaque string; nothing parses it.
+
+```json Notification
+{
+  "jsonrpc": "2.0",
+  "method": "decision/notice",
+  "params": {
+    "notice_id": "472e7eeb-5768-494e-9e4b-4193c676f0a3",
+    "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+    "kind": "release",
+    "event": "presented",
+    "phase": "open",
+    "approver_id": "team:owners",
+    "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+    "presentation": {
+      "rendering": "Release build 7 to production.",
+      "renderer": "render.v1",
+      "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+      "parts": [
+        {
+          "index": 0,
+          "count": 1,
+          "part_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3"
+        }
+      ]
+    }
+  }
+}
+```
+
+`event` is `presented`; a client reads an event it does not know as unknown
+and ignores it.
+
+The operator decides with `decision/decide`. The request names only
+`decision_id`, `approve`, `presented_digest` and an optional `reason`; the
+connection builds the authenticated event itself: the operator as the decider
+(`device_trusted`, in the connection's scope), ingress `rkat-rpc-stdio`, an
+event reference from the request id, the server's clock as the observed time,
+and the approver id of the stored decision. A decide is eligible only for a
+decision this connection presented, while the configuration still lists its
+approver id when the decide arrives and while the connection is open; a decide
+waits for a presentation in flight on the connection. Any other decide is
+refused as invalid params with `data.kind = "decision_refused"` and
+`data.decision_refusal.kind = "not_eligible"`. A client's own
+`decision/present` records a host presenter's showing; it never makes a
+decision decidable on the connection.
+
+A connection without an operator presents nothing on `decision/list` and
+answers `decision/decide` method not found (`-32601`, no `data.kind`): a TCP
+connection, a build for another platform or without local authorization, and
+a router an embedder dispatches to directly.
+
+The stock governed stdio pipe serves the same two methods for its operator, in
+its consent surface's scope, and lists them in its `initialize` answer. Its
+approver ids are the host's configuration as the pipe started; a change
+reaches the pipe at its next start.
 
 ## Schedules, WorkGraph, and multi-host mobs
 
@@ -3405,6 +3776,7 @@ live transport's realtime observations. See
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished. Since 0.9.4 it carries `summary_source` (who wrote the summary: `{"kind": "provider_call", "source_bound": ...}` with bound `whole`, `trimmed` (`through`) or `requests_only` (`kept`, `of`), `{"kind": "host_curator"}` or `{"kind": "mechanical_fallback"}`) and optional `estimated_history_tokens_after`, in the unit of `compaction_started`'s `estimated_history_tokens` |
 | `compaction_failed` | Compaction failed |
+| `operator_instructions_applied` | Since 0.9.11: an operator-instruction entry of the session applied. It reports the instructions now in effect for the live session, not their durability: the `delta` a fresh run start appended is published once the run whose start appended it starts, and the `snapshot` a compaction folded the entry rows into once that compaction commits (for a staged memory projection, when the runtime commits it, right after its `compaction_completed`; a compaction rolled back before its commit is never observed, and its `entry_sequence` goes to the next entry). A restart before the entry is durable applies the changes again at the next fresh run start and publishes the event again. Carries `session_id`, `entry_sequence`, `kind`, `run_id` (the run whose start applied it), `active` (the whole active set after the entry) and a delta's `changes`. An observation only: `session/instruction_status` is the authority (see [Operator instructions](#operator-instructions)) |
 | `tool_results_bounded_for_request` | A model request carried some of its run's own tool results shortened, for that request only: with them whole it was over the provider's request-body cap, or its forecast was over the model's context window, and no compaction made room (a compaction inside a run keeps the run's request and newest round). Carries `run_id`, `results` (each `tool_use_id`, `tool_name`, `kept_bytes` and `total_bytes`) and `axis` (`request_bytes` or `context_window`). Published before the request is sent; the stored transcript keeps every result whole. With the default compactor the next run's first check then compacts the whole transcript once; with compaction off the request is still bounded and nothing is recorded |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error; the retry reuses `assistant_message_id`, so discard that id's live buffer |

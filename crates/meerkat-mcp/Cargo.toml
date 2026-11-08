@@ -62,9 +62,10 @@ sse-stream = "0.2.4"  # SseStream::from_bytes_stream first ships in 0.2.4
 test-support = []
 # Internal, not for consumers: compiles the unit tests that need the
 # workspace (a crate this one cannot depend on once published). Only the
-# path-only self dev-dependency enables it, and `cargo package` strips that
-# dev-dependency, so the published package compiles those tests out
-# (ci/standalone-workspace-only.toml names them).
+# workspace's own test builds turn it on (they pass every crate's test
+# features: scripts/core-workspace-args.mjs --tests), so the published
+# package compiles those tests out (ci/standalone-workspace-only.toml
+# names them).
 workspace-tests = []
 
 [[test]]
@@ -81,12 +82,6 @@ required-features = ["test-support"]
 nix = { workspace = true }
 
 [dev-dependencies]
-# Enables `workspace-tests` for this crate's own tests; path-only, so the
-# published package does not carry it. It adds nothing else: with default
-# features on, every test build would turn them back on, and a
-# `--no-default-features` test build would not check the feature set it
-# names.
-meerkat-mcp = { path = ".", default-features = false, features = ["workspace-tests"] }
 tempfile = { workspace = true }
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "registry"] }

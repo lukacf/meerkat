@@ -296,7 +296,7 @@ def types(u, model_port):
             config.agent_customizer=self.customizer;config.roster_provider=config.topology_provider=self.roster
             config.workgraph_enabled=True;config.console_read_only=False;config.console_require_app_auth=True
             config.http_listen="127.0.0.1:"+str(self.port);config.http_public_base_url=self.origin
-            config.auth_config={"provider":"jwt","shared_secret":c.KEY.decode(),"issuer":c.ISSUER,"audience":c.AUDIENCE,"email_allowlist":[c.EMAIL]}
+            config.auth_config={"provider":"jwt","shared_secret":c.KEY.decode(),"issuer":c.ISSUER,"audience":c.AUDIENCE,"email_allowlist":[c.EMAIL],"accounts":"personal"}
             config.access_config_path=str(source/"console-access.toml");config.console_config_path=str(source/"console.toml")
             launch=phase["launch"];record=phase["canonical"]["canonical"]["record"]
             parents=[row for row in launch["graph_receipts"] if row.get("owner",{}).get("key")=={"kind":"agent","id":"supplied-parent-owner"}]

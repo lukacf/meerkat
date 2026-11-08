@@ -127,13 +127,8 @@ helperful encodings stay unchanged. Fresh startup still completes the actual
 held callback, publishes the selected artifacts and adopts the same native owner;
 Restore uses the retained installation and current application roster.
 
-The installed macOS development gateway on `45d1f4f` passed startup with zero
-members, late Add and callback use, then callback use after a new process
-restored the same admitted member and session. The restored callback returned a
-fresh nonce for a new input, and both processes completed joined cleanup. This
-qualifies that helperless scenario; it does not supply integration discovery,
-approve MCP access or qualify shared setup recovery. This development path is
-not part of released 0.9.4.
+Connect 0.9.10 includes this helperless path; Forge does not update a
+helperless application in place.
 
 ### Declare member classes (unreleased)
 
@@ -231,6 +226,28 @@ admission without that selection does not gain it through Restore, same-ID Add
 replay or incoming message content. This receiver path still awaits native
 validation. See the
 [current development status](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#native-collaboration-and-recorder-gap).
+
+When a member's governed work sends to another member in the same process (a
+reply, a message or a request), Core carries that work's origin with the
+delivery. Connect binds the receiving work under that work's requester, with
+the sending member as its ingress actor and the sending work as its
+contributors; the receiver's selected targets stay its own. Every operation of
+the receiving work is also narrowed by the sending work's current grants for
+that target, so the receiver's standing grants never widen it. Connect refuses
+such a delivery before it records anything when its origin names another
+realm, another ingress domain or another agent than the member that delivered
+it (`origin_unverifiable`), when an original of the sending work narrows
+nothing (`sender_basis_unbounded`), or when the sending work names more than
+64 works (`contributor_bound_exceeded`). A host-triggered delivery, one from a
+member that runs no governed work and one over a network carry no origin and
+keep the receiver's own standing selection.
+
+A member's work therefore cannot answer a delivery that another member's
+governed work sent it. Standing member grants allow only replies to the
+member's own sender and writes to its own Recorder, so the receiving work runs
+its model, but Core refuses its replies, its other peer sends and its Recorder
+writes. Work started by a message the host sends to a member is not limited
+this way.
 
 Member admission and standing grants do not declare peer topology. Select the
 intended peer relationship through the existing native topology owner before
@@ -573,12 +590,14 @@ The composed `MobBootstrapSpec` must carry the application's actual
 Keep the real session service and its current actor ownership; stored metadata
 cannot replace it.
 
-When the member factory uses `AgentFactory::user_config_root`, declare that same
-user-global path with `MobBootstrapSpec::with_session_identity_config_root` before
-the first bootstrap and on every cold reopen. This raw-spec API is part of the
-pending Meta 0.9.6 integration. A realm storage path does not substitute for the
-factory's identity root. If the factory leaves its root unspecified, leave the
-spec root unspecified too, so both use the ambient default. Empty roots are
+When the member factory uses `AgentFactory::user_config_root`, the mob's session
+service reports that root (`MobSessionService::session_comms_identity_root`), and
+the mob seats dormant in-process members under it without a declaration.
+`MobBootstrapSpec::with_session_identity_config_root` stays as an override that
+wins over the reported root: a declared root that differs is logged as a warning
+at bootstrap, and a member seated under a root its factory does not load from is
+refused at its first materialization. A session service that reports no durable
+root has every dormant seat refused unless a root is declared. Empty roots are
 refused during bootstrap.
 
 `UnifiedRuntimeBuilder::session_identity_config_root` configures builder-owned

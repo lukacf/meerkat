@@ -860,6 +860,123 @@ fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
     }
 }
 
+/// MobMachine's arms of a host's adoption over a declared identity entry
+/// (0.9.11: the archive terminals that end the entry, the takeover's
+/// verdicts and the replay of its mark) are emitted on the machine's late
+/// tail after the legacy adoption's arms, so no `TransitionId`
+/// discriminant 0.9.10 renders moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
+/// its last variant, keeps index 1902. Only the arms appended after them
+/// follow them: the build preparation retry's
+/// (`mob_build_preparation_retry_arms_follow_the_host_adoption_arms`), then
+/// the refusals of external work to an identity entry, last.
+#[test]
+fn mob_host_adoption_arms_follow_every_earlier_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    let host_adoption_arms = [
+        "ObserveMemberRetirementArchivedLiveHostAdopted",
+        "ObserveMemberRetirementArchivedRetiredHostAdopted",
+        "TakeOverIdentityEntryAdopting",
+        "TakeOverIdentityEntryEnded",
+        "TakeOverIdentityEntryDeferred",
+        "TakeOverIdentityEntryNotADeclaredEntry",
+        "TakeOverIdentityEntryNonAuthoritative",
+        "TakeOverIdentityEntryMobNotRunningStopped",
+        "TakeOverIdentityEntryMobNotRunningCompleted",
+        "TakeOverIdentityEntryMobNotRunningDestroyed",
+        "RecoverIdentityEntryAdoptingMarkedRunning",
+        "RecoverIdentityEntryAdoptingStaleRunning",
+    ];
+    // The build preparation retry's arms follow them, then the refusals of
+    // external work to an identity entry (0.9.11), last.
+    let refusals_start = variants.len() - MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len();
+    let end = refusals_start - MOB_BUILD_PREPARATION_RETRY_ARMS.len();
+    assert_eq!(
+        variants[end - host_adoption_arms.len()..end].to_vec(),
+        host_adoption_arms.to_vec(),
+        "the host adoption's arms follow every variant before them"
+    );
+    assert_eq!(
+        variants[refusals_start..].to_vec(),
+        MOB_IDENTITY_MEMBER_REFUSAL_ARMS.to_vec(),
+        "the identity member refusals of external work are the last TransitionId variants"
+    );
+    assert!(
+        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1902,
+        "the legacy adoption's arms follow every variant 0.9.10 renders"
+    );
+}
+
+/// MobMachine's arms of a build preparation the host asked to retry
+/// (0.9.11: the wake feedback that records the cause, and the host's
+/// resolve in each phase), appended on the machine's late tail after the
+/// host adoption's arms, so no earlier variant's discriminant moves. Only
+/// the refusals of external work to an identity entry follow them
+/// (`MOB_IDENTITY_MEMBER_REFUSAL_ARMS`).
+const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
+    "ResolveMemberRevivalRetryableBuildPreparationRunning",
+    "ResolveMemberBuildPreparationRunning",
+    "ResolveMemberBuildPreparationStopped",
+    "ResolveMemberBuildPreparationCompleted",
+];
+
+/// MobMachine's refusals of external work to an identity entry and to a
+/// name reserved unreadable (0.9.11): the last `TransitionId` variants.
+const MOB_IDENTITY_MEMBER_REFUSAL_ARMS: [&str; 2] = [
+    "ResolveSubmitWorkRejectionIdentityMember",
+    "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+];
+
+#[test]
+fn mob_build_preparation_retry_arms_follow_the_host_adoption_arms() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let end = variants.len() - MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len();
+    assert_eq!(
+        variants[end - MOB_BUILD_PREPARATION_RETRY_ARMS.len()..end].to_vec(),
+        MOB_BUILD_PREPARATION_RETRY_ARMS.to_vec(),
+        "the build preparation retry's arms are the last TransitionId variants before the identity member refusals"
+    );
+}
+
+#[test]
+fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.9 published.
+    assert_eq!(index("StopCurrentRunForRunResumableAttached"), 2742);
+    for arm in [
+        "AbortUntilChangedSwitchTurnReconfigureIdle",
+        "AbortUntilChangedSwitchTurnReconfigureAttached",
+        "AbortUntilChangedSwitchTurnReconfigureRunning",
+        "AbortUntilChangedSwitchTurnReconfigureRetired",
+        "AbortUntilChangedSwitchTurnReconfigureStopped",
+        "RequestUntilChangedSwitchTurnPendingConflictIdle",
+        "RequestUntilChangedSwitchTurnPendingConflictAttached",
+        "RequestUntilChangedSwitchTurnPendingConflictRunning",
+        "CompleteUntilChangedSwitchTurnReconfigureRetired",
+        "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    ] {
+        assert!(
+            index(arm) > 2742,
+            "`{arm}` must follow every variant 0.9.9 published"
+        );
+    }
+}
+
 #[test]
 fn generated_meerkat_operation_status_is_closed_enum() {
     let rendered = render_machine_kernel_module(&meerkat_machine());

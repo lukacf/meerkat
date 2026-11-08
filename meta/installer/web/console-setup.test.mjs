@@ -538,6 +538,20 @@ focused('authentication retirement stops not-ready observation instead of reopen
   }
 });
 
+focused('a shared account refusal asks for a named account instead of a new sign-in', async () => {
+  const f = fixture(), view = f.mount(); await flush();
+  try {
+    f.state({ ...idle(), available: false, can_send: false });
+    assert.equal(f.timers.size, 1);
+    f.overrides.set('/state', () => response({ error: { code: 'approver_unauthenticated' } }, 403));
+    const [timer, observe] = f.timers.entries().next().value; f.timers.delete(timer); observe(); await flush();
+    assert.equal(f.port.snapshot.connection, 'named-account'); assert.equal(f.port.available, false);
+    assert.equal(f.timers.size, 0); assert.equal(f.sources.every(source => source.closed), true);
+    assert.match(f.container.querySelector('.forge-setup__status-text').textContent, /needs your own named account/);
+    assert.equal(f.requests.some(call => ['/send', '/answer', '/cancel', '/close'].includes(call.path)), false);
+  } finally { view.dispose(); f.dom.window.close(); }
+});
+
 focused('early observation errors during setup opening retain nonterminal status and GET-only recovery', async () => {
   const f = fixture();
   f.host.state = { ...idle(), available: false, can_send: false };

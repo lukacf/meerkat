@@ -184,6 +184,16 @@ impl SessionBridge for ScriptedPreviewBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -231,6 +241,16 @@ impl SessionBridge for ScriptedPreviewBridge {
             peer_reachable_count: 0,
         })
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 fn make_runtime(bridge: Arc<dyn SessionBridge>) -> Arc<IdentityRuntime> {
@@ -263,7 +283,10 @@ async fn register_active(
         Some(meerkat_core::types::SessionId::new()),
         token,
     );
-    runtime.register(make_spec(name)).await;
+    runtime
+        .register(make_spec(name))
+        .await
+        .expect("the identity registers");
     identity
 }
 

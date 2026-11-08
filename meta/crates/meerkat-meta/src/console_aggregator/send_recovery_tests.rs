@@ -42,7 +42,12 @@ async fn reserve(
     scope: &ConsoleSendScope,
 ) -> ScopedReservation {
     aggregator
-        .reserve_identity_first_interaction_scoped(request(key, content), Some(SESSION), scope)
+        .reserve_identity_first_interaction_scoped(
+            request(key, content),
+            Some(SESSION),
+            scope,
+            None,
+        )
         .await
         .expect("reservation")
 }
@@ -192,6 +197,7 @@ async fn one_key_under_two_principals_names_two_sends() {
             request("k1", "other body"),
             Some(SESSION),
             &human("u2"),
+            None,
         )
         .await
         .expect_err("same principal, same key, other body");

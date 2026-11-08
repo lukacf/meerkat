@@ -513,6 +513,122 @@ impl ConsoleTurnOrigin {
             Self::System => "system",
         }
     }
+
+    /// Whether this kind names one of Meerkat's own internal emitters (a
+    /// schedule, a connector, a flow, a policy, the host), which no HTTP send
+    /// may claim. An operator's kind and an operator probe's (a caller's own
+    /// label for an automated check) are not reserved.
+    pub const fn reserved_for_internal_senders(self) -> bool {
+        !matches!(self, Self::Operator | Self::OperatorProbe)
+    }
+}
+
+/// What kind of caller the Console acts as for one request, derived from the
+/// connection alone: the token the Console verified, or none on an open
+/// Console. No request field names it. `meta/console/whoami` reports it as
+/// `actor.kind`, and a console message's [`ConsoleSender`] names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleActorKind {
+    /// A verified human token: an OIDC issuer and `sub`.
+    Person,
+    /// A verified service token (`svc:` principal or service actor).
+    Service,
+    /// A verified token that names no human (no `sub`).
+    TokenPrincipal,
+    /// A caller of an open Console without a verified token.
+    Anonymous,
+}
+
+impl ConsoleActorKind {
+    /// The kind's wire name, as `meta/console/whoami` reports it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Service => "service",
+            Self::TokenPrincipal => "token_principal",
+            Self::Anonymous => "anonymous",
+        }
+    }
+
+    /// The authentication assurance the Console established for this kind
+    /// of caller; a token that names no human claims none.
+    pub const fn assurance(self) -> Option<meerkat_core::ApprovalAssurance> {
+        match self {
+            Self::Person => Some(meerkat_core::ApprovalAssurance::PersonAuthenticated),
+            Self::Service => Some(meerkat_core::ApprovalAssurance::ServiceCredential),
+            Self::TokenPrincipal | Self::Anonymous => None,
+        }
+    }
+}
+
+/// Who sent a console message, as the Console authenticated the caller of
+/// the send: never taken from the request body. It is recorded on the
+/// `user_input` frame the send makes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleSender {
+    /// What kind of caller sent it, as `meta/console/whoami` reports the
+    /// caller.
+    pub kind: ConsoleActorKind,
+    /// The authentication assurance the Console established for the caller,
+    /// if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assurance: Option<meerkat_core::ApprovalAssurance>,
+    /// The name the Console knows the caller by (the authenticated principal,
+    /// such as a verified email); absent for an anonymous caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The caller's opaque scope, as `meta/console/whoami` reports it, so a
+    /// client tells its own messages from another caller's.
+    pub caller_scope: String,
+    /// The person's qualified principal, which the send carries to the
+    /// agent's run as its original requester. Kept with the stored frame and
+    /// never projected to a view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The label the agent's model reads right before a person's message on
+    /// a console that requires sign-in: "Message from" and the display name.
+    /// Attribution for the model, never control data. Kept with the stored
+    /// frame (a redispatch reads it there) and never projected to a view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
+}
+
+impl ConsoleSender {
+    /// The sender a stored `user_input` frame recorded, if it recorded one.
+    pub(crate) fn of_frame_payload(payload: &Value) -> Option<Self> {
+        payload
+            .get("sender")
+            .and_then(|sender| serde_json::from_value(sender.clone()).ok())
+    }
+
+    /// What this sender's send carries to the agent: its requester and its
+    /// sender label.
+    pub(crate) fn attribution(&self) -> ConsoleHumanAttribution {
+        ConsoleHumanAttribution {
+            requester: self.requester.clone(),
+            sender_label: self
+                .model_label
+                .clone()
+                .and_then(meerkat_mob::SenderLabel::new),
+        }
+    }
+}
+
+/// What a console send carries to the agent's run for the person who sent
+/// it: the requester the run works for and the sender label its model reads
+/// before the message. Both are absent for every send that names no person.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConsoleHumanAttribution {
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
+    pub(crate) sender_label: Option<meerkat_mob::SenderLabel>,
+}
+
+impl ConsoleHumanAttribution {
+    /// The attribution a send's recorded sender carries; none without one.
+    pub(crate) fn of_sender(sender: Option<&ConsoleSender>) -> Self {
+        sender.map(ConsoleSender::attribution).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

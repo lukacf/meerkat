@@ -179,6 +179,24 @@
       "result_type": "InstructionActivationReadPage"
     },
     {
+      "description": "Record one session-owned operator instruction, applied at the session's next fresh run start",
+      "name": "session/set_instruction",
+      "params_type": "SetSessionInstructionParams",
+      "result_type": "SessionInstructionWriteResult"
+    },
+    {
+      "description": "Revoke one session-owned operator instruction at a higher revision",
+      "name": "session/revoke_instruction",
+      "params_type": "RevokeSessionInstructionParams",
+      "result_type": "SessionInstructionWriteResult"
+    },
+    {
+      "description": "Read a session's committed operator-instruction state without materializing it",
+      "name": "session/instruction_status",
+      "params_type": "SessionInstructionStatusParams",
+      "result_type": "SessionInstructionStatusResult"
+    },
+    {
       "description": "Read a retained immutable transcript revision body",
       "name": "session/transcript_revision",
       "params_type": "ReadSessionTranscriptRevisionParams",
@@ -398,6 +416,36 @@
       "name": "tool_grants/audit",
       "params_type": "ToolGrantAuditParams",
       "result_type": "ToolGrantAuditResult"
+    },
+    {
+      "description": "List a page of durable decisions, filtered by kind, phase, approver id or requester",
+      "name": "decision/list",
+      "params_type": "DecisionListParams",
+      "result_type": "DecisionListResult"
+    },
+    {
+      "description": "Get one durable decision, its expiry recorded when its deadline passed",
+      "name": "decision/get",
+      "params_type": "DecisionGetParams",
+      "result_type": "DecisionResult"
+    },
+    {
+      "description": "Get a durable decision's rendering and its canonical parts for a part size",
+      "name": "decision/rendering",
+      "params_type": "DecisionRenderingParams",
+      "result_type": "DecisionRenderingResult"
+    },
+    {
+      "description": "Record a host presenter's presentation of a durable decision's rendering",
+      "name": "decision/present",
+      "params_type": "DecisionPresentParams",
+      "result_type": "DecisionResult"
+    },
+    {
+      "description": "Withdraw an open durable decision as the host",
+      "name": "decision/withdraw",
+      "params_type": "DecisionWithdrawParams",
+      "result_type": "DecisionResult"
     },
     {
       "description": "Fetch raw blob payload metadata and bytes by blob id",
@@ -787,6 +835,24 @@
       "result_type": "MobAppendSystemContextResult"
     },
     {
+      "description": "Write one operator instruction for the members a target selects",
+      "name": "mob/set_instruction",
+      "params_type": "MobSetInstructionParams",
+      "result_type": "MobInstructionWriteResult"
+    },
+    {
+      "description": "Revoke one operator instruction of a mob at a higher revision",
+      "name": "mob/revoke_instruction",
+      "params_type": "MobRevokeInstructionParams",
+      "result_type": "MobInstructionWriteResult"
+    },
+    {
+      "description": "Read a mob's operator-instruction records and each member's delivery and slot state",
+      "name": "mob/instruction_status",
+      "params_type": "MobInstructionStatusParams",
+      "result_type": "MobInstructionStatusResult"
+    },
+    {
       "description": "List flows defined for a mob",
       "name": "mob/flows",
       "params_type": "MobIdParams",
@@ -1106,6 +1172,10 @@
     {
       "description": "One recorded R3 human consent transition (requested, approved, denied, used, withdrawn) of an approval this connection's approver decides",
       "name": "approval/consent_notice"
+    },
+    {
+      "description": "One durable decision this stdio connection presented to its operator, with the whole rendering, written before the decision/list answer that caused it",
+      "name": "decision/notice"
     },
     {
       "description": "Opaque playback handle for one admitted assistant output (measured playback)",

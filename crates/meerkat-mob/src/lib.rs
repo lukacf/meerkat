@@ -39,6 +39,34 @@
     )
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-mob`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(test, not(feature = "test-support")))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-mob: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-mob --features test-support` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
+
 /// ATIF trajectory export vocabulary, for hosts that assemble mob member
 /// trajectories into one document. Gated because nothing in this crate consumes
 /// it (feature `atif`).
@@ -170,7 +198,7 @@ pub use identity::{
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
-    StepId, WorkOrigin, WorkRef, WorkSpec,
+    SenderLabel, StepId, WorkOrigin, WorkRef, WorkSpec,
 };
 pub use launch::{ForkContext, MemberLaunchMode};
 #[doc(hidden)]
@@ -337,23 +365,23 @@ pub use runtime::{
     LiveDurableSourceObservation, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
     MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain, MemberInputAdmission,
-    MemberLiveStatusDomain, MemberOperatorAuthorityCeiling, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
-    MemberRunState, MemberSessionActivity, MemberShutdownOutcome, MemberStatusSessionView,
-    MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
-    MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState, MobActorTaskWait,
-    MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal, MobDestroyReport,
-    MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig,
-    MobHandle, MobMachineStateChanges, MobMemberEndpointOwner, MobMemberEndpointStatus,
-    MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobSessionService, MobShutdownReport, MobSpawnManyFailure, MobState,
-    MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt,
-    PeerTarget, PreviousMemberCleanupReport, QueuedInputsOnShutdown, RequeueMaxAge,
-    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, ResumedMemberView,
-    RetirementSettlement, RetirementSettlementWatch, RetirementStage, SessionResumeAuthority,
-    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, ShutdownOptions, ShutdownOptionsError,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    MemberLifecycleSettlement, MemberLiveStatusDomain, MemberOperatorAuthorityCeiling,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal,
+    MemberRespawnReceipt, MemberRunState, MemberSessionActivity, MemberShutdownOutcome,
+    MemberStatusSessionView, MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender,
+    MemberTurnHandle, MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState,
+    MobActorTaskWait, MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal,
+    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
+    MobEventsSubscriptionConfig, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
+    MobMemberEndpointStatus, MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobShutdownReport,
+    MobSpawnManyFailure, MobState, MobUnreachablePeer, MobWireMembersBatchReport,
+    OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    QueuedInputsOnShutdown, RequeueMaxAge, ResumeRejectionKind, ResumeSessionLoad,
+    ResumeVerdictTerminality, ResumedMemberView, RetirementSettlement, RetirementSettlementWatch,
+    RetirementStage, SessionResumeAuthority, SessionResumeLifecycle, SessionResumeMaterialization,
+    SessionResumePreparationReceipt, SessionResumeRejection, SessionResumeVerdict, ShutdownOptions,
+    ShutdownOptionsError, SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
     SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
     SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
     SpawnToolAdmission, SupervisorRotationReport, WithheldToolBundle, WorkBoundedTurnResult,
@@ -375,9 +403,9 @@ pub use runtime::{
     MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 pub use runtime::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
-    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
-    UnlistedEntryOutcome,
+    DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{

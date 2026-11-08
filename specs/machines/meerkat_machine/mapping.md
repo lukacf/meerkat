@@ -527,6 +527,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnPendingConflictIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnPendingConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnPendingConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -534,6 +543,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteUntilChangedSwitchTurnReconfigureRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteUntilChangedSwitchTurnReconfigureStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ImportCommittedModelRoutingHandoffFirstIdle`
@@ -2625,6 +2655,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BindInputAuthorityStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BindScopedContextIdle`
@@ -4890,6 +4935,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CancelQueuedLiveDelegationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationNarrationIdle`
@@ -8255,6 +8315,75 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReleaseInputControllerStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SettleRetainedRunAcceptedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunAcceptedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyDrainingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyDrainingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyStaleRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyStaleRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -9041,6 +9170,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `InputControllerReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RetainedRunSettleResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

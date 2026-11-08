@@ -1117,10 +1117,12 @@ fn identity_reset_of(state: &Path, identity: &str, apply: bool, exit_code: i32) 
 /// held completion; a dry run writes nothing and reports a held-completion
 /// mark of the bound identity as stale; `--apply` leaves one `Fresh` row
 /// naming the session of the identity's live binding, and applying it again
-/// finds the row pending. The next boot drops the stale mark and carries the
-/// row out: the identity answers on a new session that does not inherit the
-/// old transcript, the manifest is removed, and Core keeps the old session,
-/// its binding retired.
+/// finds the row pending. The next boot carries the row out: the identity
+/// answers on a new session that does not inherit the old transcript, the
+/// manifest is removed, and Core keeps the old session, its binding
+/// retired. Nothing online reads the held-completion marks, so the stale
+/// mark stays for a rollback's read (which drops it, since Core binds the
+/// identity) and never holds the fresh life.
 #[test]
 fn the_identity_reset_verb_gives_a_stopped_directorys_identity_a_fresh_session() {
     use sha2::Digest as _;
@@ -1226,7 +1228,10 @@ fn the_identity_reset_verb_gives_a_stopped_directorys_identity_a_fresh_session()
         !manifest.exists(),
         "the manifest is removed once its last row is carried out"
     );
-    assert!(!mark.exists(), "the next start drops the stale mark");
+    assert!(
+        mark.exists(),
+        "the stale mark stays for a rollback's read: nothing online reads or drops it"
+    );
     send_turn(&mut gateway, "Which token did I give you?");
     wait_for_durable_messages(
         &state,

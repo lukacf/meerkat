@@ -21,8 +21,17 @@ import { randomUUID } from "node:crypto";
 import type { MetaBuilderConfig } from "./builder.js";
 import {
   CallbackDispatcher,
+  type DecisionNoticeHandler,
   type SessionAgentBuilder,
 } from "./agent-builder.js";
+import {
+  type DecisionDecideOptions,
+  type DecisionListOptions,
+  decisionDecideParams,
+  decisionIngressesOption,
+  decisionListParams,
+  refuseInsideToolCallback,
+} from "./decisions.js";
 import {
   MOB_EVENTS_STALE_CURSOR_CODE,
   CAPABILITY_UNAVAILABLE_CODE,
@@ -1424,6 +1433,9 @@ export class MetaRuntime {
     if (this._config.forkInstructionPolicy !== null) {
       runtimeOptions.fork_instruction_policy = this._config.forkInstructionPolicy;
     }
+    if (this._config.decisionIngresses != null) {
+      runtimeOptions.decisions = decisionIngressesOption(this._config.decisionIngresses);
+    }
     if (this._config.memberRestore != null) {
       runtimeOptions.member_restore = this._config.memberRestore;
     }
@@ -1611,6 +1623,16 @@ export class MetaRuntime {
 
   mobHandle(): MobHandle {
     return new MobHandle(this);
+  }
+
+  /**
+   * Receive each `meta/decisions/notice` the stdio gateway writes: one open
+   * durable decision, noticed once per connection when the host lists it.
+   * `event` is `held` (nothing of its content shown) or `presented` (shown to
+   * the stdio operator, with the rendering).
+   */
+  onDecisionNotice(handler: DecisionNoticeHandler): void {
+    this._dispatcher.registerDecisionNoticeHandler(handler);
   }
 
   sseBridge(): SseBridge {
@@ -2572,6 +2594,9 @@ export class MetaRuntime {
    * times out, the activation may still apply at the boundary: re-send the
    * identical activation, which answers `"applied"`, `"duplicate"` or the
    * typed refusal.
+   *
+   * @deprecated Since 0.9.11: keep standing instructions with
+   * {@link setInstruction}. This method keeps working.
    */
   async activateMemberInstruction(
     identity: string,
@@ -2600,6 +2625,94 @@ export class MetaRuntime {
       if (value !== undefined) params[name] = value;
     }
     const raw = await this._rpc("meta/member_instruction_activations", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects.
+   *
+   * Host-only. `target` is `{ kind: "mob" }` (every member of the gateway's
+   * mob), `{ kind: "profile", profile }` or `{ kind: "member", identity }`.
+   * The slot is `namespace` (one your host owns) and `key`; `revision` is at
+   * least 1 and strictly increasing per slot; `body` is the exact text, at
+   * most 256 KiB. `options.contentSha256` (`"sha256:<hex>"` of the body),
+   * when given, must be the body's.
+   *
+   * Resolves to Meerkat's write receipt once the record is durable:
+   * `disposition` (`"committed"`, or `"duplicate"` for an exact repeat),
+   * `generation` and `matched_members`. Each selected member receives the
+   * instruction at its next run start, never inside a run;
+   * {@link instructionStatus} reports it. A refusal rejects with an RPC
+   * error whose `data.instruction_set_code` names it, for example
+   * `"stale_revision"` or `"body_too_large"`.
+   */
+  async setInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target:
+      | { kind: "mob" }
+      | { kind: "profile"; profile: string }
+      | { kind: "member"; identity: string },
+    options: { contentSha256?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {
+      namespace,
+      key,
+      revision,
+      body,
+      target: { ...target },
+    };
+    if (options.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this._rpc("meta/set_instruction", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Revoke one operator instruction at a higher revision.
+   *
+   * Host-only. The record keeps its target; the members it selected drop the
+   * instruction at their next run start. Resolves to Meerkat's write
+   * receipt, as {@link setInstruction} does.
+   */
+  async revokeInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/revoke_instruction", { namespace, key, revision });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Read the operator instructions of the gateway's mob and one page of
+   * members.
+   *
+   * Host-only; read from committed state, so no member is woken. `namespace`
+   * and `key` narrow the records; `identity` or `profile` narrows the
+   * members; `offset` and `limit` (1 to 200, 100 by default) page them.
+   * Resolves to `{ mob_id, generation, desired, members }` (plus
+   * `next_offset` when there is another page): each record with its
+   * `target`, and each member, named by its `identity`, with its delivery and
+   * per-slot state. Advisory values such as a pending reason can be new to
+   * this SDK: keep an unknown one as it is.
+   */
+  async instructionStatus(
+    query: {
+      namespace?: string;
+      key?: string;
+      identity?: string;
+      profile?: string;
+      offset?: number;
+      limit?: number;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(query)) {
+      if (value !== undefined) params[name] = value;
+    }
+    const raw = await this._rpc("meta/instruction_status", params);
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 
@@ -3979,6 +4092,93 @@ export class MobHandle {
         ? (((raw as Record<string, unknown>).entries as unknown[]) ?? [])
         : [];
     return (entries as unknown[]).map(parseGatingAuditEntry);
+  }
+
+  // -- Durable decisions (the stdio host's `meta/decisions/*`) --------------
+
+  /**
+   * One page of durable decisions, in decision id order. Before the gateway
+   * answers, it writes one `meta/decisions/notice` for each open decision of
+   * the page it has not noticed on this connection (see
+   * `MetaRuntime.onDecisionNotice`), and presents to the stdio operator those
+   * the approver map lets it decide. The answer carries `decisions`,
+   * `statuses`, `unreadable` and `next_after`.
+   */
+  async decisionsList(
+    options: DecisionListOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return (await this._runtime._rpc(
+      "meta/decisions/list",
+      decisionListParams(options),
+    )) as Record<string, unknown>;
+  }
+
+  /** One durable decision (`{decision}`), with its held request when asked. */
+  async decisionsGet(
+    decisionId: string,
+    options: { includeRequest?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { decision_id: decisionId };
+    if (options.includeRequest === true) params.include_request = true;
+    return (await this._runtime._rpc("meta/decisions/get", params)) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  /** A decision's one canonical rendering and its parts for `maxPartBytes`. */
+  async decisionsRendering(
+    decisionId: string,
+    options: { maxPartBytes?: number } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { decision_id: decisionId };
+    if (options.maxPartBytes !== undefined) {
+      params.max_part_bytes = options.maxPartBytes;
+    }
+    return (await this._runtime._rpc(
+      "meta/decisions/rendering",
+      params,
+    )) as Record<string, unknown>;
+  }
+
+  /**
+   * Record what the host presenter showed on its channel: the audience, the
+   * subject digest, the parts shown, the channel and message references, and
+   * the host clock reading `at_ms`.
+   */
+  async decisionsPresent(
+    decisionId: string,
+    presentation: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return (await this._runtime._rpc("meta/decisions/present", {
+      decision_id: decisionId,
+      presentation,
+    })) as Record<string, unknown>;
+  }
+
+  /** Withdraw an open decision as the host. */
+  async decisionsWithdraw(decisionId: string): Promise<Record<string, unknown>> {
+    return (await this._runtime._rpc("meta/decisions/withdraw", {
+      decision_id: decisionId,
+    })) as Record<string, unknown>;
+  }
+
+  /**
+   * Decide an open decision. Without an attestation the stdio operator
+   * decides, eligible only for a decision the gateway presented to it on this
+   * connection; with one, a declared decision ingress attests the person who
+   * decided. Refused while this SDK serves a host tool callback
+   * (`DecideInsideToolCallbackError`): an agent's tool call never decides.
+   */
+  async decisionsDecide(
+    decisionId: string,
+    options: DecisionDecideOptions,
+  ): Promise<Record<string, unknown>> {
+    refuseInsideToolCallback();
+    return (await this._runtime._rpc(
+      "meta/decisions/decide",
+      decisionDecideParams(decisionId, options),
+    )) as Record<string, unknown>;
   }
 
   // -- WorkGraph ------------------------------------------------------------

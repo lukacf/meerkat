@@ -566,6 +566,9 @@ pub(crate) async fn presentation_pipe() -> (
         ) -> Result<HostCloseObservation, HostLifetimeError> {
             self.observe_close(handle)
         }
+        async fn release_native_custody(&self) -> Result<(), HostLifetimeError> {
+            Ok(())
+        }
         fn host_lost(&self) -> Result<HostCloseObservation, HostLifetimeError> {
             Ok(self.observation())
         }

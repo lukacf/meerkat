@@ -11,23 +11,77 @@ use std::time::Duration;
 /// copying the database does not extend its executor fence to another copy.
 #[derive(Clone)]
 pub struct SqliteStore {
-    connection: Arc<Mutex<OwnedConnection>>,
+    connection: Arc<Mutex<Option<OwnedConnection>>>,
     store_id: String,
     record_publication: Option<Arc<dyn RecordChangePublication>>,
 }
 
+/// A handle to an opened store's physical custody, from
+/// [`SqliteStore::custody`]: it covers every clone of that store, value
+/// clones included, yet neither keeps the store open nor reads or changes
+/// anything. Its [`release`](Self::release) ends the custody as
+/// [`SqliteStore::release_custody`] does, whichever clones are still held.
+#[derive(Clone)]
+pub struct StoreCustody(std::sync::Weak<Mutex<Option<OwnedConnection>>>);
+
+impl StoreCustody {
+    /// End the store's physical custody, as [`SqliteStore::release_custody`]
+    /// does. A store whose every clone is gone has no custody left to end.
+    ///
+    /// # Errors
+    /// [`StoreError::Worker`] when the blocking release could not run.
+    pub async fn release(&self) -> StoreResult<()> {
+        match self.0.upgrade() {
+            Some(connection) => release_connection(connection).await,
+            None => Ok(()),
+        }
+    }
+}
+
+// Take the connection slot after any entered blocking work, and drop the
+// connection and its physical owner, in the blocking pool like every
+// operation on it.
+async fn release_connection(connection: Arc<Mutex<Option<OwnedConnection>>>) -> StoreResult<()> {
+    tokio::task::spawn_blocking(move || {
+        // Poisoned by a panicked operation, the connection is still
+        // closed: SQLite rolls back an unfinished transaction.
+        let released = match connection.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        drop(released);
+    })
+    .await
+    .map_err(|_| StoreError::Worker)
+}
+
 // Entered blocking work retains this same Arc, including physical custody,
 // after its awaiting caller or last public store handle has been dropped.
+// The slot is emptied only by the store's release, which waits for that work.
 struct OwnedConnection {
     connection: Connection,
-    _physical_owner: File,
+    _physical_owner: PhysicalOwner,
+}
+
+// The physical owner file, locked through this descriptor: the store's
+// custody. Dropping it unlocks the file, then closes it. The lock belongs to
+// the open file description, and a process spawned meanwhile holds a copy of
+// the descriptor until it executes its program, which would keep a custody
+// the close alone ended. The description is this store's own, so the unlock
+// releases no other opener's lock.
+struct PhysicalOwner(File);
+
+impl Drop for PhysicalOwner {
+    fn drop(&mut self) {
+        unlock_physical_owner(&self.0);
+    }
 }
 
 // Darwin's whole-file flock conflicts with SQLite's own POSIX locks. Keep
 // custody on the same inode, but reserve one byte outside SQLite's main-file
 // lock range (0x40000000 through 0x400001ff). OFD locks remain bound to this
-// open description across unrelated SQLite closes and until the last retained
-// File is dropped; ordinary process-associated F_SETLK would not suffice.
+// open description across unrelated SQLite closes, until the owner unlocks
+// it; ordinary process-associated F_SETLK would not suffice.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
@@ -65,6 +119,32 @@ fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
     }
 }
 
+// The same byte as `lock_physical_owner`, unlocked for this open description.
+// A failed unlock leaves the close that follows to end the lock.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn unlock_physical_owner(file: &File) {
+    use std::os::fd::AsRawFd;
+    let lock = libc::flock {
+        l_start: 0,
+        l_len: 1,
+        l_pid: 0,
+        l_type: libc::F_UNLCK,
+        l_whence: libc::SEEK_SET as i16,
+    };
+    // SAFETY: file retains a valid descriptor for this synchronous call. The
+    // initialized flock lives through the call and F_OFD_SETLK reads it without
+    // retaining the pointer. Byte zero, length one is the range the owner
+    // locked; F_UNLCK releases this open description's lock on it.
+    let _ = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &lock) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unlock_physical_owner(file: &File) {
+    // A failed unlock leaves the close that follows to end the lock.
+    let _ = file.unlock();
+}
+
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         Self::open_mode(path.as_ref(), true, None)
@@ -79,8 +159,9 @@ impl SqliteStore {
 
     /// Open this installed application's existing database with exclusive
     /// physical custody and its actual owner's publication. The guard spans all
-    /// clones and entered blocking work. A competing supported handle refuses
-    /// to open while this owner exists. Raw SQL is outside this host contract.
+    /// clones and entered blocking work, until [`Self::release_custody`] ends
+    /// it. A competing supported handle refuses to open while this owner
+    /// exists. Raw SQL is outside this host contract.
     pub fn open_existing_published(
         path: impl AsRef<Path>,
         publication: Arc<dyn RecordChangePublication>,
@@ -104,6 +185,46 @@ impl SqliteStore {
             .is_some_and(|bound| Arc::ptr_eq(bound, publication))
     }
 
+    /// End this opened store's physical custody, for every clone of it: once
+    /// any blocking work already entered on the connection ends, close the
+    /// connection, then unlock and close the physical owner file, so the
+    /// owner's lock ends even while a process spawned meanwhile still holds a
+    /// copy of its descriptor. From then on every operation through any clone
+    /// answers [`StoreError::OwnerUnavailable`] without touching the
+    /// database, so a task that still holds a clone can no longer read or
+    /// change it, and the same database opens again at once. Nothing
+    /// committed changes. A second call changes nothing.
+    ///
+    /// The host's close calls it once every join that can still touch the
+    /// store has returned.
+    ///
+    /// # Errors
+    /// [`StoreError::Worker`] when the blocking release could not run; the
+    /// custody then ends when the last clone and the entered work drop.
+    pub async fn release_custody(&self) -> StoreResult<()> {
+        release_connection(self.connection.clone()).await
+    }
+
+    /// A handle to this store's physical custody, shared by every clone of
+    /// the store, for a host whose close ends it. See [`StoreCustody`].
+    pub fn custody(&self) -> StoreCustody {
+        StoreCustody(Arc::downgrade(&self.connection))
+    }
+
+    /// Test-only: a copy of the physical owner file's descriptor while this
+    /// store holds its custody. It shares the owner's open file description.
+    #[cfg(test)]
+    fn owner_descriptor_copy(&self) -> Option<File> {
+        self.connection
+            .lock()
+            .ok()?
+            .as_ref()?
+            ._physical_owner
+            .0
+            .try_clone()
+            .ok()
+    }
+
     fn open_mode(
         path: &Path,
         create: bool,
@@ -121,13 +242,14 @@ impl SqliteStore {
             .open(path)
             .map_err(|_| StoreError::OwnerUnavailable)?;
         lock_physical_owner(&physical_owner, publication.is_some())?;
-        check_database_identity(path, &physical_owner)?;
+        let physical_owner = PhysicalOwner(physical_owner);
+        check_database_identity(path, &physical_owner.0)?;
         let mut flags = rusqlite::OpenFlags::default();
         if !create {
             flags.remove(rusqlite::OpenFlags::SQLITE_OPEN_CREATE);
         }
         let mut connection = Connection::open_with_flags(path, flags)?;
-        check_database_identity(path, &physical_owner)?;
+        check_database_identity(path, &physical_owner.0)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         if !create {
             let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -189,10 +311,10 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(OwnedConnection {
+            connection: Arc::new(Mutex::new(Some(OwnedConnection {
                 connection,
                 _physical_owner: physical_owner,
-            })),
+            }))),
             store_id,
             record_publication: publication,
         })
@@ -201,6 +323,8 @@ impl SqliteStore {
     /// Blocking SQLite work never holds an async runtime thread. Cancellation of
     /// an awaiting caller does not roll back a transaction that already committed;
     /// callers reconcile by admission key, revision and effect ID after loss.
+    /// After [`Self::release_custody`] nothing runs: the store's owner is
+    /// unavailable.
     async fn with<T: Send + 'static>(
         &self,
         action: impl FnOnce(&mut Connection, &str) -> StoreResult<T> + Send + 'static,
@@ -212,8 +336,9 @@ impl SqliteStore {
             // Declare before the lock so connection/publication guards leave
             // before the last caller hold, including on panic unwinding.
             let _custody = custody;
-            let mut connection = connection.lock().map_err(|_| StoreError::Synchronization)?;
-            action(&mut connection.connection, &store_id)
+            let mut slot = connection.lock().map_err(|_| StoreError::Synchronization)?;
+            let owned = slot.as_mut().ok_or(StoreError::OwnerUnavailable)?;
+            action(&mut owned.connection, &store_id)
         })
         .await
         .map_err(|_| StoreError::Worker)?

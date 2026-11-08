@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- `ToolCallRequester`, `RequesterPrincipal` and `parseToolCallRequester`: the
+  original requester of the run a callback serves, which the gateway names
+  on `callback/call_tool` and `callback/job/start`. A tool handler receives
+  it as its optional second argument (`undefined` when the run has none),
+  and `DetachedJobContext.requester` is the requester of the run that
+  submitted the job. `parseToolCallRequester` reads it as the runtime's
+  grammar does, and a malformed value is `undefined`, so a person-scoped
+  tool fails closed. A tool that acts in one person's name checks that the
+  requester is not `carried` and that its principal's `kind`, `id` and
+  `trustDomainId` are its owner's.
+
+- Durable decisions: `MobHandle.decisionsList({kind, phase, approverId,
+  requester, after, limit})`, `decisionsGet(decisionId, {includeRequest})`,
+  `decisionsRendering(decisionId, {maxPartBytes})`,
+  `decisionsPresent(decisionId, presentation)`,
+  `decisionsWithdraw(decisionId)` and `decisionsDecide(decisionId,
+  {approve, presentedDigest, reason, attestation})` call the gateway's
+  `meta/decisions/*` methods; `DecisionAttestation` carries a declared
+  ingress's attestation of the person who decided.
+  `MetaRuntime.onDecisionNotice(handler)` (a `DecisionNoticeHandler`)
+  receives each `meta/decisions/notice`, and
+  `MetaBuilder.decisionIngresses([...])` (`DecisionIngressDeclaration`)
+  declares the ingresses as `runtime_options.decisions`.
+- A decide called while the SDK serves a host tool callback rejects with
+  `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
+  `"decide_inside_tool_callback"`) and sends nothing.
+
+- `MetaRuntime.setInstruction(namespace, key, revision, body, target, {
+  contentSha256 })`, `MetaRuntime.revokeInstruction(namespace, key,
+  revision)` and `MetaRuntime.instructionStatus({ namespace, key, identity,
+  profile, offset, limit })` call `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status`: operator
+  instructions for the members of the gateway's mob, by slot and revision,
+  for every member (`{ kind: "mob" }`), one profile (`{ kind: "profile",
+  profile }`) or one identity (`{ kind: "member", identity }`). The results
+  are the gateway's, unchanged; a refusal rejects with an RPC error whose
+  `data.instruction_set_code` names it.
+- `MetaRuntime.activateMemberInstruction` is deprecated in favour of
+  `setInstruction` in the docs; it keeps working.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

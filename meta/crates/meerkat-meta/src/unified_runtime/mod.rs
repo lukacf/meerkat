@@ -454,6 +454,12 @@ pub struct UnifiedRuntimeCore {
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
 
+    // The runtime's durable decisions: the decision owner of its persistent
+    // state directory, the decision ingresses its launch declares, and its
+    // record of attested decide events. A runtime without a persistent
+    // state directory keeps none.
+    durable_decisions: crate::durable_decisions::RuntimeDecisions,
+
     // The Console's session fence record, shared by every console and SSE
     // route; it exists whether or not access control is installed.
     console_session_fences: crate::auth::session_fence::ConsoleSessionFences,
@@ -529,6 +535,21 @@ pub struct UnifiedRuntimeCore {
     // subscription cursor). Falls back to `InMemoryMetadataStore` when not
     // explicitly configured — see `UnifiedRuntimeBuilder::persistent_metadata`.
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
+
+    /// The console audit log, kept in `persistent_metadata` and shared by
+    /// every console router this runtime builds; `None` when that store
+    /// keeps no realm documents.
+    console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The gating owner's state kept in `persistent_metadata`, once the
+    /// composition keeps it (`keep_gating_state_in_realm`).
+    gating_persistence: tokio::sync::Mutex<Option<GatingPersistence>>,
+}
+
+/// The gating owner's state kept in the realm's metadata store, and the task
+/// that writes it after every gating change.
+struct GatingPersistence {
+    persistence: Arc<crate::gating_persistence::GatingStatePersistence>,
+    task: Option<JoinHandle<()>>,
 }
 
 enum MobEventIngress {
@@ -855,6 +876,11 @@ impl UnifiedRuntime {
             )
             .map(|policy| Arc::new(policy) as Arc<dyn EdgeDiscovery>);
         let state_dir_claims = mob_runtime.state_dir_claim_refs();
+        let console_audit = crate::console_audit::ConsoleAuditLog::over(
+            Arc::clone(&persistent_metadata),
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .map(Arc::new);
         Self::assemble(
             UnifiedRuntimeCore {
                 mob_runtime,
@@ -917,6 +943,7 @@ impl UnifiedRuntime {
                 identity_first_context: None,
                 bootstrap_member_build_wiring: None,
                 access_controller: None,
+                durable_decisions: crate::durable_decisions::RuntimeDecisions::unavailable(),
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
                 flow_editor_host_deploy: false,
@@ -937,6 +964,8 @@ impl UnifiedRuntime {
                 console_schedule_doors: Default::default(),
                 metadata_table,
                 persistent_metadata,
+                console_audit,
+                gating_persistence: tokio::sync::Mutex::new(None),
             },
             public_owner,
         )
@@ -2205,6 +2234,44 @@ impl UnifiedRuntime {
         self.access_controller.as_ref()
     }
 
+    /// The runtime's durable decisions: the decision owner of its
+    /// persistent state directory (`approval_decisions.sqlite3`), and the
+    /// decision ingresses its launch declares. A runtime without a
+    /// persistent state directory, or on a host store realm, keeps none.
+    pub fn durable_decisions(&self) -> &crate::durable_decisions::RuntimeDecisions {
+        &self.durable_decisions
+    }
+
+    /// The runtime's durable decision owner. A host composition holds its
+    /// own kinds' decisions through it; a runtime that keeps none answers
+    /// every call unavailable.
+    pub fn decision_owner(&self) -> &meerkat_runtime::decision::DurableDecisionService {
+        self.durable_decisions.owner()
+    }
+
+    /// Install the runtime's durable decisions. The builder and the stdio
+    /// gateway install those of a persistent state directory at their build.
+    pub fn set_durable_decisions(&mut self, decisions: crate::durable_decisions::RuntimeDecisions) {
+        self.durable_decisions = decisions;
+    }
+
+    /// Meta's answer to whether the party that decided a decision may still
+    /// do so, for a host's decision executor: `Eligible` while the live
+    /// approver map (the access controller's `approvers`) lists the identity
+    /// that decided (this runtime's stdio operator, or a person a declared
+    /// ingress attests) for the decision's approver id, re-read when the
+    /// execution commits; `Refused` once it no longer does, and for operator
+    /// evidence whose decider is not this runtime's operator. A runtime
+    /// without an access controller has no map and refuses.
+    pub fn decision_approver_currentness(
+        &self,
+    ) -> Arc<dyn meerkat_runtime::decision::DecisionApproverCurrentness> {
+        Arc::new(crate::durable_decisions::MapApproverCurrentness::new(
+            self.access_controller.clone(),
+            self.durable_decisions.realm(),
+        ))
+    }
+
     /// Optional topology control-plane policy and durable intent store.
     pub fn topology_controller(&self) -> &crate::topology_control::TopologyController {
         &self.topology_controller
@@ -2240,6 +2307,12 @@ impl UnifiedRuntime {
     /// persisted cursor reach through this accessor.
     pub fn persistent_metadata(&self) -> &Arc<dyn PersistentMetadataStore> {
         &self.persistent_metadata
+    }
+
+    /// The console audit log the console routers this runtime builds write
+    /// and read; `None` when the metadata store keeps no realm documents.
+    pub(crate) fn console_audit_log(&self) -> Option<Arc<crate::console_audit::ConsoleAuditLog>> {
+        self.console_audit.clone()
     }
 
     /// Replace the label set associated with this mob.
@@ -3914,7 +3987,19 @@ async fn reconcile_agent_event_streams(
                 subscribe_agent_events_for_console_forwarder(handle, &identity, console, replay)
                     .await;
             match subscription {
-                Ok((stream, actor, epoch)) => {
+                // Released, or still waking, after this pass found it
+                // materialized: skipped as a member found unmaterialized
+                // is, with nothing attached, and its wake runs this pass
+                // again.
+                Ok(ForwarderSubscription::NotMaterialized) => {
+                    subscribe_failures.remove(&tracked_key);
+                    continue;
+                }
+                Ok(ForwarderSubscription::Attached {
+                    stream,
+                    actor,
+                    epoch,
+                }) => {
                     subscribe_failures.remove(&tracked_key);
                     let forwarded = console.then(|| tracked.forwarded_for(&owner));
                     let attachment = attach_member_event_stream(
@@ -4052,19 +4137,27 @@ async fn observe_bound_session(
 static FAIL_MEMBER_EVENT_SUBSCRIPTIONS_OF_MOB: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
 
+/// What the forwarder's subscription of one member answers.
+enum ForwarderSubscription {
+    /// The member's stream, the actor incarnation it belongs to (console
+    /// forwarder only) and its sequence space.
+    Attached {
+        stream: EventStream,
+        actor: Option<meerkat_session::LiveSessionActorWitness>,
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+    },
+    /// The member was not materialized when the subscription was opened: it
+    /// was released, or was still waking, after the pass found it
+    /// materialized, so the subscription would attach only at its wake.
+    NotMaterialized,
+}
+
 async fn subscribe_agent_events_for_console_forwarder(
     handle: &MobHandle,
     identity: &AgentIdentity,
     console: bool,
     replay: bool,
-) -> Result<
-    (
-        EventStream,
-        Option<meerkat_session::LiveSessionActorWitness>,
-        Option<meerkat_core::comms::SessionEventEpoch>,
-    ),
-    meerkat_mob::MobError,
-> {
+) -> Result<ForwarderSubscription, meerkat_mob::MobError> {
     #[cfg(test)]
     if FAIL_MEMBER_EVENT_SUBSCRIPTIONS_OF_MOB
         .lock()
@@ -4092,10 +4185,22 @@ async fn subscribe_agent_events_for_console_forwarder(
         meerkat_core::comms::SessionEventCursor::Live
     };
     let subscription = handle.subscribe_agent_events_from(identity, cursor).await?;
+    // Opened while the member was not materialized (released, or still
+    // waking, after the pass found it materialized), the subscription would
+    // attach only at the member's wake. The pass skips such a member, and
+    // the end of its wake runs the pass again; dropping the subscription
+    // ends its wait.
+    if subscription.attached_epoch.is_some() {
+        return Ok(ForwarderSubscription::NotMaterialized);
+    }
     // The identity health monitor does not hold successors back, so it
     // leaves the actor untracked (its departed streams are cut off instead).
     let actor = if console { subscription.actor } else { None };
-    Ok((subscription.stream, actor, subscription.epoch))
+    Ok(ForwarderSubscription::Attached {
+        stream: subscription.stream,
+        actor,
+        epoch: subscription.epoch,
+    })
 }
 
 /// Streaming subscription against the meerkat mob event ledger. Each
@@ -8611,6 +8716,48 @@ mod tests {
             "after the wake",
         );
 
+        runtime.shutdown().await;
+    }
+
+    /// A subscription the forwarder opens for a member that is not
+    /// materialized would attach only at the member's wake: the forwarder
+    /// skips it, as it skips a member it finds unmaterialized, so a member
+    /// released between a pass's check and its subscription (as a mob's
+    /// teardown releases its members) is never attached. RED on the base:
+    /// the deferred subscription came back as a stream and the pass
+    /// attached it, the race behind
+    /// `reconcile_neither_retries_nor_warns_for_a_member_of_a_mob_shutting_down`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_subscription_of_an_unmaterialized_member_is_skipped_not_attached() {
+        let mob_id = "console-unmaterialized-subscribe";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mob_path = temp.path().join("mob.sqlite3");
+        let state_root = temp.path().join("state");
+        let (first, first_identity) =
+            boot_identity_first_persistent(mob_id, &mob_path, &state_root).await;
+        commit_restart_member_turn(&first_identity, "before restart").await;
+        first.shutdown().await;
+
+        let boot = boot_persistent_before_activation(mob_id, &mob_path, &state_root).await;
+        // The runtime's own forwarder is stopped, so only this row subscribes.
+        let _ingress = boot.runtime.install_test_event_ingress().await;
+        let runtime = boot.activate().await;
+        let handle = runtime.mob_handle();
+        let key = restart_member_key(&restart_member_entry(&handle).await, mob_id);
+        assert!(
+            handle.member_unmaterialized(&key.member_identity),
+            "the restart seated the member Dormant"
+        );
+
+        let subscription =
+            subscribe_agent_events_for_console_forwarder(&handle, &key.member_identity, true, true)
+                .await
+                .expect("the subscription answers");
+        assert!(
+            matches!(subscription, ForwarderSubscription::NotMaterialized),
+            "a subscription that would attach only at the member's wake is skipped, not attached"
+        );
+        drop(subscription);
         runtime.shutdown().await;
     }
 

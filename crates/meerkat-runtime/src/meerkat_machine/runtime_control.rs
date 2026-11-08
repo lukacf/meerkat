@@ -71,11 +71,11 @@ fn live_delegation_worker_binding_matches(
 /// under the channel's current exact binding, or (mirroring the generated
 /// `ResolveLiveDelegationWorkerStart` guards) once the operation's own channel
 /// carries no runtime, fence, or generation binding at all, because it closed
-/// after the start was authorized (Turbo S S104 R7). Every open mints a fresh
-/// channel id, so a retired channel id never aliases a later incarnation; a
-/// still-bound channel with a different fence or generation is refused as
-/// before.
-fn live_delegation_worker_start_binding_admits(
+/// after the start was authorized (Turbo S S104 R7), while its session is
+/// still registered. Every open mints a fresh channel id, so a retired
+/// channel id never aliases a later incarnation; a still-bound channel with a
+/// different fence or generation is refused as before.
+pub(super) fn live_delegation_worker_start_binding_admits(
     state: &crate::meerkat_machine::dsl::MeerkatMachineState,
     runtime_id: &crate::identifiers::LogicalRuntimeId,
     fence_token: u64,
@@ -105,6 +105,7 @@ fn live_delegation_worker_start_binding_admits(
         && !state
             .live_execution_generation_by_channel
             .contains_key(&channel)
+        && state.session_id.is_some()
         && state
             .live_delegation_channel_by_operation
             .get(&operation_id)
@@ -11096,7 +11097,7 @@ impl MeerkatMachine {
     }
 
     /// Retire a transport-free context fixture through generated close.
-    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[cfg(all(any(test, feature = "test-support"), feature = "live"))]
     #[doc(hidden)]
     pub async fn __test_close_live_context_channel(
         &self,
@@ -11825,6 +11826,53 @@ impl MeerkatMachine {
             .copied())
     }
 
+    /// Every live delegation the session's machine holds, with its generated
+    /// schedule state and whether a worker is bound to it. Unlike
+    /// [`Self::live_delegation_recovery_snapshots`], this includes operations
+    /// that never bound a worker (an admitted delegation still queued, or one
+    /// cancelled before its worker started), so a live harness can tell a
+    /// delegation that ended without a worker from one still running.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __test_live_delegation_schedule_states(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Vec<(
+            meerkat_core::OperationId,
+            crate::live_execution::LiveDelegationScheduleState,
+            bool,
+        )>,
+        RuntimeDriverError,
+    > {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        state
+            .live_delegation_schedule_state_by_operation
+            .iter()
+            .map(|(dsl_operation_id, schedule_state)| {
+                let operation_id: meerkat_core::OperationId =
+                    serde_json::from_str(&dsl_operation_id.0).map_err(|error| {
+                        RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "live delegation operation identity is corrupt: {error}"
+                            ),
+                        }
+                    })?;
+                Ok((
+                    operation_id,
+                    *schedule_state,
+                    state
+                        .live_delegation_worker_identity_by_operation
+                        .contains_key(dsl_operation_id),
+                ))
+            })
+            .collect()
+    }
+
     /// Return a blocked live delegation, or one whose worker start failed
     /// before anything physical existed, to `Created` so the same exact
     /// operation may bind a fresh worker.
@@ -11951,6 +11999,56 @@ impl MeerkatMachine {
                     .to_string(),
             ))
         }
+    }
+
+    /// Close a channel's delegation intake under its exact binding: from
+    /// then on no delegation is admitted on the channel. Delegations admitted
+    /// before keep their custody and still start, run and settle after the
+    /// close. Closing again changes nothing.
+    pub async fn close_live_delegation_intake(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CloseLiveDelegationIntake {
+                channel_id: binding.channel_id().to_string(),
+                runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                    binding.runtime_id(),
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                    binding.fence_token(),
+                ),
+                generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                    binding.generation(),
+                ),
+            },
+            "CloseLiveDelegationIntake",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Whether a channel's delegation intake is closed: the machine admits
+    /// no delegation on it any more.
+    pub async fn live_delegation_intake_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        Ok(state
+            .live_delegation_intake_closed_channels
+            .contains(&channel_id.to_string()))
     }
 
     /// Mint the one-use authority for a templated executor-state narration.

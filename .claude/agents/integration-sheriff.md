@@ -45,7 +45,7 @@ Read the supplied checklist to understand what Phase X covers, then read the spe
 
 ### 2. Run Tests
 ```bash
-./scripts/repo-cargo test -p meerkat-core   # or relevant crate for the phase
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests -p meerkat-core)   # or the phase's crate; the args carry its test features
 ```
 For simultaneous reviewers in the same checkout, set a distinct `RUST_LANE_ID` for each reviewer.
 

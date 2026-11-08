@@ -1098,6 +1098,7 @@ async fn console_human_reset_refuses_old_prepared_session_and_old_worker_fence()
             &[],
             HandlingMode::Queue,
             &accepted,
+            &crate::console_aggregator::ConsoleHumanAttribution::default(),
         )
         .await
         .is_err()
@@ -1133,6 +1134,7 @@ async fn console_human_redispatch_into_a_moved_session_fails_and_delivers_nothin
             request.clone(),
             Some(h.session_id.to_string().as_str()),
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await
         .unwrap()
@@ -1229,6 +1231,125 @@ async fn console_human_redispatch_into_a_moved_session_fails_and_delivers_nothin
             .iter()
             .all(|request| !format!("{request:?}").contains("MOVED-SESSION")),
         "the model never saw the send"
+    );
+    h.stop().await;
+}
+
+/// A person's send accepted on a console that requires sign-in records the
+/// person as its requester, with their sender label, on its frame. Its
+/// dispatch never ran (the gateway stopped in between), and the same caller
+/// replays it after the console restarted without sign-in, where a live send
+/// of theirs would name no requester. The identity-first redispatch carries
+/// what the send's frame recorded, as the member lane's does: the agent's
+/// turn names the person as its requester, right after their label.
+#[tokio::test(flavor = "multi_thread")]
+async fn console_human_redispatch_carries_the_requester_its_frame_recorded() {
+    const RECORDED: &str = "RECORDED-REQUESTER a send interrupted before its admission";
+    let h = Harness::new(WAIT).await;
+    let alice = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        "alice-oidc-sub",
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example.test")
+            .expect("trust domain"),
+    )
+    .expect("qualified person");
+    let scope = crate::console_aggregator::ConsoleSendScope::Human {
+        issuer: "https://issuer.example.test".to_string(),
+        subject: "alice-oidc-sub".to_string(),
+    };
+    let recorded = crate::console_aggregator::ConsoleSender {
+        kind: crate::console_aggregator::ConsoleActorKind::Person,
+        assurance: crate::console_aggregator::ConsoleActorKind::Person.assurance(),
+        display_name: Some("alice@example.test".to_string()),
+        caller_scope: "alice-caller-scope".to_string(),
+        requester: Some(alice.clone()),
+        model_label: Some("Message from alice@example.test".to_string()),
+    };
+    let request = h.request("recorded-requester", RECORDED);
+    let accepted = match h
+        .aggregator
+        .reserve_identity_first_interaction_scoped(
+            request.clone(),
+            Some(h.session_id.to_string().as_str()),
+            &scope,
+            Some(&recorded),
+        )
+        .await
+        .unwrap()
+    {
+        // The claim drops here, as it does when the process stops.
+        crate::console_aggregator::ScopedReservation::Fresh(accepted, _claim) => Some(accepted),
+        _ => None,
+    }
+    .expect("a fresh reservation");
+
+    // The same caller after a restart without sign-in: a live send of theirs
+    // names no requester and carries no label.
+    let governance = super::ConsoleSendGovernance {
+        scope,
+        sender: Some(crate::console_aggregator::ConsoleSender {
+            requester: None,
+            model_label: None,
+            ..recorded
+        }),
+        ..Default::default()
+    };
+    let replay = super::console_send_identity_first_governed(
+        &h.aggregator,
+        h.identity_runtime.clone(),
+        None,
+        request,
+        &governance,
+    )
+    .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
+    .expect("the replay is accepted");
+    assert_eq!(replay.input_frame_id, accepted.input_frame_id);
+    h.wait_status(&accepted, ConsoleFrameStatus::Delivered)
+        .await;
+
+    // The member commits the send's row with its turn.
+    let (history, position) = tokio::time::timeout(WAIT, async {
+        loop {
+            let history = h
+                .unified
+                .mob_runtime()
+                .read_session_history(&h.session_id.to_string(), 0, None)
+                .await
+                .expect("the session's history reads")
+                .messages;
+            if let Some(position) = history.iter().position(|message| {
+                matches!(message, Message::User(user)
+                    if user.transcript_role == TranscriptUserRole::Conversational
+                        && user.text_content() == RECORDED)
+            }) {
+                break (history, position);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the member committed the redispatched send");
+    let Message::User(row) = &history[position] else {
+        unreachable!("the position names a user row");
+    };
+    assert_eq!(
+        row.identity.requester,
+        Some(meerkat_core::TurnRequester::direct(alice)),
+        "the redispatched turn names the requester the frame recorded"
+    );
+    let label = position
+        .checked_sub(1)
+        .and_then(|previous| match &history[previous] {
+            Message::User(user) if user.transcript_role == TranscriptUserRole::InjectedContext => {
+                Some(user.text_content())
+            }
+            _ => None,
+        });
+    assert_eq!(
+        label.as_deref(),
+        Some("Message from alice@example.test"),
+        "the redispatched turn carries the label the frame recorded"
     );
     h.stop().await;
 }
@@ -1574,7 +1695,10 @@ async fn console_send_selected_skills_refused_before_reservation_for_external_or
     placed.placement = Some(meerkat_contracts::WireHostRef("remote-host".to_string()));
     for spec in [external, placed] {
         let identity = spec.identity.to_string();
-        h.identity_runtime.register(spec).await;
+        h.identity_runtime
+            .register(spec)
+            .await
+            .expect("the identity registers");
         let request = ConsoleSendRequest {
             identity: identity.clone(),
             skill_refs: vec![selected_skill()],
@@ -1739,6 +1863,7 @@ async fn a_governed_console_send_reaches_only_the_hosts_binder_for_the_verified_
                 &governance,
             )
             .await
+            .map_err(super::CheckedConsoleSendError::into_send_error)
         }
     };
 
@@ -1901,6 +2026,7 @@ async fn send_pinned(
         &governance,
     )
     .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
 }
 
 /// The host's per-send hook receives exactly the request's client key and

@@ -38,3 +38,11 @@ pub const SKILL_RESOLUTION_FAILED: i32 =
     meerkat_contracts::ErrorCode::SkillResolutionFailed.jsonrpc_code();
 /// Duplicate input (already processed)
 pub const DUPLICATE_INPUT: i32 = meerkat_contracts::ErrorCode::DuplicateInput.jsonrpc_code();
+/// A realm admission fence the request needs is held beyond its bound: the
+/// request did not start and wrote nothing. Retryable once the hold ends.
+pub const ADMISSION_IN_PROGRESS: i32 =
+    meerkat_contracts::ErrorCode::AdmissionInProgress.jsonrpc_code();
+/// A realm admission fence the request needs could not be used: the request
+/// did not start and wrote nothing.
+pub const ADMISSION_FENCE_UNAVAILABLE: i32 =
+    meerkat_contracts::ErrorCode::AdmissionFenceUnavailable.jsonrpc_code();

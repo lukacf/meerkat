@@ -211,7 +211,9 @@ fn profile_refusal_schedule(
         let tokens = Arc::new(FileTokenStore::new(directory.path().join("credentials")));
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                directory.path().join("credentials").join("refresh-locks"),
+            )),
         );
         if matches!(schedule, "incompatible" | "changed") {
             let mut client = definition(&target);
@@ -610,7 +612,9 @@ fn initial_secret_refusal_schedule(
         let tokens = Arc::new(FileTokenStore::new(directory.path().join("credentials")));
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                directory.path().join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage: storage.clone(),
@@ -684,7 +688,10 @@ fn initial_secret_refusal_schedule(
                 store.patch(ConfigDelta(json!({"realm":{"global":{}}}))).await.unwrap();
             }
             let writer = ConfigRuntime::new(store, occupied_path.with_file_name("config_state.json"));
-            McpRealmPersistTarget::new(&writer).add(config.clone(), Some(0)).await.unwrap();
+            // The parent's declaration above, a store write, moved the
+            // generation; the add is checked against the current one.
+            let generation = writer.get().await.unwrap().generation;
+            McpRealmPersistTarget::new(&writer).add(config.clone(), Some(generation)).await.unwrap();
             drop(writer);
             let own_before = crate::realm::read_own_mcp_config(&storage).await.unwrap();
             assert_eq!(own_before.0.iter().any(|server| server.name == config.name), !inherited);

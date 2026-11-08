@@ -747,6 +747,7 @@ async fn unfinished_work_references_every_selected_target_lineage_read_only() {
         let issue = |name: &str| {
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new(name).expect("id"),
                     candidate.logical_executor.clone(),
@@ -858,7 +859,12 @@ async fn unfinished_work_references_every_selected_target_lineage_read_only() {
     );
     let revoked = custody
         .revoke_if_unreferenced(&selected, &NoOriginals, |custody| {
-            fixture.grants.revoke(&root, &selected, custody)
+            fixture.grants.revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &root,
+                &selected,
+                custody,
+            )
         })
         .expect("custody held");
     assert_eq!(revoked, Some(Ok(())));
@@ -910,7 +916,12 @@ async fn controller_only_work_runs_on_its_controller_lineage_alone() {
         candidate.authority_basis = controller_only();
         let controller = candidate.controller_grant_lineage[0].clone();
         grants
-            .revoke(&controller.root_authority, &controller, &mut Unreferenced)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &controller.root_authority,
+                &controller,
+                &mut Unreferenced,
+            )
             .expect("controller lineage revoked before admission");
     })
     .await;

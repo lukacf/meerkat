@@ -22,6 +22,19 @@
 //! host environment, and none appears in configuration, `Debug`, errors or
 //! records.
 //!
+//! Every write is named ([`meerkat_core::auth::McpServiceSecretWitness`]):
+//! a set returns its witness, [`RealmMcpServiceSecrets::observe`] reports
+//! each slot's current one, and a launch records the witness of each value
+//! it injected on its connection
+//! (`meerkat_mcp::McpConnection::service_secret_launch`, stated again on
+//! each call's `McpCallTarget` and on a callable operation observation), so
+//! the calls over that connection are bound to exactly those writes.
+//! [`RealmMcpServiceSecrets::recheck`] later answers, from the realm's
+//! configuration and the credential store, whether a witness is still what
+//! a launch of its server would inject: current, rotated, removed, or no
+//! longer its server's definition. No value is read by the host, hashed or
+//! numbered for any of it.
+//!
 //! Coverage limit of this first implementation: only servers defined in a
 //! realm's own configuration document have custody. A server from an
 //! `mcp.toml` file, a host-supplied configuration or a live `mcp/add` that
@@ -35,8 +48,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use meerkat_core::McpServerConfig;
 use meerkat_core::auth::{
-    McpServiceSecretPresence, McpServiceSecretRef, McpServiceSecretRefusal, McpServiceSecretValues,
-    TokenStore, load_mcp_service_secret, observe_mcp_service_secret,
+    McpServiceSecretPresence, McpServiceSecretRecheck, McpServiceSecretRef,
+    McpServiceSecretRefusal, McpServiceSecretValues, McpServiceSecretWitness, TokenStore,
+    load_mcp_service_secret_into, observe_mcp_service_secret_witness, recheck_mcp_service_secret,
 };
 use meerkat_core::connection::RealmId;
 use meerkat_core::mcp_config::McpTransportConfig;
@@ -62,12 +76,16 @@ pub struct RealmMcpServiceSecrets {
 
 /// What a launch of a server would find, without reading any value: the
 /// realm whose own configuration defines it and, per declared slot, whether
-/// a value is stored for its current definition. A stored value does not
-/// say which write stored it.
+/// a value is stored for its current definition and which write stored it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServiceSecretObservation {
     pub owner: RealmId,
     pub slots: BTreeMap<String, McpServiceSecretPresence>,
+    /// The witness of each slot's current write, for a slot whose stored
+    /// value was written with one. A declared slot not listed has none: no
+    /// value is stored, the store did not answer, or the value was stored
+    /// before writes were named.
+    pub witnesses: BTreeMap<String, McpServiceSecretWitness>,
 }
 
 impl RealmMcpServiceSecrets {
@@ -165,9 +183,12 @@ impl RealmMcpServiceSecrets {
     }
 
     /// The values `server`'s declared slots launch with: an unattended read
-    /// of the defining realm's exact rows. A missing value refuses the
-    /// launch; it is never taken from anywhere else. A server that declares
-    /// no secrets has none, and nothing is read for it.
+    /// of the defining realm's exact rows, each value with the witness of
+    /// the write that stored it, from the same read of the same row
+    /// ([`McpServiceSecretValues::launch`] is what the launch records). A
+    /// missing value refuses the launch; it is never taken from anywhere
+    /// else. A server that declares no secrets has none, and nothing is read
+    /// for it.
     pub async fn resolve(
         &self,
         server: &McpServerConfig,
@@ -179,9 +200,11 @@ impl RealmMcpServiceSecrets {
         let (_, references) = self.references(server).await?;
         let mut values = McpServiceSecretValues::new();
         for reference in references {
-            match load_mcp_service_secret(self.token_store.as_ref(), &reference).await {
-                Ok(Some(value)) => values.insert(reference.env(), value),
-                Ok(None) => {
+            match load_mcp_service_secret_into(self.token_store.as_ref(), &reference, &mut values)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
                     return Err(McpServiceSecretRefusal::NotStored {
                         env: reference.env().to_owned(),
                     });
@@ -197,22 +220,72 @@ impl RealmMcpServiceSecrets {
     }
 
     /// What a launch of `server` would find, by the same resolution as
-    /// [`Self::resolve`], observed as a status read that reads no value.
+    /// [`Self::resolve`], observed as a status read that reads no value: per
+    /// declared slot, whether a value is stored and the witness of the write
+    /// that stored it.
     pub async fn observe(
         &self,
         server: &McpServerConfig,
     ) -> Result<McpServiceSecretObservation, McpServiceSecretRefusal> {
         let (owner, references) = self.references(server).await?;
         let mut slots = BTreeMap::new();
+        let mut witnesses = BTreeMap::new();
         for reference in references {
-            let presence = observe_mcp_service_secret(self.token_store.as_ref(), &reference)
-                .await
-                .map_err(|error| McpServiceSecretRefusal::Unavailable {
-                    reason: error.to_string(),
-                })?;
+            let (presence, witness) =
+                observe_mcp_service_secret_witness(self.token_store.as_ref(), &reference)
+                    .await
+                    .map_err(|error| McpServiceSecretRefusal::Unavailable {
+                        reason: error.to_string(),
+                    })?;
             slots.insert(reference.env().to_owned(), presence);
+            if let Some(witness) = witness {
+                witnesses.insert(reference.env().to_owned(), witness);
+            }
         }
-        Ok(McpServiceSecretObservation { owner, slots })
+        Ok(McpServiceSecretObservation {
+            owner,
+            slots,
+            witnesses,
+        })
+    }
+
+    /// Whether `witness` is still what a launch of its server would inject
+    /// for its slot, answered at the point of use from durable state: the
+    /// realm documents this custody composes and the credential store, read
+    /// now (unattended, no operating-system UI, nothing cached), returning
+    /// no value.
+    ///
+    /// [`McpServiceSecretRecheck::DefinitionChanged`] when the realm whose
+    /// own configuration now defines the server, and its definition there,
+    /// are not exactly the ones the witness's reference names: the
+    /// definition changed, another realm's definition now serves the
+    /// server's launches, or the server was uninstalled. An identical
+    /// reinstallation in the same realm is the same reference, and is
+    /// answered from the store like any other. Otherwise the store answers
+    /// ([`recheck_mcp_service_secret`]): `Current` while the stored value is
+    /// that write's, `Rotated` once another write (or one that names no
+    /// write) replaced it, `Removed` once no value is stored. Refused only
+    /// when the configuration or the store could not be read
+    /// ([`McpServiceSecretRefusal::Unavailable`]): nothing is known then.
+    pub async fn recheck(
+        &self,
+        witness: &McpServiceSecretWitness,
+    ) -> Result<McpServiceSecretRecheck, McpServiceSecretRefusal> {
+        let reference = witness.reference();
+        let defined = (self.owner_of)(reference.server().to_owned())
+            .await
+            .map_err(|reason| McpServiceSecretRefusal::Unavailable { reason })?;
+        let current = defined.and_then(|(owner, definition)| {
+            McpServiceSecretRef::for_definition(owner, &definition, reference.env()).ok()
+        });
+        if current.as_ref() != Some(reference) {
+            return Ok(McpServiceSecretRecheck::DefinitionChanged);
+        }
+        recheck_mcp_service_secret(self.token_store.as_ref(), witness)
+            .await
+            .map_err(|error| McpServiceSecretRefusal::Unavailable {
+                reason: error.to_string(),
+            })
     }
 
     /// `inner` serving this custody's service secrets. Every other method
@@ -283,6 +356,13 @@ impl meerkat_mcp::McpAuthResolver for ServiceSecretCustodyResolver {
     ) -> meerkat_core::OperationAccount {
         self.inner.selected_account(target)
     }
+
+    fn credential_publication(
+        &self,
+        target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        self.inner.credential_publication(target)
+    }
 }
 
 #[cfg(all(feature = "session-store", feature = "local-authorization"))]
@@ -298,8 +378,8 @@ mod update {
 
     use meerkat_core::auth::{
         CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome,
-        McpServiceSecretRef, McpServiceSecretValue, TokenKey, TokenStore, TokenStoreAccess,
-        TokenStoreError, clear_mcp_service_secret, save_mcp_service_secret,
+        McpServiceSecretRef, McpServiceSecretValue, McpServiceSecretWitness, TokenKey, TokenStore,
+        TokenStoreAccess, TokenStoreError, clear_mcp_service_secret, save_mcp_service_secret,
     };
     use meerkat_core::storage_layout::ResolvedStorage;
     use meerkat_core::{
@@ -356,6 +436,21 @@ mod update {
         /// it; repeating the same update does.
         #[error("MCP service secret update outcome is unknown: {0}")]
         OutcomeUnknown(String),
+        /// The credential fence of the reference's realm is held, by an
+        /// admission or another fenced operation, beyond the update's wait.
+        /// The update did not start and wrote nothing. It may be retried once
+        /// the hold ends, which for an admission may be only when its
+        /// process restarts.
+        #[error(
+            "an admission or another fenced operation holds the realm's credential fence; the \
+             MCP service secret update did not start and wrote nothing"
+        )]
+        AdmissionInProgress,
+        /// The credential fence could not be opened, created, locked or
+        /// identity-checked, or did not cover the write. The update did not
+        /// start and wrote nothing.
+        #[error("the realm's credential fence is unavailable; nothing was written: {0}")]
+        AdmissionFenceUnavailable(String),
     }
 
     /// The realm's own config document, by the projection the reviewed
@@ -421,6 +516,8 @@ mod update {
     /// mutation owner has received the write's durable result. The mutation
     /// owner receives the write's own durable result: the persisted row, the
     /// removal, or the error that left nothing (or nothing known) written.
+    /// The caller receives the witness of a persisted write, read from the
+    /// exact row the store persisted, and none for a removal.
     async fn update(
         persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
         document: std::path::PathBuf,
@@ -430,17 +527,20 @@ mod update {
         + 'static,
         write: Write,
         entry: Arc<dyn AdministrationEntry>,
-    ) -> Result<(), McpServiceSecretUpdateError> {
+    ) -> Result<Option<McpServiceSecretWitness>, McpServiceSecretUpdateError> {
         let token_store = persistence.token_store();
         let outcome = Arc::new(std::sync::Mutex::new(None));
         let slot = Arc::clone(&outcome);
         let entered: EnteredSlot = Arc::new(std::sync::Mutex::new(None));
         let entered_slot = Arc::clone(&entered);
         let key = TokenKey::mcp_service_secret(&reference);
-        let mutation: CredentialMutationFn = Box::new(move || {
+        let mutation: CredentialMutationFn = Box::new(move |guard| {
             Box::pin(async move {
                 let written = write_if_admitted(
-                    token_store.as_ref(),
+                    FencedStore {
+                        guard: &guard,
+                        store: token_store.as_ref(),
+                    },
                     &document,
                     &reference,
                     admits,
@@ -450,7 +550,15 @@ mod update {
                 )
                 .await;
                 let (result, durable) = match written {
-                    Ok(durable) => (Ok(()), Ok(durable)),
+                    Ok(durable) => {
+                        let witness = match &durable {
+                            CredentialMutationOutcome::Persisted(tokens) => {
+                                reference.witness_of(tokens)
+                            }
+                            CredentialMutationOutcome::Cleared => None,
+                        };
+                        (Ok(witness), Ok(durable))
+                    }
                     Err(NotWritten::Refused(refusal)) => {
                         let error = CredentialMutationError::Operation(refusal.to_string());
                         (Err(refusal), Err(error))
@@ -494,6 +602,14 @@ mod update {
             (Err(error @ CredentialMutationError::CredentialAccess { .. }), None) => {
                 Err(McpServiceSecretUpdateError::Ownership(error.to_string()))
             }
+            // The realm's credential fence is held, or could not be taken:
+            // nothing started.
+            (Err(CredentialMutationError::AdmissionInProgress), None) => {
+                Err(McpServiceSecretUpdateError::AdmissionInProgress)
+            }
+            (Err(CredentialMutationError::AdmissionFenceUnavailable(detail)), None) => Err(
+                McpServiceSecretUpdateError::AdmissionFenceUnavailable(detail),
+            ),
             // Anything else (including cancellation) lost the outcome.
             (Err(error), None) => Err(McpServiceSecretUpdateError::OutcomeUnknown(
                 error.to_string(),
@@ -504,11 +620,19 @@ mod update {
         }
     }
 
+    /// The credential store an update writes, and the coordinator's
+    /// credential-fence guard its writes take.
+    struct FencedStore<'a> {
+        guard: &'a meerkat_core::AdmissionGuard,
+        store: &'a dyn TokenStore,
+    }
+
     /// Take the realm config document's writer exclusion, let `admits` check
-    /// the installation it holds, let `entry` admit the caller, then write,
-    /// still under the exclusion. The entered admission goes to `entered`.
+    /// the installation it holds, let `entry` admit the caller, then write
+    /// `target`, still under the exclusion and under its guard. The entered
+    /// admission goes to `entered`.
     async fn write_if_admitted(
-        token_store: &dyn TokenStore,
+        target: FencedStore<'_>,
         document: &std::path::Path,
         reference: &McpServiceSecretRef,
         admits: impl FnOnce(Option<&McpServerConfig>) -> Result<(), McpServiceSecretUpdateError>,
@@ -538,14 +662,22 @@ mod update {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(admission);
         let written = match write {
-            Write::Set(value) => save_mcp_service_secret(token_store, reference, value.expose())
-                .await
-                .map(CredentialMutationOutcome::Persisted),
-            Write::Clear => clear_mcp_service_secret(token_store, reference)
+            Write::Set(value) => {
+                save_mcp_service_secret(target.guard, target.store, reference, value.expose())
+                    .await
+                    .map(CredentialMutationOutcome::Persisted)
+            }
+            Write::Clear => clear_mcp_service_secret(target.guard, target.store, reference)
                 .await
                 .map(|()| CredentialMutationOutcome::Cleared),
         }
-        .map_err(NotWritten::Store);
+        .map_err(|error| match error {
+            // Refused before any byte: the guard does not cover the fence.
+            TokenStoreError::AdmissionFence(detail) => NotWritten::Refused(
+                McpServiceSecretUpdateError::AdmissionFenceUnavailable(detail),
+            ),
+            error => NotWritten::Store(error),
+        });
         // The write's durable result is known: the admission's record says
         // how it ended, whoever releases the admission last.
         if let Some(admission) = entered
@@ -600,13 +732,21 @@ mod update {
     /// replaces the value; a launch that already read the earlier one keeps
     /// it. The caller is the realm's authenticated configuration owner: this
     /// host-side function is not an authentication.
+    ///
+    /// Returns the witness of this write, read from the exact row the store
+    /// persisted: the reference and a write identity drawn for this write
+    /// alone, never derived from the value (setting the same value again is
+    /// another write). [`crate::RealmMcpServiceSecrets::observe`] reports it
+    /// as the slot's current write, a launch that reads the value records
+    /// it, and [`crate::RealmMcpServiceSecrets::recheck`] answers whether it
+    /// is still current.
     pub async fn set_mcp_service_secret(
         storage: &ResolvedStorage,
         persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
         reviewed: &McpServerConfig,
         env: &str,
         value: &str,
-    ) -> Result<McpServiceSecretRef, McpServiceSecretUpdateError> {
+    ) -> Result<McpServiceSecretWitness, McpServiceSecretUpdateError> {
         set_mcp_service_secret_entered(
             storage,
             persistence,
@@ -627,7 +767,8 @@ mod update {
     /// ([`McpServiceSecretUpdateError::NotAdmitted`]). The entered admission
     /// is held until the mutation owner has received the write's durable
     /// result and this update has settled; an entered write that fails is
-    /// [`McpServiceSecretUpdateError::OutcomeUnknown`], never a success. An
+    /// [`McpServiceSecretUpdateError::OutcomeUnknown`], never a success.
+    /// Returns the write's witness, as [`set_mcp_service_secret`] does. An
     /// admission that states its administrator
     /// ([`EnteredAdministration::administered_by`]) hands the host's
     /// recorder one record when the update settles, even after the caller
@@ -639,7 +780,7 @@ mod update {
         env: &str,
         value: McpServiceSecretValue,
         entry: Arc<dyn AdministrationEntry>,
-    ) -> Result<McpServiceSecretRef, McpServiceSecretUpdateError> {
+    ) -> Result<McpServiceSecretWitness, McpServiceSecretUpdateError> {
         let reference = reference(storage, reviewed, env)?;
         if value.expose().is_empty() {
             return Err(McpServiceSecretUpdateError::Invalid(
@@ -651,7 +792,7 @@ mod update {
         update(
             persistence,
             document,
-            reference.clone(),
+            reference,
             move |installed| {
                 if installed == Some(&reviewed_owned) {
                     Ok(())
@@ -664,8 +805,14 @@ mod update {
             Write::Set(value),
             entry,
         )
-        .await?;
-        Ok(reference)
+        .await?
+        // The persisted row is the one this write built, with its identity
+        // beside the reference: a row without one is not this write's.
+        .ok_or_else(|| {
+            McpServiceSecretUpdateError::OutcomeUnknown(
+                "the stored row does not name this write".to_owned(),
+            )
+        })
     }
 
     /// Remove the value of slot `env` of `reviewed` in `storage`'s realm:
@@ -735,6 +882,7 @@ mod update {
             entry,
         )
         .await
+        .map(|_| ())
     }
 }
 

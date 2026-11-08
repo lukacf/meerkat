@@ -19,7 +19,7 @@ use meerkat_auth_core::http_egress::{HttpEgressError, HttpEgressProfile, HttpEgr
 use meerkat_auth_core::{McpAuthMode, McpOAuthError, McpServerIdentity};
 use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
-use meerkat_core::auth::{McpServiceSecretRefusal, McpServiceSecretValues};
+use meerkat_core::auth::{McpServiceSecretLaunch, McpServiceSecretRefusal, McpServiceSecretValues};
 use meerkat_core::mcp_attachment::{McpAttachmentAuthority, McpStdioSetupFailureClass};
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::ContentBlock;
@@ -53,6 +53,14 @@ pub struct McpConnection {
     /// The account this connection's operations act with, as its owners
     /// stated it when it was made ([`connection_account`]).
     account: Arc<meerkat_core::OperationAccount>,
+    /// What its stdio server's launch injected for the declared service
+    /// secrets: the write of each value, never a value. `None` when the
+    /// launch injected none.
+    service_secret_launch: Option<Arc<McpServiceSecretLaunch>>,
+    /// The OAuth credential owner this connection's requests read their
+    /// bearer from, with its target; `None` for a connection that resolves
+    /// no bearer (stdio, or a remote server without a resolver).
+    credential_source: Option<OAuthBearer>,
     /// Full standard discovery, for host replay. Model definitions are a
     /// separate projection and do not carry private UI metadata.
     standard_tools: std::sync::RwLock<Vec<rmcp::model::Tool>>,
@@ -1627,7 +1635,11 @@ pub trait McpAuthResolver: Send + Sync {
     /// before the handshake. The default holds no custody and refuses, so a
     /// resolver that does not serve service secrets never launches a server
     /// that declares them, and no value is ever taken from the host
-    /// environment instead.
+    /// environment instead. A value read with the write that stored it
+    /// ([`meerkat_core::auth::load_mcp_service_secret_into`]) carries that
+    /// write's witness, which the connection records
+    /// ([`McpConnection::service_secret_launch`]); a value inserted without
+    /// one is recorded without a witness.
     async fn stdio_service_secrets(
         &self,
         server: &McpServerConfig,
@@ -1644,6 +1656,23 @@ pub trait McpAuthResolver: Send + Sync {
     /// locally answers unavailable.
     fn selected_account(&self, _target: &McpServerIdentity) -> meerkat_core::OperationAccount {
         meerkat_core::OperationAccount::Unavailable
+    }
+
+    /// The publication of the credential this resolver's owner holds for
+    /// `target` now, read without loading, resolving, refreshing or sending
+    /// anything: what a call prepared now records as the credential its
+    /// requests carry ([`crate::McpCallTarget::credential_publication`]).
+    /// A request reads the owner's credential when it is sent, after its
+    /// call was prepared, so it carries that publication or a later one, and
+    /// a later one is never the lease's current publication while the
+    /// recorded one is. `None` when the owner holds no lease-published
+    /// credential for `target`, or keeps no lease (the default). A resolver
+    /// that wraps another forwards it.
+    fn credential_publication(
+        &self,
+        _target: &McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        None
     }
 }
 
@@ -1701,6 +1730,14 @@ impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
             }
             _ => meerkat_core::OperationAccount::Unavailable,
         }
+    }
+
+    /// The publication the authority's lease for `target` holds now.
+    fn credential_publication(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        meerkat_auth_core::McpOAuthAuthority::credential_publication(self, target)
     }
 }
 
@@ -1979,6 +2016,7 @@ impl McpConnection {
         // Refusal precedes process spawn, SSE startup and HTTP transport effects.
         let client = ClientServiceSelection::select(config, client_factory.as_deref())?;
         let mut stdio_child = None;
+        let mut service_secret_launch = None;
         let service = match &config.transport {
             McpTransportConfig::Stdio(stdio) => {
                 // We own the process; rmcp only gets its stdout/stdin.
@@ -1990,6 +2028,10 @@ impl McpConnection {
                 // connect deadline) spawns nothing either.
                 let secrets =
                     resolve_stdio_service_secrets(config, stdio, auth_resolver.as_deref()).await?;
+                // The writes of exactly the values this launch injects, taken
+                // from those values before they go to the process: the
+                // connection keeps this record, never a value.
+                let launched_secrets = secrets.as_ref().map(|values| Arc::new(values.launch()));
                 // The launch-only configuration: the declared secrets and the
                 // one projection of a connector-bound installation's expected
                 // account binding (set over any configured value). It is
@@ -2016,6 +2058,7 @@ impl McpConnection {
                         match client_custody.deposit(service, custody.bounds.eof_grace()) {
                             Ok(service) => {
                                 stdio_child = Some(custody);
+                                service_secret_launch = launched_secrets;
                                 service
                             }
                             // Its close index closed it while it connected: the
@@ -2107,6 +2150,8 @@ impl McpConnection {
             oauth_target: None,
             attempt: None,
             account: Arc::new(connection_account(config, None)),
+            service_secret_launch,
+            credential_source: None,
             standard_tools: Default::default(),
         })
     }
@@ -2336,6 +2381,7 @@ impl McpConnection {
                 .with_abandoned_requests(abandoned.clone());
         let oauth_target = bearer.as_ref().map(|bearer| bearer.target().clone());
         let account = Arc::new(connection_account(config, bearer.as_ref()));
+        let credential_source = bearer.clone();
         if let Some(bearer) = bearer {
             http_client = http_client.with_oauth_bearer(bearer);
         }
@@ -2380,6 +2426,8 @@ impl McpConnection {
             oauth_target,
             attempt: attempt.cloned(),
             account,
+            service_secret_launch: None,
+            credential_source,
             standard_tools: Default::default(),
         })
     }
@@ -2773,6 +2821,32 @@ impl McpConnection {
     /// lifetime: a changed binding is a new connection generation.
     pub fn operation_account(&self) -> &Arc<meerkat_core::OperationAccount> {
         &self.account
+    }
+
+    /// The service-secret writes this connection's stdio server was launched
+    /// with: for each declared slot, the witness of the write whose value the
+    /// launch injected, read with the value from the same stored row
+    /// ([`meerkat_core::auth::McpServiceSecretLaunch`]). It names writes,
+    /// never values. Fixed for the connection's lifetime (the running server
+    /// keeps the environment it was launched with), so every call over this
+    /// connection is served by these writes' values; a later write or
+    /// removal reaches only a later launch. `None` when the launch injected
+    /// no service secret (a server that declares none, or a remote server).
+    pub fn service_secret_launch(&self) -> Option<&McpServiceSecretLaunch> {
+        self.service_secret_launch.as_deref()
+    }
+
+    /// The publication of the credential this connection's requests carry,
+    /// as its credential owner states it now
+    /// ([`McpAuthResolver::credential_publication`]): read when a call is
+    /// prepared and recorded on its [`crate::McpCallTarget`]. `None` when the
+    /// connection resolves no bearer, or its owner keeps no lease.
+    pub fn credential_publication(
+        &self,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        self.credential_source
+            .as_ref()
+            .and_then(OAuthBearer::credential_publication)
     }
 
     pub(crate) fn supports_mcp_apps(&self) -> bool {

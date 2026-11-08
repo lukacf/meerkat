@@ -441,6 +441,8 @@ Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI e
 | Approval commit outcome unknown (reconciled before reuse) | `APPROVAL_COMMIT_UNKNOWN` | -32035 | 500 | 55 |
 | Mob delivery scope stale (session moved under a current fence; re-capture the scope) | `STALE_DELIVERY_SCOPE` | -32036 | 409 | 56 |
 | Fork refused by the fork instruction policy (the child would inherit activated instructions) | `FORK_INSTRUCTION_REFUSED` | -32037 | 422 | 57 |
+| Admission in progress: a realm admission fence the write needs is held; nothing was written (retryable once the hold ends, which may be only after the holding process restarts) | `ADMISSION_IN_PROGRESS` | -32038 | 409 | 58 |
+| Admission fence unavailable: a realm admission fence the write needs could not be used; nothing was written | `ADMISSION_FENCE_UNAVAILABLE` | -32039 | 503 | 59 |
 | Invalid params | `INVALID_PARAMS` | -32602 | 400 | 2 |
 | Internal error | `INTERNAL_ERROR` | -32603 | 500 | 1 |
 

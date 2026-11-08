@@ -507,7 +507,12 @@ fn revoke(
             .source
             .owner
             .grants()
-            .revoke(&route.grant_caller, &leaf, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &route.grant_caller,
+                &leaf,
+                &mut custody,
+            )
             .unwrap();
     }
 }

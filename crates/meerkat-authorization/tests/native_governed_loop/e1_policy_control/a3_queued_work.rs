@@ -429,6 +429,7 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -438,6 +439,7 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),

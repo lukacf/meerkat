@@ -64,9 +64,14 @@ impl AuthOwners {
         let lease = flows
             .generated_credential_lifecycle()
             .expect("native generated lifecycle absent");
+        // The store and its coordinator share one credential root: the
+        // coordinator fences the store's writes from its lock directory's
+        // parent, as a persisted backend opens them.
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("vault"))),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("vault").join("refresh-locks"),
+            )),
         );
         Self {
             store,

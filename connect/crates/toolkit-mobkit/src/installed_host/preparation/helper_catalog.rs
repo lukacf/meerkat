@@ -151,6 +151,7 @@ impl PreparedHelperCatalog {
             source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     self.id.clone(),
                     self.grantee.clone(),
@@ -192,7 +193,7 @@ impl PreparedHelperCatalog {
 
 fn refusal(error: GrantRefusal) -> HostLifetimeError {
     match error {
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }

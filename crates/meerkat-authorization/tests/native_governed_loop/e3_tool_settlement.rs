@@ -490,6 +490,7 @@ async fn exercise(server: &Server) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -499,6 +500,7 @@ async fn exercise(server: &Server) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("increment-only"),
             principal("executor"),

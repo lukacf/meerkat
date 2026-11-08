@@ -51,7 +51,10 @@ use crate::decision::{
 /// otherwise); it opens the decision's cleanup, then the approval branch
 /// (idempotent per decision), issues the branch's controller grant
 /// (recovered on retry), then the approval-carried grant, whose id derives
-/// from the decision. A commit landed exactly when that grant exists. The
+/// from the decision. Both are appended under the grant log's admission
+/// fence, taken without waiting: while another holder holds it, the
+/// decision is released with neither issued, and a later pass executes it
+/// again. A commit landed exactly when that grant exists. The
 /// decision's notice admits the approved work into the branch the execution
 /// opened, then tells the origin it was approved; an admission that fails
 /// for good tells the origin it was refused, and a notice delivered once
@@ -821,12 +824,39 @@ impl DecisionExecutor for GrantDecisionExecutor {
             deadline: meerkat_core::time_compat::Instant::now()
                 + Duration::from_millis(permit.deadline_at_ms().saturating_sub(now_ms)),
         };
+        // It and the approval-carried grant are appended under one hold of
+        // the grant log's admission fence, taken without waiting: while an
+        // admission (or another fenced write) holds it, or it cannot be
+        // taken, the decision is released before anything is issued, and a
+        // later pass executes it again. The hold ends before any cleanup,
+        // whose revocation takes the fence itself.
+        let guard = match meerkat_core::AdmissionGuard::try_acquire(inner.grants.admission_fences())
+        {
+            Ok(guard) => guard,
+            Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                tracing::info!(
+                    decision = %decision_id,
+                    "an admission or another fenced write holds the grant log's fence; the \
+                     execution is tried again"
+                );
+                return DecisionExecution::Released;
+            }
+            Err(meerkat_core::AdmissionRefusal::Unavailable(unavailable)) => {
+                tracing::warn!(
+                    decision = %decision_id,
+                    %unavailable,
+                    "the grant log's fence cannot be taken now; the execution is tried again"
+                );
+                return DecisionExecution::Released;
+            }
+        };
         match inner
             .grants
-            .issue_or_recover_child_under_exclusion(&intent, || Ok(validity))
+            .issue_or_recover_child_under_exclusion(&guard, &intent, || Ok(validity))
         {
             Ok(_) => {}
             Err(ChildGrantRefusal::Denied) => {
+                drop(guard);
                 let _ = self.grants.undo(decision_id).await;
                 return refused("approval_branch_unavailable");
             }
@@ -843,14 +873,17 @@ impl DecisionExecutor for GrantDecisionExecutor {
         {
             return DecisionExecution::Released;
         }
-        match inner.grants.issue_approval_child(
+        let issued = inner.grants.issue_approval_child(
+            &guard,
             &terms.issuer,
             parent_ref,
             id,
             terms.grantee.clone(),
             requested,
             approval,
-        ) {
+        );
+        drop(guard);
+        match issued {
             Ok(_) => DecisionExecution::Committed,
             Err(ApprovalChildRefusal::Unavailable) => DecisionExecution::Released,
             Err(ApprovalChildRefusal::AlreadyIssued | ApprovalChildRefusal::DecisionCarried) => {

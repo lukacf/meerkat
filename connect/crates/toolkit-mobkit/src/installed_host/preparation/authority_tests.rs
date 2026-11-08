@@ -802,6 +802,7 @@ fn bundled_helper_mcp_rejects_changed_scope_replacement_and_revocation_without_r
         .source
         .grants()
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             owner.selected.native_host.remote_operator.as_ref().unwrap(),
             &parent,
             &mut custody,
@@ -840,6 +841,7 @@ fn bundled_helper_mcp_preserves_existing_base_and_unrelated_target_constraints()
         .source
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             operator,
             EvidenceId::new("unrelated-parent").unwrap(),
             helper.logical_executor.clone(),
@@ -1205,6 +1207,7 @@ fn helper_catalog_preserves_targets_and_refuses_changed_session_occupied_base_an
         .source
         .grants()
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             owner.selected.native_host.remote_operator.as_ref().unwrap(),
             &parent,
             &mut custody,
@@ -1483,6 +1486,7 @@ fn helper_catalog_successor_selection_refuses_old_exact_id_foreign_owner_and_rev
         .source
         .grants()
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             owner.selected.native_host.remote_operator.as_ref().unwrap(),
             &parent,
             &mut custody,

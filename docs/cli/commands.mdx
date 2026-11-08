@@ -116,6 +116,7 @@ part of the new run.
 | `rkat storage doctor` | Read-only storage diagnosis (realm inventory, schema ledgers, split-brain twins, structural integrity) |
 | `rkat storage migrate` | Offline, fenced storage migration (dry-run by default) |
 | `rkat storage prune` | Lifecycle for registered storage backup artifacts |
+| `rkat storage hosts-fences` | Report, as JSON lines, whether directories' filesystems can host admission fences |
 | `rkat init` | Create project config from the global template |
 
 ## Prompt-first usage
@@ -419,7 +420,12 @@ use it only after confirming that no process still owns the target realm.
 Neither command removes a realm that another realm's own config document
 names as its parent, `--force` included: the refusal (or prune's
 `kept_parents` note) names the child, which would otherwise stop composing
-the parent's `[confinement]` and `[governance]`.
+the parent's `[confinement]` and `[governance]`. Nor does either remove a
+realm an admission holds: both take the realm's
+[admission fence](/concepts/realm-admission) first, without waiting and
+before the lease check, and hold it through the removal. `realm delete` then
+exits 58, `--force` included (it overrides heartbeat leases only), and
+`realm prune` keeps the realm, counted as active.
 
 `realm govern` makes an existing realm governed, durably, with the local user
 as operator; every later `rkat` process opens it governed, and no flag selects
@@ -431,7 +437,10 @@ more `--route <key>`; a controller grant has no expiry). A new grant
 supersedes only its target's previous one.
 `realm revoke-grant` revokes the grant selected for one target and exits
 successfully only when it is revoked. Use the global `--as-agent` to run as a
-granted agent.
+granted agent. `realm govern`, `grant` and `revoke-grant` take the realm's
+[admission fence](/concepts/realm-admission) first, waiting up to 5 s for an
+admission that holds it: past that they exit 58, and 59 when the fence
+cannot be used, with nothing written.
 
 ## config
 
@@ -622,10 +631,14 @@ held fences, and archiving is gated on that comparison being conclusive
 (an unreadable entry poisons it and refuses) — then every other copy is
 archived read-only under the registered `*.pre-<version>-<timestamp>`
 backup naming. Divergent data is preserved and reported, never merged.
+Before its maintenance fence, the resolution takes each copy's
+[realm admission fence](/concepts/realm-admission) without waiting and holds
+it through the archive: while an admission holds any copy, the resolution is
+refused, naming the fence.
 Per-mob databases under `mobs/` are report-only, and credential stores are
 never read, moved, or reported. Exit 0 = clean; exit 1 = errors or
 fail-closed refusals (split-brain without `--adopt-root`, unacquirable
-maintenance fence).
+maintenance fence, a held or unusable admission fence).
 
 `--bridge-pre-0-8-10` is an explicit `--apply`-only maintenance lane for
 SQLite realms. JSONL and memory realms are rejected before any database is
@@ -663,6 +676,25 @@ mtime — renames preserve mtime, so a long-idle file archived today would
 otherwise look instantly prunable. `--realm` restricts eligibility to one
 realm's artifacts. Exit 0 = clean; exit 1 = deletion failures. Not to be
 confused with `rkat realm prune`, which deletes whole realm directories.
+
+```bash
+rkat storage hosts-fences <DIR>...
+```
+
+`hosts-fences` reports whether each directory's filesystem can host a realm
+admission fence. It runs, in this process's own view of the filesystem, the
+one predicate that fence writers, holders and verifiers use, and prints one
+JSON object per directory, one per line, in argument order, and nothing else
+on stdout: `{"dir": "<path>", "hosts": true}` (or `false`), or, when the
+directory's filesystem could not be inspected (a directory that does not
+exist, for one), `{"dir": "<path>", "unavailable": {"kind": "<kind>", "cause": "<text>"}}`,
+where `kind` is a stable snake_case name and `cause` is for people. It runs
+before any realm, state, config or auth step, creates nothing, and takes no
+global option (giving one is a usage error). Exit 0 when every directory was
+evaluated, whatever the answers; exit 1 only when the report could not be
+written; exit 2 on a usage error, or when the process could not start at all
+(for example, a refused thread spawn), as for every command. See
+[Realm admission fences](/concepts/realm-admission).
 
 ## mcp
 

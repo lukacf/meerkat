@@ -359,7 +359,10 @@ pub fn original_operation_grant(
         .map(Some)
         .map_err(|refusal| match refusal {
             GrantRefusal::Denied => denied(),
-            GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
+            GrantRefusal::ControllerInUse
+            | GrantRefusal::Duplicate
+            | GrantRefusal::Unavailable
+            | GrantRefusal::AdmissionFence => {
                 meerkat_core::OperationAuthorizationError::Unavailable
             }
         })
@@ -422,7 +425,10 @@ fn contributor_operation_ceiling(
             }
             LineageResolutionRefusal::Refused(GrantRefusal::Denied) => denied(),
             LineageResolutionRefusal::Refused(
-                GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable,
+                GrantRefusal::ControllerInUse
+                | GrantRefusal::Duplicate
+                | GrantRefusal::Unavailable
+                | GrantRefusal::AdmissionFence,
             ) => meerkat_core::OperationAuthorizationError::Unavailable,
         })
 }
@@ -1483,7 +1489,10 @@ fn lineage_refusal(refusal: LineageResolutionRefusal) -> NativeAdmissionError {
 fn grant_refusal(refusal: GrantRefusal) -> NativeAdmissionError {
     match refusal {
         GrantRefusal::Denied => refused(OperationRefusalKind::Denied),
-        GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
+        GrantRefusal::ControllerInUse
+        | GrantRefusal::Duplicate
+        | GrantRefusal::Unavailable
+        | GrantRefusal::AdmissionFence => {
             NativeAdmissionError::Readiness(ControllerReadinessFailure::PolicyUnavailable)
         }
     }

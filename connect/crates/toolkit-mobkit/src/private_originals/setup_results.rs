@@ -306,6 +306,7 @@ mod tests {
         let base = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("result-source-base").unwrap(),
                 principal("admin"),

@@ -79,6 +79,7 @@ pub(super) fn issue_targets(
                 let leaf = match grants.issued_reference(&id)? {
                     Some(leaf) => leaf,
                     None => grants.issue_child(
+                        &meerkat_core::AdmissionGuard::none(),
                         application,
                         &selected.parent,
                         id,
@@ -102,7 +103,9 @@ pub(super) fn issue_targets(
                     GrantRefusal::Denied
                     | GrantRefusal::Duplicate
                     | GrantRefusal::ControllerInUse => HostLifetimeError::Denied,
-                    GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+                    GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => {
+                        HostLifetimeError::Unavailable
+                    }
                 })
         })
         .collect()

@@ -98,7 +98,9 @@ async fn fixture(root: &std::path::Path, issuer: &str) -> (TerminalConnectors, S
         .unwrap();
     let persistence = ProviderAuthPersistence::new(
         Arc::new(FileTokenStore::new(root.join("credentials"))),
-        Arc::new(FileLockCoordinator::new(root.join("locks"))),
+        Arc::new(FileLockCoordinator::new(
+            root.join("credentials").join("refresh-locks"),
+        )),
     );
     // The governed realm's own owner, as the standalone continuation reopens
     // it. An ordinary startup open of a governed realm is refused.

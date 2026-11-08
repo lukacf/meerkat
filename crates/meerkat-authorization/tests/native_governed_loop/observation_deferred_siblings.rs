@@ -287,6 +287,7 @@ async fn deferred_case(callback: bool) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -296,6 +297,7 @@ async fn deferred_case(callback: bool) {
         .expect("controller grant");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read"),
             principal("executor"),

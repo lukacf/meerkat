@@ -360,6 +360,7 @@ async fn exercise_expiry(case: CredentialCase) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -369,6 +370,7 @@ async fn exercise_expiry(case: CredentialCase) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("operation"),
             principal("executor"),

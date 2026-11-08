@@ -1250,11 +1250,16 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
         }
         fn create(
             &self,
+            guard: &meerkat_core::AdmissionGuard,
             identity: &GrantOwnerIdentity,
         ) -> std::result::Result<(), GrantStoreError> {
-            self.inner.create(identity)
+            self.inner.create(guard, identity)
         }
-        fn append(&self, change: &GrantOwnerChange) -> std::result::Result<(), GrantStoreError> {
+        fn append(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            change: &GrantOwnerChange,
+        ) -> std::result::Result<(), GrantStoreError> {
             self.entered
                 .send(())
                 .map_err(|_| GrantStoreError::Refused)?;
@@ -1263,7 +1268,7 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
                 .map_err(|_| GrantStoreError::Refused)?
                 .recv_timeout(Duration::from_secs(5))
                 .map_err(|_| GrantStoreError::Refused)?;
-            self.inner.append(change)
+            self.inner.append(guard, change)
         }
         fn release(&self) {
             self.inner.release();
@@ -1280,7 +1285,10 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
     let (entered, observed) = sync_channel(1);
     let (resume, resumed) = sync_channel(1);
     let store = Arc::new(PausedAppend {
-        inner: FileGrantOwnerStore::new(f._directory.path().join("setup-grants")),
+        inner: FileGrantOwnerStore::new(
+            f._directory.path().join("setup-grants"),
+            meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+        ),
         entered,
         resume: Mutex::new(resumed),
     });
@@ -1288,6 +1296,7 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
     let application = principal(PrincipalKind::ServiceAccount, "application");
     let grants = Arc::new(
         LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             LocalGrantConfiguration {
                 root: root.clone(),
                 namespace: id("setup-close-test"),
@@ -1308,6 +1317,7 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
         let result = setup_owner.with_current_setup(|| {
             setup_grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &setup_root,
                     id("admitted-before-close"),
                     setup_application,
@@ -1361,6 +1371,7 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
             called.set(true);
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     id("refused-after-close"),
                     application,

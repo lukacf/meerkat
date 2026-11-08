@@ -962,7 +962,7 @@ async fn fresh_helper_reset_catalog_calls_require_explicit_successor_parent() {
             drop(resolved);
             if successor {
                 let mut mutation = fixture.machine.try_controller_grant_mutation().unwrap();
-                fixture.source.owner.grants().revoke(&lineage[0].root_authority, &lineage[0], &mut mutation).unwrap();
+                fixture.source.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &lineage[0].root_authority, &lineage[0], &mut mutation).unwrap();
                 drop(mutation);
                 assert!(fixture.source.owner.grants().resolve_lineage(lineage,
                     &helper_member.logical_owner, association.candidate().represented_subject.as_ref()).is_err());

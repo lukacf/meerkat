@@ -215,7 +215,10 @@ pub(super) fn open_owner_pair_in(
     if grants.is_symlink() || original_path.is_symlink() {
         return Err(HostLifetimeError::InvalidSelection);
     }
-    let store = Arc::new(FileGrantOwnerStore::new(grants));
+    let store = Arc::new(FileGrantOwnerStore::new(
+        grants,
+        meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+    ));
     let source = match startup {
         OperatorOwnerStartup::Initialize {
             namespace,
@@ -864,6 +867,7 @@ impl OperatorSetup {
                 return Ok(Err(meerkat_authorization::grants::GrantRefusal::Denied));
             }
             Ok(self.source.grants().issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &self.operator,
                 id,
                 record.application.clone(),

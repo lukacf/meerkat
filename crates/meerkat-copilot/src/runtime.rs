@@ -2337,9 +2337,10 @@ impl CopilotAuthorizer {
         let preparation_env = self.env.clone();
         let preparation_binding = self.binding.clone();
         let preparation: meerkat_auth_core::resolver::ManagedStoreOAuthRefreshPrepareFn =
-            Box::new(move |locked_baseline, mode| {
+            Box::new(move |fence, locked_baseline, mode| {
                 Box::pin(async move {
                     prepare_managed_store_oauth_refresh_under_lock(
+                        fence,
                         &preparation_env,
                         &preparation_binding,
                         managed,
@@ -4197,7 +4198,7 @@ async fn refresh_github_tokens(
     let key = meerkat_core::auth::TokenKey::from_credential_identity(&credential_identity);
     let refresh_key = key.clone();
     let preparation_for_refresh = preparation.clone();
-    let refresh_fn: RefreshFn = Box::new(move || {
+    let refresh_fn: RefreshFn = Box::new(move |fence| {
         let token_store = token_store.clone();
         let key = refresh_key.clone();
         let preparation = preparation_for_refresh.clone();
@@ -4213,7 +4214,10 @@ async fn refresh_github_tokens(
                         "Copilot source credential disappeared before refresh".to_string(),
                     )
                 })?;
-            match preparation.claim_refresh_owner(current.clone()).await? {
+            match preparation
+                .claim_refresh_owner(fence, current.clone())
+                .await?
+            {
                 LockedManagedStoreOAuthRefresh::UseCached(cached) => Ok(cached),
                 LockedManagedStoreOAuthRefresh::Refresh(transaction) => {
                     let refresh_token = match current.refresh_token.clone() {
@@ -4957,6 +4961,7 @@ mod tests {
         .expect("mark source token");
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &meerkat_core::auth::TokenKey::from_credential_identity(&identity),
                 &marked,
             )
@@ -9010,7 +9015,7 @@ mod tests {
             };
             let earlier = publish(stored(user_token("stored-earlier")));
             store
-                .save(&key, &earlier)
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &earlier)
                 .await
                 .expect("store the earlier token");
             let newer = publish(stored(user_token("stored-newer")));
@@ -9035,7 +9040,7 @@ mod tests {
             );
 
             store
-                .save(&key, &newer)
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &newer)
                 .await
                 .expect("the newer token's record is saved");
             let resolved = harness
@@ -12142,7 +12147,7 @@ mod tests {
                     .provider_auth_persistence()
                     .expect("test persistence")
                     .token_store()
-                    .save(&key, &marked)
+                    .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
                     .await
                     .expect("store the new sign-in");
             }

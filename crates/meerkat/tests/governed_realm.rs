@@ -249,18 +249,23 @@ fn provision_grant_owner(paths: &RealmPaths) {
     let path = grant_owner_path(paths);
     std::fs::create_dir_all(path.parent().expect("authorization dir")).expect("dir");
     let owner = LocalGrantAuthority::new_durable(
+        &meerkat_core::AdmissionGuard::none(),
         LocalGrantConfiguration {
             root: principal("grant-owner"),
             namespace: EvidenceId::new("realm-grants").expect("id"),
             generation: 1,
         },
-        Arc::new(FileGrantOwnerStore::new(path)),
+        Arc::new(FileGrantOwnerStore::new(
+            path,
+            meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+        )),
         LocalAuthorizationPublication::new(),
         Arc::new(Clock),
     )
     .expect("provisioned owner");
     owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             EvidenceId::new("leaf").expect("id"),
             principal("executor"),
@@ -272,7 +277,10 @@ fn provision_grant_owner(paths: &RealmPaths) {
 
 fn try_restore(paths: &RealmPaths) -> Result<LocalGrantAuthority, GrantDurabilityError> {
     LocalGrantAuthority::restore(
-        Arc::new(FileGrantOwnerStore::new(grant_owner_path(paths))),
+        Arc::new(FileGrantOwnerStore::new(
+            grant_owner_path(paths),
+            meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+        )),
         LocalAuthorizationPublication::new(),
         Arc::new(Clock),
     )
@@ -689,6 +697,7 @@ async fn a_stock_realm_holds_only_the_operators_recorded_grant_selection() {
     let issue = |grant: &str, restrictions: ExecutionRestrictions| {
         owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principals.operator,
                 EvidenceId::new(grant).unwrap(),
                 principals.executor.clone(),

@@ -284,6 +284,7 @@ async fn a_memory_search_needs_the_lineage_selected_for_its_own_memory_scope() {
     let session = SessionId::new();
     let base = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &operator(),
             id("base"),
             executor(),
@@ -293,6 +294,7 @@ async fn a_memory_search_needs_the_lineage_selected_for_its_own_memory_scope() {
         .unwrap();
     let memory = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &operator(),
             id("session-memory-read"),
             executor(),

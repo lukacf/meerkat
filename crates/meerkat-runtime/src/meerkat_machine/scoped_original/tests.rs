@@ -563,6 +563,7 @@ fn the_mandate_is_authorized_by_its_actual_owners() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("work-leaf"),
             f.claims.logical_executor.clone(),
@@ -702,6 +703,7 @@ fn an_unauthorized_requester_with_a_valid_lineage_is_refused() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("valid-leaf"),
             f.claims.logical_executor.clone(),
@@ -835,6 +837,7 @@ fn both_faces_of_the_invocation_policy_follow_one_grant_publication() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("invocation"),
             f.claims.requester.clone(),
@@ -873,7 +876,12 @@ fn both_faces_of_the_invocation_policy_follow_one_grant_publication() {
     assert!(admitted(&configuration).is_ok());
 
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("the host revokes the invocation grant");
     assert_eq!(
         refusal((configuration.ingress)(
@@ -923,6 +931,7 @@ fn every_contributor_is_an_admitted_original_whose_grant_is_a_conjunct() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("contributor-leaf"),
             f.claims.logical_executor.clone(),
@@ -946,7 +955,12 @@ fn every_contributor_is_an_admitted_original_whose_grant_is_a_conjunct() {
     );
 
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("the source owner's grant for one contributor is revoked");
     assert_eq!(
         refusal(f.admit(f.claims.clone())),
@@ -986,6 +1000,7 @@ impl Fixture {
     ) -> GrantLineageRef {
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &self.root,
                 id(grant),
                 source_executor(),
@@ -1024,6 +1039,7 @@ impl Fixture {
         let own = self
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &self.root,
                 id("helper-leaf"),
                 self.claims.logical_executor.clone(),
@@ -1120,7 +1136,12 @@ fn a_contributor_that_is_not_live_refuses_locally() {
         "live before the revocation"
     );
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("the source's grant is revoked");
     assert_eq!(refusal(f.admit(helper)), denied, "a revoked lineage");
 
@@ -1189,6 +1210,7 @@ fn a_contributor_that_is_not_live_refuses_locally() {
     .expect("another grant owner");
     let foreign = other
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-leaf"),
             source_executor(),
@@ -1260,6 +1282,7 @@ fn the_admitted_originals_own_basis_stays_bound_to_its_executor_and_subject() {
     let other_subject = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("helper-other-subject"),
             helper.logical_executor.clone(),
@@ -1622,7 +1645,12 @@ fn an_operation_refuses_on_a_contributor_that_is_no_longer_current() {
     let live = f.issue_source_grant("source-live", covering());
     let revoked = f.issue_source_grant("source-revoked", covering());
     f.grants
-        .revoke(&f.root, &revoked, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &revoked,
+            &mut AnyCustody,
+        )
         .expect("revoked");
     // The grant owner's time is 100: this window has ended.
     let expired = f.issue_source_grant(
@@ -1644,6 +1672,7 @@ fn an_operation_refuses_on_a_contributor_that_is_no_longer_current() {
     .expect("another grant owner");
     let foreign = other
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-live"),
             source_executor(),
@@ -1725,6 +1754,7 @@ fn a_same_executor_contributor_ceiling_is_its_executor_resolution() {
     let same = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("same-executor-leaf"),
             executor.clone(),
@@ -2330,6 +2360,7 @@ fn a_current_source_original_is_retained_and_its_mandate_resolves() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-leaf"),
             f.claims.logical_executor.clone(),
@@ -2375,7 +2406,12 @@ fn a_current_source_original_is_retained_and_its_mandate_resolves() {
     assert!(current().is_ok(), "the exclusion published nothing");
 
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("revoked");
     assert_eq!(refusal(current()), Some(OperationRefusalKind::Denied));
     f.originals
@@ -2401,6 +2437,7 @@ fn a_source_original_read_during_an_owner_change_is_a_changed_policy() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-leaf"),
             f.claims.logical_executor.clone(),
@@ -2706,7 +2743,12 @@ fn arm_completed_change(clock: &ChangingClock, f: &Fixture, grant: GrantLineageR
             grants
                 .upgrade()
                 .expect("the grant owner")
-                .revoke(&root, &grant, &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &root,
+                    &grant,
+                    &mut AnyCustody,
+                )
                 .expect("another actor revokes the grant");
         });
     } else {

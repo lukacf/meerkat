@@ -189,7 +189,7 @@ impl OpenAiOAuthRuntime {
         let token_store = self.token_store();
         let key = self.key.clone();
         let preparation_for_refresh = preparation.clone();
-        let refresh_fn: RefreshFn = Box::new(move || {
+        let refresh_fn: RefreshFn = Box::new(move |fence| {
             let http = http.clone();
             let endpoints = endpoints.clone();
             let token_store = Arc::clone(&token_store);
@@ -205,7 +205,10 @@ impl OpenAiOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                match preparation.claim_refresh_owner(current.clone()).await? {
+                match preparation
+                    .claim_refresh_owner(fence, current.clone())
+                    .await?
+                {
                     LockedManagedStoreOAuthRefresh::UseCached(cached) => Ok(cached),
                     LockedManagedStoreOAuthRefresh::Refresh(transaction) => {
                         let refresh_token = match current.refresh_token.clone() {
@@ -647,6 +650,7 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -655,13 +659,14 @@ mod tests {
                         "injected first save failure".into(),
                     ));
                 }
-                self.inner.save(key, tokens).await
+                self.inner.save(fence, key, tokens).await
             }
             async fn clear(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-                self.inner.clear(key).await
+                self.inner.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, meerkat_core::auth::TokenStoreError> {
                 self.inner.list().await
@@ -790,7 +795,32 @@ mod tests {
                     &transition,
                 )
                 .unwrap();
-                store.save(&key, &original).await.unwrap();
+                // The seed write goes through the pair's coordinator, which
+                // hands it the guard its store's writes require.
+                let seeded_store = Arc::clone(&store);
+                let seeded_key = key.clone();
+                let seeded = original.clone();
+                persistence
+                    .refresh_coordinator()
+                    .with_exclusive_mutation_for(
+                        key.clone(),
+                        meerkat_core::auth::TokenStoreAccess::Unattended,
+                        Box::new(move |fence| {
+                            Box::pin(async move {
+                                seeded_store
+                                    .save(&fence, &seeded_key, &seeded)
+                                    .await
+                                    .map_err(
+                                    meerkat_core::auth::CredentialMutationError::from_token_store,
+                                )?;
+                                Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
+                                    seeded,
+                                ))
+                            })
+                        }),
+                    )
+                    .await
+                    .unwrap();
                 let env = ResolverEnvironment::testing()
                     .with_provider_auth_persistence(persistence.clone())
                     .with_auth_lease_handle(auth.clone())
@@ -801,9 +831,10 @@ mod tests {
                 // Preserve the production pre-coordinator release and exact re-admission.
                 previous.release_prelock_lifecycle_guard();
                 let prepare_binding = binding.clone();
-                let prepare: TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         prepare_managed_store_oauth_refresh_under_lock(
+                            fence,
                             &env,
                             &prepare_binding,
                             previous,
@@ -868,10 +899,10 @@ mod tests {
                     .unwrap();
                 previous.release_prelock_lifecycle_guard();
                 let binding = self.binding.clone();
-                let prepare: TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         prepare_managed_store_oauth_refresh_under_lock(
-                            &env, &binding, previous, locked, mode,
+                            fence, &env, &binding, previous, locked, mode,
                         )
                         .await
                         .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
@@ -1004,7 +1035,11 @@ mod tests {
                 .unwrap();
                 fixture
                     .store
-                    .save(&fixture.key, &replacement)
+                    .save(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &fixture.key,
+                        &replacement,
+                    )
                     .await
                     .unwrap();
                 fixture.auth.begin_refresh(&fixture.lease).unwrap();
@@ -1344,7 +1379,11 @@ mod tests {
                     .phase,
                 Some(AuthLeasePhase::Refreshing)
             );
-            fixture.store.save(&fixture.key, &legacy).await.unwrap();
+            fixture
+                .store
+                .save(&meerkat_core::AdmissionGuard::none(), &fixture.key, &legacy)
+                .await
+                .unwrap();
             fixture
                 .auth
                 .refresh_failed(
@@ -1498,8 +1537,8 @@ mod tests {
             let binding = fixture.binding.clone();
             let locked = legacy.clone();
             let result = fixture.persistence.refresh_coordinator().with_forced_refresh(fixture.key.clone(),
-                Box::new(move || Box::pin(async move {
-                    match prepare_managed_store_oauth_refresh_under_lock(&env, &binding, previous, locked,
+                Box::new(move |fence| Box::pin(async move {
+                    match prepare_managed_store_oauth_refresh_under_lock(fence, &env, &binding, previous, locked,
                         meerkat_auth_core::resolver::ManagedStoreOAuthRefreshPreparationMode::RefreshOwner).await {
                         Err(error) => Err(meerkat_auth_core::resolver::refresh_error_from_provider(error)),
                         Ok(_) => panic!("a current reauth verdict cannot be replaced by a legacy marker"),
@@ -1524,7 +1563,9 @@ mod tests {
 
             let directory = tempfile::tempdir().unwrap();
             let token_root = directory.path().join("tokens");
-            let lock_root = directory.path().join("locks");
+            // The coordinator fences the store's writes from its lock
+            // directory's parent: the store's own root.
+            let lock_root = token_root.join("refresh-locks");
             let persistence = ProviderAuthPersistence::new(
                 Arc::new(FileTokenStore::new(&token_root)),
                 Arc::new(FileLockCoordinator::new(&lock_root)),
@@ -1570,7 +1611,7 @@ mod tests {
                 BOUND,
                 fence_coordinator.with_exclusive_mutation(
                     fixture.key.clone(),
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         Box::pin(async move {
                             Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
                                 fresh_store
@@ -1642,7 +1683,7 @@ mod tests {
                         .refresh_coordinator()
                         .with_exclusive_mutation(
                             fixture.key.clone(),
-                            Box::new(move || {
+                            Box::new(move |_fence| {
                                 Box::pin(async move {
                                     Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
                                         store.load(&key).await.unwrap().unwrap(),

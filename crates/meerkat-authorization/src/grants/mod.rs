@@ -19,6 +19,7 @@ use meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_authorization_contracts::grant::{GrantAuthorityIncarnation, GrantLineageRef};
 use meerkat_core::auth::PrincipalRef;
+use meerkat_core::{AdmissionFence, AdmissionGuard};
 
 use crate::clock::LocalAuthorizationClock;
 use crate::publication::{
@@ -45,7 +46,7 @@ use dsl::{
 #[cfg(test)]
 pub(crate) use durable::with_last_issued_restrictions;
 pub use durable::{
-    DurableGrantOwner, FileGrantOwnerStore, GrantDurabilityError, GrantOwnerChange,
+    DurableGrantOwner, FileGrantOwnerStore, GrantDurabilityError, GrantLogFence, GrantOwnerChange,
     GrantOwnerIdentity, GrantOwnerStore, GrantStoreDurability, GrantStoreError,
     InMemoryGrantOwnerStore,
 };
@@ -79,6 +80,13 @@ pub enum GrantRefusal {
     ControllerInUse,
     #[error("grant authority unavailable")]
     Unavailable,
+    /// The operation's admission guard does not hold the fence of this
+    /// owner's store ([`LocalGrantAuthority::admission_fences`]): refused
+    /// before anything was appended.
+    #[error(
+        "grant operation refused: the operation does not hold the grant store's admission fence"
+    )]
+    AdmissionFence,
 }
 
 /// Why an observed lineage resolution has no grant. An owner change
@@ -493,21 +501,38 @@ impl LocalGrantAuthority {
     /// The caller is supplied by the authenticated administrative owner, never
     /// copied from request JSON. A represented subject is an explicit immutable
     /// root fact and remains unchanged in every child.
+    ///
+    /// `guard` is the operation's admission guard: a durable owner whose
+    /// store has an admission fence appends only while `guard` holds it
+    /// ([`GrantRefusal::AdmissionFence`] otherwise, with nothing appended).
+    /// Every mutation of this owner takes it the same way.
     pub fn issue_root(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         id: EvidenceId,
         grantee: PrincipalRef,
         represented_subject: Option<PrincipalRef>,
         restrictions: ExecutionRestrictions,
     ) -> Result<GrantLineageRef, GrantRefusal> {
-        self.issue_root_carrying(caller, id, grantee, represented_subject, restrictions, None)
+        self.issue_root_carrying(
+            guard,
+            caller,
+            id,
+            grantee,
+            represented_subject,
+            restrictions,
+            None,
+        )
     }
 
     /// [`issue_root`](Self::issue_root) with an optional child rule: every
     /// child of the root then carries a person's decision for its approver id.
+    /// Its append takes `guard` as [`issue_root`](Self::issue_root)'s does.
+    #[allow(clippy::too_many_arguments)]
     fn issue_root_carrying(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         id: EvidenceId,
         grantee: PrincipalRef,
@@ -548,6 +573,7 @@ impl LocalGrantAuthority {
         self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::IssueRoot {
                 actor,
                 record: record.clone(),
@@ -566,13 +592,14 @@ impl LocalGrantAuthority {
     /// checked mathematical value is bound to the actual retained parent.
     pub fn issue_child(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         parent: &GrantLineageRef,
         id: EvidenceId,
         grantee: PrincipalRef,
         requested: ExecutionRestrictions,
     ) -> Result<GrantLineageRef, GrantRefusal> {
-        self.issue_child_carrying(caller, parent, id, grantee, requested, None, None)
+        self.issue_child_carrying(guard, caller, parent, id, grantee, requested, None, None)
     }
 
     /// [`issue_child`](Self::issue_child) with an optional child rule of its
@@ -580,10 +607,12 @@ impl LocalGrantAuthority {
     /// decides both: a child of a grant under a rule must carry a decision
     /// that meets it, and an approval-carried child needs such a parent,
     /// terms equal to the approved request's, depth 0, a window, at least
-    /// one use and a decision no other grant carries.
+    /// one use and a decision no other grant carries. Its append takes
+    /// `guard` as [`issue_child`](Self::issue_child)'s does.
     #[allow(clippy::too_many_arguments)]
     fn issue_child_carrying(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         parent: &GrantLineageRef,
         id: EvidenceId,
@@ -653,6 +682,7 @@ impl LocalGrantAuthority {
         self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::IssueChild {
                 actor,
                 record: record.clone(),
@@ -710,9 +740,13 @@ impl LocalGrantAuthority {
     /// recover with the same intent from the restored owner.
     /// [`ChildGrantRefusal::Unavailable`] when the publication was poisoned
     /// after the reservation and before the pre-append check (always so for
-    /// `originating`'s own poison), with nothing appended.
+    /// `originating`'s own poison), with nothing appended, and when `guard`
+    /// does not hold the fence of this owner's store (the caller takes it
+    /// without waiting, [`AdmissionGuard::try_acquire`] of
+    /// [`Self::admission_fences`]), with nothing appended.
     pub fn issue_or_recover_child_under_exclusion(
         &self,
+        guard: &AdmissionGuard,
         intent: &ChildGrantIntent,
         originating: impl FnOnce() -> Result<ChildGrantValidity, GrantRefusal>,
     ) -> Result<ChildGrantOutcome, ChildGrantRefusal> {
@@ -723,7 +757,7 @@ impl LocalGrantAuthority {
             .publication
             .try_reserve_owner_change()
             .map_err(|_| ChildGrantRefusal::Unavailable)?;
-        self.issue_or_recover_child_reserved(&mut publication, intent, originating)
+        self.issue_or_recover_child_reserved(&mut publication, guard, intent, originating)
     }
 
     /// [`issue_or_recover_child_under_exclusion`](Self::issue_or_recover_child_under_exclusion)
@@ -738,11 +772,14 @@ impl LocalGrantAuthority {
     pub(crate) fn issue_or_recover_child_reserved(
         &self,
         publication: &mut crate::publication::LocalPublicationGuard<'_>,
+        guard: &AdmissionGuard,
         intent: &ChildGrantIntent,
         originating: impl FnOnce() -> Result<ChildGrantValidity, GrantRefusal>,
     ) -> Result<ChildGrantOutcome, ChildGrantRefusal> {
         let refused = |refusal: GrantRefusal| match refusal {
-            GrantRefusal::Unavailable => ChildGrantRefusal::Unavailable,
+            GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => {
+                ChildGrantRefusal::Unavailable
+            }
             GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
                 ChildGrantRefusal::Denied
             }
@@ -855,6 +892,7 @@ impl LocalGrantAuthority {
         if let Err(refusal) = self.apply_change(
             &mut owner,
             publication,
+            guard,
             GrantAuthorityInput::IssueChild {
                 actor,
                 record: record.clone(),
@@ -973,11 +1011,12 @@ impl LocalGrantAuthority {
     /// mutation or publication.
     pub fn revoke(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
     ) -> Result<(), GrantRefusal> {
-        self.revoke_reserved(caller, grant, custody, |_| Ok(()))
+        self.revoke_reserved(guard, caller, grant, custody, |_| Ok(()))
     }
 
     /// [`revoke`](Self::revoke) for a caller that decided against
@@ -990,12 +1029,13 @@ impl LocalGrantAuthority {
     /// published. Every other result is that of [`revoke`](Self::revoke).
     pub fn revoke_expecting(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         expected: &LocalPublicationStamp,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
     ) -> Result<(), ExpectedRevokeRefusal> {
-        self.revoke_reserved(caller, grant, custody, |reservation| {
+        self.revoke_reserved(guard, caller, grant, custody, |reservation| {
             if reservation.stamp_is_current(expected) {
                 Ok(())
             } else {
@@ -1009,6 +1049,7 @@ impl LocalGrantAuthority {
     /// mutation; its refusal changes and publishes nothing.
     fn revoke_reserved<E: From<GrantRefusal>>(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
@@ -1018,7 +1059,7 @@ impl LocalGrantAuthority {
         self.check_revoke_authority(caller, grant)?;
         custody
             .with_unreferenced_controller_grant(grant, || {
-                self.revoke_under_native_custody(caller, grant, under_reservation)
+                self.revoke_under_native_custody(guard, caller, grant, under_reservation)
             })
             .map_err(|refusal| {
                 E::from(match refusal {
@@ -1054,6 +1095,7 @@ impl LocalGrantAuthority {
 
     fn revoke_under_native_custody<E: From<GrantRefusal>>(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         under_reservation: impl FnOnce(&LocalPublicationGuard<'_>) -> Result<(), E>,
@@ -1076,6 +1118,7 @@ impl LocalGrantAuthority {
         self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::Revoke { actor, record },
         )?;
         // RevokeAlready is a canonical successful no-op. Only RevokeNew
@@ -1131,21 +1174,38 @@ impl LocalGrantAuthority {
 
     /// Apply one accepted administrative change. With durable custody the
     /// change is acknowledged by the store before it is installed; callers
-    /// publish the change only after this returns `Ok`.
+    /// publish the change only after this returns `Ok`. The store refuses a
+    /// `guard` that does not hold its admission fence, with nothing appended.
     fn apply_change(
         &self,
         owner: &mut GrantAuthorityMachineAuthority,
         publication: &mut crate::publication::LocalPublicationGuard<'_>,
+        guard: &AdmissionGuard,
         input: GrantAuthorityInput,
     ) -> Result<(), GrantRefusal> {
         require_custody(owner)?;
         match &self.durable {
-            Some(durable) => durable.apply(owner, publication, input),
+            Some(durable) => durable.apply(owner, publication, guard, input),
             None => owner
                 .apply(input)
                 .map(|_| ())
                 .map_err(|_| GrantRefusal::Denied),
         }
+    }
+
+    /// The admission fences of this owner's writes
+    /// (`meerkat_core::realm_admission`): its durable store's fence, if it
+    /// has one, and none for an owner in memory. An operation takes them,
+    /// EXCLUSIVE, before it mutates the owner, and passes its guard to every
+    /// mutation; a caller that may not wait takes them with
+    /// [`AdmissionGuard::try_acquire`].
+    #[must_use]
+    pub fn admission_fences(&self) -> Vec<AdmissionFence> {
+        self.durable
+            .as_ref()
+            .and_then(durable::DurableCustody::admission_fence)
+            .into_iter()
+            .collect()
     }
 
     /// The owner change in progress on this grant authority's publication,

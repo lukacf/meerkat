@@ -262,6 +262,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An access configuration that names the new `audit.view` action is refused
   by earlier releases (unknown action): keep it out of a configuration an
   earlier gateway may still load.
+- Downgrade: Meta 0.9.10 does not read the gating state `rpc_gateway`
+  keeps (it keeps gating in memory), so after a rollback its pending
+  approvals and gating audit are missing, and a later start of this
+  release restores the state stored before the rollback. Decide pending
+  approvals before rolling back.
+- Downgrade: Meta 0.9.10 reads a memory record that names the console
+  person who wrote it (`"author": "operator"` with a `principal`) as
+  written by the operator: it shows no name, and the record keeps the
+  name. Nothing needs doing first.
 
 ### Added
 
@@ -476,10 +485,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`local-accounts`). The operator signs in as before, with an empty account
   name, and now signs in as a person.
 
-- The stock gateways keep the gating owner's state (pending approvals and
-  the gating audit) in the realm's metadata store across restarts.
-  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
-  embedded runtime; a host that persists `gating_state_snapshot` itself
+- `rpc_gateway` started with a `persistent_state` directory keeps the
+  gating owner's state (pending approvals and the gating audit) in that
+  directory's metadata store, so it survives a restart. `meta_gateway`,
+  with persistent sessions too, and `rpc_gateway` without
+  `persistent_state` keep it in memory, as before: after a restart there
+  is no pending approval and the gating audit is empty (see Known
+  limitations). `UnifiedRuntimeBuilder::keep_gating_state(true)` does the
+  same for an embedded runtime whose metadata store keeps realm documents
+  across restarts; a host that persists `gating_state_snapshot` itself
   leaves it off.
 - Memory written from the console names the person who wrote it: its
   author, `application` before, is now the operator with the caller's
@@ -626,6 +640,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cannot hold everyone else's sign-in off. A flood through one address can
   still make other people's forms or waiting sign-ins expire early; put a
   console that other computers reach behind a rate-limiting proxy.
+- `meta_gateway` does not yet keep its metadata durably, with persistent
+  sessions too: its console audit log, gating state (pending approvals and
+  the gating audit), metadata cursor and identity records live in memory
+  and start empty after a restart. `rpc_gateway` started with a
+  `persistent_state` directory keeps them in that directory's metadata
+  store.
 
 ## [0.9.10] - 2026-11-04
 

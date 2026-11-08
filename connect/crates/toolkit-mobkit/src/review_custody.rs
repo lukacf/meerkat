@@ -11,7 +11,8 @@ pub(crate) struct ReviewCustody {
 }
 
 impl ReviewCustody {
-    #[cfg(test)]
+    // Only the native host's controls hold a native reviewed entry.
+    #[cfg(all(test, feature = "native-host", unix))]
     pub(crate) fn entered(entry: meerkat_core::approval::review::ReviewedEntryCustody) -> Self {
         Self {
             _entry: Some(Arc::new(entry)),
@@ -20,7 +21,7 @@ impl ReviewCustody {
 
     /// A lifetime witness in place of a native reviewed entry, for controls
     /// that count the holds their custody keeps of it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native-host", unix))]
     pub(crate) fn witness_for_test(entry: Arc<dyn Send + Sync>) -> Self {
         Self {
             _entry: Some(entry),

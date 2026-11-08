@@ -1300,6 +1300,62 @@ async fn an_exempt_fork_of_any_role_is_unwired_and_no_later_seat_targets_it() {
     );
 }
 
+/// A durable fork takes its source's exemption from the definition's wiring
+/// rules. A fork of a member seated exempt, asked for with the default
+/// seating (as an agent's `fork_off` asks for its child), is seated exempt:
+/// unwired, recorded exempt by MobMachine, and no later seat is wired to it.
+/// A fork of a member the rules apply to keeps the seating its request
+/// states, and is wired as any member of its role.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_of_an_exempt_member_is_seated_exempt() {
+    let mob = WiringMob::new("exempt-source", sample_definition_with_auto_wire(), false).await;
+    let lead = AgentIdentity::from("source-lead");
+    let worker = AgentIdentity::from("source-worker");
+    spawn_settled(&mob.handle, "lead", &lead).await;
+    spawn_settled(&mob.handle, "worker", &worker).await;
+    let side = AgentIdentity::from("source-side");
+    mob.fork_when_idle(&worker, exempt(spec("worker", &side)))
+        .await;
+    assert!(mob.machine_exempt(&side), "the exempt source is seated");
+
+    let side_child = AgentIdentity::from("source-side-child");
+    mob.fork_when_idle(&side, spec("worker", &side_child)).await;
+    assert_eq!(
+        mob.roster_definition_wiring(&side_child).await,
+        crate::DefinitionWiring::Exempt,
+        "a fork of an exempt member is seated exempt"
+    );
+    assert!(
+        mob.machine_exempt(&side_child),
+        "MobMachine records it exempt"
+    );
+    assert!(
+        mob.wired_to(&side_child).await.is_empty(),
+        "a fork of an exempt member takes no declared edge"
+    );
+
+    let worker_child = AgentIdentity::from("source-worker-child");
+    mob.fork_when_idle(&worker, spec("worker", &worker_child))
+        .await;
+    assert_eq!(
+        mob.roster_definition_wiring(&worker_child).await,
+        crate::DefinitionWiring::Applies,
+        "a fork of a member the rules apply to keeps its requested seating"
+    );
+
+    let seated = AgentIdentity::from("source-later-worker");
+    mob.seat(vec![spec("worker", &seated)]).await;
+    assert_eq!(
+        mob.edges(),
+        BTreeSet::from([
+            pair(&worker, &lead),
+            pair(&worker_child, &lead),
+            pair(&seated, &lead),
+        ]),
+        "only the members the rules apply to are wired to the orchestrator"
+    );
+}
+
 /// The exemption is durable. A respawn of an exempt member keeps it,
 /// unwired; after a restart the member is still exempt (its roster entry
 /// from its `MemberSpawned` row, MobMachine from the row's replay), and a

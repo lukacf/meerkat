@@ -9524,6 +9524,8 @@ fn parse_gateway_runtime_options(
         // parse runs (see `run_persistent_inner`).
         "native_realm",
         "member_auth_binding",
+        // Parsed typed by `crate::tool_grant_options` before this parse runs.
+        "tool_grants",
         "http_listen",
         "http_public_base_url",
         "allow_remote",
@@ -17675,6 +17677,16 @@ external_addressable = true
     // before that file is read.
     let member_route = crate::native_realm::MemberRoute::from_init_params(&params)
         .map_err(|refusal| fail_member_route(&request_id, &refusal))?;
+    // The scoped tool grants' maximum lifetime, parsed typed so its refusal
+    // names its kind in `error.data`. The runtime takes it as its grant
+    // policy once the runtime exists, before any session.
+    let tool_grant_options = crate::tool_grant_options::ToolGrantLaunchOptions::parse(
+        params
+            .get("runtime_options")
+            .and_then(|options| options.get("tool_grants")),
+        "runtime_options.tool_grants",
+    )
+    .map_err(|error| fail_init_with_data(&request_id, -32602, error.to_string(), error.data()))?;
     let mut gateway_options = parse_gateway_runtime_options(&params, persistent_state.as_deref())
         .map_err(|e| fail_init(&request_id, -32602, e))?;
     gateway_options.native_realm = member_route.native_realm;
@@ -18290,6 +18302,9 @@ external_addressable = true
                 )
             })?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         // Match the ephemeral path's capability mask — only comms is enabled
         // by default. Apps control additional capabilities via their mob
         // definition profiles, not the gateway factory.
@@ -18738,6 +18753,9 @@ external_addressable = true
                 )
             })?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         let process_local_session_store: Arc<dyn meerkat::SessionStore> =
             Arc::new(meerkat::MemoryStore::new());
         let job_store: Arc<dyn meerkat::DetachedJobStore> =

@@ -4,6 +4,18 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.grant_tool(identity, *, tool=None, family=None,
+  duration_ms=None, expires_at_ms=None, reason=None, decision_ref=None)`,
+  `revoke_tool_grant(grant_id, *, reason=None)`,
+  `list_tool_grants(identity, *, include_ended=False)` and
+  `tool_grant_audit(identity, *, after_sequence=None, limit=None)` call
+  `meta/tool_grants/{grant, revoke, list, audit}`: the scoped tool grants of
+  the identities a gateway serves. A grant names exactly one of `tool` and
+  `family` (a `ValueError` otherwise, nothing sent). A refused request
+  raises `ToolGrantRequestRefusedError` (`refusal`, `refusal_kind`; the
+  constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
+  `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

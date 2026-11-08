@@ -39,6 +39,7 @@ import {
   FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
   SYSTEM_ROW_PRUNE_REFUSED_KIND,
   TRANSCRIPT_REVISION_CONFLICT_KIND,
+  TOOL_GRANT_REQUEST_REFUSED_KIND,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -53,6 +54,7 @@ import {
   MemberReloadRequiredError,
   SystemRowPruneRefusedError,
   TranscriptRevisionConflictError,
+  ToolGrantRequestRefusedError,
   ConsoleTimelineReplayUnavailableError,
   RegisteredSpecChangedError,
   StaleScopeError,
@@ -990,6 +992,14 @@ function rpcErrorFromPayload(
   ) {
     return new TranscriptRevisionConflictError(message, rid, method, err.data);
   }
+  if (
+    code === -32602 &&
+    typeof err.data === "object" &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).kind === TOOL_GRANT_REQUEST_REFUSED_KIND
+  ) {
+    return new ToolGrantRequestRefusedError(message, rid, method, err.data);
+  }
   if (code === WORKGRAPH_UNAVAILABLE_CODE) {
     return new WorkGraphUnavailableError(message, rid, method, err.data);
   }
@@ -1020,6 +1030,19 @@ function rpcErrorFromPayload(
     return MobEventsStaleError.fromRpcError(rpcError);
   }
   return rpcError;
+}
+
+/**
+ * Options of {@link MetaRuntime.grantTool}: exactly one of `tool` and
+ * `family`, and exactly one of `durationMs` and `expiresAtMs`.
+ */
+export interface GrantToolOptions {
+  tool?: string;
+  family?: string;
+  durationMs?: number;
+  expiresAtMs?: number;
+  reason?: string;
+  decisionRef?: string;
 }
 
 /**
@@ -2651,6 +2674,89 @@ export class MetaRuntime {
     }
     if (options.note !== undefined) params.note = options.note;
     const raw = await this._rpc("meta/prune_member_system_rows", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Grant one of an identity's grant-gated tool names or tool families.
+   *
+   * Name exactly one of `tool` and `family`: the gate the member's next
+   * build resolves (its profile's `tools.grant_gated` joined with its
+   * role's) must name it. Bound the grant by exactly one of `durationMs` and
+   * `expiresAtMs` (UNIX ms), at most the gateway's maximum lifetime.
+   * `decisionRef` records your own reference to the decision you made before
+   * issuing, as attribution. The grant applies across the member's respawns
+   * and the gateway's restarts, opens the tool at the member's next model
+   * request and wakes nothing. Resolves `{grant}`; a refused request rejects
+   * with {@link ToolGrantRequestRefusedError}.
+   */
+  async grantTool(
+    identity: string,
+    options: GrantToolOptions,
+  ): Promise<Record<string, unknown>> {
+    if ((options.tool === undefined) === (options.family === undefined)) {
+      throw new TypeError("grantTool names exactly one of tool and family");
+    }
+    const params: Record<string, unknown> = {
+      identity,
+      target:
+        options.tool !== undefined
+          ? { kind: "tool", name: options.tool }
+          : { kind: "family", family: options.family },
+    };
+    if (options.durationMs !== undefined) params.duration_ms = options.durationMs;
+    if (options.expiresAtMs !== undefined) params.expires_at_ms = options.expiresAtMs;
+    if (options.reason !== undefined) params.reason = options.reason;
+    if (options.decisionRef !== undefined) params.decision_ref = options.decisionRef;
+    const raw = await this._rpc("meta/tool_grants/grant", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Revoke one of this gateway's identity grants. Idempotent: revoking a
+   * grant that already ended answers it as it stands. Resolves
+   * `{grant, changed}`; a grant this gateway's mob does not hold rejects
+   * with {@link ToolGrantRequestRefusedError} (`not_found`).
+   */
+  async revokeToolGrant(
+    grantId: string,
+    options: { reason?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { grant_id: grantId };
+    if (options.reason !== undefined) params.reason = options.reason;
+    const raw = await this._rpc("meta/tool_grants/revoke", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * List an identity's scoped tool grants, each due one read as expired.
+   * Ended grants are listed only with `includeEnded`. Resolves
+   * `{grants, unreadable?}`.
+   */
+  async listToolGrants(
+    identity: string,
+    options: { includeEnded?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/tool_grants/list", {
+      identity,
+      include_ended: options.includeEnded ?? false,
+    });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Read one page of an identity's grant audit log. Resolves
+   * `{rows, unreadable?, next_sequence?}`; pass `next_sequence` as
+   * `afterSequence` to read the next page.
+   */
+  async toolGrantAudit(
+    identity: string,
+    options: { afterSequence?: number; limit?: number } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { identity };
+    if (options.afterSequence !== undefined) params.after_sequence = options.afterSequence;
+    if (options.limit !== undefined) params.limit = options.limit;
+    const raw = await this._rpc("meta/tool_grants/audit", params);
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 

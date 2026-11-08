@@ -34,6 +34,7 @@ pub(crate) mod schedule_methods;
 mod session_store_methods;
 pub(crate) mod storage_methods;
 mod subscribe_methods;
+pub(crate) mod tool_grant_methods;
 pub(crate) mod topology_methods;
 pub(crate) mod workgraph_methods;
 
@@ -2114,13 +2115,16 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// member declaration mutation (an identity adoption or a tool declaration
 /// apply, [`mob_methods::is_member_declaration_mutating_method`]), which
 /// writes durable member intent and schedules the identity convergence that
-/// can replace a stored member; a WorkGraph write
+/// can replace a stored member; a scoped tool grant write
+/// ([`tool_grant_methods::is_tool_grant_mutating_method`]), which writes the
+/// runtime's grant rows and can seat a member; a WorkGraph write
 /// ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
 /// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
-/// still answer: the declaration read, the WorkGraph reads, the draft reads,
-/// a deploy plan, a structural validation and a BigQuery read among them.
+/// still answer: the declaration read, the grant reads, the WorkGraph reads,
+/// the draft reads, a deploy plan, a structural validation and a BigQuery
+/// read among them.
 pub(crate) fn candidate_launch_refuses(
     method: &str,
     params: &Value,
@@ -2128,6 +2132,7 @@ pub(crate) fn candidate_launch_refuses(
 ) -> bool {
     CANDIDATE_LAUNCH_REFUSED_METHODS.contains(&method)
         || mob_methods::is_member_declaration_mutating_method(method)
+        || tool_grant_methods::is_tool_grant_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
         || candidate_launch_refuses_mobpack_change(method, params, state_dir)
@@ -2725,6 +2730,12 @@ async fn handle_unified_rpc_json_inner(
             // it cannot SERVE these. Advertising what a surface cannot serve is the
             // same defect as serving what it does not advertise.
             methods.extend_from_slice(mob_methods::MEMBER_DECLARATION_METHODS);
+            // The scoped tool grant family, derived from its registry: a grant
+            // names an identity the identity runtime serves, so the family is
+            // served and advertised with it.
+            if identity_ctx.is_some() || runtime.identity_runtime_ref().is_some() {
+                methods.extend_from_slice(tool_grant_methods::TOOL_GRANT_METHODS);
+            }
             // Workgraph methods are advertised only when the service is
             // configured (`runtime_options.workgraph = false` or a failed
             // store open leave them off).
@@ -4037,6 +4048,44 @@ async fn handle_unified_rpc_json_inner(
                         code: -32601,
                         message: format!(
                             "{method} is registered in the member-declaration family but has no dispatcher arm"
+                        ),
+                        data: None,
+                    }),
+                },
+            }
+        }
+        // ONE arm for the scoped tool grant family, from its registry, served
+        // with the identity runtime as the capabilities advertise it. The
+        // stdio host is the operator: no caller and no access view.
+        method
+            if tool_grant_methods::is_tool_grant_method(method)
+                && (identity_ctx.is_some() || runtime.identity_runtime_ref().is_some()) =>
+        {
+            let surface = tool_grant_methods::ToolGrantSurface {
+                mob: runtime.mob_runtime(),
+                identity_runtime: identity_ctx
+                    .map(|ctx| ctx.runtime.runtime())
+                    .or_else(|| runtime.identity_runtime_ref()),
+                caller: None,
+                access: None,
+            };
+            match tool_grant_methods::handle_tool_grant_rpc(
+                &surface,
+                method,
+                response_id.clone(),
+                &request.params,
+            )
+            .await
+            {
+                Some(response) => response,
+                None => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: format!(
+                            "{method} is registered in the tool grant family but has no dispatcher arm"
                         ),
                         data: None,
                     }),

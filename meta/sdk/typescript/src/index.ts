@@ -109,6 +109,7 @@ export type {
   MemberRunStopContributor,
   MemberRunStopReceipt,
   MemberRuntimeState,
+  GrantToolOptions,
 } from "./runtime.js";
 
 // -- Data models ----------------------------------------------------------
@@ -200,6 +201,8 @@ export {
   SYSTEM_ROW_PRUNE_REFUSED_KIND,
   SYSTEM_ROW_PRUNE_REFUSAL_CAUSES,
   TRANSCRIPT_REVISION_CONFLICT_KIND,
+  TOOL_GRANT_REQUEST_REFUSED_KIND,
+  TOOL_GRANT_REQUEST_REFUSAL_KINDS,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -220,6 +223,7 @@ export {
   FlowRunIdempotencyConflictError,
   SystemRowPruneRefusedError,
   TranscriptRevisionConflictError,
+  ToolGrantRequestRefusedError,
   InitInProgressError,
   WorkGraphUnavailableError,
   WorkGraphConflictError,

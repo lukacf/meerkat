@@ -2340,6 +2340,10 @@ fn r68_f9_the_identity_runtime_keeps_no_wake_policy_of_its_own() {
             include_str!("build_preparation.rs"),
         ),
         (
+            "identity_first/runtime/tool_grant_seat.rs",
+            include_str!("tool_grant_seat.rs"),
+        ),
+        (
             "identity_first/orchestrator.rs",
             include_str!("../orchestrator.rs"),
         ),

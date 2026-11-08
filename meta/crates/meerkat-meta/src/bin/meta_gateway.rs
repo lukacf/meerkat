@@ -113,6 +113,12 @@ struct InitParams {
     /// (the default) and `persistent_sessions: true`.
     #[serde(default)]
     mob_announcements: Option<Value>,
+    /// The scoped tool grants' maximum lifetime: the object `rpc_gateway`
+    /// takes as `runtime_options.tool_grants` (`{max_lifetime_ms?}`), through
+    /// the same parser and refusal. The runtime takes it as its grant policy
+    /// at init; without it the runtime's default of 24 hours stands.
+    #[serde(default)]
+    tool_grants: Option<Value>,
     /// Member role migrations this activation is authorized to perform, e.g.
     /// `[{"identity": "domain:automation", "from_role": "domain"}]`.
     ///
@@ -994,6 +1000,11 @@ fn parse_init_request(line: &str) -> anyhow::Result<(Value, InitParams)> {
         meerkat_meta::console_auth_config::parse_console_auth_config(auth)
             .map_err(|error| anyhow!("{error}"))?;
     }
+    meerkat_meta::tool_grant_options::ToolGrantLaunchOptions::parse(
+        parsed.tool_grants.as_ref(),
+        "tool_grants",
+    )
+    .map_err(|error| anyhow!("{error}"))?;
     if let Some(root) = parsed.provider_credentials_root.as_deref() {
         meerkat_meta::gateway_composition::validate_provider_credentials_root(root)
             .map_err(|error| anyhow!("provider_credentials_root: {error}"))?;
@@ -2704,6 +2715,13 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             })
         })
         .transpose()?;
+    // The scoped tool grants' maximum lifetime, checked at parse; the
+    // runtime takes it as its grant policy once the runtime exists.
+    let tool_grant_options = meerkat_meta::tool_grant_options::ToolGrantLaunchOptions::parse(
+        params.tool_grants.as_ref(),
+        "tool_grants",
+    )
+    .map_err(|error| refuse_init(&request_id, -32602, error.to_string()))?;
     // Doctrine default: the identity substrate is ON. `identity_first: false`
     // remains as a one-release opt-out for deployments that need the pure
     // mob-plane console back (changelog-flagged).
@@ -3010,6 +3028,9 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             &member_mcp_custody,
             provider_auth_persistence.clone(),
         )?;
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         // Pair the schedule wiring with a clone of the runtime adapter so the
         // firing host can be spawned once the runtime has booted (below).
         let schedule_host_inputs =
@@ -3107,6 +3128,9 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             )
             .context("failed to acquire the gateway runtime machine")?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let mut factory = AgentFactory::new(&runtime_root)
             .session_store(session_store.clone())

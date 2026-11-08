@@ -136,6 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   as any declared identity is. 0.9.10 kept the add's owed state across a
   restart, read back from its durable mark.
 
+- Console access: the new action `agent.tool_grants.manage` (grant and
+  revoke an agent's scoped tool grants) joins the `agent` family, so every
+  rule that names `agent.*` or `*` covers it, allow and deny alike: a
+  principal such a rule allows on an agent may now grant tools to it. See
+  Upgrade.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -308,6 +314,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A host that added a member held and wants it held again after a restart
   holds it through its held bootstrap or a re-add (see Breaking).
 
+- Access configurations: a rule that names `agent.*` or `*` now covers
+  `agent.tool_grants.manage`. Where such a rule should not let its
+  principals grant tools, add a `deny` rule for `agent.tool_grants.manage`
+  beside it, or name the `agent` actions it allows one by one.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -408,6 +419,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   bridge without run-start holds holds none (the one-member read answers
   from the list read), and one without build preparation records no
   cause.
+
+- `meta/tool_grants/grant`, `revoke`, `list` and `audit`, on the stdio
+  gateway and on `POST /console/rpc`: Meerkat's scoped tool grants for the
+  identities a gateway serves. A grant opens a tool or a built-in tool
+  family the member's profile gates (`[profiles.*.tools] grant_gated`, its
+  own gate joined with its role's) for a fixed window, across respawns and
+  restarts, in the mob's running incarnation; it wakes nothing and applies at
+  the member's next model request. A host may record its own reference to
+  the decision behind a grant (`decision_ref`). A registered identity Core
+  holds no member of (its member was retired) is seated by the grant, as a
+  delivery seats it, Dormant and building nothing. Meta keeps no grant
+  state. Every refusal of a request is `-32602` with the typed
+  `tool_grant_request_refused` refusal; an identity created at runtime
+  (store-owned) is `subject_unknown`. On the Console, grant and revoke need
+  `agent.tool_grants.manage` on the identity and record the signed-in
+  principal as the grant's caller, list and audit need `agent.view`, and a
+  read-only Console refuses the writes; a candidate launch refuses them too
+  (`candidate_launch`).
+- `runtime_options.tool_grants = {max_lifetime_ms}` on the stdio gateway,
+  and the top-level `tool_grants` init param on `meta_gateway`: the longest
+  window a grant may have (24 hours by default), set as the runtime's grant
+  policy at init. An invalid maximum refuses init (`-32602`,
+  `tool_grant_lifetime_invalid` on the stdio gateway).
+- Python `MetaRuntime.grant_tool`, `revoke_tool_grant`, `list_tool_grants`
+  and `tool_grant_audit`, TypeScript `grantTool`, `revokeToolGrant`,
+  `listToolGrants` and `toolGrantAudit`, with `ToolGrantRequestRefusedError`
+  and the closed `TOOL_GRANT_REQUEST_REFUSAL_KINDS` in both SDKs.
+- Rust: `meerkat_meta::tool_grant_options` (`ToolGrantLaunchOptions`, the
+  launch option's parser, and `TOOL_GRANT_LIFETIME_INVALID_KIND`) and the
+  access action constant `ACTION_AGENT_TOOL_GRANTS_MANAGE`.
+- Meta's members build with their profiles' tool grant gate, and Meta now
+  has grant methods: the 0.9.10 known limitation "Meta builds its members
+  with no tool grant gate and has no grant methods" no longer applies.
 
 ### Changed
 

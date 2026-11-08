@@ -105,6 +105,7 @@ mod test_wait;
 mod tool_application_test_support;
 pub mod tool_artifacts;
 pub mod tool_compose;
+pub mod tool_grant_options;
 pub mod topology_control;
 pub mod types;
 pub mod unified_runtime;

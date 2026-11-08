@@ -32,6 +32,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.respawn` | Respawn the agent |
 | `agent.retire` | Retire / force-cancel / delete the agent |
 | `agent.reset` | Reset durable agent state |
+| `agent.tool_grants.manage` | Grant and revoke the agent's [scoped tool grants](/api/rpc#scoped-tool-grants) (`meta/tool_grants/grant` and `revoke`); listing them and reading their audit needs `agent.view` |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
@@ -49,6 +50,10 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 - **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
 
 Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
+
+A pattern covers the actions a later release adds to its family: a rule
+with `agent.*` or `*` also covers `agent.tool_grants.manage`, allow and deny
+alike.
 
 WorkGraph actions are resource-less grants over the whole WorkGraph, not
 per-agent permissions. Console mutations also require the independent

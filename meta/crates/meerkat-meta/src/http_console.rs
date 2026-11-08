@@ -38,11 +38,11 @@ use std::time::{Duration, Instant};
 use crate::access::{
     ACCESS_ACTIONS, ACTION_AGENT_MEMORY_DELETE, ACTION_AGENT_MEMORY_READ,
     ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN, ACTION_AGENT_RETIRE,
-    ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_GATING_DECIDE,
-    ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW, ACTION_MOB_MEMORY_READ,
-    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
-    ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessResource, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_TOOL_GRANTS_MANAGE, ACTION_AGENT_VIEW,
+    ACTION_GATING_DECIDE, ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW,
+    ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN,
+    ACTION_SCHEDULE_MANAGE, ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController,
+    AccessResource, AccessView, AgentResourceAttributes, LiveAccessView,
 };
 // The test modules build access rules and groups through `use super::*`.
 #[cfg(test)]
@@ -4161,6 +4161,9 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
     if crate::rpc::mob_methods::is_member_declaration_mutating_method(method) {
         return true;
     }
+    if crate::rpc::tool_grant_methods::is_tool_grant_mutating_method(method) {
+        return true;
+    }
     if crate::rpc::topology_methods::is_topology_mutating_method(method) {
         return true;
     }
@@ -4888,6 +4891,15 @@ fn console_rpc_access_requirements(
         | crate::rpc::mob_methods::APPLY_MEMBER_TOOL_DECLARATION => {
             one(ACTION_RUNTIME_ADMIN, None)
         }
+        // A scoped tool grant needs `agent.tool_grants.manage` on its
+        // identity, and the grant reads what viewing the identity needs. A
+        // revoke names no identity: its handler checks the manage action on
+        // the identity of the grant it reads.
+        crate::rpc::tool_grant_methods::TOOL_GRANTS_GRANT => {
+            one(ACTION_AGENT_TOOL_GRANTS_MANAGE, identity)
+        }
+        crate::rpc::tool_grant_methods::TOOL_GRANTS_LIST
+        | crate::rpc::tool_grant_methods::TOOL_GRANTS_AUDIT => one(ACTION_AGENT_VIEW, identity),
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
@@ -9093,7 +9105,7 @@ fn console_live_only_fallback_allowed(
 }
 
 /// The access-denied error for `action` on a member.
-fn member_access_denied(action: &str, resource: Option<String>) -> JsonRpcError {
+pub(crate) fn member_access_denied(action: &str, resource: Option<String>) -> JsonRpcError {
     JsonRpcError {
         code: ACCESS_DENIED_RPC_CODE,
         message: format!("access denied: {action}"),
@@ -10886,6 +10898,32 @@ async fn handle_console_runtime_rpc_with_visibility(
         }
     }
 
+    // The scoped tool grant family, served by the same handlers as the stdin
+    // surface and with the identity runtime, after the gates above. A grant
+    // records the signed-in principal as its caller; a revoke, which names
+    // no identity, checks `agent.tool_grants.manage` on its grant's identity
+    // once it has read the grant.
+    if identity_runtime.is_some()
+        && crate::rpc::tool_grant_methods::is_tool_grant_method(request.method.as_str())
+    {
+        let surface = crate::rpc::tool_grant_methods::ToolGrantSurface {
+            mob: runtime,
+            identity_runtime: identity_runtime.as_ref(),
+            caller: authenticated_principal,
+            access: access_view,
+        };
+        if let Some(response) = crate::rpc::tool_grant_methods::handle_tool_grant_rpc(
+            &surface,
+            request.method.as_str(),
+            response_id.clone(),
+            &request.params,
+        )
+        .await
+        {
+            return response_value(response_id, response.result, response.error);
+        }
+    }
+
     match request.method.as_str() {
         "meta/capabilities" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             // A decision (a gate, a quarantine review, a goal confirmation)
@@ -10947,6 +10985,19 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/inspect_identity",
                     "meta/send_status",
                 ]);
+                // The grant family, derived from its registry and split by its
+                // own classifier, as the member declarations are.
+                methods.extend(
+                    crate::rpc::tool_grant_methods::TOOL_GRANT_METHODS
+                        .iter()
+                        .copied()
+                        .filter(|method| {
+                            can_mutate
+                                || !crate::rpc::tool_grant_methods::is_tool_grant_mutating_method(
+                                    method,
+                                )
+                        }),
+                );
                 if let Some(identity_runtime) = &identity_runtime
                     && identity_runtime.agent_memory_supports_recall().await
                 {

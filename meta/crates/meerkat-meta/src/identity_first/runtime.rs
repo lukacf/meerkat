@@ -67,6 +67,7 @@ mod records;
 mod roster_pass_tests;
 #[cfg(test)]
 mod seat_tests;
+mod tool_grant_seat;
 use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
 pub(crate) use records::host_pending_members_before_build;

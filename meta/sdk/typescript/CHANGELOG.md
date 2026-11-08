@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `MetaRuntime.grantTool(identity, { tool | family, durationMs |
+  expiresAtMs, reason, decisionRef })` (options type `GrantToolOptions`),
+  `revokeToolGrant(grantId, { reason })`,
+  `listToolGrants(identity, { includeEnded })` and
+  `toolGrantAudit(identity, { afterSequence, limit })` call
+  `meta/tool_grants/{grant, revoke, list, audit}`: the scoped tool grants of
+  the identities a gateway serves. A grant names exactly one of `tool` and
+  `family` (a `TypeError` otherwise, nothing sent). A refused request
+  rejects with `ToolGrantRequestRefusedError` (`refusal`, `refusalKind`; the
+  constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
+  `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

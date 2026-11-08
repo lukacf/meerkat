@@ -50,6 +50,10 @@ pub const ACTION_AGENT_RESPAWN: &str = "agent.respawn";
 pub const ACTION_AGENT_RETIRE: &str = "agent.retire";
 /// Reset an agent's durable state.
 pub const ACTION_AGENT_RESET: &str = "agent.reset";
+/// Issue and revoke an agent's scoped tool grants
+/// (`meta/tool_grants/grant` and `meta/tool_grants/revoke`). Reading them
+/// (`list`, `audit`) rides `agent.view`.
+pub const ACTION_AGENT_TOOL_GRANTS_MANAGE: &str = "agent.tool_grants.manage";
 /// Read gating queues and audit history.
 pub const ACTION_GATING_VIEW: &str = "gating.view";
 /// Decide pending gating approvals.
@@ -114,6 +118,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_AGENT_RESPAWN,
     ACTION_AGENT_RETIRE,
     ACTION_AGENT_RESET,
+    ACTION_AGENT_TOOL_GRANTS_MANAGE,
     ACTION_GATING_VIEW,
     ACTION_GATING_DECIDE,
     ACTION_WORKGRAPH_VIEW,

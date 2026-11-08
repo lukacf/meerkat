@@ -41,6 +41,7 @@ from .errors import (
     FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
     SYSTEM_ROW_PRUNE_REFUSED_KIND,
     TRANSCRIPT_REVISION_CONFLICT_KIND,
+    TOOL_GRANT_REQUEST_REFUSED_KIND,
     WORKGRAPH_CONFLICT_CODE,
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
@@ -55,6 +56,7 @@ from .errors import (
     MemberReloadRequiredError,
     SystemRowPruneRefusedError,
     TranscriptRevisionConflictError,
+    ToolGrantRequestRefusedError,
     CONSOLE_TIMELINE_REPLAY_UNAVAILABLE_CODE,
     ConsoleTimelineReplayUnavailableError,
     RegisteredSpecChangedError,
@@ -474,6 +476,17 @@ def _rpc_error_from_payload(
         and data.get("kind") == TRANSCRIPT_REVISION_CONFLICT_KIND
     ):
         return TranscriptRevisionConflictError(
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+    if (
+        code == -32602
+        and isinstance(data, dict)
+        and data.get("kind") == TOOL_GRANT_REQUEST_REFUSED_KIND
+    ):
+        return ToolGrantRequestRefusedError(
             message,
             request_id=request_id,
             method=method,
@@ -1894,6 +1907,101 @@ class MetaRuntime:
         if note is not None:
             params["note"] = note
         raw = await self._rpc("meta/prune_member_system_rows", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def grant_tool(
+        self,
+        identity: str,
+        *,
+        tool: str | None = None,
+        family: str | None = None,
+        duration_ms: int | None = None,
+        expires_at_ms: int | None = None,
+        reason: str | None = None,
+        decision_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Grant one of an identity's grant-gated tool names or tool families.
+
+        Name exactly one of ``tool`` and ``family``: the gate the member's
+        next build resolves (its profile's ``tools.grant_gated`` joined with
+        its role's) must name it. Bound the grant by exactly one of
+        ``duration_ms`` and ``expires_at_ms`` (UNIX ms), at most the
+        gateway's maximum lifetime. ``decision_ref`` records your own
+        reference to the decision you made before issuing, as attribution.
+        The grant applies across the member's respawns and the gateway's
+        restarts, opens the tool at the member's next model request and wakes
+        nothing. Returns ``{"grant": {...}}``.
+
+        Raises :class:`ToolGrantRequestRefusedError` for a refused request.
+        """
+        if (tool is None) == (family is None):
+            raise ValueError("name exactly one of tool and family")
+        target: dict[str, Any] = (
+            {"kind": "tool", "name": tool}
+            if tool is not None
+            else {"kind": "family", "family": family}
+        )
+        params: dict[str, Any] = {"identity": identity, "target": target}
+        if duration_ms is not None:
+            params["duration_ms"] = duration_ms
+        if expires_at_ms is not None:
+            params["expires_at_ms"] = expires_at_ms
+        if reason is not None:
+            params["reason"] = reason
+        if decision_ref is not None:
+            params["decision_ref"] = decision_ref
+        raw = await self._rpc("meta/tool_grants/grant", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def revoke_tool_grant(
+        self, grant_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        """Revoke one of this gateway's identity grants.
+
+        Idempotent: revoking a grant that already ended answers it as it
+        stands. Returns ``{"grant": {...}, "changed": bool}``. Raises
+        :class:`ToolGrantRequestRefusedError` (``not_found``) for a grant
+        this gateway's mob does not hold.
+        """
+        params: dict[str, Any] = {"grant_id": grant_id}
+        if reason is not None:
+            params["reason"] = reason
+        raw = await self._rpc("meta/tool_grants/revoke", params)
+        return raw if isinstance(raw, dict) else {}
+
+    async def list_tool_grants(
+        self, identity: str, *, include_ended: bool = False
+    ) -> dict[str, Any]:
+        """List an identity's scoped tool grants, each due one read as expired.
+
+        Ended (expired or revoked) grants are listed only with
+        ``include_ended``. Returns ``{"grants": [...]}``, with an
+        ``"unreadable"`` list naming any stored grant the gateway cannot read.
+        """
+        raw = await self._rpc(
+            "meta/tool_grants/list",
+            {"identity": identity, "include_ended": include_ended},
+        )
+        return raw if isinstance(raw, dict) else {}
+
+    async def tool_grant_audit(
+        self,
+        identity: str,
+        *,
+        after_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Read one page of an identity's grant audit log.
+
+        Returns ``{"rows": [...]}``, with ``"next_sequence"`` while more rows
+        may follow: pass it as ``after_sequence`` to read the next page.
+        """
+        params: dict[str, Any] = {"identity": identity}
+        if after_sequence is not None:
+            params["after_sequence"] = after_sequence
+        if limit is not None:
+            params["limit"] = limit
+        raw = await self._rpc("meta/tool_grants/audit", params)
         return raw if isinstance(raw, dict) else {}
 
     async def reconcile(self) -> Any:

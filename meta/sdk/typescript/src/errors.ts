@@ -251,6 +251,25 @@ export const SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: ReadonlySet<string> = new Set([
  * `{kind: TRANSCRIPT_REVISION_CONFLICT_KIND, expected, actual}`.
  */
 export const TRANSCRIPT_REVISION_CONFLICT_KIND = "transcript_revision_conflict" as const;
+/**
+ * `meta/tool_grants/*` refused a request (JSON-RPC invalid params, `-32602`);
+ * nothing was granted or revoked. The error data is
+ * `{kind: TOOL_GRANT_REQUEST_REFUSED_KIND, tool_grant_request_refusal: {kind, ...}}`.
+ */
+export const TOOL_GRANT_REQUEST_REFUSED_KIND = "tool_grant_request_refused" as const;
+/** The grant request refusal kinds, a closed vocabulary: a new kind is a breaking change. */
+export const TOOL_GRANT_REQUEST_REFUSAL_KINDS: ReadonlySet<string> = new Set([
+  "subject_unknown",
+  "target_not_gated",
+  "server_not_installed",
+  "no_live_grant",
+  "invalid_wait",
+  "invalid_window",
+  "empty_target",
+  "not_found",
+  "invalid_decision_ref",
+  "invalid_page_limit",
+]);
 /** The refusal kinds, a closed vocabulary: a new kind is a breaking change. */
 export const FLOW_ROLE_TARGET_REFUSAL_KINDS: ReadonlySet<string> = new Set([
   "role_not_in_flow",
@@ -732,6 +751,42 @@ export class TranscriptRevisionConflictError extends RpcError {
         : {};
     this.expected = typeof payload.expected === "string" ? payload.expected : null;
     this.actual = typeof payload.actual === "string" ? payload.actual : null;
+  }
+}
+
+/**
+ * A `meta/tool_grants/*` request was refused; nothing changed.
+ *
+ * The gateway answers invalid params (`-32602`) with data `kind`
+ * `"tool_grant_request_refused"`; both must match, and any other `-32602`
+ * answer stays a plain {@link RpcError}. `refusal` is Meerkat's typed
+ * refusal: its `kind` is one of {@link TOOL_GRANT_REQUEST_REFUSAL_KINDS} (for
+ * example `subject_unknown`, `target_not_gated`, `invalid_window` or
+ * `not_found` with its `grant_id`). `refusalKind` is that `kind`, `null` when
+ * the gateway sent none.
+ */
+export class ToolGrantRequestRefusedError extends RpcError {
+  readonly refusal: Record<string, unknown>;
+  readonly refusalKind: string | null;
+
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32602, message, requestId, method, data);
+    this.name = "ToolGrantRequestRefusedError";
+    const payload =
+      typeof data === "object" && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : {};
+    const refusal = payload.tool_grant_request_refusal;
+    this.refusal =
+      typeof refusal === "object" && refusal !== null && !Array.isArray(refusal)
+        ? { ...(refusal as Record<string, unknown>) }
+        : {};
+    this.refusalKind = typeof this.refusal.kind === "string" ? this.refusal.kind : null;
   }
 }
 

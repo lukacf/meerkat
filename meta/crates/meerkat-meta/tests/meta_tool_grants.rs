@@ -655,3 +655,69 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
     assert_eq!(refusal_kind(&refused), "subject_unknown");
     rig.shutdown().await;
 }
+
+/// A mob destroyed and created again under the same id is a new
+/// incarnation: the old incarnation's grants match nothing, the identity's
+/// list under the new one shows none, and the member's build opens nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_destroyed_and_created_again_holds_none_of_the_old_grants() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot(temp.path(), &mob_id).await;
+    rig.grant(json!({
+        "identity": IDENTITY,
+        "target": tool_target(),
+        "duration_ms": TEN_MINUTES_MS,
+    }))
+    .await;
+    rig.runtime
+        .mob_handle()
+        .destroy()
+        .await
+        .expect("the mob is destroyed");
+    rig.shutdown().await;
+
+    let mut rig = boot(temp.path(), &mob_id).await;
+    let listed = rig
+        .rpc(
+            "meta/tool_grants/list",
+            json!({"identity": IDENTITY, "include_ended": true}),
+        )
+        .await;
+    assert!(listed["error"].is_null(), "{listed:#?}");
+    assert_eq!(
+        listed["result"]["grants"],
+        json!([]),
+        "the new incarnation lists none of the old grants: {listed:#?}"
+    );
+    let closed = rig.probe().await;
+    assert_eq!(
+        grant_refusal(&closed),
+        Some("tool_grant_required"),
+        "the new incarnation's member build opens nothing: {closed}"
+    );
+    rig.shutdown().await;
+}
+
+/// The stdio gateway's capabilities list the grant methods it serves.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_capabilities_list_the_tool_grant_methods() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let capabilities = rig.rpc("meta/capabilities", json!({})).await;
+    let methods = capabilities["result"]["methods"]
+        .as_array()
+        .unwrap_or_else(|| panic!("methods: {capabilities:#?}"));
+    for method in [
+        "meta/tool_grants/grant",
+        "meta/tool_grants/revoke",
+        "meta/tool_grants/list",
+        "meta/tool_grants/audit",
+    ] {
+        assert!(
+            methods.contains(&json!(method)),
+            "{method} is advertised: {methods:?}"
+        );
+    }
+    rig.shutdown().await;
+}

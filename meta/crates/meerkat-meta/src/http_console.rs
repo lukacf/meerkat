@@ -33642,6 +33642,45 @@ mod mob_announcement_console_access_tests {
 }
 
 #[cfg(test)]
+mod tool_grant_console_access_tests {
+    use super::*;
+
+    /// A grant on the console needs `agent.tool_grants.manage` on its
+    /// identity and the reads need `agent.view`; a read-only console refuses
+    /// the grant and the revoke. A revoke names no identity, so it has no
+    /// entry gate: its handler checks the identity its grant names.
+    #[test]
+    fn the_console_gates_grant_writes_on_the_manage_action_and_reads_on_view() {
+        let params = json!({ "identity": "agent-a" });
+        assert_eq!(
+            console_rpc_access_requirements("meta/tool_grants/grant", &params),
+            Some(vec![(
+                "agent.tool_grants.manage",
+                Some("agent-a".to_string())
+            )])
+        );
+        for method in ["meta/tool_grants/list", "meta/tool_grants/audit"] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &params),
+                Some(vec![(ACTION_AGENT_VIEW, Some("agent-a".to_string()))]),
+                "{method}"
+            );
+            assert!(!is_console_mutating_rpc_method(method), "{method}");
+        }
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/tool_grants/revoke",
+                &json!({ "grant_id": "g1" })
+            ),
+            None
+        );
+        for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
+            assert!(is_console_mutating_rpc_method(method), "{method}");
+        }
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::expect_used)]
 mod console_access_priming_tests {
     //! Every route records one final access value per console identity, so

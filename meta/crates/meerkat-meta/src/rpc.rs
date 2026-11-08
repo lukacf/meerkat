@@ -8420,6 +8420,31 @@ mod tests {
         }
     }
 
+    /// A candidate launch refuses the grant writes typed (they change the
+    /// grant rows the authoritative launch reads) and still answers the
+    /// grant reads.
+    #[test]
+    fn a_candidate_launch_refuses_grant_writes_and_serves_grant_reads() {
+        for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+        }
+        for method in ["meta/tool_grants/list", "meta/tool_grants/audit"] {
+            assert!(
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .is_none(),
+                "a candidate serves {method}"
+            );
+        }
+    }
+
     /// A candidate's refusal of a session revocation sends the operator to
     /// the authoritative launch.
     #[test]

@@ -1383,6 +1383,17 @@ meerkat_machine_runtime_internal_inputs!(
     RunExecutionLifecycle => [
         SettleRetainedRun,
     ],
+    // The scoped tool grant gate's server gate: each model-request
+    // boundary's extension of the gate by the names a gated MCP server
+    // provides, applied by the visibility owner.
+    VisibilityAuthorityLifecycle => [
+        ExtendToolGrantGate,
+    ],
+    // A grant-time live attach's stage of an MCP server the build's grant
+    // gate gates.
+    ExternalSurfaceLifecycle => [
+        SurfaceStageGatedAdd,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

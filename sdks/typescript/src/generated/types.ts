@@ -883,7 +883,13 @@ export interface ToolGrantTargetFamily {
   kind: "family";
 }
 
-export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
+export interface ToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer;
 
 export interface WireToolGrantSubjectSession {
   kind: "session";
@@ -913,11 +919,17 @@ export interface WireToolGrantTargetFamily {
   names?: string[];
 }
 
+export interface WireToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
 export interface WireToolGrantTargetUnknown {
   kind: "unknown";
 }
 
-export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown;
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown;
 
 export interface WireToolGrantIssuerOperator {
   caller?: string | null;
@@ -938,7 +950,7 @@ export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIss
 
 export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
 
-export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "build" | "unknown";
 
 export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
 
@@ -981,6 +993,8 @@ export interface WireToolGrantAuditEventUnknown {
 }
 
 export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
+
+export type WireToolGrantApplies = "now" | "not_mounted" | "at_next_build" | "unknown";
 
 export interface DecisionAudienceApprover {
   approver_id: string;
@@ -1755,6 +1769,23 @@ export interface WireUnreadableToolGrantAuditRow {
   sequence: number;
 }
 
+export interface WireToolGrantGateEntries {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
+export interface WireToolGrantGateView {
+  gated?: WireToolGrantGateEntries;
+  not_mounted?: WireToolGrantGateEntries;
+}
+
+export interface WireMemberToolGrantGate {
+  next_build: WireToolGrantGateView;
+  running?: WireToolGrantGateView | null;
+}
+
 export interface GrantToolParams {
   decision_ref?: string | null;
   duration_ms?: number | null;
@@ -1765,6 +1796,7 @@ export interface GrantToolParams {
 }
 
 export interface GrantToolResult {
+  applies?: WireToolGrantApplies | null;
   grant: WireToolGrant;
 }
 
@@ -1784,6 +1816,7 @@ export interface ListToolGrantsParams {
 }
 
 export interface ListToolGrantsResult {
+  gate?: WireMemberToolGrantGate | null;
   grants: WireToolGrant[];
   unreadable?: WireUnreadableToolGrant[];
 }
@@ -2395,7 +2428,9 @@ export interface WireMemberCustodyDeferral {
 
 export interface WireGrantGatedTools {
   families?: string[];
+  mcp_servers?: string[];
   tools?: string[];
+  unconfigured_mcp_servers?: boolean;
 }
 
 export interface WireMobToolConfig {

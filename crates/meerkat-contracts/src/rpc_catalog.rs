@@ -488,7 +488,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         methods.extend([
             RpcMethodDescriptor::typed(
                 "tool_grants/grant",
-                "Grant a session's or a mob member identity's grant-gated tool name or built-in tool family for a bounded window",
+                "Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window",
                 "GrantToolParams",
                 "GrantToolResult",
             ),

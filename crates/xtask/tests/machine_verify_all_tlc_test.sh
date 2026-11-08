@@ -580,6 +580,28 @@ if run_part audits-a; then
   TLC_WORKERS="${tlc_workers}" "${mob_operator_grant_audit}" "${MOB_OPERATOR_GRANT_AUDIT_MAX_STEPS:-5}" --mutants
 fi
 
+# The scoped tool grant gate's server half (the gated servers, the
+# unconfigured-servers mode, the ungated servers and the ignored names; the
+# boundary's ExtendToolGrantGate and the grant path's SurfaceStageGatedAdd)
+# is unreachable in the ci sweep, whose ToolNameValues and StringValues are
+# {}, so its guards and invariants hold there only vacuously. A hand-written
+# audit over the same generated model gives one registered session two tool
+# names and two servers and explores every gate install, extension, open set
+# and stage in Idle, under every generated invariant plus: only a gate
+# install shrinks the gated names or changes the servers and the mode, an
+# extension never opens a name and is taken only for a gated server, and the
+# gated stage stages only a gated server. It requires ten witnesses reached
+# and refuses nine seeded defects (--mutants). 5 steps reach every witness.
+tool_grant_gate_audit="${workspace_root}/specs/machines/meerkat_machine/tool_grant_gate_audit.sh"
+if [[ ! -x "${tool_grant_gate_audit}" ]]; then
+  echo "error: tool grant gate audit runner is missing from workspace runfiles: ${tool_grant_gate_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded tool grant gate TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${tool_grant_gate_audit}" "${TOOL_GRANT_GATE_AUDIT_MAX_STEPS:-5}" --mutants
+fi
+
 # The empty-resume retirement verdict (a recovered registration whose resume
 # found nothing to run retires only when it is Session-owned with nothing
 # queued; a Composition-owned one, a mob member, keeps serving) reads the
@@ -1443,8 +1465,11 @@ run_machine_verify() {
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s, plus the retained-run settle audit with --mutants (0.9.11, not
-# yet measured on a hosted runner);
+# 248-375 s (200 s locally with 4 TLC workers), plus the retained-run settle
+# audit with --mutants (0.9.11, not yet measured on a hosted runner) and the
+# scoped tool grant gate audit with --mutants (its runs 144 s locally, not
+# yet measured on a hosted runner): with the gate audit alone, about
+# 430-650 s at that shard's 1.24-1.88x;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;

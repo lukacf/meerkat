@@ -3539,6 +3539,12 @@ runtime_internal_inputs!(
         // by `MeerkatMachine::settle_retained_run`, which answers the
         // machine's verdict.
         SettleRetainedRun,
+        // The scoped tool grant gate's server gate: a model-request boundary
+        // extends the gate with a gated server's names, and a grant-time
+        // live attach stages a gated server through the surface owner. No
+        // caller can ask for either.
+        ExtendToolGrantGate,
+        SurfaceStageGatedAdd,
     ]
 );
 

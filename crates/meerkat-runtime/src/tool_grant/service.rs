@@ -12,12 +12,12 @@
 //! conflict it reloads the row and applies the input once more; a second
 //! conflict is [`ToolGrantServiceError::Conflict`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
+    GatedToolView, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
     ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
 };
 use meerkat_core::types::ToolNameSet;
@@ -529,6 +529,11 @@ impl ToolGrantService {
 
     /// Issue one grant.
     ///
+    /// The service writes the grant row and consults no mob roster: for a
+    /// mob member identity subject, issue the grant through
+    /// `meerkat_mob::MobHandle::grant_member_tool`, which decides it against
+    /// the mob's live roster as it commits.
+    ///
     /// # Errors
     /// [`ToolGrantServiceError::InvalidWindow`] for a window that is past,
     /// empty or longer than the policy's maximum lifetime,
@@ -538,8 +543,7 @@ impl ToolGrantService {
         &self,
         request: ToolGrantRequest,
     ) -> Result<StoredToolGrant, ToolGrantServiceError> {
-        if request.target.names().next().is_none()
-            || request.target.names().any(|name| name.as_str().is_empty())
+        if request.target.is_empty() || request.target.names().any(|name| name.as_str().is_empty())
         {
             return Err(ToolGrantServiceError::EmptyTarget);
         }
@@ -852,10 +856,11 @@ impl ToolGrantService {
         })
     }
 
-    /// A model-request boundary: the gated names of `gated` a live grant of
-    /// `subjects` opens at this moment. A grant the boundary finds past its
-    /// deadline is settled as expired; a row this binary cannot read opens
-    /// nothing.
+    /// A model-request boundary: the gated names of `view` a live grant of
+    /// `subjects` opens at this moment (a name or family target's gated
+    /// names, and a server target's gated names its server provides now). A
+    /// grant the boundary finds past its deadline is settled as expired; a
+    /// row this binary cannot read opens nothing.
     ///
     /// # Errors
     /// `Unavailable` when the grants cannot be read or settled: the gate
@@ -863,7 +868,7 @@ impl ToolGrantService {
     pub(crate) async fn adjudicate_boundary(
         &self,
         subjects: &[ToolGrantSubjectKey],
-        gated: &GatedToolTable,
+        view: &GatedToolView,
     ) -> Result<BoundaryAdjudication, ToolGrantRefusal> {
         let rows = self
             .subject_rows(subjects)
@@ -873,14 +878,7 @@ impl ToolGrantService {
         let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
         let mut adjudication = BoundaryAdjudication::default();
         for read in rows.readable {
-            let covered: Vec<_> = read
-                .row
-                .record
-                .target
-                .names()
-                .filter(|name| gated.is_gated(name.as_str()))
-                .cloned()
-                .collect();
+            let covered = view.covered_by(&read.row.record.target);
             if covered.is_empty() {
                 continue;
             }
@@ -962,7 +960,7 @@ impl ToolGrantService {
         // else the session's.
         let mut refusal_subject = subjects.first().cloned();
         for read in rows.readable {
-            if !read.row.record.target.covers(call.name) {
+            if !read.row.record.target.covers(call.name, call.server) {
                 continue;
             }
             let verdict = apply(&read.row, ToolGrantLifecycleInput::AdmitUse { now_ms }).and_then(
@@ -1005,6 +1003,73 @@ impl ToolGrantService {
         self.record_refusal(refusal_subject.as_ref(), call, &refusal)
             .await;
         Err(refusal)
+    }
+
+    /// Which of the MCP servers `servers` a live server grant of `subjects`
+    /// covers at this moment, with or without a `tools` subset: a build
+    /// attaches a gated server only while one does. Each covering grant is
+    /// adjudicated as a boundary does (`AdmitUse`); one found past its
+    /// deadline is settled as expired by the build. A row this binary cannot
+    /// read covers nothing.
+    ///
+    /// # Errors
+    /// `Unavailable` when the grants cannot be read or settled: the build
+    /// attaches no gated server.
+    pub(crate) async fn granted_servers(
+        &self,
+        subjects: &[ToolGrantSubjectKey],
+        servers: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, ToolGrantRefusal> {
+        let mut granted = BTreeSet::new();
+        if servers.is_empty() {
+            return Ok(granted);
+        }
+        let rows = self
+            .subject_rows(subjects)
+            .await
+            .map_err(|error| unavailable(&error))?;
+        rows.warn_unreadable("build");
+        let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
+        for read in rows.readable {
+            let Some(server) = read
+                .row
+                .record
+                .target
+                .mcp_server()
+                .filter(|server| servers.contains(*server) && !granted.contains(*server))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let (row, effects) = match self
+                .apply_and_commit(
+                    read,
+                    &|| ToolGrantLifecycleInput::AdmitUse { now_ms },
+                    AuditContext::Expiry(ToolGrantExpiryDriver::Build),
+                )
+                .await
+            {
+                Ok(applied) => applied,
+                // A row whose machine refuses to rebuild covers nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "build",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(unavailable(&error)),
+            };
+            if use_verdict(&row, &effects)
+                .map_err(|error| unavailable(&error))?
+                .is_ok()
+            {
+                granted.insert(server);
+            }
+        }
+        Ok(granted)
     }
 
     /// Append a `refused` row for `call` to `subject`'s log. Best effort.

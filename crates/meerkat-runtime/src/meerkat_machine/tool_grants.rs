@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use meerkat_core::tool_grant::{SessionToolGrants, ToolGrantId, ToolGrantSubject};
+use meerkat_core::tool_grant::{
+    InstalledToolGrantGate, RunningToolGrantGate, SessionToolGrants, ToolGrantId, ToolGrantSubject,
+};
 use meerkat_core::types::SessionId;
 
 use super::MeerkatMachine;
@@ -20,6 +22,47 @@ use crate::tool_grant::{
 };
 
 impl MeerkatMachine {
+    /// The scoped tool grant gate the session `session_id` runs now, as its
+    /// machine records it: the gate its build installed, the names a
+    /// boundary since gated for a gated server, the names a live grant
+    /// opened at its last boundary, and the MCP servers its external tool
+    /// surface holds (an add staged or pending, or the server active), read
+    /// from the same state. `None` when the session is not registered here:
+    /// this loads, registers and wakes nothing.
+    pub async fn tool_grant_gate(&self, session_id: &SessionId) -> Option<RunningToolGrantGate> {
+        let authority = {
+            let sessions = self.sessions.read().await;
+            Arc::clone(&sessions.get(session_id)?.dsl_authority)
+        };
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        let attached_servers = state
+            .known_surfaces
+            .iter()
+            .filter(|surface| {
+                state.surface_base_state.get(*surface)
+                    == Some(&super::dsl::ExternalToolSurfaceBaseState::Active)
+                    || state.surface_staged_op.get(*surface)
+                        == Some(&super::dsl::SurfaceStagedOp::Add)
+                    || state.surface_pending_op.get(*surface)
+                        == Some(&super::dsl::SurfacePendingOp::Add)
+            })
+            .cloned()
+            .collect();
+        Some(RunningToolGrantGate {
+            gate: InstalledToolGrantGate {
+                gated: state.tool_grant_gated_names.clone(),
+                gated_servers: state.tool_grant_gated_servers.clone(),
+                gates_unconfigured_servers: state.tool_grant_gates_unconfigured_servers,
+                ungated_servers: state.tool_grant_ungated_servers.clone(),
+                not_mounted_names: state.tool_grant_not_mounted_names.clone(),
+            },
+            open: state.tool_grant_open_names.clone(),
+            attached_servers,
+        })
+    }
     /// This runtime's scoped tool grant service, over its store.
     #[must_use]
     pub fn tool_grant_service(&self) -> Arc<ToolGrantService> {
@@ -47,6 +90,14 @@ impl MeerkatMachine {
     /// it (a session subject is served by its own session). When that
     /// session is served here, its deadline driver is armed for the subject
     /// with the grant's deadline.
+    ///
+    /// Grant a mob member identity through
+    /// `meerkat_mob::MobHandle::grant_member_tool`, which the mob's actor
+    /// decides against its live roster as it commits, in order with the
+    /// retirements that end an identity's grants. This writer, like
+    /// [`ToolGrantService::grant`] with a member subject, does not consult the
+    /// roster: a grant it writes for an identity that has retired is issued,
+    /// and a name seated again in the same incarnation holds it.
     ///
     /// # Errors
     /// The service's refusal.
@@ -157,6 +208,21 @@ impl MeerkatMachine {
             self.tool_grant_deadlines.clone(),
             session_id.clone(),
         ))
+    }
+
+    /// Arm the deadline driver of the session serving `subject` (its own
+    /// session for a session subject, `serving` for an identity) for the
+    /// subject with `deadline_ms`, when that session is served here. An
+    /// unserved session is left alone. A grant issued outside
+    /// [`Self::grant_tool`] (a mob member identity's, which the mob's actor
+    /// commits against its live roster) is armed this way once it is issued.
+    pub async fn arm_tool_grant_deadline(
+        &self,
+        subject: &ToolGrantSubject,
+        serving: Option<&SessionId>,
+        deadline_ms: u64,
+    ) {
+        self.arm_if_served(subject, serving, deadline_ms).await;
     }
 
     /// Arm the deadline driver of the session serving `subject` (its own

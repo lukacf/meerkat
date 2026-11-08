@@ -9649,6 +9649,1203 @@ mod tests {
         }
     }
 
+    /// The MCP server gate over `session/create`, `mcp/*`, `mob/*` and
+    /// `tool_grants/*`: a gate that names an MCP server, or gates every
+    /// server its build does not configure, keeps that server's tools hidden
+    /// and refused until an `mcp_server` grant opens them; a gated server a
+    /// member's profile configures starts no process until a grant covers
+    /// it; an identity grant answers whether it applies to the member's
+    /// running build, and `tool_grants/list` answers the member's gate.
+    #[cfg(all(feature = "mcp", feature = "mob", feature = "workspace-tests"))]
+    mod server_gate_rpc {
+        use super::*;
+        use meerkat_core::tool_grant::{
+            TOOL_GRANT_EXPIRED_CODE, TOOL_GRANT_REQUIRED_CODE, TOOL_GRANT_REVOKED_CODE,
+            TOOL_GRANT_UNAVAILABLE_CODE,
+        };
+        use std::collections::{BTreeSet, HashMap, VecDeque};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Bounds a failure only; a passing row never waits for it.
+        const PROBE_BOUND: Duration = Duration::from_mins(1);
+
+        /// What one turn offered the model and, when the turn called a tool,
+        /// that call's result text.
+        #[derive(Debug, Clone)]
+        struct Turn {
+            offered: BTreeSet<String>,
+            result: Option<String>,
+        }
+
+        impl Turn {
+            fn offers(&self, name: &str) -> bool {
+                self.offered.contains(name)
+            }
+
+            /// Whether the turn offered any tool whose name starts `prefix`.
+            fn offers_any(&self, prefix: &str) -> bool {
+                self.offered.iter().any(|name| name.starts_with(prefix))
+            }
+
+            fn result(&self) -> &str {
+                self.result.as_deref().expect("the turn called a tool")
+            }
+
+            /// The grant refusal code the call's result carries, if any.
+            fn grant_refusal(&self) -> Option<&'static str> {
+                [
+                    TOOL_GRANT_REQUIRED_CODE,
+                    TOOL_GRANT_EXPIRED_CODE,
+                    TOOL_GRANT_REVOKED_CODE,
+                    TOOL_GRANT_UNAVAILABLE_CODE,
+                ]
+                .into_iter()
+                .find(|code| self.result().contains(code))
+            }
+
+            /// Whether the call found no tool of its name.
+            fn found_no_tool(&self) -> bool {
+                self.result().contains("tool_not_found")
+            }
+
+            /// Whether the call ran: the fixture's tools answer `probe`.
+            fn ran(&self) -> bool {
+                self.grant_refusal().is_none()
+                    && !self.found_no_tool()
+                    && self.result().contains("probe")
+            }
+
+            /// Whether the call met the server connected: it ran, or the
+            /// grant gate refused it. A server still connecting answers
+            /// neither (its tool is not found, or not loadable yet).
+            fn settled(&self) -> bool {
+                self.ran() || self.grant_refusal().is_some()
+            }
+        }
+
+        /// One scripted turn: the names the model asks the deferred catalog
+        /// for (MCP tools sit behind it), then the tool it calls, if any.
+        #[derive(Debug, Clone, Default)]
+        struct Step {
+            load: Vec<String>,
+            call: Option<String>,
+        }
+
+        /// The model of these rows. A turn the row scripted asks the deferred
+        /// catalog for its names, if any, and reports the tool names the
+        /// request after that load offers; then it calls the scripted tool,
+        /// if any, with `{"message": "probe"}`, and reports that call's result
+        /// text. An unscripted turn reports its first request's offer and
+        /// answers.
+        struct ScriptedProbeClient {
+            script: StdMutex<VecDeque<Step>>,
+            pending: StdMutex<Option<String>>,
+            next_call: AtomicUsize,
+            offered: mpsc::UnboundedSender<BTreeSet<String>>,
+            results: mpsc::UnboundedSender<String>,
+        }
+
+        impl ScriptedProbeClient {
+            fn script(&self, step: Step) {
+                self.script.lock().unwrap().push_back(step);
+            }
+        }
+
+        #[async_trait]
+        impl LlmClient for ScriptedProbeClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let offered = || -> BTreeSet<String> {
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.to_string())
+                        .collect()
+                };
+                let probe = |tool: String| (tool, serde_json::json!({"message": "probe"}));
+                // The latest turn message: a boundary's system notice may
+                // follow the tool results it answers.
+                let latest = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| !matches!(message, Message::SystemNotice(_)));
+                let call = match latest {
+                    Some(Message::ToolResults { results, .. })
+                        if results
+                            .iter()
+                            .any(|result| result.tool_use_id.starts_with("load-")) =>
+                    {
+                        let _ = self.offered.send(offered());
+                        self.pending.lock().unwrap().take().map(probe)
+                    }
+                    Some(Message::ToolResults { results, .. }) => {
+                        for result in results {
+                            let _ = self.results.send(result.text_content());
+                        }
+                        None
+                    }
+                    _ => match self.script.lock().unwrap().pop_front() {
+                        Some(Step { load, call }) if !load.is_empty() => {
+                            *self.pending.lock().unwrap() = call;
+                            Some((
+                                meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME.to_string(),
+                                serde_json::json!({"names": load}),
+                            ))
+                        }
+                        step => {
+                            let _ = self.offered.send(offered());
+                            step.and_then(|step| step.call).map(probe)
+                        }
+                    },
+                };
+                let mut events = Vec::new();
+                let stop_reason = match call {
+                    Some((tool, args)) => {
+                        let call = self.next_call.fetch_add(1, Ordering::SeqCst);
+                        let id = if tool == meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME {
+                            format!("load-{call}")
+                        } else {
+                            format!("probe-call-{call}")
+                        };
+                        events.push(Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                            id,
+                            name: tool,
+                            args,
+                            meta: None,
+                        }));
+                        StopReason::ToolUse
+                    }
+                    None => {
+                        events.push(Ok(meerkat_client::LlmEvent::TextDelta {
+                            delta: "noted".to_string(),
+                            meta: None,
+                        }));
+                        StopReason::EndTurn
+                    }
+                };
+                events.push(Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }));
+                events.push(Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(stop_reason),
+                }));
+                Box::pin(stream::iter(events))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        struct Rig {
+            router: MethodRouter,
+            client: Arc<ScriptedProbeClient>,
+            offered: mpsc::UnboundedReceiver<BTreeSet<String>>,
+            results: mpsc::UnboundedReceiver<String>,
+            temp: tempfile::TempDir,
+            _notifications: mpsc::Receiver<RpcNotification>,
+        }
+
+        async fn rig() -> Rig {
+            let temp = tempfile::tempdir().unwrap();
+            let (offered_tx, offered) = mpsc::unbounded_channel();
+            let (results_tx, results) = mpsc::unbounded_channel();
+            let client = Arc::new(ScriptedProbeClient {
+                script: StdMutex::new(VecDeque::new()),
+                pending: StdMutex::new(None),
+                next_call: AtomicUsize::new(0),
+                offered: offered_tx,
+                results: results_tx,
+            });
+            let factory = AgentFactory::new(temp.path().join("sessions"));
+            let config = anthropic_test_config();
+            let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+            let runtime = SessionRuntime::new(
+                factory,
+                config.clone(),
+                10,
+                runtime_backed_persistence(store),
+                NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime");
+            let config_store: Arc<dyn ConfigStore> =
+                Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+            runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+            runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+                Arc::clone(&config_store),
+                temp.path().join("config_state.json"),
+            )));
+            let (notif_tx, notif_rx) = mpsc::channel(100);
+            let router = MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority");
+            Rig {
+                router,
+                client,
+                offered,
+                results,
+                temp,
+                _notifications: notif_rx,
+            }
+        }
+
+        /// The fixture MCP server `name`, whose tools are `<prefix>echo`,
+        /// `<prefix>add`, `<prefix>slow` and `<prefix>fail`, and whose process
+        /// appends a line to `started` when it starts.
+        fn fixture_server(
+            name: &str,
+            prefix: &str,
+            started: &std::path::Path,
+        ) -> meerkat_core::McpServerConfig {
+            meerkat_core::McpServerConfig::stdio(
+                name,
+                mcp_test_server::fixture_binary()
+                    .to_string_lossy()
+                    .to_string(),
+                vec![
+                    "--tool-prefix".to_string(),
+                    prefix.to_string(),
+                    "--started-file".to_string(),
+                    started.to_string_lossy().to_string(),
+                ],
+                HashMap::new(),
+            )
+        }
+
+        /// How many processes the fixture servers logging to `started`
+        /// started.
+        fn started_count(started: &std::path::Path) -> usize {
+            std::fs::read_to_string(started).map_or(0, |log| log.lines().count())
+        }
+
+        async fn call(rig: &Rig, method: &str, params: serde_json::Value) -> RpcResponse {
+            rig.router
+                .dispatch(make_request(method, params))
+                .await
+                .expect("response")
+        }
+
+        /// The success result of `method`, failing the row with `what` when
+        /// the call is refused.
+        async fn ok(
+            rig: &Rig,
+            method: &str,
+            params: serde_json::Value,
+            what: &str,
+        ) -> serde_json::Value {
+            let response = call(rig, method, params).await;
+            assert!(
+                response.error.is_none(),
+                "{what}: {method} was refused: {:?}",
+                response.error
+            );
+            result_value(&response)
+        }
+
+        /// The kind of the typed refusal a `tool_grants/*` call answered.
+        fn refusal_kind(response: &RpcResponse) -> String {
+            let failure = response.error.as_ref().expect("a refused call is an error");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure
+                .data
+                .as_ref()
+                .unwrap_or_else(|| panic!("a typed refusal carries data: {failure:?}"));
+            assert_eq!(data["kind"], "tool_grant_request_refused", "{failure:?}");
+            data["tool_grant_request_refusal"]["kind"]
+                .as_str()
+                .expect("a refusal kind")
+                .to_string()
+        }
+
+        /// The strings of a JSON array (none for anything else).
+        fn names(value: &serde_json::Value) -> BTreeSet<String> {
+            value
+                .as_array()
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        fn session_subject(session_id: &str) -> serde_json::Value {
+            serde_json::json!({"kind": "session", "session_id": session_id})
+        }
+
+        fn identity_subject(mob_id: &str, identity: &str) -> serde_json::Value {
+            serde_json::json!({"kind": "identity", "mob_id": mob_id, "identity": identity})
+        }
+
+        /// A grant of `target` to `subject` for ten minutes: the result.
+        async fn grant(
+            rig: &Rig,
+            subject: serde_json::Value,
+            target: serde_json::Value,
+            what: &str,
+        ) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": subject,
+                    "target": target,
+                    "duration_ms": 600_000,
+                }),
+                what,
+            )
+            .await
+        }
+
+        async fn revoke(rig: &Rig, grant: &serde_json::Value) {
+            ok(
+                rig,
+                "tool_grants/revoke",
+                serde_json::json!({"grant_id": grant["grant"]["grant_id"], "reason": "done"}),
+                "the grant is revoked",
+            )
+            .await;
+        }
+
+        async fn list(rig: &Rig, subject: serde_json::Value) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/list",
+                serde_json::json!({"subject": subject, "include_ended": true}),
+                "the subject's grants are listed",
+            )
+            .await
+        }
+
+        /// A session whose build takes the gate `gate`, its first turn run.
+        async fn gated_session(rig: &Rig, gate: serde_json::Value) -> String {
+            ok(
+                rig,
+                "session/create",
+                serde_json::json!({"prompt": "hello", "grant_gated_tools": gate}),
+                "a session's gate may name MCP servers",
+            )
+            .await["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string()
+        }
+
+        async fn add_server(rig: &Rig, session_id: &str, server: meerkat_core::McpServerConfig) {
+            ok(
+                rig,
+                "mcp/add",
+                serde_json::json!({"session_id": session_id, "server_config": server}),
+                "the server is staged",
+            )
+            .await;
+        }
+
+        async fn remove_server(rig: &Rig, session_id: &str, server: &str) {
+            ok(
+                rig,
+                "mcp/remove",
+                serde_json::json!({"session_id": session_id, "server_name": server}),
+                "the server's removal is staged",
+            )
+            .await;
+        }
+
+        /// Forget what earlier turns reported.
+        fn drain(rig: &mut Rig) {
+            while rig.offered.try_recv().is_ok() {}
+            while rig.results.try_recv().is_ok() {}
+        }
+
+        /// What the turn now running reports: its offer, and its call's
+        /// result when it calls a tool.
+        async fn observe(rig: &mut Rig, calls: bool) -> Turn {
+            let offered = tokio::time::timeout(PROBE_BOUND, rig.offered.recv())
+                .await
+                .expect("the turn reaches the model within the bound")
+                .expect("the offer channel stays open");
+            let result = if calls {
+                Some(
+                    tokio::time::timeout(PROBE_BOUND, rig.results.recv())
+                        .await
+                        .expect("the turn's call answers within the bound")
+                        .expect("the result channel stays open"),
+                )
+            } else {
+                None
+            };
+            Turn { offered, result }
+        }
+
+        /// Script the next turn: ask the deferred catalog for `load`, then
+        /// call `call`, if any. An empty script answers at once.
+        fn script(rig: &mut Rig, load: &[&str], call: Option<&str>) {
+            drain(rig);
+            if !load.is_empty() || call.is_some() {
+                rig.client.script(Step {
+                    load: load.iter().map(|name| (*name).to_string()).collect(),
+                    call: call.map(str::to_owned),
+                });
+            }
+        }
+
+        /// One turn of the session as scripted (`load`, then `call`).
+        async fn turn(rig: &mut Rig, session_id: &str, load: &[&str], call: Option<&str>) -> Turn {
+            script(rig, load, call);
+            ok(
+                rig,
+                "turn/start",
+                serde_json::json!({"session_id": session_id, "prompt": "go"}),
+                "the session takes a turn",
+            )
+            .await;
+            observe(rig, call.is_some()).await
+        }
+
+        /// Turns of the session that load `load` and call `call`, until one
+        /// satisfies `done` (a staged server connects in the background).
+        async fn turn_until(
+            rig: &mut Rig,
+            session_id: &str,
+            load: &[&str],
+            call: &str,
+            done: impl Fn(&Turn) -> bool,
+        ) -> Turn {
+            let deadline = tokio::time::Instant::now() + PROBE_BOUND;
+            loop {
+                let turn = turn(rig, session_id, load, Some(call)).await;
+                if done(&turn) {
+                    return turn;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "no turn within the bound satisfied the row; the last: {turn:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+
+        /// A mob profile with `tools` (comms added).
+        fn worker_profile(mut tools: serde_json::Value) -> serde_json::Value {
+            tools["comms"] = serde_json::json!(true);
+            serde_json::json!({
+                "model": "claude-sonnet-4-5",
+                "external_addressable": true,
+                "tools": tools,
+            })
+        }
+
+        /// A mob whose `worker` role is bound to `profile`.
+        async fn create_mob(rig: &Rig, mob_id: &str, profile: serde_json::Value) {
+            ok(
+                rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {"id": mob_id, "profiles": {"worker": profile}}
+                }),
+                "the mob is created",
+            )
+            .await;
+        }
+
+        /// Spawn `identity` in the `worker` role, with the profile `own` of
+        /// its own when given.
+        async fn spawn(rig: &Rig, mob_id: &str, identity: &str, own: Option<serde_json::Value>) {
+            let mut params = serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": identity,
+                "runtime_mode": "turn_driven",
+            });
+            if let Some(own) = own {
+                params["override_profile"] = own;
+            }
+            ok(rig, "mob/spawn", params, "the member spawns").await;
+        }
+
+        async fn respawn(rig: &Rig, mob_id: &str, identity: &str) {
+            ok(
+                rig,
+                "mob/respawn",
+                serde_json::json!({"mob_id": mob_id, "agent_identity": identity}),
+                "the member respawns",
+            )
+            .await;
+        }
+
+        /// One member turn as scripted (`load`, then `call`).
+        async fn member_turn(
+            rig: &mut Rig,
+            mob_id: &str,
+            identity: &str,
+            load: &[&str],
+            call: Option<&str>,
+        ) -> Turn {
+            script(rig, load, call);
+            ok(
+                rig,
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": identity,
+                    "content": "go",
+                }),
+                "the member takes a turn",
+            )
+            .await;
+            observe(rig, call.is_some()).await
+        }
+
+        /// Member turns that load `load` and call `call`, until one satisfies
+        /// `done`.
+        async fn member_turn_until(
+            rig: &mut Rig,
+            mob_id: &str,
+            identity: &str,
+            load: &[&str],
+            call: &str,
+            done: impl Fn(&Turn) -> bool,
+        ) -> Turn {
+            let deadline = tokio::time::Instant::now() + PROBE_BOUND;
+            loop {
+                let turn = member_turn(rig, mob_id, identity, load, Some(call)).await;
+                if done(&turn) {
+                    return turn;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "no member turn within the bound satisfied the row; the last: {turn:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+
+        /// The tools of the fixture server `s` the rows ask for.
+        const S_TOOLS: [&str; 2] = ["s_echo", "s_add"];
+
+        /// A session whose gate names the MCP server `s`: once `s` is added
+        /// its tools are hidden and a call is refused `tool_grant_required`;
+        /// an `mcp_server` grant opens them at the following turn; after a
+        /// revoke they are hidden again and a call is refused
+        /// `tool_grant_revoked`. A session subject's list carries no member
+        /// gate.
+        #[tokio::test]
+        async fn a_gated_server_opens_only_under_a_server_grant() {
+            let mut rig = rig().await;
+            let session_id = gated_session(&rig, serde_json::json!({"mcp_servers": ["s"]})).await;
+            let started = rig.temp.path().join("started");
+            add_server(&rig, &session_id, fixture_server("s", "s_", &started)).await;
+            let closed = turn_until(&mut rig, &session_id, &S_TOOLS, "s_echo", |turn| {
+                turn.grant_refusal().is_some()
+            })
+            .await;
+            assert_eq!(
+                closed.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{closed:?}"
+            );
+            assert!(
+                !closed.offers_any("s_"),
+                "the gated server's tools are hidden: {closed:?}"
+            );
+
+            let granted = grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "a server grant",
+            )
+            .await;
+            assert_eq!(
+                granted["grant"]["target"],
+                serde_json::json!({"kind": "mcp_server", "server": "s"})
+            );
+            assert!(
+                granted.get("applies").is_none(),
+                "only an identity grant answers whether it applies: {granted}"
+            );
+            let open = turn(&mut rig, &session_id, &S_TOOLS, Some("s_echo")).await;
+            assert!(open.offers("s_echo") && open.offers("s_add"), "{open:?}");
+            assert!(open.ran(), "the granted server's tool runs: {open:?}");
+
+            revoke(&rig, &granted).await;
+            let revoked = turn(&mut rig, &session_id, &S_TOOLS, Some("s_echo")).await;
+            assert!(!revoked.offers_any("s_"), "{revoked:?}");
+            assert_eq!(
+                revoked.grant_refusal(),
+                Some(TOOL_GRANT_REVOKED_CODE),
+                "{revoked:?}"
+            );
+            let listed = list(&rig, session_subject(&session_id)).await;
+            assert!(listed.get("gate").is_none(), "{listed}");
+        }
+
+        /// Servers `s` (gated) and `t` (ungated, one of whose names is gated):
+        /// a tool target naming one of `s`'s tools is refused; a grant of the
+        /// gated name `t_add` opens it and none of `s`'s tools; a server grant
+        /// narrowed to `s_echo` opens it alone, and `tools: []` is no target.
+        /// Once `s` is removed, a server `u` serving the names `s` had keeps
+        /// them hidden for the rest of the build.
+        #[tokio::test]
+        async fn a_server_grant_opens_its_own_server_only_within_its_tools() {
+            const TOOLS: [&str; 4] = ["s_echo", "s_add", "t_echo", "t_add"];
+            let mut rig = rig().await;
+            let session_id = gated_session(
+                &rig,
+                serde_json::json!({"mcp_servers": ["s"], "tools": ["t_add"]}),
+            )
+            .await;
+            let started = rig.temp.path().join("started");
+            add_server(&rig, &session_id, fixture_server("s", "s_", &started)).await;
+            add_server(&rig, &session_id, fixture_server("t", "t_", &started)).await;
+            let connected = turn_until(&mut rig, &session_id, &TOOLS, "s_echo", |turn| {
+                turn.grant_refusal().is_some() && turn.offers("t_echo")
+            })
+            .await;
+            assert!(
+                !connected.offers("t_add") && !connected.offers_any("s_"),
+                "{connected:?}"
+            );
+
+            let named = call(
+                &rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "tool", "name": "s_echo"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(refusal_kind(&named), "target_not_gated");
+            assert!(
+                named
+                    .error
+                    .as_ref()
+                    .is_some_and(|failure| failure.message.contains("mcp_server")),
+                "the refusal names the server form: {named:?}"
+            );
+            let empty = call(
+                &rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "mcp_server", "server": "s", "tools": []},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(refusal_kind(&empty), "empty_target");
+
+            grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "tool", "name": "t_add"}),
+                "a grant of a gated name",
+            )
+            .await;
+            let by_name = turn(&mut rig, &session_id, &TOOLS, Some("s_echo")).await;
+            assert!(
+                by_name.offers("t_add") && by_name.offers("t_echo"),
+                "{by_name:?}"
+            );
+            assert!(!by_name.offers_any("s_"), "{by_name:?}");
+            assert_eq!(
+                by_name.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{by_name:?}"
+            );
+
+            grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "mcp_server", "server": "s", "tools": ["s_echo"]}),
+                "a server grant narrowed to one tool",
+            )
+            .await;
+            let narrowed = turn(&mut rig, &session_id, &TOOLS, Some("s_echo")).await;
+            assert!(
+                narrowed.offers("s_echo") && !narrowed.offers("s_add"),
+                "{narrowed:?}"
+            );
+            assert!(narrowed.ran(), "{narrowed:?}");
+            let outside = turn(&mut rig, &session_id, &TOOLS, Some("s_add")).await;
+            assert_eq!(
+                outside.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{outside:?}"
+            );
+
+            remove_server(&rig, &session_id, "s").await;
+            turn_until(&mut rig, &session_id, &[], "s_echo", Turn::found_no_tool).await;
+            add_server(&rig, &session_id, fixture_server("u", "s_", &started)).await;
+            let reused = turn_until(&mut rig, &session_id, &S_TOOLS, "s_echo", Turn::settled).await;
+            assert!(!reused.offers_any("s_"), "{reused:?}");
+            assert_eq!(
+                reused.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "a name a gated server had stays gated for the build: {reused:?}"
+            );
+        }
+
+        /// A session whose gate gates every MCP server it does not configure,
+        /// over a configured server `c` (configured as a trusted host composes
+        /// one: a public `session/create` takes no configured server): `c`
+        /// stays open, a server `n` added later is hidden and refused, and an
+        /// `mcp_server` grant for `n` opens it at the following turn.
+        #[tokio::test]
+        async fn the_unconfigured_servers_mode_gates_a_later_server_only() {
+            const TOOLS: [&str; 2] = ["n_echo", "c_echo"];
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let params: crate::handlers::session::CreateSessionParams =
+                serde_json::from_value(serde_json::json!({
+                    "prompt": "hello",
+                    "grant_gated_tools": {"unconfigured_mcp_servers": true},
+                }))
+                .expect("session/create takes the unconfigured-servers mode");
+            let created =
+                crate::handlers::session::create_session_with_params_on_route_and_configured_mcp(
+                    Some(RpcId::Num(1)),
+                    params,
+                    Arc::clone(&rig.router.runtime),
+                    &NotificationSink::noop(),
+                    &rig.router.runtime.runtime_adapter(),
+                    None,
+                    None,
+                    vec![fixture_server("c", "c_", &started)],
+                    None,
+                )
+                .await;
+            assert!(created.error.is_none(), "{:?}", created.error);
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+
+            add_server(&rig, &session_id, fixture_server("n", "n_", &started)).await;
+            let closed = turn_until(&mut rig, &session_id, &TOOLS, "n_echo", |turn| {
+                turn.grant_refusal().is_some() && turn.offers("c_echo")
+            })
+            .await;
+            assert_eq!(
+                closed.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{closed:?}"
+            );
+            assert!(!closed.offers_any("n_"), "{closed:?}");
+            let configured = turn(&mut rig, &session_id, &TOOLS, Some("c_echo")).await;
+            assert!(
+                configured.ran(),
+                "a configured server stays open: {configured:?}"
+            );
+
+            grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "mcp_server", "server": "n"}),
+                "a grant of a server the mode gates",
+            )
+            .await;
+            let open = turn(&mut rig, &session_id, &TOOLS, Some("n_echo")).await;
+            assert!(open.offers("n_echo") && open.offers("c_echo"), "{open:?}");
+            assert!(open.ran(), "{open:?}");
+        }
+
+        /// A mob whose `worker` role is bound to the realm profile `name`,
+        /// created with `profile`: on rkat-rpc a member's profile configures
+        /// MCP servers only through a realm profile (an inline profile and a
+        /// spawn override take none).
+        async fn create_realm_mob(rig: &Rig, mob_id: &str, name: &str, profile: serde_json::Value) {
+            ok(
+                rig,
+                "mob/profile/create",
+                serde_json::json!({"name": name, "profile": profile}),
+                "a realm profile configures and gates a server",
+            )
+            .await;
+            ok(
+                rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {"id": mob_id, "profiles": {"worker": {"realm_profile": name}}}
+                }),
+                "a mob over the realm profile",
+            )
+            .await;
+        }
+
+        /// A role whose profile configures the fixture server `s` and gates
+        /// it: a member built without a grant starts no `s` process; after an
+        /// identity `mcp_server` grant and a respawn, `s` is connected and its
+        /// tools run; after the grant ends and another respawn, `s` is not
+        /// connected.
+        #[tokio::test]
+        async fn a_role_gated_server_starts_only_while_an_identity_grant_covers_it() {
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            create_realm_mob(
+                &rig,
+                "role-lazy",
+                "lazy-worker",
+                worker_profile(serde_json::json!({
+                    "mcp_servers": [server],
+                    "grant_gated": {"mcp_servers": ["s"]},
+                })),
+            )
+            .await;
+            spawn(&rig, "role-lazy", "worker-1", None).await;
+            let before =
+                member_turn(&mut rig, "role-lazy", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(before.found_no_tool(), "{before:?}");
+            assert_eq!(started_count(&started), 0);
+
+            let granted = grant(
+                &rig,
+                identity_subject("role-lazy", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity server grant",
+            )
+            .await;
+            respawn(&rig, "role-lazy", "worker-1").await;
+            let open = member_turn_until(
+                &mut rig,
+                "role-lazy",
+                "worker-1",
+                &S_TOOLS,
+                "s_echo",
+                Turn::settled,
+            )
+            .await;
+            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
+            assert_eq!(started_count(&started), 1);
+
+            revoke(&rig, &granted).await;
+            respawn(&rig, "role-lazy", "worker-1").await;
+            let after =
+                member_turn(&mut rig, "role-lazy", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(after.found_no_tool(), "{after:?}");
+            assert_eq!(
+                started_count(&started),
+                1,
+                "a build no grant covers starts no new process"
+            );
+        }
+
+        /// A role whose profile configures and gates the server `s` and gates
+        /// the server `u` it does not configure; its member built without a
+        /// grant left `s` unattached. An identity grant of `s` answers
+        /// `applies: "at_next_build"`: a turn right after it still finds no
+        /// `s` tool and no `s` process starts. A grant of `u` answers `now`:
+        /// no build attaches `u`, and the running build gates it wherever it
+        /// is attached. After a respawn the build connects `s`, and a grant
+        /// of `s` answers `now`.
+        #[tokio::test]
+        async fn a_grant_of_a_server_its_build_left_unattached_applies_at_the_next_build() {
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            create_realm_mob(
+                &rig,
+                "unattached",
+                "unattached-worker",
+                worker_profile(serde_json::json!({
+                    "mcp_servers": [server],
+                    "grant_gated": {"mcp_servers": ["s", "u"]},
+                })),
+            )
+            .await;
+            spawn(&rig, "unattached", "worker-1", None).await;
+            let before =
+                member_turn(&mut rig, "unattached", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(before.found_no_tool(), "{before:?}");
+
+            let granted = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity grant of the unattached server",
+            )
+            .await;
+            assert_eq!(granted["applies"], "at_next_build", "{granted}");
+            let after =
+                member_turn(&mut rig, "unattached", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(
+                after.found_no_tool(),
+                "the running build has no s tool: {after:?}"
+            );
+            assert_eq!(started_count(&started), 0);
+
+            let unconfigured = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "u"}),
+                "an identity grant of a gated server no build configures",
+            )
+            .await;
+            assert_eq!(unconfigured["applies"], "now", "{unconfigured}");
+
+            respawn(&rig, "unattached", "worker-1").await;
+            let open = member_turn_until(
+                &mut rig,
+                "unattached",
+                "worker-1",
+                &S_TOOLS,
+                "s_echo",
+                Turn::settled,
+            )
+            .await;
+            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
+            let attached = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity grant of the attached server",
+            )
+            .await;
+            assert_eq!(attached["applies"], "now", "{attached}");
+        }
+
+        /// A role gates the shell family and the tool name `fx_echo`, which
+        /// nothing the member mounts provides; a member spawned with its own
+        /// profile that switches shell off builds, with `fx_echo` gated from
+        /// the moment it appears and shell ignored. Its list shows both; a
+        /// grant of shell answers `not_mounted` and a grant of `fx_echo`
+        /// answers `now`.
+        #[tokio::test]
+        async fn a_member_list_shows_what_its_build_gates_and_ignores() {
+            let mut rig = rig().await;
+            create_mob(
+                &rig,
+                "union",
+                worker_profile(serde_json::json!({
+                    "grant_gated": {"families": ["shell"], "tools": ["fx_echo"]},
+                })),
+            )
+            .await;
+            spawn(
+                &rig,
+                "union",
+                "worker-1",
+                Some(worker_profile(serde_json::json!({"shell": false}))),
+            )
+            .await;
+            member_turn(&mut rig, "union", "worker-1", &[], None).await;
+
+            let listed = list(&rig, identity_subject("union", "worker-1")).await;
+            let gate = &listed["gate"];
+            assert!(
+                names(&gate["running"]["gated"]["tools"]).contains("fx_echo"),
+                "{listed}"
+            );
+            assert!(
+                names(&gate["running"]["not_mounted"]["tools"]).contains("shell"),
+                "{listed}"
+            );
+            assert_eq!(
+                gate["next_build"]["not_mounted"]["families"],
+                serde_json::json!(["shell"]),
+                "{listed}"
+            );
+            assert!(
+                names(&gate["next_build"]["gated"]["tools"]).contains("fx_echo"),
+                "{listed}"
+            );
+
+            let shell = grant(
+                &rig,
+                identity_subject("union", "worker-1"),
+                serde_json::json!({"kind": "family", "family": "shell"}),
+                "a grant of an ignored family",
+            )
+            .await;
+            assert_eq!(shell["applies"], "not_mounted", "{shell}");
+            let echo = grant(
+                &rig,
+                identity_subject("union", "worker-1"),
+                serde_json::json!({"kind": "tool", "name": "fx_echo"}),
+                "a grant of a gated role name",
+            )
+            .await;
+            assert_eq!(echo["applies"], "now", "{echo}");
+        }
+
+        /// A gate the role's realm profile gains while a member built from the
+        /// role and a member spawned with its own profile are live reaches
+        /// their next builds only: their lists show it under
+        /// `gate.next_build` and not under `gate.running`, and a grant answers
+        /// `at_next_build`; after a respawn both builds gate it and a grant
+        /// answers `now`.
+        #[tokio::test]
+        async fn a_role_gate_added_while_members_are_live_applies_at_their_next_build() {
+            let mut rig = rig().await;
+            let created = ok(
+                &rig,
+                "mob/profile/create",
+                serde_json::json!({
+                    "name": "realm-worker",
+                    "profile": worker_profile(serde_json::json!({"shell": true})),
+                }),
+                "a realm profile",
+            )
+            .await;
+            ok(
+                &rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "live-role",
+                        "profiles": {"worker": {"realm_profile": "realm-worker"}},
+                    }
+                }),
+                "a mob over the realm profile",
+            )
+            .await;
+            spawn(&rig, "live-role", "from-role", None).await;
+            spawn(
+                &rig,
+                "live-role",
+                "own-profile",
+                Some(worker_profile(serde_json::json!({"shell": true}))),
+            )
+            .await;
+            for identity in ["from-role", "own-profile"] {
+                member_turn(&mut rig, "live-role", identity, &[], None).await;
+            }
+
+            ok(
+                &rig,
+                "mob/profile/update",
+                serde_json::json!({
+                    "name": "realm-worker",
+                    "profile": worker_profile(serde_json::json!({
+                        "shell": true,
+                        "grant_gated": {"tools": ["shell"]},
+                    })),
+                    "expected_revision": created["revision"],
+                }),
+                "the role's realm profile gains a gate",
+            )
+            .await;
+            for identity in ["from-role", "own-profile"] {
+                let listed = list(&rig, identity_subject("live-role", identity)).await;
+                assert!(
+                    names(&listed["gate"]["next_build"]["gated"]["tools"]).contains("shell"),
+                    "{identity}: {listed}"
+                );
+                assert!(
+                    !names(&listed["gate"]["running"]["gated"]["tools"]).contains("shell"),
+                    "{identity}: {listed}"
+                );
+                let granted = grant(
+                    &rig,
+                    identity_subject("live-role", identity),
+                    serde_json::json!({"kind": "tool", "name": "shell"}),
+                    "a grant of the new gate's name",
+                )
+                .await;
+                assert_eq!(granted["applies"], "at_next_build", "{identity}: {granted}");
+            }
+
+            for identity in ["from-role", "own-profile"] {
+                respawn(&rig, "live-role", identity).await;
+                member_turn(&mut rig, "live-role", identity, &[], None).await;
+                let listed = list(&rig, identity_subject("live-role", identity)).await;
+                assert!(
+                    names(&listed["gate"]["running"]["gated"]["tools"]).contains("shell"),
+                    "{identity}: {listed}"
+                );
+                let granted = grant(
+                    &rig,
+                    identity_subject("live-role", identity),
+                    serde_json::json!({"kind": "tool", "name": "shell"}),
+                    "a grant after the respawn",
+                )
+                .await;
+                assert_eq!(granted["applies"], "now", "{identity}: {granted}");
+            }
+        }
+
+        /// A live member's identity grant answers `applies: "now"`, and its
+        /// list answers the member's gate, running and next build; a retired
+        /// identity's list answers its history without a gate.
+        #[tokio::test]
+        async fn an_identity_grant_answers_whether_it_applies_and_its_list_the_gate() {
+            let mut rig = rig().await;
+            create_mob(
+                &rig,
+                "gate-half",
+                worker_profile(serde_json::json!({"grant_gated": {"families": ["shell"]}})),
+            )
+            .await;
+            spawn(&rig, "gate-half", "worker-1", None).await;
+            member_turn(&mut rig, "gate-half", "worker-1", &[], None).await;
+
+            let granted = grant(
+                &rig,
+                identity_subject("gate-half", "worker-1"),
+                serde_json::json!({"kind": "family", "family": "shell"}),
+                "an identity grant",
+            )
+            .await;
+            assert_eq!(granted["applies"], "now", "{granted}");
+            let listed = list(&rig, identity_subject("gate-half", "worker-1")).await;
+            assert_eq!(
+                listed["gate"]["next_build"]["gated"]["families"],
+                serde_json::json!(["shell"]),
+                "{listed}"
+            );
+            assert!(
+                names(&listed["gate"]["running"]["gated"]["tools"]).contains("shell"),
+                "{listed}"
+            );
+
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "gate-half", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            let retired = list(&rig, identity_subject("gate-half", "worker-1")).await;
+            assert!(retired.get("gate").is_none(), "{retired}");
+            assert_eq!(
+                retired["grants"].as_array().map(Vec::len),
+                Some(1),
+                "{retired}"
+            );
+        }
+    }
+
     /// When a `keep_alive` `session/create` answers: once its first turn has
     /// built the session, or with that turn's own result when the turn ends
     /// before a build.

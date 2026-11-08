@@ -31752,6 +31752,15 @@ impl MobActor {
                     let result = self.revoke_operator_instruction(slot, revision).await;
                     let _ = reply_tx.send(result);
                 }
+                #[cfg(feature = "runtime-adapter")]
+                MobCommand::GrantMemberTool {
+                    identity,
+                    grant,
+                    reply_tx,
+                } => {
+                    let result = self.grant_member_tool(&identity, *grant).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::PrepareMemberInstructionDelivery {
                     agent_identity,
                     reply_tx,
@@ -65461,6 +65470,56 @@ impl MobActor {
         let key = Self::retire_event_key(agent_identity, generation);
         let index = self.retired_event_index.read().await;
         Ok(index.contains(&key))
+    }
+
+    /// Issue a scoped tool grant to `identity`, decided against the live
+    /// roster as it commits: the identity is in the roster and bound to a
+    /// member in MobMachine, and the grant's subject names this incarnation.
+    /// It runs in the actor's command order, so a retirement that ends the
+    /// identity's grants commits wholly before or after it: before, and the
+    /// identity is unbound here, refused as an unknown member, as a grant
+    /// read finds it; after, and the retirement's end revokes this grant.
+    /// The commit awaits the runtime's grant service only, never this actor
+    /// or a handle of it; its caller arms the deadline once it returns.
+    #[cfg(feature = "runtime-adapter")]
+    async fn grant_member_tool(
+        &self,
+        identity: &AgentIdentity,
+        grant: super::member_grant_gate::MemberToolGrant,
+    ) -> Result<
+        meerkat_runtime::tool_grant::StoredToolGrant,
+        super::member_grant_gate::MemberToolGrantError,
+    > {
+        use super::member_grant_gate::MemberToolGrantError;
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Err(MemberToolGrantError::NoRuntime);
+        };
+        let bound = self
+            .dsl_authority
+            .state()
+            .identity_to_runtime
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(identity));
+        if !bound || self.roster.read().await.get(identity).is_none() {
+            return Err(MemberToolGrantError::Mob(MobError::MemberNotFound(
+                identity.clone(),
+            )));
+        }
+        let request = meerkat_runtime::tool_grant::ToolGrantRequest {
+            subject: meerkat_core::tool_grant::ToolGrantSubject::member(
+                self.definition.id.as_str(),
+                &self.incarnation,
+                identity.as_str(),
+            ),
+            target: grant.target,
+            issuer: grant.issuer,
+            reason: grant.reason,
+            window: grant.window,
+        };
+        runtime
+            .tool_grant_service()
+            .grant(request)
+            .await
+            .map_err(MemberToolGrantError::Grant)
     }
 
     /// End every live scoped tool grant of `identity` in this mob

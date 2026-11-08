@@ -137,6 +137,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `turn_tool_overlay_deny_names`: `Set<ToolName>`
 - `tool_grant_gated_names`: `Set<ToolName>`
 - `tool_grant_open_names`: `Set<ToolName>`
+- `tool_grant_gated_servers`: `Set<String>`
+- `tool_grant_gates_unconfigured_servers`: `Bool`
+- `tool_grant_ungated_servers`: `Set<String>`
+- `tool_grant_not_mounted_names`: `Set<ToolName>`
 - `input_authority_bindings`: `Map<String, String>`
 - `input_authority_batch_keys`: `Map<String, String>`
 - `scoped_context_binding`: `Option<String>`
@@ -913,10 +917,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
 - `HoldInputController`(input_id: String)
 - `ReleaseInputController`(input_id: String)
-- `ReplaceToolGrantGate`(gated: Set<ToolName>)
+- `ReplaceToolGrantGate`(gated: Set<ToolName>, gated_servers: Set<String>, gates_unconfigured_servers: Bool, ungated_servers: Set<String>, not_mounted_names: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `SettleRetainedRun`(run_id: Option<RunId>)
+- `ExtendToolGrantGate`(server: String, gated: Set<ToolName>)
+- `SurfaceStageGatedAdd`(surface_id: String, now_ms: u64)
 
 ## Signals
 - `Initialize`
@@ -1540,6 +1546,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `supervisor_rotation_terminal_receipts_closed_shape`
 - `supervisor_rotation_phase_shape`
 - `tool_grant_open_names_are_gated`
+- `tool_grant_not_mounted_are_not_gated`
+- `tool_grant_ungated_servers_are_not_gated`
 
 ## Transitions
 ### `Initialize`
@@ -11841,6 +11849,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SurfaceStageAdd`(surface_id, now_ms)
 - Guards:
   - `surface_operating`
+- Emits: `SurfaceStageRecorded`
+- To: `Running`
+
+### `SurfaceStageGatedAddIdle`
+- From: `Idle`
+- On: `SurfaceStageGatedAdd`(surface_id, now_ms)
+- Guards:
+  - `surface_operating`
+  - `server_is_grant_gated`
+- Emits: `SurfaceStageRecorded`
+- To: `Idle`
+
+### `SurfaceStageGatedAddAttached`
+- From: `Attached`
+- On: `SurfaceStageGatedAdd`(surface_id, now_ms)
+- Guards:
+  - `surface_operating`
+  - `server_is_grant_gated`
+- Emits: `SurfaceStageRecorded`
+- To: `Attached`
+
+### `SurfaceStageGatedAddRunning`
+- From: `Running`
+- On: `SurfaceStageGatedAdd`(surface_id, now_ms)
+- Guards:
+  - `surface_operating`
+  - `server_is_grant_gated`
 - Emits: `SurfaceStageRecorded`
 - To: `Running`
 
@@ -23166,42 +23201,147 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ReplaceToolGrantGateIdle`
 - From: `Idle`
-- On: `ReplaceToolGrantGate`(gated)
+- On: `ReplaceToolGrantGate`(gated, gated_servers, gates_unconfigured_servers, ungated_servers, not_mounted_names)
 - Guards:
   - `session_registered`
+  - `not_mounted_disjoint`
+  - `server_sets_disjoint`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Idle`
 
 ### `ReplaceToolGrantGateAttached`
 - From: `Attached`
-- On: `ReplaceToolGrantGate`(gated)
+- On: `ReplaceToolGrantGate`(gated, gated_servers, gates_unconfigured_servers, ungated_servers, not_mounted_names)
 - Guards:
   - `session_registered`
+  - `not_mounted_disjoint`
+  - `server_sets_disjoint`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Attached`
 
 ### `ReplaceToolGrantGateRunning`
 - From: `Running`
-- On: `ReplaceToolGrantGate`(gated)
+- On: `ReplaceToolGrantGate`(gated, gated_servers, gates_unconfigured_servers, ungated_servers, not_mounted_names)
 - Guards:
   - `session_registered`
+  - `not_mounted_disjoint`
+  - `server_sets_disjoint`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Running`
 
 ### `ReplaceToolGrantGateRetired`
 - From: `Retired`
-- On: `ReplaceToolGrantGate`(gated)
+- On: `ReplaceToolGrantGate`(gated, gated_servers, gates_unconfigured_servers, ungated_servers, not_mounted_names)
 - Guards:
   - `session_registered`
+  - `not_mounted_disjoint`
+  - `server_sets_disjoint`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Retired`
 
 ### `ReplaceToolGrantGateStopped`
 - From: `Stopped`
-- On: `ReplaceToolGrantGate`(gated)
+- On: `ReplaceToolGrantGate`(gated, gated_servers, gates_unconfigured_servers, ungated_servers, not_mounted_names)
 - Guards:
   - `session_registered`
+  - `not_mounted_disjoint`
+  - `server_sets_disjoint`
 - Emits: `RefreshVisibleSurfaceSet`
+- To: `Stopped`
+
+### `ExtendToolGrantGateChangedIdle`
+- From: `Idle`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `adds_names`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Idle`
+
+### `ExtendToolGrantGateChangedAttached`
+- From: `Attached`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `adds_names`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Attached`
+
+### `ExtendToolGrantGateChangedRunning`
+- From: `Running`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `adds_names`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Running`
+
+### `ExtendToolGrantGateChangedRetired`
+- From: `Retired`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `adds_names`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Retired`
+
+### `ExtendToolGrantGateChangedStopped`
+- From: `Stopped`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `adds_names`
+- Emits: `RefreshVisibleSurfaceSet`
+- To: `Stopped`
+
+### `ExtendToolGrantGateUnchangedIdle`
+- From: `Idle`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `already_gated`
+- To: `Idle`
+
+### `ExtendToolGrantGateUnchangedAttached`
+- From: `Attached`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `already_gated`
+- To: `Attached`
+
+### `ExtendToolGrantGateUnchangedRunning`
+- From: `Running`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `already_gated`
+- To: `Running`
+
+### `ExtendToolGrantGateUnchangedRetired`
+- From: `Retired`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `already_gated`
+- To: `Retired`
+
+### `ExtendToolGrantGateUnchangedStopped`
+- From: `Stopped`
+- On: `ExtendToolGrantGate`(server, gated)
+- Guards:
+  - `session_registered`
+  - `server_is_gated`
+  - `already_gated`
 - To: `Stopped`
 
 ### `ApplyToolGrantOpenSetChangedIdle`

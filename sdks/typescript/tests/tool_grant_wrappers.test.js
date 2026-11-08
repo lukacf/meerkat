@@ -124,11 +124,32 @@ describe("scoped tool grant wrappers", () => {
     ]);
   });
 
+  it("grantTool sends an MCP server target, narrowed to its tools", async () => {
+    const { client, calls } = fakeClient({ "tool_grants/grant": { grant: GRANT } });
+
+    await client.grantTool(SESSION_ID, { mcpServer: "tickets" }, { durationMs: 60000 });
+    await client.grantTool(
+      SESSION_ID,
+      { mcpServer: "tickets", serverTools: ["open_ticket"] },
+      { durationMs: 60000 },
+    );
+
+    assert.deepEqual(
+      calls.map((call) => call.params.target),
+      [
+        { kind: "mcp_server", server: "tickets" },
+        { kind: "mcp_server", server: "tickets", tools: ["open_ticket"] },
+      ],
+    );
+  });
+
   it("grantTool refuses both or neither target and window forms", async () => {
     const { client, calls } = fakeClient({ "tool_grants/grant": { grant: GRANT } });
 
     for (const [target, window] of [
       [{ tool: "deploy", family: "shell" }, { durationMs: 60000 }],
+      [{ tool: "deploy", mcpServer: "tickets" }, { durationMs: 60000 }],
+      [{ tool: "deploy", serverTools: ["open_ticket"] }, { durationMs: 60000 }],
       [{}, { durationMs: 60000 }],
       [{ family: "shell" }, { durationMs: 60000, expiresAtMs: 61000 }],
       [{ family: "shell" }, {}],

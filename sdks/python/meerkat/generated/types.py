@@ -1109,10 +1109,10 @@ class ToolGrantSubjectIdentity(TypedDict, total=False):
 
 ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity
 
-# The target a grant request names: one tool name, or a built-in tool
-# family, whose names the server takes at grant time. Closed: a kind or a
-# field this version does not know is refused, never ignored, so a request
-# is never read as wider than it asked.
+# The target a grant request names: one tool name, a built-in tool family,
+# whose names the server takes at grant time, or an MCP server. Closed: a
+# kind or a field this version does not know is refused, never ignored, so
+# a request is never read as wider than it asked.
 class ToolGrantTargetTool(TypedDict, total=False):
     kind: Required[Literal['tool']]
     name: Required[str]
@@ -1121,7 +1121,12 @@ class ToolGrantTargetFamily(TypedDict, total=False):
     family: Required[str]
     kind: Required[Literal['family']]
 
-ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily
+class ToolGrantTargetMcpServer(TypedDict, total=False):
+    kind: Required[Literal['mcp_server']]
+    server: Required[str]
+    tools: NotRequired[Optional[list[str]]]
+
+ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer
 
 # Whose grant a record names: a session, or (in a later version) a mob
 # member's identity.
@@ -1139,8 +1144,8 @@ class WireToolGrantSubjectUnknown(TypedDict, total=False):
 
 WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown
 
-# What a grant record opens: one tool name, or a built-in tool family with
-# the names the server took for it at grant time.
+# What a grant record opens: one tool name, a built-in tool family with
+# the names the server took for it at grant time, or an MCP server's tools.
 class WireToolGrantTargetTool(TypedDict, total=False):
     kind: Required[Literal['tool']]
     name: Required[str]
@@ -1150,10 +1155,15 @@ class WireToolGrantTargetFamily(TypedDict, total=False):
     kind: Required[Literal['family']]
     names: NotRequired[list[str]]
 
+class WireToolGrantTargetMcpServer(TypedDict, total=False):
+    kind: Required[Literal['mcp_server']]
+    server: Required[str]
+    tools: NotRequired[Optional[list[str]]]
+
 class WireToolGrantTargetUnknown(TypedDict, total=False):
     kind: Required[Literal['unknown']]
 
-WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown
+WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown
 
 # Who issued a grant.
 class WireToolGrantIssuerOperator(TypedDict, total=False):
@@ -1174,7 +1184,7 @@ WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval 
 WireToolGrantStatus = Literal['active', 'expired', 'revoked', 'requested', 'declined', 'unknown']
 
 # Which driver observed a grant's expiry.
-WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['unknown']
+WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['build'] | Literal['unknown']
 
 # Why a gated call was refused.
 WireToolGrantRefusalKind = Literal['required', 'expired', 'revoked', 'unavailable'] | Literal['unknown']
@@ -1214,6 +1224,9 @@ class WireToolGrantAuditEventUnknown(TypedDict, total=False):
     kind: Required[Literal['unknown']]
 
 WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
+
+# Whether an identity grant applies to the member's running build.
+WireToolGrantApplies = Literal['now', 'not_mounted', 'at_next_build', 'unknown']
 
 # Who a presenter showed a rendering to. Closed.
 class DecisionAudienceApprover(TypedDict, total=False):
@@ -2185,6 +2198,36 @@ version, or damaged): its place in the subject's log."""
 
 
 @dataclass
+class WireToolGrantGateEntries:
+    """The entries of a build's tool grant gate as `tool_grants/list` shows
+them: built-in tool families, tool names, MCP servers and the
+unconfigured-servers mode. Advisory, so tolerant: a field this version
+does not know is ignored, never refused, and a newer server's gate never
+fails the result it rides on. (A gate a request names is the closed
+[`WireGrantGatedTools`].)"""
+    families: Optional[list[str]] = None
+    mcp_servers: Optional[list[str]] = None
+    tools: Optional[list[str]] = None
+    unconfigured_mcp_servers: Optional[bool] = None
+
+
+@dataclass
+class WireToolGrantGateView:
+    """A build's tool grant gate: what it gates, and the role entries it
+ignores as not mounted (never gated, never open)."""
+    gated: Optional[WireToolGrantGateEntries] = None
+    not_mounted: Optional[WireToolGrantGateEntries] = None
+
+
+@dataclass
+class WireMemberToolGrantGate:
+    """A mob member identity's tool grant gate, as `tool_grants/list` answers
+it: what its live build runs, and what its next build resolves."""
+    next_build: WireToolGrantGateView
+    running: Optional[WireToolGrantGateView] = None
+
+
+@dataclass
 class GrantToolParams:
     """`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
 `duration_ms` bounds the grant, at most the host's maximum lifetime."""
@@ -2200,6 +2243,7 @@ class GrantToolParams:
 class GrantToolResult:
     """`tool_grants/grant` result."""
     grant: WireToolGrant
+    applies: Optional[WireToolGrantApplies] = None
 
 
 @dataclass
@@ -2228,6 +2272,7 @@ class ListToolGrantsParams:
 class ListToolGrantsResult:
     """`tool_grants/list` result. Due grants are settled as expired first."""
     grants: list[WireToolGrant]
+    gate: Optional[WireMemberToolGrantGate] = None
     unreadable: Optional[list[WireUnreadableToolGrant]] = None
 
 
@@ -3046,13 +3091,16 @@ not know instead of refusing it."""
 
 @dataclass
 class WireGrantGatedTools:
-    """A scoped tool grant gate: the built-in tool families and the tool names a
-build mounts hidden and refuses at dispatch until a live grant opens them.
-A session's build takes it on `session/create` (`grant_gated_tools`); a
-mob profile declares its members' (`tools.grant_gated`). A field this
-version does not know is refused, never ignored."""
+    """A scoped tool grant gate: the built-in tool families, the tool names and
+the MCP servers a build mounts hidden and refuses at dispatch until a live
+grant opens them. A session's build takes it on `session/create`
+(`grant_gated_tools`); a mob profile declares its members'
+(`tools.grant_gated`). A field this version does not know is refused,
+never ignored."""
     families: Optional[list[str]] = None
+    mcp_servers: Optional[list[str]] = None
     tools: Optional[list[str]] = None
+    unconfigured_mcp_servers: Optional[bool] = None
 
 
 @dataclass

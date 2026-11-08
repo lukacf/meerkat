@@ -190,6 +190,56 @@ fn sidebar_identities(experience: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Under enforced access each agent's affordances say whether the caller may
+/// change its console schedules (`can_manage_schedules`): `agent.send` and
+/// `schedule.manage` on it. A configuration that names no schedule action
+/// grants `schedule.manage` wherever it grants `agent.send`; one that names
+/// it is taken literally, so a caller may message an agent without changing
+/// its schedules.
+#[test]
+fn experience_affords_schedule_changes_with_send_and_schedule_manage() {
+    let snapshot = snapshot_with_members(vec![
+        member("ops-lead", "lead", &[]),
+        member("scout-1", "scout", &[]),
+    ]);
+    let affordance = |experience: &Value, identity: &str, key: &str| {
+        experience["agent_sidebar"]["live_snapshot"]["agents"]
+            .as_array()
+            .and_then(|agents| agents.iter().find(|agent| agent["identity"] == identity))
+            .map(|agent| agent["affordances"][key].clone())
+    };
+
+    let naive = AccessController::new(ops_access_config()).expect("controller");
+    let alice = experience_for(&naive, "alice@example.test", &snapshot);
+    assert_eq!(
+        affordance(&alice, "ops-lead", "can_manage_schedules"),
+        Some(json!(true))
+    );
+    assert_eq!(
+        affordance(&alice, "scout-1", "can_manage_schedules"),
+        Some(json!(false))
+    );
+
+    let mut config = ops_access_config();
+    config.rules.push(AccessRule {
+        id: "frank-schedules-lead".to_string(),
+        subjects: vec!["frank@example.test".to_string()],
+        actions: vec!["schedule.manage".to_string()],
+        agents: vec!["ops-lead".to_string()],
+        ..AccessRule::default()
+    });
+    let restricted = AccessController::new(config).expect("controller");
+    let alice = experience_for(&restricted, "alice@example.test", &snapshot);
+    assert_eq!(
+        affordance(&alice, "ops-lead", "can_send_message"),
+        Some(json!(true))
+    );
+    assert_eq!(
+        affordance(&alice, "ops-lead", "can_manage_schedules"),
+        Some(json!(false))
+    );
+}
+
 #[test]
 fn experience_is_filtered_per_principal() {
     let controller = AccessController::new(ops_access_config()).expect("controller");
@@ -5837,7 +5887,9 @@ mod checked_v1_acceptance {
                 id: "existing-rule".to_string(),
                 description: Some(PRIVATE_CONFIG.to_string()),
                 subjects: vec![NEW_ADMIN.to_string()],
-                actions: vec!["agent.send".to_string()],
+                // Names `schedule.manage` itself, so the owner keeps this
+                // configuration exactly as written.
+                actions: vec!["agent.send".to_string(), "schedule.manage".to_string()],
                 agents: vec!["router".to_string()],
                 ..AccessRule::default()
             }],
@@ -6407,13 +6459,13 @@ mod checked_v1_acceptance {
 
     /// An invalid save says what is wrong with it: `invalid_access_config`
     /// carries `reason`, a stable token, and `detail`, the text that names
-    /// the rule, action, group or approver at fault, on the checked and the
-    /// unchecked write of each method that can leave the configuration
-    /// invalid (`set`, `rules/upsert`, `rules/delete` and `groups/delete`).
-    /// The code and the fixed message stay, nothing is written, and the
-    /// refusal names nothing private.
+    /// the rule, action, group or approver at fault, on the checked write of
+    /// each method that can leave the configuration invalid (`set`,
+    /// `rules/upsert`, `rules/delete` and `groups/delete`). The code and the
+    /// fixed message stay, nothing is written, and the refusal names nothing
+    /// private.
     #[tokio::test]
-    async fn invalid_saves_name_their_reason_on_checked_and_unchecked_writes() {
+    async fn invalid_saves_name_their_reason() {
         fn strings(values: &[&str]) -> Vec<String> {
             values.iter().map(ToString::to_string).collect()
         }
@@ -6555,40 +6607,33 @@ mod checked_v1_acceptance {
             ),
         ];
         for (method, payload, reason, detail) in cases {
-            for (form, params) in [
-                (
-                    "checked",
-                    checked(&base.owner, base.revision, payload.clone()),
-                ),
-                ("unchecked", payload),
-            ] {
-                let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
-                assert_eq!(
-                    response["error"]["code"],
-                    json!(-32602),
-                    "{method}, {form}: {response:#?}"
-                );
-                assert_eq!(
-                    response["error"]["message"],
-                    json!("Invalid access configuration."),
-                    "{method}, {form}: {response:#?}"
-                );
-                assert_eq!(
-                    response["error"]["data"],
-                    json!({
-                        "kind": "invalid_access_config",
-                        "reason": reason,
-                        "detail": detail,
-                    }),
-                    "{method}, {form}: {response:#?}"
-                );
-                safe_error(&response, &fixture);
-                assert_eq!(
-                    checkpoint(&fixture),
-                    initial,
-                    "{method}, {form}: nothing is written"
-                );
-            }
+            let params = checked(&base.owner, base.revision, payload);
+            let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
+            assert_eq!(
+                response["error"]["code"],
+                json!(-32602),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["message"],
+                json!("Invalid access configuration."),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["data"],
+                json!({
+                    "kind": "invalid_access_config",
+                    "reason": reason,
+                    "detail": detail,
+                }),
+                "{method}: {response:#?}"
+            );
+            safe_error(&response, &fixture);
+            assert_eq!(
+                checkpoint(&fixture),
+                initial,
+                "{method}: nothing is written"
+            );
         }
     }
 

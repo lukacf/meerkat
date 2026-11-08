@@ -32618,6 +32618,13 @@ impl MobActor {
                     self.handle_stop_member_run(agent_identity, run_id, reason, reply_tx)
                         .await;
                 }
+                MobCommand::SettleMemberRetainedRun {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    self.handle_settle_member_retained_run(agent_identity, reply_tx)
+                        .await;
+                }
                 MobCommand::MemberHistory {
                     agent_identity,
                     from_index,
@@ -42573,6 +42580,80 @@ impl MobActor {
                         .await
                 }
             };
+            let _ = reply_tx.send(result);
+        });
+    }
+
+    /// A host's settle of the run a local member's runtime retained: the run
+    /// a crash or a graceful stop left open, which the member's registration
+    /// kept and which has not resumed. The member runtime's machine decides
+    /// (`SettleRetainedRun`); see
+    /// [`MobHandle::settle_member_retained_run`](super::MobHandle::settle_member_retained_run).
+    /// A member the mob does not hold is `MemberNotFound`. A member not
+    /// materialized in this process (dormant, or waking) is
+    /// `MemberSessionNotLive`, and nothing wakes it: a wake while nothing
+    /// holds its run starts would resume the run. A placed member's runtime
+    /// lives on its member host (`UnsupportedForMode`). A member runtime that
+    /// needs a durability reload is `MemberReloadRequired`. The settle waits
+    /// for the run's settlement on a DETACHED task (ADJ-P4-12).
+    async fn handle_settle_member_retained_run(
+        &mut self,
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
+    ) {
+        let projection = self.machine_projection_for_identity(&agent_identity);
+        if projection.runtime_id.is_none() {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let placed = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity));
+        if placed {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a placed member's retained run is settled on its member host".to_string(),
+            }));
+            return;
+        }
+        let Some(session_id) = entry.member_ref.bridge_session_id().cloned() else {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "settling a retained run requires a session-backed member".to_string(),
+            }));
+            return;
+        };
+        if super::boot_plan::domain_member_is_unmaterialized(
+            self.dsl_authority.state(),
+            &agent_identity,
+        ) || !projection.live_runtime
+        {
+            let _ = reply_tx.send(Err(MobError::MemberSessionNotLive {
+                agent_identity,
+                session_id,
+            }));
+            return;
+        }
+        if let Err(error) = self.ensure_member_runtime_durability_ready(&entry).await {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        let provisioner = self.provisioner.clone();
+        let member_ref = entry.member_ref.clone();
+        self.actor_io_tasks.spawn(async move {
+            let result = provisioner
+                .settle_member_retained_run(&member_ref, &agent_identity)
+                .await;
             let _ = reply_tx.send(result);
         });
     }
@@ -54292,26 +54373,31 @@ impl MobActor {
         self.edge_locks.prune(ctx.agent_identity.as_str()).await;
     }
 
-    /// Drop the `MobStop` a Stop staged for a member whose session is
-    /// disposed for good, by a retire or a destroy (#1500), so a later
-    /// registration of the same session is not held for it. The runtime's
+    /// Drop the run-start holds staged for a member whose session is disposed
+    /// for good, by a retire or a destroy (#1500), so a later registration
+    /// of the same session is not held for them: the `MobStop` a Stop staged,
+    /// and a host's `HostRecovery`, which the host can no longer release
+    /// through the mob once the member left the roster. The runtime's
     /// unregister keeps staged reasons on purpose: a reload unregisters and
     /// registers the same session again while the mob is Stopped. A failure
     /// is logged only: the member is gone either way.
-    async fn unstage_departed_member_mob_stop(&self, entry: &RosterEntry) {
-        if let Err(error) = self
-            .provisioner
-            .unstage_member_registration_run_start_hold(
-                &entry.member_ref,
-                meerkat_runtime::RunStartHoldReason::MobStop,
-            )
-            .await
-        {
-            tracing::warn!(
-                agent_identity = %entry.agent_identity,
-                error = %error,
-                "dropping the staged MobStop of a departed member failed"
-            );
+    async fn unstage_departed_member_run_start_holds(&self, entry: &RosterEntry) {
+        for reason in [
+            meerkat_runtime::RunStartHoldReason::MobStop,
+            meerkat_runtime::RunStartHoldReason::HostRecovery,
+        ] {
+            if let Err(error) = self
+                .provisioner
+                .unstage_member_registration_run_start_hold(&entry.member_ref, reason)
+                .await
+            {
+                tracing::warn!(
+                    agent_identity = %entry.agent_identity,
+                    reason = ?reason,
+                    error = %error,
+                    "dropping a run-start hold staged for a departed member failed"
+                );
+            }
         }
     }
 
@@ -55706,7 +55792,7 @@ impl MobActor {
                 });
             }
         }
-        self.unstage_departed_member_mob_stop(&entry).await;
+        self.unstage_departed_member_run_start_holds(&entry).await;
         if let Err(error) = boxed_arm_future(|| {
             self.release_forked_participant_attachments_for_member(&entry.agent_identity)
         })

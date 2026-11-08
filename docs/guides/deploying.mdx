@@ -514,7 +514,9 @@ Size the limit for everything the host runs, not only its workers:
   one of the pool's threads is free, but only while the pool has a thread:
   in a pool with none, Tokio panics instead (`OS can't spawn worker thread`).
 - Every MCP stdio server and shell command is a process inside the same
-  limit, with threads of its own.
+  limit, with threads of its own. A launch under Linux OS process confinement
+  is two processes: the command and the small init of its own pid namespace
+  (see [OS process confinement](/concepts/configuration#os-process-confinement)).
 
 Near the limit, other thread spawns are refused too, later in startup or
 while serving, and what happens depends on which one. Usually the operation

@@ -3485,10 +3485,11 @@ async fn a_keep_shutdown_of_a_held_member_leaves_its_work_as_the_store_held_it()
         .expect("mob shutdown");
 }
 
-/// A requeued input older than the requeue bound when the next start
-/// recovers it ends as expired instead of running: payload retired, no run,
-/// no model request, and a same-key replay answers the expiry. A later start
-/// serves nothing: the expiry's commit left the row terminal.
+/// A requeued input kept longer than the requeue bound, counted from the
+/// stop, when the next start recovers it ends as expired instead of running:
+/// payload retired, no run, no model request, and a same-key replay answers
+/// the expiry. A later start serves nothing: the expiry's commit left the row
+/// terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requeue_shutdown_expires_a_queued_human_input_older_than_the_bound_at_restart() {
     use meerkat_runtime::input_state::InputLifecycleState;

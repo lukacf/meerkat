@@ -78,8 +78,9 @@ pub use console_ingress::{
     validate_console_token_under_session_fences,
 };
 pub(crate) use console_ingress::{
-    ConsoleCallerVerification, ResolvedConsoleCaller, authorize_console_rest_json_route,
-    console_human_principal, console_member_access_attributes, fold_console_member_attributes,
+    ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
+    ResolvedConsoleCaller, authorize_console_rest_json_route, console_human_principal,
+    console_member_access_attributes, fold_console_member_attributes,
     render_console_rest_json_route, resolve_authorized_console_caller_from_token,
     session_fence_first_accepted_iat,
 };

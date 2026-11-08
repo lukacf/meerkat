@@ -40,10 +40,14 @@ use crate::access::{
     ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN, ACTION_AGENT_RETIRE,
     ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_GATING_DECIDE,
     ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW, ACTION_MOB_MEMORY_READ,
-    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_WORKGRAPH_MANAGE,
-    ACTION_WORKGRAPH_VIEW, AccessController, AccessGroup, AccessResource, AccessRule, AccessView,
+    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
+    ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessResource, AccessView,
     AgentResourceAttributes, LiveAccessView,
 };
+// The test modules build access rules and groups through `use super::*`.
+#[cfg(test)]
+use crate::access::{AccessGroup, AccessRule};
+
 use crate::blob_store::{BinaryBlobPayload, BinaryBlobStore, is_valid_blob_id_value};
 use crate::console_aggregator::{
     ConsoleActorKind, ConsoleCursor, ConsoleFrame, ConsoleFrameSourceKind, ConsoleIdentityRecord,
@@ -1462,6 +1466,9 @@ pub async fn console_rpc_handler(
         let response =
             console_revoke_sessions_rpc(&state, &auth_context, read_only, &parsed_request);
         return (StatusCode::OK, Json::<Value>(response));
+    }
+    if request_method == crate::rpc::CONSOLE_SIGN_OUT_METHOD {
+        return console_sign_out_rpc(&auth_context, &parsed_request);
     }
     if request_method == crate::rpc::CONSOLE_WHOAMI_METHOD {
         let response = console_whoami_rpc(&state.decisions, &auth_context, &parsed_request);
@@ -2950,20 +2957,9 @@ impl ConsoleSendGovernance {
     }
 
     /// Refuse a change whose caller's login ended since the request was
-    /// accepted: the token must still pass the Console's acceptance now,
-    /// its principal's session fence included. The open Console's caller
-    /// without a token has no login to end.
+    /// accepted, by the rule of [`refuse_unless_current`].
     pub(crate) fn refuse_unless_caller_current(&self) -> Result<(), ConsoleCallerRefusal> {
-        match &self.verification {
-            Some(verification)
-                if verification
-                    .current_at(std::time::SystemTime::now())
-                    .is_none() =>
-            {
-                Err(ConsoleCallerRefusal::NotCurrent)
-            }
-            _ => Ok(()),
-        }
+        refuse_unless_current(self.verification.as_ref())
     }
 
     /// Whether a send to `identity` must be governed: the runtime's canonical
@@ -3211,8 +3207,20 @@ mod console_side_chat_tests;
 mod console_schedule_tests;
 
 #[cfg(test)]
+#[path = "console_shared_object_tests.rs"]
+mod console_shared_object_tests;
+
+#[cfg(test)]
 #[path = "console_actor_tests.rs"]
 mod console_actor_tests;
+
+#[cfg(test)]
+#[path = "console_sign_out_tests.rs"]
+mod console_sign_out_tests;
+
+#[cfg(test)]
+#[path = "console_flow_editor_caller_tests.rs"]
+mod console_flow_editor_caller_tests;
 
 #[cfg(test)]
 #[path = "console_approver_tests.rs"]
@@ -4259,6 +4267,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/access/groups/set"
             | "meta/access/groups/delete"
             | crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD
+            | crate::rpc::CONSOLE_SIGN_OUT_METHOD
             | "meta/live/open"
             | "meta/live/replacement_required"
             | "meta/live/playback_owner/register"
@@ -4583,7 +4592,7 @@ impl ConsoleCallerRefusal {
 /// Take the `expected_caller_scope` field out of a console RPC's params, so
 /// no method's own params see it. A field that is not a string is invalid
 /// params.
-fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
+pub(crate) fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
     let Some(object) = params.as_object_mut() else {
         return Ok(None);
     };
@@ -4637,6 +4646,17 @@ pub(crate) fn served_hosts_only(router: Router, open: bool) -> Router {
 /// The 401 body for the JSON and multipart console RPC doors. The JSON-RPC
 /// code stays `-32600` for existing clients; `data.kind` is the typed reason.
 fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json<Value>) {
+    console_rpc_unauthenticated_response_with(
+        response_id,
+        "unauthorized: console rpc requires a valid auth token",
+    )
+}
+
+/// [`console_rpc_unauthenticated_response`] with its own `message`.
+fn console_rpc_unauthenticated_response_with(
+    response_id: Value,
+    message: &str,
+) -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
         Json::<Value>(serde_json::json!({
@@ -4644,7 +4664,7 @@ fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json
             "id": response_id,
             "error": {
                 "code": -32600,
-                "message": "unauthorized: console rpc requires a valid auth token",
+                "message": message,
                 "data": {
                     "kind": CONSOLE_UNAUTHENTICATED_KIND,
                     "http_status": StatusCode::UNAUTHORIZED.as_u16(),
@@ -4921,14 +4941,19 @@ fn console_rpc_access_requirements(
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
         // A console schedule is a deferred send to its agent, named by
         // `identity`: listing them needs what viewing the agent needs, and
-        // every write what sending to it needs. That the schedule is that
-        // agent's is judged in the handler.
+        // every write what sending to it needs and `schedule.manage`, which
+        // lets a deployment keep some who message the agent from changing
+        // its schedules. That the schedule is that agent's is judged in the
+        // handler.
         "meta/schedule/list" => one(ACTION_AGENT_VIEW, identity),
         "meta/schedule/create"
         | "meta/schedule/update"
         | "meta/schedule/pause"
         | "meta/schedule/resume"
-        | "meta/schedule/delete" => one(ACTION_AGENT_SEND, identity),
+        | "meta/schedule/delete" => Some(vec![
+            (ACTION_AGENT_SEND, identity.clone()),
+            (ACTION_SCHEDULE_MANAGE, identity),
+        ]),
         crate::console_voice::VOICE_CONTEXT_STATUS_METHOD
         | crate::console_voice::VOICE_CAPTIONS_METHOD => one(ACTION_AGENT_VIEW, identity),
         crate::console_voice::VOICE_OPEN_METHOD
@@ -5250,11 +5275,13 @@ pub(crate) fn console_rpc_access_violation(
 }
 
 /// `meta/console/revoke_sessions` on the console route. With an access
-/// controller, enforced or not, only an access admin may revoke, as for the
-/// `meta/access/*` edits ([`handle_access_admin_rpc`]); on a console without
-/// one, any caller a token identified may, as it may every other console
-/// edit, and an anonymous caller may not. A read-only console refuses it,
-/// and so does a console whose session fence record has no file.
+/// controller, enforced or not, only an access admin may revoke, anyone's
+/// sessions, as for the `meta/access/*` edits ([`handle_access_admin_rpc`]).
+/// On a console without one, a caller its token identified revokes only
+/// their own sessions, and an anonymous caller none. Either way a request
+/// that leaves `principal` out names the caller (the target comes from the
+/// connection). A read-only console refuses it, and so does a console whose
+/// session fence record has no file.
 fn console_revoke_sessions_rpc(
     state: &ConsoleJsonState,
     auth: &ConsoleHttpAuthContext,
@@ -5266,14 +5293,26 @@ fn console_revoke_sessions_rpc(
     if read_only && is_console_mutating_rpc_method(&request.method) {
         return console_read_only_rpc_error(response_id);
     }
+    let caller = auth.principal.as_deref();
+    let principal = match request.params.get("principal") {
+        None | Some(Value::Null) => caller,
+        Some(Value::String(principal)) => Some(principal.as_str()),
+        Some(_) => return invalid_params(response_id, "principal must be a string"),
+    };
     let permitted = match auth.access_view.as_ref() {
         Some(view) => view.can_administer(),
-        None => auth.principal.is_some(),
+        None => caller.is_some() && principal == caller,
     };
     if !permitted {
-        return access_denied_rpc_error(response_id, "access denied: access.admin");
+        let message = match (auth.access_view.as_ref(), caller) {
+            (None, Some(_)) => {
+                "access denied: without access control a caller revokes only their own sessions"
+            }
+            _ => "access denied: access.admin",
+        };
+        return access_denied_rpc_error(response_id, message);
     }
-    let Some(principal) = request.params.get("principal").and_then(Value::as_str) else {
+    let Some(principal) = principal else {
         return invalid_params(response_id, "principal must be a string");
     };
     match state
@@ -5330,6 +5369,74 @@ fn access_denied_rpc_error(response_id: Value, message: impl Into<String>) -> Va
             data: Some(json!({ "kind": "access_denied" })),
         }),
     )
+}
+
+/// `meta/console/sign_out` on the console route: sign the caller out of the
+/// login its token belongs to (the issuer's `sid`, or the token alone
+/// without one), as of now. Every caller a token identified may sign itself
+/// out, under an access controller or not and on a read-only console too:
+/// ending one's own login changes nothing else. A caller the console did not
+/// identify by a token has no login to sign out and is answered 401. A
+/// console whose session fence record has no file refuses it, as it refuses
+/// a revocation: a restart would forget the sign-out.
+fn console_sign_out_rpc(
+    auth: &ConsoleHttpAuthContext,
+    request: &JsonRpcRequest,
+) -> (StatusCode, Json<Value>) {
+    use crate::auth::session_fence::ConsoleSessionFencesError;
+    use crate::runtime::ConsoleSignOutError;
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let Some(verification) = auth.verification.as_ref() else {
+        return console_rpc_unauthenticated_response_with(
+            response_id,
+            "unauthorized: signing out needs the token of the login to end, in the \
+             Authorization header",
+        );
+    };
+    let error = |code: i64, message: String| {
+        response_value(
+            response_id.clone(),
+            None,
+            Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
+        )
+    };
+    let response = match verification.sign_out_at(std::time::SystemTime::now()) {
+        Ok(signed_out) => response_value(
+            response_id.clone(),
+            Some(crate::rpc::console_sign_out_json(&signed_out)),
+            None,
+        ),
+        Err(ConsoleSignOutError::NotCurrent) => response_value(
+            response_id.clone(),
+            None,
+            Some(ConsoleCallerRefusal::NotCurrent.json_rpc_error()),
+        ),
+        Err(ConsoleSignOutError::Fences(ConsoleSessionFencesError::NotDurable)) => error(
+            crate::rpc::CAPABILITY_UNAVAILABLE_CODE,
+            "this console has no durable session fence record, so a sign-out would not \
+             survive a restart; configure the gateway's state directory"
+                .to_string(),
+        ),
+        // The sign-out took effect; only its durability is not confirmed.
+        Err(ConsoleSignOutError::Fences(ConsoleSessionFencesError::DurabilityUnconfirmed {
+            error: sync_error,
+            ..
+        })) => error(
+            -32603,
+            format!(
+                "signed out, but the session fence record's directory could not be synced \
+                 ({sync_error}), so the sign-out may not survive a power loss"
+            ),
+        ),
+        Err(ConsoleSignOutError::Fences(fence_error)) => {
+            error(-32603, format!("console sign-out failed: {fence_error}"))
+        }
+    };
+    (StatusCode::OK, Json::<Value>(response))
 }
 
 fn access_unavailable_rpc_error(response_id: Value) -> Value {
@@ -7224,8 +7331,37 @@ fn invalid_access_config_detail(error: &crate::access::AccessConfigError) -> Str
     }
 }
 
-/// Returns None only for a legacy payload with no checked-version key. Any
-/// malformed, mixed or unknown checked envelope is terminal invalid params.
+/// The `meta/access/*` methods that change the configuration. On the
+/// console each one needs `checked_v1`.
+const ACCESS_WRITE_METHODS: &[&str] = &[
+    "meta/access/set",
+    "meta/access/enable",
+    "meta/access/rules/upsert",
+    "meta/access/rules/delete",
+    "meta/access/groups/set",
+    "meta/access/groups/delete",
+];
+
+/// A console access write without `checked_v1` (the owner instance and the
+/// revision it was made against): refused, so no write lands over an edit
+/// its client did not see.
+fn access_revision_required_rpc_error(response_id: Value) -> Value {
+    response_value(
+        response_id,
+        None,
+        Some(JsonRpcError {
+            code: -32602,
+            message: "Access changes need checked_v1 with the owner_instance and the \
+                      expected_revision read from meta/access/get."
+                .to_string(),
+            data: Some(json!({ "kind": "revision_required" })),
+        }),
+    )
+}
+
+/// `None` for a request with no checked-version key: a read, or a write the
+/// caller refuses as `revision_required`. Any malformed, mixed or unknown
+/// checked envelope is terminal invalid params.
 fn checked_access_mutation(
     method: &str,
     params: &Value,
@@ -7373,13 +7509,16 @@ fn handle_access_admin_rpc(
         }
     };
     // Only the authenticated view's subject is forwarded. Its captured admin
-    // decision is not the final authority at either serialized write boundary.
+    // decision is not the final authority at the serialized write boundary.
+    // Every write names the owner instance and the revision it was made
+    // against (`checked_v1`); a write without them is refused, never applied
+    // over an edit its client did not see.
     match checked_access_mutation(&request.method, &request.params) {
         Ok(Some((expected, mutation))) => {
             return Some(
                 match controller.mutate_admin(
                     view.and_then(AccessView::subject),
-                    Some(expected),
+                    expected,
                     mutation,
                 ) {
                     Ok(revision) => {
@@ -7395,13 +7534,11 @@ fn handle_access_admin_rpc(
                 "Invalid checked access request.",
             ));
         }
+        Ok(None) if ACCESS_WRITE_METHODS.contains(&request.method.as_str()) => {
+            return Some(access_revision_required_rpc_error(response_id));
+        }
         Ok(None) => {}
     }
-    let legacy_write = |mutation| {
-        controller
-            .mutate_admin(view.and_then(AccessView::subject), None, mutation)
-            .map(|revision| json!({ "revision": revision }))
-    };
     let result = match request.method.as_str() {
         "meta/access/get" => {
             let (config, revision) =
@@ -7412,61 +7549,6 @@ fn handle_access_admin_rpc(
             let mut result = json!({ "config": &*config, "revision": revision });
             add_access_edit_metadata(controller, &mut result);
             Ok(result)
-        }
-        "meta/access/set" => {
-            match serde_json::from_value(request.params.get("config").cloned().unwrap_or_default())
-            {
-                Ok(config) => legacy_write(crate::access::AccessMutation::Replace(config)),
-                Err(_) => {
-                    return Some(invalid_params(response_id, "Invalid access config."));
-                }
-            }
-        }
-        "meta/access/rules/upsert" => {
-            match serde_json::from_value::<AccessRule>(
-                request.params.get("rule").cloned().unwrap_or_default(),
-            ) {
-                Ok(rule) => legacy_write(crate::access::AccessMutation::UpsertRule(rule)),
-                Err(_) => {
-                    return Some(invalid_params(response_id, "Invalid access rule."));
-                }
-            }
-        }
-        "meta/access/rules/delete" => {
-            let Some(rule_id) = request.params.get("id").and_then(Value::as_str) else {
-                return Some(invalid_params(response_id, "id required"));
-            };
-            legacy_write(crate::access::AccessMutation::DeleteRule(
-                rule_id.to_string(),
-            ))
-        }
-        "meta/access/groups/set" => {
-            let Some(name) = request.params.get("name").and_then(Value::as_str) else {
-                return Some(invalid_params(response_id, "name required"));
-            };
-            match serde_json::from_value::<AccessGroup>(
-                request.params.get("group").cloned().unwrap_or_default(),
-            ) {
-                Ok(group) => legacy_write(crate::access::AccessMutation::SetGroup(
-                    name.to_string(),
-                    group,
-                )),
-                Err(_) => {
-                    return Some(invalid_params(response_id, "Invalid access group."));
-                }
-            }
-        }
-        "meta/access/groups/delete" => {
-            let Some(name) = request.params.get("name").and_then(Value::as_str) else {
-                return Some(invalid_params(response_id, "name required"));
-            };
-            legacy_write(crate::access::AccessMutation::DeleteGroup(name.to_string()))
-        }
-        "meta/access/enable" => {
-            let Some(enabled) = request.params.get("enabled").and_then(Value::as_bool) else {
-                return Some(invalid_params(response_id, "enabled (bool) required"));
-            };
-            legacy_write(crate::access::AccessMutation::SetEnabled(enabled))
         }
         "meta/access/preview" => {
             let subject = request.params.get("subject").and_then(Value::as_str);
@@ -8361,6 +8443,96 @@ fn console_write_auth_context(
 /// too.
 pub(crate) fn token_only_in_query(headers: &HeaderMap, uri: &Uri) -> bool {
     header_bearer_token(headers).is_none() && query_auth_token(uri).is_some()
+}
+
+/// The caller of a change on the Console's listener that a route outside
+/// the console's own router serves (the Flow Editor RPC), resolved as a
+/// console write's caller is ([`console_write_auth_context`]): the same
+/// decisions, session fence record and access controller, and a token only
+/// in the query string refused.
+pub(crate) struct ConsoleChangeCaller {
+    auth: ConsoleHttpAuthContext,
+}
+
+impl ConsoleChangeCaller {
+    /// The request's caller; `None` when the Console refuses the request as
+    /// unauthenticated (answered 401).
+    pub(crate) fn resolve(
+        decisions: &RuntimeDecisionState,
+        fences: &crate::auth::session_fence::ConsoleSessionFences,
+        access: Option<&AccessController>,
+        headers: &HeaderMap,
+        uri: &Uri,
+    ) -> Option<Self> {
+        if token_only_in_query(headers, uri) {
+            return None;
+        }
+        console_request_auth_context_for(decisions, fences, access, headers, uri)
+            .map(|auth| Self { auth })
+    }
+
+    /// The caller's access snapshot, when an access controller is
+    /// installed (an anonymous view on an open Console).
+    pub(crate) fn access_view(&self) -> Option<&AccessView> {
+        self.auth.access_view.as_ref()
+    }
+
+    /// The opaque caller scope `meta/console/whoami` reports for this
+    /// caller.
+    pub(crate) fn caller_scope(&self) -> String {
+        self.auth.caller_scope()
+    }
+
+    /// Refuse a change made for another caller: `expected` is the
+    /// request's `expected_caller_scope`, if any.
+    pub(crate) fn refuse_other_caller(
+        &self,
+        expected: Option<&str>,
+    ) -> Result<(), ConsoleCallerRefusal> {
+        self.auth.refuse_other_caller(expected)
+    }
+
+    /// The check this caller passes again right before its change is made,
+    /// after the change's awaits and reads, wherever it runs.
+    pub(crate) fn current_check(&self) -> ConsoleCallerCurrentCheck {
+        ConsoleCallerCurrentCheck {
+            verification: self.auth.verification.clone(),
+        }
+    }
+}
+
+/// Whether a console caller is still current, checked right before its
+/// change is made ([`ConsoleChangeCaller::current_check`]).
+#[derive(Clone)]
+pub(crate) struct ConsoleCallerCurrentCheck {
+    verification: Option<crate::runtime::ConsoleCallerVerification>,
+}
+
+impl ConsoleCallerCurrentCheck {
+    /// Refuse when the caller's login ended since the request was accepted,
+    /// by the rule of [`refuse_unless_current`].
+    pub(crate) fn refuse_unless_current(&self) -> Result<(), ConsoleCallerRefusal> {
+        refuse_unless_current(self.verification.as_ref())
+    }
+}
+
+/// Refuse a change whose caller's login ended since the request was
+/// accepted: the token must still pass the Console's acceptance now, its
+/// principal's and its login's session fences included. The open Console's
+/// caller without a token (no `verification`) has no login to end.
+fn refuse_unless_current(
+    verification: Option<&crate::runtime::ConsoleCallerVerification>,
+) -> Result<(), ConsoleCallerRefusal> {
+    match verification {
+        Some(verification)
+            if verification
+                .current_at(std::time::SystemTime::now())
+                .is_none() =>
+        {
+            Err(ConsoleCallerRefusal::NotCurrent)
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug)]
@@ -10226,6 +10398,7 @@ async fn handle_console_aggregator_rpc(
             let mut methods = vec![
                 "meta/capabilities",
                 crate::rpc::CONSOLE_WHOAMI_METHOD,
+                crate::rpc::CONSOLE_SIGN_OUT_METHOD,
                 "meta/console/list_identities",
                 "meta/console/inspect_identity",
                 "meta/console/query_timeline",
@@ -10782,6 +10955,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 "meta/status",
                 "meta/capabilities",
                 crate::rpc::CONSOLE_WHOAMI_METHOD,
+                crate::rpc::CONSOLE_SIGN_OUT_METHOD,
                 "meta/list_members",
                 "meta/get_member",
                 "meta/find_members",
@@ -31838,10 +32012,10 @@ mod console_token_lapse_tests {
     }
 
     /// The console route revokes too: on a console without an access
-    /// controller, a caller its token identified may and an anonymous caller
-    /// may not; with an access controller, enforced or not, only an access
-    /// admin may; a console whose record has no file, and a read-only
-    /// console, refuse.
+    /// controller, a caller its token identified revokes their own sessions
+    /// and no one else's, and an anonymous caller none; with an access
+    /// controller, enforced or not, only an access admin may; a console whose
+    /// record has no file, and a read-only console, refuse.
     #[tokio::test]
     async fn the_console_route_revokes_a_principals_sessions() {
         let token = issued_token(Some(now_seconds() - 60), Some(now_seconds() + 3600));
@@ -31856,22 +32030,14 @@ mod console_token_lapse_tests {
             params.clone(),
         )
         .await;
-        assert!(answer["error"].is_null(), "{answer}");
-        assert_eq!(answer["result"]["principal"], "carol@example.test");
-        let not_before = fences
-            .not_before("carol@example.test")
-            .expect("the fence is recorded");
-        assert_eq!(answer["result"]["not_before"], json!(not_before));
-        assert_eq!(
-            answer["result"]["accepts_tokens_issued_from"],
-            json!(not_before + 30)
-        );
+        assert_eq!(answer["error"]["data"]["kind"], "access_denied", "{answer}");
+        assert_eq!(fences.not_before("carol@example.test"), None);
 
         let refused = console_rpc(
             &console_json_router_with_state(state()),
             &token,
             crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
-            params.clone(),
+            json!({ "principal": BOB }),
         )
         .await;
         assert_eq!(
@@ -31969,6 +32135,25 @@ mod console_token_lapse_tests {
             "{denied}"
         );
         assert_eq!(fences.not_before("grace@example.test"), None);
+
+        // No controller: the caller revokes their own sessions.
+        let mut own = state();
+        own.session_fences = fences.clone();
+        let answer = console_rpc(
+            &console_json_router_with_state(own),
+            &token,
+            crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
+            json!({ "principal": BOB }),
+        )
+        .await;
+        assert!(answer["error"].is_null(), "{answer}");
+        assert_eq!(answer["result"]["principal"], BOB);
+        let not_before = fences.not_before(BOB).expect("the fence is recorded");
+        assert_eq!(answer["result"]["not_before"], json!(not_before));
+        assert_eq!(
+            answer["result"]["accepts_tokens_issued_from"],
+            json!(not_before + 30)
+        );
     }
 
     /// Whether the host's session was closed within `wait`.

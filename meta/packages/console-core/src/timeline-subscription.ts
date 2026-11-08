@@ -27,6 +27,9 @@ export interface ConsoleTimelineSubscription {
 export interface ConsoleStreamFailure extends Error {
   httpStatus?: number;
   replayFrame?: ConsoleFrame;
+  /** `sign_in_redirect`: a front answered with a redirect to its sign-in
+   * page, so the stream needs a sign-in exactly as after a 401. */
+  transportFailure?: "sign_in_redirect";
 }
 
 export function timelineCursor(frame: ConsoleFrame): string | undefined {
@@ -136,10 +139,12 @@ export function createTimelineSubscription(input: {
           if (!stopped) state("stopped", { error });
           break;
         }
-        if (fault?.httpStatus === 401 || fault?.httpStatus === 403) {
-          state(fault.httpStatus === 401 ? "authentication-required" : "forbidden", {
-            error, httpStatus: fault.httpStatus,
-          });
+        if (fault?.httpStatus === 401 || fault?.transportFailure === "sign_in_redirect") {
+          state("authentication-required", { error, ...(fault.httpStatus === 401 ? { httpStatus: 401 } : {}) });
+          break;
+        }
+        if (fault?.httpStatus === 403) {
+          state("forbidden", { error, httpStatus: 403 });
           break;
         }
         if (fault?.httpStatus && fault.httpStatus < 500 && fault.httpStatus !== 408 && fault.httpStatus !== 429) {

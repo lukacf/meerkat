@@ -352,12 +352,17 @@ async function accessRevocation(host) {
       // The explicit inbox must explain that state after Needs you disappears.
       await page.getByTestId("nav:gating").click();
       await page.getByText("Approvals are not available for this connection", { exact: true }).waitFor();
-      const capabilityReads = fixture.observations.filter(item => {
-        try { return JSON.parse(item.request || "{}").method === "meta/capabilities"; }
-        catch { return false; }
-      });
-      const advertised = JSON.parse(capabilityReads.at(-1)?.response || "{}").result?.methods;
-      assert(Array.isArray(advertised), "revocation captured the advertised capabilities");
+      // The fixture's proxy records an exchange when its request starts and
+      // fills in the response as it arrives, so the newest capabilities read
+      // can still be in flight here: wait until it holds a whole response.
+      const advertised = await eventually(() => {
+        const capabilityReads = fixture.observations.filter(item => {
+          try { return JSON.parse(item.request || "{}").method === "meta/capabilities"; }
+          catch { return false; }
+        });
+        const methods = JSON.parse(capabilityReads.at(-1)?.response || "{}").result?.methods;
+        return Array.isArray(methods) && methods;
+      }, "revocation captured the advertised capabilities");
       assert(!advertised.includes("meta/gating/pending"), "revocation removes the read capability before dispatch");
       assert.equal(await page.getByText("No pending approvals.", { exact: true }).count(), 0, "unsupported is not an empty success");
     }

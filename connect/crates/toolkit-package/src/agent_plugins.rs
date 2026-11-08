@@ -1,6 +1,6 @@
 //! Agent Plugins 1.0.0 metadata import. Parsing never imports executable code,
 //! launches servers, expands ambient environment variables, or grants authority.
-//! Format source: https://agent-plugins.org/specification (checked 2026-09-29).
+//! Format source: <https://agent-plugins.org/specification> (checked 2026-09-29).
 
 use crate::{
     ContentDigest, IntegrationPackage, PackageIdentity, PortableMcpEntry, RemoteTransport,

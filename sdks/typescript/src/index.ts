@@ -41,6 +41,7 @@ export type {
   MobKickoffWaitOptions,
   MobMemberCustodyDeferral,
   MobMemberCustodyUnknown,
+  MobMemberPreviewUnavailableUnknown,
   MobMemberSnapshot,
   MobPeerConnectivity,
   MobPeerConnectivitySnapshot,

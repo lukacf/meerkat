@@ -2,8 +2,11 @@ import React from "react";
 
 import {
   CONSOLE_SCHEDULE_COMMANDS,
+  describeLatestTakeover,
   describeSchedulePhase,
   describeScheduleSender,
+  describeScheduleSenderHistory,
+  describeScheduleTakeover,
   describeScheduleTrigger,
   emptyScheduleDraft,
   formatScheduleTime,
@@ -12,6 +15,10 @@ import {
   scheduleDraftFromSchedule,
   scheduleErrorMessage,
   scheduleIsGone,
+  scheduleResumeParams,
+  scheduleTakeover,
+  scheduleTakeoverConfirmLabel,
+  scheduleTakeoverParams,
   scheduleUpdateParams,
   viewerTimeZone,
   type ConsoleSchedule,
@@ -19,6 +26,7 @@ import {
   type ConsoleScheduleDraft,
   type ConsoleScheduleEditing,
   type ConsoleScheduleIntervalUnit,
+  type ConsoleScheduleTakeover,
   type ConsoleScheduleTimingKind,
 } from "../lib/schedules";
 import {
@@ -93,6 +101,8 @@ export interface ScheduleFormProps {
   formatTime?: (iso: string) => string;
   /** Fields before the message (the Schedules panel's agent choice). */
   lead?: React.ReactNode;
+  /** A question for the viewer above the form's buttons (a takeover to confirm). */
+  notice?: React.ReactNode;
   className?: string;
 }
 
@@ -116,6 +126,7 @@ export function ScheduleForm({
   onCancel,
   formatTime = formatScheduleTime,
   lead,
+  notice,
   className,
 }: ScheduleFormProps): React.JSX.Element {
   return (
@@ -260,6 +271,7 @@ export function ScheduleForm({
       <p className="console-schedules__hint">
         Each send goes to {agentName || identity} as you, through the same checks as a message you send now.
       </p>
+      {notice}
       {error ? (
         <Notice tone="crit" role="alert" className="console-schedules__error" testId="schedule-form-error">
           {error}
@@ -279,6 +291,76 @@ export function ScheduleForm({
         </button>
       </div>
     </form>
+  );
+}
+
+/** A change the gateway held back because it would take a schedule over from
+ * its sender, waiting for the viewer: the change as asked, and who the
+ * schedule sends as now. */
+export interface PendingScheduleTakeover {
+  /** The agent the schedule belongs to. */
+  identity: string;
+  command: ConsoleScheduleCommand;
+  params: Record<string, unknown>;
+  /** The busy key of the change. */
+  key: string;
+  takeover: ConsoleScheduleTakeover;
+}
+
+export interface ScheduleTakeoverNoticeProps {
+  pending: PendingScheduleTakeover;
+  /** A write is running: the buttons wait. */
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  /** A sender that is an agent reads by its name. */
+  agentName?: (sender: string) => string | undefined;
+  testId: string;
+  confirmTestId: string;
+  cancelTestId: string;
+}
+
+/**
+ * The question a takeover asks before a change makes the viewer a
+ * schedule's sender in someone else's place: who it sends as now, and what
+ * confirming does. Confirming repeats the change as a takeover; keeping the
+ * sender changes nothing.
+ */
+export function ScheduleTakeoverNotice({
+  pending,
+  busy,
+  onConfirm,
+  onCancel,
+  agentName,
+  testId,
+  confirmTestId,
+  cancelTestId,
+}: ScheduleTakeoverNoticeProps): React.JSX.Element {
+  return (
+    <Notice
+      tone="warn"
+      role="alert"
+      className="console-schedules__takeover"
+      testId={testId}
+      action={
+        <span className="cc-btn-row">
+          <button
+            type="button"
+            className="cc-btn cc-btn--sm cc-btn--primary"
+            data-testid={confirmTestId}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {scheduleTakeoverConfirmLabel(pending.command)}
+          </button>
+          <button type="button" className="cc-btn cc-btn--sm cc-btn--ghost" data-testid={cancelTestId} onClick={onCancel}>
+            Keep its sender
+          </button>
+        </span>
+      }
+    >
+      {describeScheduleTakeover(pending.takeover, pending.command, agentName)}
+    </Notice>
   );
 }
 
@@ -375,6 +457,8 @@ export function SchedulesSection({
   const senderLabel = (sender: string) => directory.lookup(sender)?.label;
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const [form, setForm] = React.useState<ScheduleFormState | null>(null);
+  // A change held back until the viewer confirms taking the schedule over.
+  const [takeover, setTakeover] = React.useState<PendingScheduleTakeover | null>(null);
   const [stripRef, stripWidth] = useMeasuredWidth<HTMLDivElement>(480);
   const runRef = React.useRef(run);
   runRef.current = run;
@@ -423,6 +507,7 @@ export function SchedulesSection({
     if (!editing.canChange) {
       setForm(null);
       setConfirmingDelete(null);
+      setTakeover(null);
     }
   }, [editing.canChange]);
 
@@ -443,13 +528,21 @@ export function SchedulesSection({
   ): Promise<boolean> {
     setBusy(key);
     setActionError(null);
+    setTakeover(null);
     let done = false;
     try {
       await runRef.current(command, params);
       done = true;
     } catch (error) {
       if (alive.current) {
-        setActionError(scheduleErrorMessage(error, command));
+        // A change that would take the schedule over waits for the viewer;
+        // nothing was changed.
+        const asked = scheduleTakeover(error);
+        if (asked) {
+          setTakeover({ identity, command, params, key, takeover: asked });
+        } else {
+          setActionError(scheduleErrorMessage(error, command));
+        }
         if (scheduleIsGone(error)) {
           setForm(null);
           setConfirmingDelete(null);
@@ -461,15 +554,27 @@ export function SchedulesSection({
     return done;
   }
 
+  /** Repeat the held-back change as a takeover; an edit's form closes once
+   * it is saved. */
+  function confirmTakeover() {
+    if (!takeover || busy) return;
+    const { command, params, key } = takeover;
+    void write(command, scheduleTakeoverParams(params), key).then((done) => {
+      if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.update) setForm(null);
+    });
+  }
+
   function openNew() {
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setForm({ schedule: null, draft: emptyScheduleDraft(now(), timezone ?? viewerTimeZone()), error: null });
   }
 
   function openEdit(schedule: ConsoleSchedule) {
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setForm({
       schedule,
       draft: scheduleDraftFromSchedule(schedule, now(), timezone ?? viewerTimeZone()),
@@ -477,11 +582,15 @@ export function SchedulesSection({
     });
   }
 
+  // A takeover confirms the change as it was asked: editing the form again
+  // drops the question, and the next save asks again if it has to.
   function change(patch: Partial<ConsoleScheduleDraft>) {
+    setTakeover((current) => (current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current));
     setForm((current) => (current ? { ...current, draft: { ...current.draft, ...patch }, error: null } : current));
   }
 
   function toggleWeekday(day: number) {
+    setTakeover((current) => (current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current));
     setForm((current) => (current ? { ...current, draft: toggleDraftWeekday(current.draft, day), error: null } : current));
   }
 
@@ -503,7 +612,10 @@ export function SchedulesSection({
 
   function runAction(schedule: ConsoleSchedule, command: ConsoleScheduleCommand) {
     if (busy) return;
-    void write(command, { schedule_id: schedule.scheduleId }, `${schedule.scheduleId}:${command}`).then((done) => {
+    const params = command === CONSOLE_SCHEDULE_COMMANDS.resume
+      ? scheduleResumeParams(schedule)
+      : { schedule_id: schedule.scheduleId };
+    void write(command, params, `${schedule.scheduleId}:${command}`).then((done) => {
       if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.delete) {
         setConfirmingDelete(null);
         setForm((current) => (current?.schedule?.scheduleId === schedule.scheduleId ? null : current));
@@ -513,6 +625,20 @@ export function SchedulesSection({
 
   const headingId = `schedules-heading:${identity}`;
   const agentName = directory.lookup(identity)?.label;
+  // An edit's takeover question sits in its form; a resume's above the list.
+  const takeoverInForm = Boolean(form && editing.canChange && takeover?.command === CONSOLE_SCHEDULE_COMMANDS.update);
+  const takeoverNotice = takeover ? (
+    <ScheduleTakeoverNotice
+      pending={takeover}
+      busy={busy !== null}
+      onConfirm={confirmTakeover}
+      onCancel={() => setTakeover(null)}
+      agentName={senderLabel}
+      testId={`schedules-takeover:${identity}`}
+      confirmTestId={`schedules-takeover-confirm:${identity}`}
+      cancelTestId={`schedules-takeover-cancel:${identity}`}
+    />
+  ) : null;
   return (
     <section
       className="console-schedules"
@@ -557,6 +683,7 @@ export function SchedulesSection({
           {actionError}
         </Notice>
       ) : null}
+      {takeover && !takeoverInForm ? takeoverNotice : null}
       {schedules.length > 0 ? (
         <div className="console-schedules__glance" ref={stripRef}>
           <p className="console-schedules__next" data-testid={`schedules-next:${identity}`}>
@@ -598,8 +725,12 @@ export function SchedulesSection({
           onChange={change}
           onToggleWeekday={toggleWeekday}
           onSubmit={submit}
-          onCancel={() => setForm(null)}
+          onCancel={() => {
+            setForm(null);
+            setTakeover((current) => (current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current));
+          }}
           formatTime={formatTime}
+          notice={takeoverInForm ? takeoverNotice : null}
         />
       ) : null}
       {status === "loading" && schedules.length === 0 ? <LoadingState label="Loading schedules" rows={2} /> : null}
@@ -649,6 +780,15 @@ export function SchedulesSection({
             {`Sends as ${describeScheduleSender(schedule.sender, senderLabel)}`}
           </p>
         )}
+        {schedule.senderHistory.length > 0 ? (
+          <p
+            className="console-schedules__meta"
+            data-testid={`schedule-sender-history:${id}`}
+            title={describeScheduleSenderHistory(schedule.senderHistory, senderLabel, formatTime)}
+          >
+            {describeLatestTakeover(schedule.senderHistory, senderLabel, formatTime)}
+          </p>
+        ) : null}
         {editing.canChange ? (
           <div className="cc-btn-row console-schedules__actions">
             <button

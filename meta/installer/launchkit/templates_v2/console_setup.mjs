@@ -94,7 +94,13 @@ export function createConsoleSetupPort({ fetch: fetcher, EventSource: Events, Se
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch { throw safeError("turn_uncertain"); }
-    if (response.status === 401 || response.status === 403) { retire("sign-in"); throw safeError("unavailable"); }
+    if (response.status === 401) { retire("sign-in"); throw safeError("unavailable"); }
+    if (response.status === 403) {
+      // An account people share answers no setup prompt: ask for a named one.
+      let code = null;
+      try { code = (await response.json())?.error?.code ?? null; } catch {}
+      retire(code === "approver_unauthenticated" ? "named-account" : "sign-in"); throw safeError("unavailable");
+    }
     let value;
     try { value = await response.json(); } catch { throw safeError("turn_uncertain"); }
     if (!response.ok) throw Object.assign(safeError("unavailable"), {
@@ -418,6 +424,7 @@ export function mountConsoleSetup(container, options) {
     const active = snapshot.state?.active_send;
     const provider = port.protectedPrompt?.protocol_version === 3 && port.protectedPrompt.prompt.kind.startsWith("provider_");
     statusText.textContent = snapshot.connection === "sign-in" ? "Sign in to the Console again to continue."
+      : snapshot.connection === "named-account" ? "Answering setup questions needs your own named account. Sign out, then sign in with your account."
       : snapshot.connection === "replaced" ? "This setup session was replaced."
         : snapshot.startupRefusal ? startupRefusalLabels[snapshot.startupRefusal]
         : snapshot.admissionUncertain || port.outcomeUncertain ? "Message outcome unconfirmed. Checking the original request only; it has not been sent again."

@@ -13,6 +13,16 @@ const { routeGuard } = require("./scenarios/route-guard.cjs");
 
 const repoRoot = path.resolve(__dirname, "..");
 
+/** The caller the mock console server's `meta/console/whoami` reports. */
+const MOCK_CALLER_SCOPE = "browser-e2e-caller";
+/** The params a console method sees: the gateway takes the console's
+ * `expected_caller_scope` (whom it acts for) out of every request first. */
+function methodParams(params) {
+  if (!params || typeof params !== "object") return params;
+  const { expected_caller_scope: _caller, ...rest } = params;
+  return rest;
+}
+
 function stockTopologyEndpointId(authority, identity) {
   return `mk1|${encodeURIComponent(authority)}|${encodeURIComponent(identity)}`;
 }
@@ -779,7 +789,7 @@ function startMockConsoleServer(options = {}) {
               login_expires_at_ms: null,
               can_administer: false,
               approver_ids: [],
-              caller_scope: "browser-e2e-caller",
+              caller_scope: MOCK_CALLER_SCOPE,
             },
           }));
           return;
@@ -3983,13 +3993,15 @@ async function runCheckedSaveBrowserProof(mode) {
         return reply({ result: { config: state.config, ...metadata() } });
       }
       if (mutationMethods.has(request.method)) {
-        writes.push(structuredClone({ method: request.method, params: request.params }));
+        const params = methodParams(request.params);
+        // Every change names the caller the console acts as.
+        writes.push(structuredClone({ method: request.method, params, caller: request.params?.expected_caller_scope }));
         if (mode === "unavailable") {
           // Keep valid read metadata to isolate the finite error projection.
           return reply({ error: { code: -32004, message: "PRIVATE_UNAVAILABLE_CANARY", data: { kind: "access_mutation_unavailable" } } });
         }
-        const checked = request.params.checked_v1;
-        if (Object.keys(request.params).length !== 1 || checked?.owner_instance !== state.owner) {
+        const checked = params.checked_v1;
+        if (Object.keys(params).length !== 1 || checked?.owner_instance !== state.owner) {
           return reply({ error: { code: -32602, message: "PRIVATE_PAYLOAD_CANARY" } });
         }
         if (checked.expected_revision !== state.revision) {
@@ -4042,6 +4054,7 @@ async function runCheckedSaveBrowserProof(mode) {
     checkpoints.push({ step: "first-response", notice, saveDisabled: disabled, draft: await draft.inputValue(), writes: writes.length, readMetadata: metadata() });
     await page.screenshot({ path: path.join(evidence, "first-response.png"), fullPage: true });
     assert.equal(writes.length, 1);
+    assert.equal(writes[0].caller, MOCK_CALLER_SCOPE, "a change names the caller the console acts as");
     assert.equal(state.applied, 0);
     assert.equal(await draft.inputValue(), draftText);
     assert.doesNotMatch(await page.locator("body").innerText(), /PRIVATE_.*CANARY/);
@@ -4530,7 +4543,7 @@ async function runMemoryBodyClickAcrossRefreshProof() {
       }
       // Only the refresh's own unfiltered read fails. The lattice page-walk
       // pages with a limit, and a walk failing would change the tile.
-      const plainRead = !request.params || Object.keys(request.params).length === 0;
+      const plainRead = !request.params || Object.keys(methodParams(request.params)).length === 0;
       if (request.method === "meta/memory/panel/records" && failRecordReads && plainRead) {
         failedReads.push(request.id);
         return reply({ error: { code: -32000, message: "memory store unavailable" } });
@@ -4683,7 +4696,7 @@ async function runMemoryLatticeRecheckAcrossRefreshProof() {
         return route.fulfill({ response, json: value });
       }
       if (request.method === "meta/memory/panel/records") {
-        const params = request.params || {};
+        const params = methodParams(request.params) || {};
         // The page-walk pages with a limit; the scope probes carry a scope.
         if (params.limit !== undefined && params.scope === undefined) {
           walkReads.push(request.id);

@@ -134,6 +134,20 @@ for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile 
     bad "machine-authority-changed ignored its gate owner $gate_owner"
   fi
 done
+# The one TLC install every TLC lane runs (the JDK and the mirrored TLC jar)
+# is a machine-authority input: nightly runs only the lane's machine-verify
+# part, so a jar or JDK change reaches the audit shards through ci.yml's
+# tlc-audits job alone. Another action stays out of the machine lanes.
+if scripts/machine-authority-changed -- .github/actions/setup-tlc-ci/action.yml >/dev/null; then
+  ok "machine-authority-changed protects the TLC install .github/actions/setup-tlc-ci/action.yml"
+else
+  bad "machine-authority-changed ignored the TLC install .github/actions/setup-tlc-ci/action.yml"
+fi
+if scripts/machine-authority-changed -- .github/actions/setup-rust-ci/action.yml >/dev/null; then
+  bad "machine-authority-changed routes an action without TLC to the machine lanes"
+else
+  ok "an action without TLC (.github/actions/setup-rust-ci/action.yml) stays out of the machine lanes"
+fi
 edge_out=$(printf 'crates/xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"
@@ -294,8 +308,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # firing run, so the fake prints one trace state.
 # live_context_causal_tail_batch_audit.sh requires its four goals violated,
 # and with --mutants each seeded defect's property violated.
-# run_start_hold_audit.sh requires each of its eight reachability witnesses
-# (seven in its main run, one in its reasons run) to be reported violated.
+# run_start_hold_audit.sh requires each of its nine reachability witnesses
+# (seven in its main run, two in its reasons run) to be reported violated.
+# retained_run_settle_audit.sh requires its eleven witnesses violated, and
+# with --mutants each seeded defect's action property violated.
 # requeue_across_stop_audit.sh requires each of its fifteen reachability
 # witnesses to be reported violated.
 # materialization_rollback_keep_audit.sh requires each of its eleven
@@ -443,6 +459,23 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessStillHeldRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessStoppedHoldSurvivesResume is violated."' \
   'echo "Error: Invariant NotAuditWitnessHostPreparationHeld is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHostRecoveryHeld is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAcceptedUnderHostHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSettledUnderHostHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRepeatAccepted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyWithRunCurrent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyStaleObservation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyWhileDraining is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetryNotRetained is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingInitializing is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessInertDestroyed is violated."' \
+  'echo "Error: Action property AuditAcceptedSettlesTheRetainedRun is violated."' \
+  'echo "Error: Action property AuditSettleNotAcceptedWhileDraining is violated."' \
+  'echo "Error: Action property AuditRefusedSettleRecordsNothing is violated."' \
+  'echo "Error: Action property AuditSettledRunNeverResumes is violated."' \
+  'echo "Error: Action property AuditSettledRunEndsCancelled is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterGracefulStop is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterCrash is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredSettled is violated."' \

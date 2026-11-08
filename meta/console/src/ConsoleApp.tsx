@@ -45,6 +45,7 @@ import type {
   TopologyOperationReceipt,
   HostAttentionSnapshot,
   HostAttentionSourceConfig,
+  ApprovalViewer,
 } from "@console-core";
 import {
   collectConsoleDockPanelIds,
@@ -102,16 +103,16 @@ import {
   consoleCommandMethod,
   createHttpConsoleTransport,
   createMetaConsoleController,
+  type ConsoleWhoami,
   type MetaConsoleTransport,
 } from "./lib/headless";
+import { announceConsoleCaller, consoleCallerFailure, createConsoleInstanceCaller, subscribeConsoleCaller } from "./lib/console-caller";
+import { adoptSharedSectionPreferences, rememberPreferenceScope, useBrowserPreference } from "./lib/preference-scope";
 import {
   WORKGRAPH_CONFLICT_CODE,
-  resolveWorkGraphBindingRevision,
-  resolveWorkGraphGoalItemRevision,
-  resolveWorkGraphItemRevision,
+  WORKGRAPH_UNOBSERVED_REVISION_MESSAGE,
   workGraphMayRelease,
   workGraphConflictRefreshRequest,
-  type WorkGraphCommandRunner,
 } from "./lib/workgraph-actions";
 import { createConsoleId } from "./lib/id";
 import {
@@ -240,13 +241,14 @@ import {
 } from "./panels/WorkGraphPanel";
 import { RoutingPanel, deliverySummaries } from "./panels/RoutingPanel";
 import { LogsPanel } from "./panels/LogsPanel";
-import { Topbar } from "./panels/Topbar";
+import { Topbar, type TopbarIdentity } from "./panels/Topbar";
 import { useConsoleDisplay, type ConsoleTheme } from "./panels/Tweaks";
 import {
   Sidebar as DesignSidebar,
   normalizeNavKind,
   pruneStaleSidebarStorage,
   readSidebarPins,
+  readSidebarStringSet,
   sidebarAgentPinId,
   sidebarAgentsWithLineage,
   sidebarPinnedFamilyPinIds,
@@ -270,10 +272,10 @@ import { consoleNavControls } from "./lib/nav-controls";
 import { ConsoleNavigationProvider, PanelPreferencesProvider } from "@console-components";
 import { NavigationFocusProvider, buildConsoleNavigation, useNavigationFocusSource, type ConsoleNavigationHost } from "./lib/console-navigation";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
-import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
+import { ApprovalViewerProvider, HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
 import type { ConsoleQuoteSelection } from "../../packages/console-components/src/conversation/context-selection";
-import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft } from "./lib/send-attempt-storage";
+import { consoleSendStorageKey, loadConsoleSendAttempts, saveConsoleSendAttempts, readLegacyConsoleQueue, readPredecessorConsoleQueue, consoleLegacyQueueImported, consoleComposerTabId, loadConsoleComposerDraft, saveConsoleComposerDraft, legacyConsoleQueueKey, purgeConsoleSendScope, removeOlderConsoleQueues } from "./lib/send-attempt-storage";
 
 import { VoiceBar } from "./panels/VoiceBar";
 import { useVoiceController } from "./lib/use-voice-controller";
@@ -553,6 +555,9 @@ function isWorkGraphSignalFrame(frame: ConsoleFrame): boolean {
   return name.startsWith("workgraph_");
 }
 const DOCK_LAYOUT_STORAGE_PREFIX = "meta-console-dock-state";
+/** The sidebar's and the activity rail's collapse (per-user preferences). */
+const SIDEBAR_COLLAPSED_PREFERENCE = "meta-console-sidebar-collapsed";
+const RAIL_COLLAPSED_PREFERENCE = "meta-console-rail-collapsed";
 // A fork's side chat is listed once the console's read model has walked it;
 // the refreshes right after the fork may predate that walk.
 const SIDE_CHAT_LIST_ATTEMPTS = 6;
@@ -617,6 +622,23 @@ function browserLocalStorage(): Storage | null {
     return window.localStorage;
   } catch {
     return null;
+  }
+}
+
+/** The identity chip's words for who the console acts as. A shared account
+ * names a principal but no person; an open console names nobody. */
+function consoleCallerWords(whoami: ConsoleWhoami): Pick<TopbarIdentity, "kind" | "label" | "detail"> {
+  switch (whoami.actorKind) {
+    case "person":
+      return { kind: "person", label: whoami.principal ?? "Signed in", detail: "Signed in" };
+    case "token_principal":
+      return { kind: "token_principal", label: whoami.principal ?? "Shared account", detail: "Signed in with a shared account, not as a person" };
+    case "service":
+      return { kind: "service", label: whoami.principal ?? "Service", detail: "Signed in as a service" };
+    case "anonymous":
+      return { kind: "anonymous", label: "Not signed in", detail: "Open console: everyone here acts as the open console" };
+    default:
+      return { kind: whoami.actorKind, label: whoami.principal ?? "Signed in", detail: "Signed in" };
   }
 }
 
@@ -905,38 +927,240 @@ export function ConsoleApp(props: ConsoleAppProps): React.JSX.Element {
   return <ConsoleAppAuthority key={instanceKey} {...props} />;
 }
 
+/** How an instance tells its authority what it learned about its caller. */
+interface ConsoleCallerHandlers {
+  /** The experience's storage scope: `false` when it changed (the instance ends). */
+  observeScope: (scope: string | undefined) => boolean;
+  /** The caller this instance acts as (`meta/console/whoami`'s `caller_scope`). */
+  onCaller: (callerScope: string) => void;
+  /** Where this instance keeps its user's queued messages and drafts. */
+  onStorageScope: (namespace: string | null) => void;
+  /** A console request said the login ended (a 401, a sign-in redirect). */
+  onSignInRequired: () => void;
+  /** The gateway serves another caller than this instance acts for. */
+  onCallerChanged: () => void;
+  /** The person signs out (the identity chip's Sign out). Settles once this
+   * browser forgot their data; the browser then goes to the host's sign-out. */
+  onSignOut: () => Promise<void>;
+  /** Whether this browser is signing out of this console: nothing more of
+   * the signed-out user's is kept (a draft flushed on the way out included). */
+  signingOut: () => boolean;
+  /** The instance's lifetime, so a switch can end it at once. */
+  registerLifetime: (lifetime: { active: boolean; generation: number }) => void;
+  /** Reads the files the instance's composers have staged, so a login that
+   * ends keeps them for the same person's next instance. */
+  registerStagedAttachments: (read: () => Record<string, StagedAttachment[]>) => void;
+  /** The files a login that ended left staged, for the instance whose
+   * storage scope is `namespace` (the same person's); given out once. */
+  takeCarriedAttachments: (namespace: string) => Record<string, File[]> | null;
+}
+
+/** How long a sign-out waits for this browser to forget the user's data
+ * before it leaves for the host's sign-out anyway. */
+const SIGN_OUT_PURGE_WAIT_MS = 1_500;
+
 function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
   const observedScope = React.useRef<{ value: string | undefined } | null>(null);
   const [generation, setGeneration] = React.useState(0);
+  // Why the console shows no views: the login ended (a 401 or a sign-in
+  // redirect), or this browser signed out of this console.
+  const [signedOut, setSignedOut] = React.useState<"ended" | "signed_out" | null>(null);
+  const signedOutRef = React.useRef(signedOut);
+  signedOutRef.current = signedOut;
+  // The caller of the current instance, and the last one any instance knew.
+  const callerRef = React.useRef<string | undefined>(undefined);
+  const lastCallerRef = React.useRef<string | undefined>(undefined);
+  const lifetimeRef = React.useRef<{ active: boolean; generation: number } | null>(null);
+  // The current instance's storage namespace, and whether this browser is
+  // signing out of this console.
+  const storageScopeRef = React.useRef<string | null>(null);
+  const signingOutRef = React.useRef(false);
+  // The files the current instance's composers have staged, and the ones a
+  // login that ended left staged: the same person's next instance (the same
+  // storage scope, as for the composer's text) gets them back.
+  const stagedAttachmentsReaderRef = React.useRef<(() => Record<string, StagedAttachment[]>) | null>(null);
+  const carriedAttachmentsRef = React.useRef<{ namespace: string; files: Record<string, File[]> } | null>(null);
+  // Ends the current instance's work now, before React unmounts it: its
+  // requests, locks and queue drains stop with its lifetime.
+  const retireInstance = React.useCallback(() => {
+    const lifetime = lifetimeRef.current;
+    if (lifetime) {
+      lifetime.active = false;
+      lifetime.generation += 1;
+    }
+    callerRef.current = undefined;
+  }, []);
+  // Signing out: the signed-out user's queued messages and this tab's
+  // drafts leave this browser, with the storage lock's records of the
+  // queues and any files kept from an ended login. Preferences stay.
+  // Settles once the lock records are gone too.
+  const forgetSignedOutUser = React.useCallback((): Promise<void> => {
+    signingOutRef.current = true;
+    carriedAttachmentsRef.current = null;
+    retireInstance();
+    const namespace = storageScopeRef.current;
+    return namespace ? purgeConsoleSendScope(browserLocalStorage(), browserComposerStorage(), namespace) : Promise.resolve();
+  }, [retireInstance]);
+  const restart = React.useCallback((callerChanged: boolean) => {
+    // A same-URL account switch ends all old subscriptions, locks, drafts
+    // and transcript state before the replacement authority loads. The
+    // previous account's sends no longer read "You asked".
+    retireInstance();
+    if (callerChanged) forgetOwnSends();
+    observedScope.current = null;
+    signingOutRef.current = false;
+    setSignedOut(null);
+    setGeneration(current => current + 1);
+  }, [retireInstance]);
   const observeScope = React.useCallback((value: string | undefined): boolean => {
     const previous = observedScope.current;
     observedScope.current = { value };
     if (previous && previous.value !== value) {
-      // A same-URL account switch ends all old subscriptions, locks, drafts
-      // and transcript state before the replacement authority loads. The
-      // previous account's sends no longer read "You asked".
+      retireInstance();
       forgetOwnSends();
       setGeneration(current => current + 1);
       return false;
     }
     return true;
-  }, []);
-  return <ConsoleAppInstance key={generation} {...props} observeScope={observeScope} />;
+  }, [retireInstance]);
+  const handlers = React.useMemo<ConsoleCallerHandlers>(() => ({
+    observeScope,
+    onCaller: (callerScope) => {
+      // The instance acts for one caller: an answer naming another loads the
+      // console again for them, with nothing of the first carried over.
+      if (callerRef.current !== undefined && callerRef.current !== callerScope) {
+        restart(true);
+        return;
+      }
+      callerRef.current = callerScope;
+      lastCallerRef.current = callerScope;
+      announceConsoleCaller(browserLocalStorage(), props.baseUrl, callerScope);
+    },
+    onStorageScope: (namespace) => { storageScopeRef.current = namespace; },
+    onSignInRequired: () => {
+      if (signedOutRef.current) return;
+      // The composer's files wait for the same person to sign in again, as
+      // its text does (kept in this tab's storage).
+      const namespace = storageScopeRef.current;
+      const staged = Object.entries(stagedAttachmentsReaderRef.current?.() ?? {})
+        .filter(([, items]) => items.length > 0)
+        .map(([identity, items]) => [identity, items.map(item => item.file)] as const);
+      carriedAttachmentsRef.current = namespace && staged.length > 0 ? { namespace, files: Object.fromEntries(staged) } : null;
+      retireInstance();
+      setSignedOut("ended");
+    },
+    onCallerChanged: () => restart(true),
+    onSignOut: () => {
+      // Bounded, so a stalled IndexedDB cannot hold the sign-out.
+      const purged = Promise.race([
+        forgetSignedOutUser(),
+        new Promise<void>(resolve => window.setTimeout(resolve, SIGN_OUT_PURGE_WAIT_MS)),
+      ]);
+      // The console's other tabs leave their views and forget their drafts.
+      announceConsoleCaller(browserLocalStorage(), props.baseUrl, null);
+      // The browser leaves for the host's sign-out once the purge is done. A
+      // host that answers without leaving the page finds the signed-out state
+      // here; it shows only after the navigation began, so the sign-out form
+      // stays in place until the browser submitted it.
+      void purged.then(() => window.setTimeout(() => setSignedOut("signed_out"), 100));
+      return purged;
+    },
+    signingOut: () => signingOutRef.current,
+    registerLifetime: (lifetime) => { lifetimeRef.current = lifetime; },
+    registerStagedAttachments: (read) => { stagedAttachmentsReaderRef.current = read; },
+    takeCarriedAttachments: (namespace) => {
+      const carried = carriedAttachmentsRef.current;
+      carriedAttachmentsRef.current = null;
+      return carried?.namespace === namespace ? carried.files : null;
+    },
+  }), [forgetSignedOutUser, observeScope, props.baseUrl, restart, retireInstance]);
+  // Another tab of this gateway's console learned who it acts as, or signed
+  // out: a different caller reloads this tab's authority at once, a sign-out
+  // leaves its views, and a sign-in after this tab's login ended brings it back.
+  React.useEffect(() => subscribeConsoleCaller(props.baseUrl, (announcement) => {
+    if (announcement.caller === null) {
+      void forgetSignedOutUser();
+      setSignedOut("signed_out");
+      return;
+    }
+    if (signedOutRef.current) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    // An instance that knows no caller (its whoami read failed or has not
+    // answered) loads again for the caller another tab learned.
+    if (callerRef.current === undefined) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    if (announcement.caller !== callerRef.current) restart(true);
+  }), [forgetSignedOutUser, props.baseUrl, restart]);
+  // While signed out, coming back to the tab tries the login again.
+  React.useEffect(() => {
+    if (!signedOut) return undefined;
+    const retry = () => { if (document.visibilityState !== "hidden") restart(false); };
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, [signedOut, restart]);
+  if (signedOut) return <ConsoleSignInState reason={signedOut} onRetry={() => restart(false)} />;
+  return <ConsoleAppInstance key={generation} {...props} callerHandlers={handlers} />;
 }
 
-function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, observeScope }: ConsoleAppProps & { observeScope: (scope: string | undefined) => boolean }): React.JSX.Element {
+/** The one sign-in state: the login ended (an expired login, a sign-out in
+ * another tab, a front's sign-in redirect), so no view of it stays. */
+function ConsoleSignInState({ reason, onRetry }: { reason: "ended" | "signed_out"; onRetry: () => void }): React.JSX.Element {
+  // No caller is signed in: the display choices of the last user of this
+  // browser's console stand in.
+  const display = useConsoleDisplay({}, null);
+  return (
+    <div
+      className="cc-theme-scope console-sign-in"
+      data-cc-theme={display.settings.theme}
+      data-cc-variant={display.settings.variant}
+      data-testid="console-sign-in"
+      data-reason={reason}
+      role="alert"
+    >
+      <h1 className="console-sign-in__title">{reason === "signed_out" ? "You signed out of this console" : "Your console sign-in ended"}</h1>
+      <p className="console-sign-in__text">
+        {reason === "signed_out"
+          ? "Your queued messages and drafts were removed from this browser, and other tabs of this console signed out too. Sign in to use the console again."
+          : "Sign in again to continue. Nothing from the ended sign-in is shown, and messages you queued stay saved in this browser."}
+      </p>
+      <div className="console-sign-in__actions">
+        <button type="button" className="cc-btn cc-btn--primary" onClick={() => window.location.reload()}>Sign in</button>
+        <button type="button" className="cc-btn" onClick={onRetry}>Try again</button>
+      </div>
+    </div>
+  );
+}
+
+function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlPolicy, customPanels: suppliedPanels, panelService, mcpAppsHost, callerHandlers }: ConsoleAppProps & { callerHandlers: ConsoleCallerHandlers }): React.JSX.Element {
   countRender("ConsoleApp");
+  const observeScope = callerHandlers.observeScope;
+  const callerHandlersRef = React.useRef(callerHandlers);
+  callerHandlersRef.current = callerHandlers;
   const lifetimeRef = React.useRef({ active: true, generation: 0 });
   React.useLayoutEffect(() => {
     lifetimeRef.current.active = true;
     lifetimeRef.current.generation += 1;
+    callerHandlersRef.current.registerLifetime(lifetimeRef.current);
     return () => {
       lifetimeRef.current.active = false;
       lifetimeRef.current.generation += 1;
     };
   }, []);
   const consoleFetchTimeoutMsRef = React.useRef(DEFAULT_CONSOLE_FETCH_TIMEOUT_MS);
-  const consoleTransport = React.useMemo(
+  // A request answered that the login ended (one sign-in state for the
+  // whole console) or that the gateway serves another caller now (a switch,
+  // at once). The caller of the request still gets its error.
+  const reportCallerFailure = React.useCallback((error: unknown, generation = lifetimeRef.current.generation) => {
+    if (!lifetimeRef.current.active || lifetimeRef.current.generation !== generation) return;
+    const failure = consoleCallerFailure(error);
+    if (failure === "sign_in") callerHandlersRef.current.onSignInRequired();
+    else if (failure === "caller_changed") callerHandlersRef.current.onCallerChanged();
+  }, []);
+  const consoleConnection = React.useMemo(
     () => {
       const source = transport ?? createHttpConsoleTransport({
         baseUrl,
@@ -950,34 +1174,68 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const call = async <T,>(operation: () => Promise<T>): Promise<T> => {
         const generation = lifetimeRef.current.generation;
         current(generation);
-        const value = await operation();
+        let value: T;
+        try {
+          value = await operation();
+        } catch (error) {
+          reportCallerFailure(error, generation);
+          throw error;
+        }
         current(generation);
         return value;
+      };
+      // The caller this instance acts as: its own first whoami answer, read
+      // once (a failed read is read again with the next experience load).
+      const caller = createConsoleInstanceCaller(source.whoami ? async () => {
+        try {
+          return await source.whoami!();
+        } catch (error) {
+          reportCallerFailure(error);
+          throw error;
+        }
+      } : undefined);
+      // A change names the instance's caller (`expected_caller_scope`), waits
+      // for the instance's read, and is refused before it leaves while no read
+      // answered: never sent without its caller, nor as anyone else.
+      const change = <T,>(operation: (callerScope: string | null) => Promise<T>): Promise<T> => {
+        const generation = lifetimeRef.current.generation;
+        return call(async () => {
+          const callerScope = await caller.forChange();
+          current(generation);
+          return operation(callerScope);
+        });
       };
       const scoped: MetaConsoleTransport = {
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules!()) : undefined,
         capabilities: () => call(() => source.capabilities()),
-        whoami: source.whoami ? () => call(() => source.whoami!()) : undefined,
         queryTimeline: input => call(() => source.queryTimeline(input)),
-        send: input => call(() => source.send(input)),
-        executeCommand: source.executeCommand ? input => call(() => source.executeCommand!(input)) : undefined,
-        upload: source.upload ? input => call(() => source.upload!(input)) : undefined,
+        send: input => change(expectedCallerScope => source.send({ ...input, expectedCallerScope })),
+        executeCommand: source.executeCommand
+          ? input => change(expectedCallerScope => source.executeCommand!({ ...input, expectedCallerScope }))
+          : undefined,
+        upload: source.upload ? input => change(expectedCallerScope => source.upload!({ ...input, expectedCallerScope })) : undefined,
         readBlob: source.readBlob ? input => call(() => source.readBlob!(input)) : undefined,
         blobUrl: source.blobUrl ? id => { current(); return source.blobUrl!(id); } : undefined,
         subscribeTimeline(input, onFrame, options) {
           const generation = lifetimeRef.current.generation;
           current(generation);
           const active = () => lifetimeRef.current.active && lifetimeRef.current.generation === generation;
-          return source.subscribeTimeline({ ...input, onTransportState: state => { if (active()) input.onTransportState?.(state); } },
+          // A stream that needs a sign-in is the console's sign-in state too.
+          const watch = (state: ConsoleTransportState) => {
+            if (state.phase === "authentication-required") callerHandlersRef.current.onSignInRequired();
+          };
+          return source.subscribeTimeline({ ...input, onTransportState: state => { if (active()) { input.onTransportState?.(state); watch(state); } } },
             frame => { if (active()) onFrame(frame); },
-            { ...options, onTransportState: state => { if (active()) options?.onTransportState?.(state); } });
+            { ...options, onTransportState: state => { if (active()) { options?.onTransportState?.(state); watch(state); } } });
         },
       };
-      return scoped;
+      return { transport: scoped, caller };
     },
-    [baseUrl, transport],
+    [baseUrl, transport, reportCallerFailure],
   );
+  const consoleTransport = consoleConnection.transport;
+  const instanceCaller = consoleConnection.caller;
   const consoleController = React.useMemo(
     () => createMetaConsoleController({ transport: consoleTransport }),
     [consoleTransport],
@@ -988,7 +1246,43 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => consoleTransport.readBlob ? input => consoleTransport.readBlob!(input) : undefined,
     [consoleTransport],
   );
-  const { voice, state: voiceState } = useVoiceController(baseUrl);
+  // The caller this console instance acts as, for requests that do not go
+  // through the transport (voice and MCP Apps tool calls): they wait for the
+  // instance's read, and are refused while it knows no caller.
+  const callerForRequest = React.useCallback(
+    () => instanceCaller.forChange().then(callerScope => callerScope ?? undefined),
+    [instanceCaller],
+  );
+  const { voice, state: voiceState } = useVoiceController(baseUrl, callerForRequest, reportCallerFailure);
+  // Who this console instance acts as (`meta/console/whoami`), read once:
+  // `undefined` until the read answers, `null` when the connection has no
+  // whoami or the read failed (the next experience load reads it again). The
+  // instance tells its authority, which tells this browser's other tabs of
+  // the console.
+  const [caller, setCaller] = React.useState<ConsoleWhoami | null>();
+  const adoptCaller = React.useCallback((whoami: ConsoleWhoami | null) => {
+    setCaller(whoami);
+    // The same answer names this console's caller for the transcript: a
+    // message whose recorded sender carries this caller scope reads "You
+    // asked", in every tab.
+    rememberOwnCallerScope(whoami?.callerScope);
+    // A queued message the drain kept while no caller was known drains now:
+    // its finished requests are forgotten, so the next render tries again.
+    for (const [key, request] of autoDrainRequestedRef.current) {
+      if (!request.inFlight) autoDrainRequestedRef.current.delete(key);
+    }
+    if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
+  }, []);
+  React.useEffect(() => {
+    let active = true;
+    void instanceCaller.read().then(
+      (whoami) => { if (active) adoptCaller(whoami); },
+      () => { if (active) setCaller(null); },
+    );
+    return () => {
+      active = false;
+    };
+  }, [instanceCaller, adoptCaller]);
   const sampleVoiceWaveform = React.useCallback(
     (source: "microphone" | "speaker", samples: Float32Array<ArrayBuffer>) => voice?.sampleWaveform(source, samples),
     [voice],
@@ -1002,8 +1296,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [experience, setExperience] = React.useState<ConsoleExperience | null>(
     null,
   );
-  const persistentSendScope = storageNamespace?.trim() || (experience?.storage_scope?.trim()
-    ? JSON.stringify([baseUrl, experience.storage_scope]) : null);
+  // The browser storage of this signed-in user: the server's per-user
+  // `storage_scope`, combined with the host's namespace when one is given
+  // (the host's namespace alone would be every user's). Before the
+  // experience names the scope nothing is kept. A gateway that names no
+  // scope keeps the host's namespace alone, as before.
+  const serverStorageScope = experience?.storage_scope?.trim() ? experience.storage_scope : undefined;
+  const hostStorageNamespace = storageNamespace?.trim() || null;
+  const persistentSendScope = serverStorageScope
+    ? JSON.stringify([hostStorageNamespace ?? baseUrl, serverStorageScope])
+    : experience && hostStorageNamespace ? hostStorageNamespace : null;
   const savedPanelRuntimeSelection = React.useMemo(
     () => loadPanelRuntimeSelection(browserLocalStorage(), persistentSendScope),
     [persistentSendScope],
@@ -1124,15 +1426,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     phase: "connecting", stale: true, freshness: "unknown",
   });
   const [transportRetry, setTransportRetry] = React.useState(0);
-  // Display settings (B21): the user's own choices, else the configured
-  // appearance defaults (applied while the user has made no choice, never
-  // written), else the console's defaults.
-  const display = useConsoleDisplay({
-    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? undefined,
-    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? undefined,
-  });
-  const theme = display.settings.theme;
-  const variant = display.settings.variant;
   const sidebarStorageScope = React.useMemo(
     () => sidebarPreferencesScope(baseUrl, experience),
     [baseUrl, experience],
@@ -1156,52 +1449,57 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => sidebarStorageKey(SIDEBAR_AGENT_PINS_STORAGE_PREFIX, sidebarPreferenceScope),
     [sidebarPreferenceScope],
   );
+  // The roster's section and subgroup order and collapse: per user too,
+  // within the agent-list configuration they were arranged for. What an
+  // earlier console kept for every user of the runtime is read once.
+  const sidebarSectionNamespace = React.useMemo(() => {
+    if (!persistentSendScope) return sidebarStorageNamespace;
+    const own = [persistentSendScope, sidebarAgentListConfigIdentity(experience)]
+      .map((part) => encodeURIComponent(part))
+      .join(":");
+    adoptSharedSectionPreferences(browserLocalStorage(), sidebarStorageNamespace, own);
+    return own;
+  }, [experience, persistentSendScope, sidebarStorageNamespace]);
   React.useEffect(() => {
     pruneStaleSidebarStorage(browserLocalStorage(), sidebarStorageScope, sidebarStorageNamespace);
-  }, [sidebarStorageScope, sidebarStorageNamespace]);
+    if (persistentSendScope) pruneStaleSidebarStorage(browserLocalStorage(), persistentSendScope, sidebarSectionNamespace);
+  }, [persistentSendScope, sidebarSectionNamespace, sidebarStorageScope, sidebarStorageNamespace]);
+  // The scope of this user's display settings and the sidebar's and rail's
+  // collapse: unknown (`null`) until the experience loads, while the last
+  // scope of this browser stands in.
+  const browserPreferenceScope = experience ? sidebarPreferenceScope : null;
+  React.useEffect(() => {
+    if (browserPreferenceScope) rememberPreferenceScope(browserLocalStorage(), browserPreferenceScope);
+  }, [browserPreferenceScope]);
+  // Display settings (B21): the user's own choices, else the configured
+  // appearance defaults (applied while the user has made no choice, never
+  // written), else the console's defaults.
+  const display = useConsoleDisplay({
+    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? undefined,
+    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? undefined,
+  }, browserPreferenceScope);
+  const theme = display.settings.theme;
+  const variant = display.settings.variant;
 
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
-    () => {
-      try {
-        return localStorage.getItem("meta-console-sidebar-collapsed") === "1";
-      } catch {
-        return false;
-      }
-    },
-  );
+  // The sidebar's and the rail's collapse: the user's own choice, else the
+  // configured default (never written), else expanded.
+  const [sidebarCollapseChoice, chooseSidebarCollapse] = useBrowserPreference(SIDEBAR_COLLAPSED_PREFERENCE, browserPreferenceScope);
+  const configuredSidebarCollapsed = experience?.console_config?.layout?.sidebar_collapsed;
+  const sidebarCollapsed = sidebarCollapseChoice !== null
+    ? sidebarCollapseChoice === "1"
+    : configuredSidebarCollapsed === true;
   const toggleSidebarCollapsed = React.useCallback(() => {
-    setSidebarCollapsed((c) => {
-      const next = !c;
-      try {
-        localStorage.setItem(
-          "meta-console-sidebar-collapsed",
-          next ? "1" : "0",
-        );
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+    chooseSidebarCollapse(sidebarCollapsed ? "0" : "1");
+  }, [chooseSidebarCollapse, sidebarCollapsed]);
 
-  const [railCollapsed, setRailCollapsed] = React.useState<boolean>(() => {
-    try {
-      return localStorage.getItem("meta-console-rail-collapsed") === "1";
-    } catch {
-      return false;
-    }
-  });
+  const [railCollapseChoice, chooseRailCollapse] = useBrowserPreference(RAIL_COLLAPSED_PREFERENCE, browserPreferenceScope);
+  const configuredRailCollapsed = experience?.console_config?.rail?.collapsed;
+  const railCollapsed = railCollapseChoice !== null
+    ? railCollapseChoice === "1"
+    : configuredRailCollapsed === true;
   const toggleRailCollapsed = React.useCallback(() => {
-    setRailCollapsed((c) => {
-      const next = !c;
-      try {
-        localStorage.setItem("meta-console-rail-collapsed", next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
+    chooseRailCollapse(railCollapsed ? "0" : "1");
+  }, [chooseRailCollapse, railCollapsed]);
 
   const defaultPinnedAgentIdsKey = React.useMemo(
     () => JSON.stringify(experience?.console_config?.agent_list?.default_pinned_agent_ids || []),
@@ -1218,30 +1516,43 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.console_config?.agent_list?.default_pinned_agent_ids || [],
     ));
   }, [defaultPinnedAgentIdsKey, experience?.console_config?.agent_list, sidebarAgentPinsStorageKey, sidebarPinsStorageKey]);
+  // This tab follows the pins another tab of the same user stores.
+  React.useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== sidebarAgentPinsStorageKey) return;
+      const stored = readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey);
+      if (stored) setPinnedAgentIds(stored);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [sidebarAgentPinsStorageKey]);
 
+  const pinnedAgentIdsRef = React.useRef(pinnedAgentIds);
+  pinnedAgentIdsRef.current = pinnedAgentIds;
   const togglePinnedAgent = React.useCallback((agent: ConsoleAgent, renderedFamilyPinIds?: Set<string>) => {
     const pinId = sidebarAgentPinId(agent);
-    setPinnedAgentIds((current) => {
-      const next = new Set(current);
-      const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0
-        ? renderedFamilyPinIds
-        : sidebarPinnedFamilyPinIds(agent, agents);
-      const familyPinned = Array.from(familyPinIds).some((id) => next.has(id));
-      // Pins are matched on either durable ids or volatile member_ids. When a
-      // descendant pin pulls an ancestor into Pinned for context, unpinning the
-      // ancestor should clear the visible pinned family instead of looking inert.
-      if (next.has(pinId) || next.has(agent.member_id) || familyPinned) {
-        for (const id of familyPinIds) next.delete(id);
-      } else {
-        next.add(pinId);
-      }
-      writeSidebarStringSet(
-        browserLocalStorage(),
-        sidebarAgentPinsStorageKey,
-        next,
-      );
-      return next;
-    });
+    // Read, change and write under one storage read: a pin another tab of
+    // this user stored since this tab last read is kept. Done here, not in a
+    // state updater, which React may run twice (StrictMode).
+    const next = new Set(readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey) ?? pinnedAgentIdsRef.current);
+    const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0
+      ? renderedFamilyPinIds
+      : sidebarPinnedFamilyPinIds(agent, agents);
+    const familyPinned = Array.from(familyPinIds).some((id) => next.has(id));
+    // Pins are matched on either durable ids or volatile member_ids. When a
+    // descendant pin pulls an ancestor into Pinned for context, unpinning the
+    // ancestor should clear the visible pinned family instead of looking inert.
+    if (next.has(pinId) || next.has(agent.member_id) || familyPinned) {
+      for (const id of familyPinIds) next.delete(id);
+    } else {
+      next.add(pinId);
+    }
+    writeSidebarStringSet(
+      browserLocalStorage(),
+      sidebarAgentPinsStorageKey,
+      next,
+    );
+    setPinnedAgentIds(next);
   }, [agents, sidebarAgentPinsStorageKey]);
 
   // --- Render trigger ---
@@ -1340,6 +1651,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   React.useEffect(() => {
     stagedAttachmentsRef.current = stagedAttachmentsByIdentity;
   }, [stagedAttachmentsByIdentity]);
+  React.useEffect(() => {
+    callerHandlersRef.current.registerStagedAttachments(() => stagedAttachmentsRef.current);
+  }, []);
   React.useEffect(
     () => () => {
       for (const items of Object.values(stagedAttachmentsRef.current)) {
@@ -2169,7 +2483,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }
   function persistComposerDraft(identity: string, panelKey: string, text: string, contexts: ConsoleContextRecord[]): boolean {
     // The pane flushes its debounced draft while unmounting. Its captured
-    // namespace/composer still owns this write even after outbound work stops.
+    // namespace/composer still owns this write even after outbound work stops,
+    // unless its user signed out: then nothing of theirs is kept.
+    if (callerHandlersRef.current.signingOut()) return true;
     const namespace = persistentSendScopeRef.current;
     try {
       validateConsoleContexts(contexts);
@@ -2207,6 +2523,27 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     setDeliveredNotices({});
   }, [sendScope]);
   persistentSendScopeRef.current = persistentSendScope;
+  React.useEffect(() => {
+    callerHandlersRef.current.onStorageScope(persistentSendScope);
+    if (!persistentSendScope) return;
+    // Files staged when the same person's login ended come back with them.
+    const carried = callerHandlersRef.current.takeCarriedAttachments(persistentSendScope);
+    if (!carried) return;
+    const restored: Record<string, StagedAttachment[]> = {};
+    for (const [identity, files] of Object.entries(carried)) {
+      if (stagedAttachmentsRef.current[identity]?.length) continue;
+      restored[identity] = files.map((file, index) => ({
+        id: `restored-${Date.now().toString(36)}-${index}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      }));
+    }
+    setStagedAttachmentsByIdentity((current) => ({ ...restored, ...current }));
+  }, [persistentSendScope]);
+  // Where an earlier console kept every user's queue under the host's
+  // namespace alone; this user may import it once (importLegacyPending).
+  const hostOnlyQueueNamespaceRef = React.useRef<string | null>(null);
+  hostOnlyQueueNamespaceRef.current = serverStorageScope && hostStorageNamespace ? hostStorageNamespace : null;
   const scopedDraftKey = (panelKey: string) => `${sendScopeRef.current}:${panelKey}`;
 
   function loadPendingStack(identity: string): PendingItem[] {
@@ -2360,6 +2697,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const dockLayoutHydrated = React.useRef(false);
   const dockLayoutRestored = React.useRef(false);
   const dockLayoutRestoring = React.useRef(false);
+  /** The layout this tab last restored or stored, under its key. */
+  const dockLayoutWritten = React.useRef<{ key: string; layout: string } | null>(null);
 
   // =========================================================================
   // DOCK CONTROLLER
@@ -2413,13 +2752,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     if (!experience || !dockLayoutHydrated.current) return;
     if (dockLayoutRestoring.current) {
       dockLayoutRestoring.current = false;
+      dockLayoutWritten.current = { key: currentDockLayoutStorageKey, layout: JSON.stringify(dock.state) };
       return;
     }
+    // Written only when this tab's layout changed: an experience reload
+    // alone leaves what another tab of this user arranged in place.
+    const layout = JSON.stringify(dock.state);
+    const written = dockLayoutWritten.current;
+    if (written?.key === currentDockLayoutStorageKey && written.layout === layout) return;
     try {
-      localStorage.setItem(
-        currentDockLayoutStorageKey,
-        JSON.stringify(dock.state),
-      );
+      localStorage.setItem(currentDockLayoutStorageKey, layout);
+      dockLayoutWritten.current = { key: currentDockLayoutStorageKey, layout };
     } catch {
       /* ignore storage failures */
     }
@@ -2696,6 +3039,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
     let request: Promise<ConsoleAgent[]>;
     request = (async () => {
+      // While this instance knows no caller (its read failed), the load reads
+      // it again first; the answer binds the instance once the experience
+      // read after it keeps the instance's scope.
+      const callerAgain = instanceCaller.readAgain();
+      const answeredAgain = callerAgain ? await callerAgain.then(whoami => ({ whoami }), () => undefined) : undefined;
       // Each identity log's version when the status was requested: a frame
       // that arrives before the answer keeps that identity's fold as it is.
       const logVersionsAtRequest = new Map(
@@ -2706,6 +3054,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         consoleTransport.loadModules?.() ?? Promise.resolve({ modules: [] }),
       ]);
       if (!observeScope(experienceJson.storage_scope?.trim() || undefined)) return [];
+      if (answeredAgain) {
+        instanceCaller.bind(answeredAgain.whoami);
+        adoptCaller(answeredAgain.whoami);
+      }
       const configuredTimeoutMs = experienceJson.console_policy?.fetch_timeout_ms;
       if (
         typeof configuredTimeoutMs === "number" &&
@@ -2738,7 +3090,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     experienceLoadInFlightRef.current = request;
     experienceLoadGenerationRef.current = lifetimeRef.current.generation;
     return request;
-  }, [consoleTransport]);
+  }, [consoleTransport, instanceCaller, adoptCaller]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -2763,32 +3115,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return () => window.clearInterval(timer);
   }, [loadExperience]);
 
-  // The configured appearance applies through useConsoleDisplay: a default
-  // the user has not overridden, never written to storage.
-
-  React.useEffect(() => {
-    const configured = experience?.console_config?.layout?.sidebar_collapsed;
-    if (typeof configured !== "boolean") return;
-    try {
-      if (localStorage.getItem("meta-console-sidebar-collapsed") !== null)
-        return;
-    } catch {
-      /* ignore */
-    }
-    setSidebarCollapsed(configured);
-  }, [experience?.console_config?.layout?.sidebar_collapsed]);
-
-  React.useEffect(() => {
-    const configured = experience?.console_config?.rail?.collapsed;
-    if (typeof configured !== "boolean") return;
-    try {
-      if (localStorage.getItem("meta-console-rail-collapsed") !== null)
-        return;
-    } catch {
-      /* ignore */
-    }
-    setRailCollapsed(configured);
-  }, [experience?.console_config?.rail?.collapsed]);
+  // The configured appearance applies through useConsoleDisplay, and the
+  // configured sidebar and rail collapse through their preferences: a
+  // default the user has not overridden, never written to storage.
 
   const hasMobControlSurface = experience?.runtime_id !== SHARED_CONSOLE_RUNTIME_ID;
   const frontendReadOnly = React.useMemo(() => resolveConsoleReadOnlyOverride(), []);
@@ -2853,55 +3182,36 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
   // The gateway decides approvals only as the signed-in person the
   // connection names (anyone else is refused as approver_unauthenticated),
-  // so the inbox offers decisions only when whoami reports a person, and
-  // tells any other caller whoami names to sign in as themselves. A
-  // transport without whoami, an older gateway or a failed read leaves the
-  // approvals read-only.
-  // The same read names the principal the caller's WorkGraph claims are
+  // so the inbox offers decisions only when the instance's whoami answer
+  // reports a person, and tells any other caller whoami names to sign in as
+  // themselves. A transport without whoami, an older gateway or a failed read
+  // leaves the approvals read-only.
+  // The same answer names the principal the caller's WorkGraph claims are
   // owned by: an identified caller claims as itself, and an open console's
   // caller without a token claims nothing. The claim's owner releases it,
   // and so does an access admin, whose release the gateway records.
-  const [approvalDecider, setApprovalDecider] = React.useState<{
-    scope: string;
-    person: boolean;
-    answered?: boolean;
-    claimant?: string;
-    canAdminister?: boolean;
-  }>();
-  React.useEffect(() => {
-    let active = true;
-    const scope = sendScope;
-    void Promise.resolve()
-      .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
-      .then((whoami) => {
-        if (!active) return;
-        // The same read names this console's caller for the transcript: a
-        // message whose recorded sender carries this caller scope reads
-        // "You asked", in every tab.
-        rememberOwnCallerScope(whoami?.callerScope);
-        const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
-        setApprovalDecider({
-          scope,
-          person: whoami?.actorKind === "person",
-          answered: Boolean(whoami),
-          ...(claimant ? { claimant } : {}),
-          canAdminister: whoami?.canAdminister === true,
-        });
-      })
-      .catch(() => {
-        if (active) setApprovalDecider({ scope, person: false });
-      });
-    return () => {
-      active = false;
-    };
-  }, [consoleTransport, sendScope]);
-  const currentDecider = approvalDecider?.scope === sendScope ? approvalDecider : undefined;
-  const approvalsDecidable = currentDecider?.person;
+  const approvalsDecidable = caller === undefined ? undefined : caller?.actorKind === "person";
   // whoami named a caller who is no signed-in person: only signing in as
   // themselves lets them decide.
-  const signInToDecide = currentDecider?.answered === true && !currentDecider.person;
-  const workGraphClaimant = currentDecider?.claimant;
-  const workGraphAdmin = currentDecider?.canAdminister === true;
+  const signInToDecide = Boolean(caller) && caller?.actorKind !== "person";
+  // Who looks at the approvals: the cards say whether a request waits for
+  // them and "Needs you" counts only those. Unknown without a whoami answer.
+  const approvalViewer = React.useMemo<ApprovalViewer | undefined>(
+    () => (caller ? { decides: caller.actorKind === "person", approverIds: caller.approverIds } : undefined),
+    [caller],
+  );
+  const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : undefined;
+  const workGraphAdmin = caller?.canAdminister === true;
+  // Signing out: this browser forgets what this user queued and drafted
+  // here, the console's other tabs leave at once, then the browser goes to
+  // the host's sign-out.
+  const signOutOfConsole = React.useCallback(() => callerHandlersRef.current.onSignOut(), []);
+  const signOutHref = experience?.console_config?.sign_out?.href;
+  const signOutMethod = experience?.console_config?.sign_out?.method === "post" ? "post" : "get";
+  const identityChip = React.useMemo<TopbarIdentity | undefined>(() => (caller ? {
+    ...consoleCallerWords(caller),
+    ...(signOutHref ? { signOut: { href: signOutHref, method: signOutMethod }, onSignOut: signOutOfConsole } : {}),
+  } : undefined), [caller, signOutHref, signOutMethod, signOutOfConsole]);
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
@@ -2918,6 +3228,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.decideGating, target, signal,
         params: { pending_id: pendingId, decision, reason: `console_${decision}` },
+      })).result,
+      // Who decided a request that left the list elsewhere: the gating audit.
+      loadDecisions: async (signal) => (await consoleController.commands.execute({
+        command: CONSOLE_COMMAND_NAMES.listGatingAudit, target, signal, params: { limit: GATING_AUDIT_LIMIT },
       })).result,
     });
     approvalResourceRef.current = resource;
@@ -4746,10 +5060,30 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       if (previous?.inFlight || previous?.token === token) return;
       const request = { inFlight: true, token };
       autoDrainRequestedRef.current.set(key, request);
-      void dispatchPendingAttempt(identity, head.id, "queue").finally(() => {
+      // Nobody pressed Send: read who this console acts as first. When this
+      // browser's login changed, the experience names another scope and the
+      // instance ends before anything is sent; a failed read sends nothing.
+      const scope = sendScopeRef.current;
+      let keptBack = false;
+      void (async () => {
+        try { await loadExperience(); } catch { return false; }
+        if (!lifetimeRef.current.active || scope !== sendScopeRef.current) return false;
+        // No caller known yet (the whoami read failed or has not answered):
+        // the message stays queued, and the drain runs again once a read
+        // binds the caller (adoptCaller).
+        if (!instanceCaller.known()) {
+          keptBack = true;
+          return false;
+        }
+        return dispatchPendingAttempt(identity, head.id, "queue");
+      })().finally(() => {
         if (autoDrainRequestedRef.current.get(key) !== request) return;
         const current = getPendingStack(identity).find((item) => item.id === head.id);
-        if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
+        if (keptBack && instanceCaller.known()) {
+          // The caller was bound while this drain stood back: try again now.
+          autoDrainRequestedRef.current.delete(key);
+          maybeDrainHead(identity);
+        } else if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
         else autoDrainRequestedRef.current.delete(key);
       });
     }
@@ -4757,6 +5091,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   async function importLegacyPending(identity: string) {
     const namespace = persistentSendScopeRef.current;
+    const hostOnlyNamespace = hostOnlyQueueNamespaceRef.current;
     const storage = browserLocalStorage();
     if (!namespace || !storage) return;
     try {
@@ -4764,12 +5099,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const legacy = readLegacyConsoleQueue(storage, identity);
       const predecessor = readPredecessorConsoleQueue(storage, namespace, identity);
       if (predecessor.kind === "blocked") throw new Error(predecessor.reason);
+      const hostOnly = hostOnlyNamespace ? loadConsoleSendAttempts(storage, hostOnlyNamespace, identity) : null;
+      if (hostOnly?.kind === "blocked") throw new Error(hostOnly.reason);
       const imported = [...legacy.map((item) => createConsoleSendAttempt({
         id: `legacy:${item.id}`, scope: namespace, destination: identity, origin: "console:legacy-import",
         idempotencyKey: createIdempotencyKey(), text: item.text, now: item.addedAt,
-      })), ...predecessor.attempts];
-      await setPendingStack(identity, (previous) => [...previous, ...imported.filter((item) => !previous.some((old) => old.id === item.id))], true);
-      // Original legacy and predecessor bytes are preserved, including after a successful import.
+      })), ...predecessor.attempts,
+      // The same messages, now kept in this user's scope.
+      ...(hostOnly?.attempts ?? []).map((attempt) => ({ ...attempt, scope: namespace }))];
+      const saved = await setPendingStack(identity, (previous) => [...previous, ...imported.filter((item) => !previous.some((old) => old.id === item.id))], true);
+      // Imported once: the older copies go, so no other user of this browser
+      // is offered them. A queue that could not be saved keeps them.
+      if (saved) await removeOlderConsoleQueues(storage, namespace, identity, hostOnlyNamespace);
     } catch (error) { setActionError(errorMessage(error)); }
   }
 
@@ -5044,12 +5385,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     try {
       return createNativeMcpAppsHost({ baseUrl, sandboxProxyUrl, authority: sendScope,
         runtimeId: experience?.runtime_id, readOnly: consoleReadOnly,
-        requestTimeoutMs: consoleFetchTimeoutMsRef.current });
+        requestTimeoutMs: consoleFetchTimeoutMsRef.current,
+        callerScope: callerForRequest, reportFailure: reportCallerFailure });
     } catch {
       // A missing or invalid isolated sandbox retains the ordinary transcript.
       return undefined;
     }
-  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly]);
+  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly, callerForRequest, reportCallerFailure]);
 
   // =========================================================================
   // WORKGRAPH OPERATOR ACTIONS (inline card + panel)
@@ -5111,29 +5453,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         // action CASes against the live revision. Best-effort — the banner
         // and failure note above already surfaced the conflict.
         if (cardIdentity && jsonRpcErrorCode(err) === WORKGRAPH_CONFLICT_CODE) {
-          const refresh = workGraphConflictRefreshRequest(params);
-          if (refresh) {
-            try {
-              const fresh = await executeHeadlessCommand(
-                refresh.command,
-                controlWorkbenchTarget("workgraph"),
-                refresh.params,
-              );
-              appendFrame(
-                cardIdentity,
-                buildWorkGraphOperatorResultFrame({
-                  method: consoleCommandMethod(refresh.command),
-                  params: refresh.params,
-                  result: fresh,
-                  identity: cardIdentity,
-                  refresh: true,
-                }),
-              );
-              forceRender();
-            } catch {
-              // The stale card stays; the conflict is already visible.
-            }
-          }
+          await rereadWorkGraphCard(params, cardIdentity);
         }
       }
       if (workGraphPanelDockedRef.current) {
@@ -5144,47 +5464,76 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [baseUrl, refreshWorkGraphData],
   );
 
-  const runWorkGraphQuery = React.useCallback<WorkGraphCommandRunner>(
-    (command, params) =>
-      executeHeadlessCommand(command, controlWorkbenchTarget("workgraph"), params),
+  // Re-read the entity a WorkGraph action addressed (`id` or `binding_id`)
+  // and fold its live state into the inline card through the operator echo
+  // path, marked `refresh` so it sets no action outcome. Best-effort: the
+  // caller has already said why the card is read again.
+  async function rereadWorkGraphCard(params: Record<string, unknown>, cardIdentity: string) {
+    const refresh = workGraphConflictRefreshRequest(params);
+    if (!refresh) return;
+    try {
+      const fresh = await executeHeadlessCommand(
+        refresh.command,
+        controlWorkbenchTarget("workgraph"),
+        refresh.params,
+      );
+      appendFrame(
+        cardIdentity,
+        buildWorkGraphOperatorResultFrame({
+          method: consoleCommandMethod(refresh.command),
+          params: refresh.params,
+          result: fresh,
+          identity: cardIdentity,
+          refresh: true,
+        }),
+      );
+      forceRender();
+    } catch {
+      // The card stays as it was; the reason is already visible.
+    }
+  }
+
+  // A WorkGraph action whose card or panel row showed no revision sends
+  // nothing: acting on the revision current at the click would apply it to
+  // a state the viewer never saw. The console says so and reads the entity
+  // again (the inline card, and the docked panel), so the next action names
+  // a revision the viewer saw.
+  const holdUnobservedWorkGraphAction = React.useCallback(
+    async (entity: Record<string, unknown>, cardIdentity?: string) => {
+      setActionError(WORKGRAPH_UNOBSERVED_REVISION_MESSAGE);
+      if (cardIdentity) await rereadWorkGraphCard(entity, cardIdentity);
+      if (workGraphPanelDockedRef.current) {
+        await refreshWorkGraphData().catch(() => {});
+      }
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [baseUrl],
+    [baseUrl, refreshWorkGraphData],
   );
 
   // Operator handlers shared by the inline card and the docked panel.
   // `cardIdentity` scopes the synthetic result echo to that identity's chat
-  // log; the panel passes none (it re-reads the snapshot instead). A payload
-  // without a revision means the UI never observed the CAS token — resolve
-  // the live one first and, if that fails, surface the banner without
-  // sending (a guessed 0 is a guaranteed conflict).
+  // log; the panel passes none (it re-reads the snapshot instead). Each
+  // action names the revision its card or row showed (`entity` names what
+  // it addresses, for the re-read when it showed none).
   const makeWorkGraphOperatorHandlers = React.useCallback(
     (cardIdentity?: string) => {
       const dispatch = (
-        resolveRevision: () => Promise<number>,
+        revision: number | undefined,
+        entity: Record<string, unknown>,
         send: (expectedRevision: number) => Promise<void>,
       ) => {
-        void (async () => {
-          let expectedRevision: number;
-          try {
-            expectedRevision = await resolveRevision();
-          } catch (err) {
-            setActionError(errorMessage(err));
-            return;
-          }
-          await send(expectedRevision);
-        })();
+        void (revision === undefined
+          ? holdUnobservedWorkGraphAction(entity, cardIdentity)
+          : send(revision));
       };
-      const revisionOr = (
-        revision: number | undefined,
-        resolve: () => Promise<number>,
-      ) => (revision !== undefined ? () => Promise.resolve(revision) : resolve);
       return {
         // The gateway owns a claim by the connection's caller, so the
         // request names no owner. A caller who can own nothing is offered
         // no claim, and only a signed-in person confirms a goal.
         onClaim: workGraphClaimant === undefined ? undefined : ({ itemId, revision }: { itemId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId)),
+            revision,
+            { id: itemId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphClaim, {
                 id: itemId,
@@ -5193,7 +5542,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onClose: ({ itemId, revision }: { itemId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId)),
+            revision,
+            { id: itemId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphClose, {
                 id: itemId,
@@ -5202,7 +5552,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onGoalConfirm: approvalsDecidable !== true ? undefined : ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphGoalConfirm, {
                 binding_id: bindingId,
@@ -5211,7 +5562,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onGoalRequestClose: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphGoalRequestClose, {
                 binding_id: bindingId,
@@ -5220,7 +5572,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onAttentionPause: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphAttentionPause, {
                 binding_id: bindingId,
@@ -5229,7 +5582,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onAttentionResume: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphAttentionResume, {
                 binding_id: bindingId,
@@ -5238,7 +5592,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onAttentionReassign: ({ bindingId, revision, identity }: { bindingId: string; revision?: number; identity: string }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphAttentionReassign, {
                 binding_id: bindingId,
@@ -5249,7 +5604,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, workGraphClaimant, approvalsDecidable],
+    [runWorkGraphCommand, holdUnobservedWorkGraphAction, workGraphClaimant, approvalsDecidable],
   );
 
   // Inline-card affordances: undefined when the caller lacks the manage
@@ -5630,8 +5985,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     try {
       const storage = browserLocalStorage();
       const namespace = persistentSendScopeRef.current;
+      const hostOnlyNamespace = hostOnlyQueueNamespaceRef.current;
       hasLegacyQueue = Boolean(storage && namespace && !consoleLegacyQueueImported(storage, namespace, identity)
-        && (Boolean(storage.getItem(`mobkit-pending-stack:${identity}`)) || readPredecessorConsoleQueue(storage, namespace, identity).attempts.length > 0));
+        && (Boolean(storage.getItem(legacyConsoleQueueKey(identity)))
+          || readPredecessorConsoleQueue(storage, namespace, identity).attempts.length > 0
+          || (hostOnlyNamespace !== null && loadConsoleSendAttempts(storage, hostOnlyNamespace, identity).attempts.length > 0)));
     } catch { /* Queue reader reports preserved invalid bytes separately. */ }
     const agentBusy = isIdentityBusy(identity);
     // Side chats: this pane may fork its agent, or be a side chat itself.
@@ -6304,23 +6662,16 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onClose={workGraphPanelHandlers.onClose}
           canRelease={(item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin })}
           onRelease={({ itemId, revision }) => {
-            // Same CAS rule as the other item actions: an unobserved
-            // revision is resolved live, never guessed.
-            void (async () => {
-              let expectedRevision = revision;
-              if (expectedRevision === undefined) {
-                try {
-                  expectedRevision = await resolveWorkGraphItemRevision(runWorkGraphQuery, itemId);
-                } catch (err) {
-                  setActionError(errorMessage(err));
-                  return;
-                }
-              }
-              await runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphRelease, {
-                id: itemId,
-                expected_revision: expectedRevision,
-              });
-            })();
+            // The same rule as the other item actions: the revision the row
+            // showed, never one read at the click.
+            if (revision === undefined) {
+              void holdUnobservedWorkGraphAction({ id: itemId });
+              return;
+            }
+            void runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphRelease, {
+              id: itemId,
+              expected_revision: revision,
+            });
           }}
           onGoalConfirm={workGraphPanelHandlers.onGoalConfirm}
           onGoalRequestClose={workGraphPanelHandlers.onGoalRequestClose}
@@ -6359,6 +6710,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <NavigationFocusProvider value={navigationFocus.value}>
     <PanelPreferencesProvider scope={sidebarPreferenceScope}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
+    <ApprovalViewerProvider value={approvalViewer}>
     <div
       className={`cc-theme-scope meta-shell${display.settings.motion === "reduced" ? " reduced-motion" : ""}`}
       data-cc-theme={theme}
@@ -6385,6 +6737,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       )}
       <Topbar
         connectionStatus={<ConsoleTransportStatus state={transportState} onRetry={() => setTransportRetry((value) => value + 1)} />}
+        identity={identityChip}
         mobName={mobName}
         brandLabel={brand?.label}
         brandLogoUrl={brand?.logo_url}
@@ -6419,7 +6772,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           customPanels={customPanels}
           onOpenCustomPanel={openCustomPanel}
           grouping={experience?.console_config?.agent_list}
-          storageNamespace={sidebarStorageNamespace}
+          storageNamespace={sidebarSectionNamespace}
           preferenceScope={sidebarPreferenceScope}
           pinnedAgentIds={pinnedAgentIds}
           onSelect={selectSidebarAgent}
@@ -6495,6 +6848,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ) : null}
       </div>
     </div>
+    </ApprovalViewerProvider>
     </HostDecideSourcesProvider>
     </PanelPreferencesProvider>
     </NavigationFocusProvider>

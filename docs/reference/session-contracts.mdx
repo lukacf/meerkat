@@ -1011,9 +1011,10 @@ session that commits each round durably) fails the
 completion waiters of the inputs it keeps with
 `CompletionWaitError::RequeuedAcrossStop`. Such an input is neither failed nor
 consumed: it stays durably queued, and the session's next start runs it, or
-ends it abandoned with reason `requeue_expired` when it is older than the
-Shutdown's max age by then. Every start that still finds it queued (after a
-crash before it ran, say) checks its age again. Retiring, archiving or
+ends it abandoned with reason `requeue_expired` when more than the
+Shutdown's max age has passed since the Shutdown kept it, however long before
+the Shutdown it was admitted. Every start that still finds it queued (after a
+crash before it ran, say) checks that age again. Retiring, archiving or
 destroying the session before a start runs it ends it as any other queued
 input: abandoned with reason `retired` (retire, archive) or `destroyed`. Do
 not resubmit it; after the restart, the same

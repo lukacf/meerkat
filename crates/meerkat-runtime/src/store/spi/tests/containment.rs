@@ -187,9 +187,10 @@ async fn an_open_contains_a_runtime_whose_recovery_load_answers_a_conflict() {
 // so the open knows its conflicted scope only by that name. It is still
 // quarantined under the key a call names it by: a call naming the runtime
 // refuses typed. Until a call names it, the reads that list runtimes by id
-// cannot name it, so they refuse typed, naming its scope, rather than leave
-// it out; once a call named it, they name it as any quarantined runtime.
-// RED before containment: the open fails.
+// cannot name it: they answer every other runtime (one quarantined scope
+// never refuses a realm-wide listing) and report it typed by its scope's
+// name, never leaving it out; once a call named it, they name it as any
+// quarantined runtime. RED before containment: the open fails.
 #[tokio::test]
 async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
     let host = Arc::new(TestHost::new());
@@ -205,28 +206,31 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
     let name = host
         .conflict_scope(ScopeKind::Session, &prefix)
         .expect("one conflicted scope");
-    let hashed = prefix.trim_end_matches('~');
 
     let (_realm, store) = open_contained(&host).await;
     store
         .load_input_states(&kept)
         .await
         .expect("another runtime serves");
-    assert_quarantined(
-        store.list_runtimes_with_recovery_work().await,
-        hashed,
-        &[&name],
+    let with_work = store
+        .list_runtimes_with_recovery_work()
+        .await
+        .expect("the scan answers the runtimes it can name");
+    assert!(
+        with_work.contains(&kept) && !with_work.contains(&long),
+        "the scan lists every runtime it can name: {with_work:?}"
     );
-    assert_quarantined(
-        store
-            .list_runtime_delivery_authorities_or_unavailable()
-            .await,
-        hashed,
-        &[&name],
+    let authorities = store
+        .list_runtime_delivery_authorities_or_unavailable()
+        .await
+        .expect("the delivery listing answers the runtimes it can name");
+    assert!(
+        authorities.unavailable.is_empty(),
+        "no runtime it can name is unavailable: {authorities:?}"
     );
     assert!(
         store.refuses_runtime_until_reopen(&long),
-        "the quarantined runtime refuses until the realm is reopened"
+        "the quarantined runtime refuses until it is repaired and the realm reopened"
     );
     assert_quarantined(
         store.load_input_states(&long).await,
@@ -886,11 +890,12 @@ async fn a_quarantined_revocation_scope_refuses_its_read_and_a_write_that_supers
 }
 
 // A tool grant scope quarantined at the open: a load of that grant refuses
-// typed, and so does the grant listing of every subject, since the
-// quarantined grant's head, and so the subject it is filed under, is
-// unknown. Another grant still loads.
+// typed, and the grant listing of every subject answers the other grants:
+// the quarantined grant's head, and so the subject it is filed under, is
+// unknown, so it is left out of every subject's grants. Another grant still
+// loads.
 #[tokio::test]
-async fn a_quarantined_tool_grant_scope_refuses_its_load_and_every_grant_listing() {
+async fn a_quarantined_tool_grant_scope_refuses_its_load_and_is_left_out_of_every_listing() {
     let host = Arc::new(TestHost::new());
     {
         let (_realm, store) = open(&host).await;
@@ -910,15 +915,124 @@ async fn a_quarantined_tool_grant_scope_refuses_its_load_and_every_grant_listing
 
     let (_realm, store) = open_contained(&host).await;
     assert_quarantined(store.load_tool_grant("g1").await, "tg:g1", &[&name]);
-    for subject in ["s:a", "s:b"] {
-        assert_quarantined(store.list_tool_grants(subject).await, "tg:g1", &[&name]);
-    }
+    assert_eq!(
+        store
+            .list_tool_grants("s:a")
+            .await
+            .expect("the listing answers the subject's other grants"),
+        Vec::<(String, Vec<u8>)>::new(),
+        "the quarantined grant is left out"
+    );
+    assert_eq!(
+        store
+            .list_tool_grants("s:b")
+            .await
+            .expect("the listing answers"),
+        vec![("g2".to_string(), b"grant".to_vec())]
+    );
     assert_eq!(
         store
             .load_tool_grant("g2")
             .await
             .expect("another grant loads"),
         Some(b"grant".to_vec())
+    );
+}
+
+/// A grant of the session's `tool`, for an hour.
+fn grant_of(
+    subject: &meerkat_core::tool_grant::ToolGrantSubject,
+    tool: &str,
+) -> crate::tool_grant::ToolGrantRequest {
+    crate::tool_grant::ToolGrantRequest {
+        subject: subject.clone(),
+        target: meerkat_core::tool_grant::ToolGrantTarget::Tool {
+            name: meerkat_core::types::ToolName::from(tool),
+        },
+        issuer: meerkat_core::tool_grant::ToolGrantIssuer::Operator {
+            caller: Some("operator".to_string()),
+        },
+        reason: None,
+        window: crate::tool_grant::ToolGrantWindow::For(Duration::from_hours(1)),
+    }
+}
+
+/// A call of `tool`.
+fn call_of(tool: &str) -> meerkat_core::tool_grant::ToolGrantCall<'_> {
+    meerkat_core::tool_grant::ToolGrantCall {
+        name: tool,
+        call_id: "call-1",
+        run_id: None,
+    }
+}
+
+// One conflicted grant scope closes only the calls that grant may have
+// admitted: the realm's other grants keep admitting theirs. A call no known
+// live grant admits is refused as unavailable, naming the quarantined grant
+// (its target is unknown, so it may have admitted the call), and the
+// subject's listing reports the grant among the rows it cannot read. RED
+// before: every grant listing refused while a grant scope was quarantined,
+// so every grant-gated call of every session was refused.
+#[tokio::test]
+async fn a_quarantined_grant_closes_only_the_calls_it_may_have_admitted() {
+    let host = Arc::new(TestHost::new());
+    let subject =
+        meerkat_core::tool_grant::ToolGrantSubject::session(meerkat_core::types::SessionId::new());
+    let (kept, quarantined) = {
+        let (_realm, store) = open(&host).await;
+        let service = crate::tool_grant::ToolGrantService::new(Arc::new(store));
+        let kept = service
+            .grant(grant_of(&subject, "deploy"))
+            .await
+            .expect("the deploy grant is issued");
+        let quarantined = service
+            .grant(grant_of(&subject, "rollback"))
+            .await
+            .expect("the rollback grant is issued");
+        (
+            kept.record.grant_id.to_string(),
+            quarantined.record.grant_id.to_string(),
+        )
+    };
+    host.expire_lease();
+    let name = host
+        .conflict_scope(
+            ScopeKind::Record,
+            &format!("tg:{}~", codec::key_part(&quarantined)),
+        )
+        .expect("the rollback grant's scope");
+
+    let (_realm, store) = open_contained(&host).await;
+    let service = crate::tool_grant::ToolGrantService::new(Arc::new(store));
+    let subjects = [subject.key()];
+    service
+        .admit_call(&subjects, call_of("deploy"))
+        .await
+        .expect("the kept grant admits its tool");
+    match service.admit_call(&subjects, call_of("rollback")).await {
+        Err(meerkat_core::tool_grant::ToolGrantRefusal::Unavailable { detail }) => assert!(
+            detail.contains(&quarantined) && detail.contains(&name),
+            "the refusal names the quarantined grant: {detail}"
+        ),
+        other => panic!("a call only the quarantined grant may admit is refused: {other:?}"),
+    }
+    let listing = service
+        .list(&subject)
+        .await
+        .expect("the subject's listing answers");
+    let listed: Vec<String> = listing
+        .grants
+        .iter()
+        .map(|grant| grant.record.grant_id.to_string())
+        .collect();
+    assert_eq!(listed, vec![kept], "the kept grant is listed");
+    assert!(
+        listing
+            .unreadable
+            .iter()
+            .any(|row| row.grant_id == quarantined && row.detail.contains(QUARANTINED)),
+        "the quarantined grant is reported, not left out: {:?}",
+        listing.unreadable
     );
 }
 
@@ -1021,6 +1135,63 @@ async fn a_poisoned_scope_listed_conflicted_at_a_reacquire_loses_the_realm() {
     );
 }
 
+// A quarantined scope's refusal reads as a quarantine: it names the conflict
+// and the repair, and never tells the caller that a reopen alone lifts it
+// (a reopen without the repair quarantines the scope again). A poisoned
+// scope's refusal still reads as one a reopen lifts, word for word as
+// before. A refusal naming both says what lifts each.
+#[test]
+fn a_quarantined_scope_refusal_reads_as_a_quarantine_not_a_poison() {
+    let cause = "rt:rx~w.1 is conflicted in the store at version 2 (the store names no commit \
+                 ids): repair the scope in the store, then reopen the realm";
+    let quarantined = SpiError::ScopeQuarantined {
+        scope: "rt:x".to_string(),
+        cause: cause.to_string(),
+    }
+    .into_read();
+    let text = quarantined.to_string();
+    assert!(
+        text.contains(&format!("host store scope rt:x is quarantined: {cause}")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("poisoned")
+            && !text.contains("refused until the host store realm is reopened"),
+        "a quarantine is not a poison a reopen lifts: {text}"
+    );
+
+    let poisoned = SpiError::ScopePoisoned {
+        scope: "rt:y".to_string(),
+        cause: "batch refused".to_string(),
+    }
+    .into_read();
+    assert_eq!(
+        poisoned.to_string(),
+        "Store refused until the host store realm is reopened: host store scope rt:y is \
+         poisoned: batch refused"
+    );
+
+    let both = SpiError::ScopesQuarantined {
+        quarantined: vec![super::super::QuarantinedScope {
+            scope: "rt:x".to_string(),
+            names: vec!["rt:rx~w.1".to_string()],
+            cause: cause.to_string(),
+        }],
+        poisoned: vec![super::super::PoisonedScope {
+            id: ScopeId::new(super::super::RUNTIME_FAMILY, "y"),
+            cause: "batch refused".to_string(),
+        }],
+    }
+    .into_read();
+    let text = both.to_string();
+    assert!(
+        text.contains(&format!("rt:x is quarantined: {cause}"))
+            && text.contains("rt:y is poisoned: batch refused")
+            && !text.contains("refused until the host store realm is reopened"),
+        "{text}"
+    );
+}
+
 // A realm loss the writer fence refuses before the realm opened is a misuse,
 // answered so; a loss it records, or a realm lost already, answers the
 // recorded cause.
@@ -1100,4 +1271,108 @@ async fn a_conflict_met_at_a_load_leaves_the_baseline_and_keeps_the_realm() {
         commit_one(&realm, &scope, pin("next")).await,
         Err(SpiError::ScopeQuarantined { .. })
     ));
+}
+
+// A chunk whose conflict arises after the open listed it among the heads: the
+// owner's first body load meets it and quarantines the chunk and the owner.
+// The chunk is quarantined for its own conflict, so it leaves the baseline a
+// re-acquire compares with, as the owner's own conflict would: the next
+// re-acquire, whose listing reports the chunk's recorded conflict in place of
+// its head and the owner's head unchanged, keeps the realm.
+#[tokio::test(start_paused = true)]
+async fn a_chunk_conflict_met_at_a_load_after_the_open_keeps_the_realm() {
+    let host = reacquiring_host();
+    let owner = ScopeId::new(TEST_FAMILY, "owner");
+    {
+        let realm = open_realm(&host).await;
+        let body = Arc::new(vec![7_u8; super::super::realm::INLINE_VALUE_LIMIT + 1]);
+        commit_one(
+            &realm,
+            &owner,
+            ScopeDelta::Changes(vec![("body".to_string(), Some(body))]),
+        )
+        .await
+        .expect("the body is written to a chunk");
+    }
+    host.expire_lease();
+
+    let realm = open_realm(&host).await;
+    let cells = realm.claim(TEST_FAMILY).expect("the family claims");
+    // The open listed the chunk as a head; its conflict arises now.
+    let chunk = host
+        .conflict_scope(ScopeKind::Record, "ch:")
+        .expect("one chunk");
+    {
+        let mut state = cells[0].lock().await;
+        match realm.load_body(&mut state).await {
+            Err(SpiError::ScopeQuarantined { .. }) => {}
+            other => panic!("the owner's first load refuses typed: {other:?}"),
+        }
+    }
+    let quarantined: Vec<String> = realm
+        .quarantined_scopes()
+        .into_iter()
+        .map(|scope| scope.scope)
+        .collect();
+    assert!(
+        quarantined.contains(&chunk) && quarantined.contains(&"tst:owner".to_string()),
+        "the chunk and its owner are quarantined: {quarantined:?}"
+    );
+
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the chunk's recorded conflict, listed unchanged, keeps the realm: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+}
+
+// The same through a pinned value kept in a chunk: the owner's pinned read
+// meets the chunk's conflict, quarantines the chunk, and the next re-acquire
+// keeps the realm.
+#[tokio::test(start_paused = true)]
+async fn a_pinned_chunk_conflict_met_after_the_open_keeps_the_realm() {
+    let host = reacquiring_host();
+    let owner = ScopeId::new(TEST_FAMILY, "owner");
+    {
+        let realm = open_realm(&host).await;
+        let pinned = Arc::new(vec![9_u8; super::super::realm::PINNED_INLINE_LIMIT + 1]);
+        commit_one(
+            &realm,
+            &owner,
+            ScopeDelta::Changes(vec![("pin".to_string(), Some(pinned))]),
+        )
+        .await
+        .expect("the pinned value is written to a chunk");
+    }
+    host.expire_lease();
+
+    let realm = open_realm(&host).await;
+    let cells = realm.claim(TEST_FAMILY).expect("the family claims");
+    let chunk = host
+        .conflict_scope(ScopeKind::Record, "ch:")
+        .expect("one chunk");
+    {
+        let mut state = cells[0].lock().await;
+        match realm.pinned_values(&mut state).await {
+            Err(SpiError::ScopeQuarantined { .. }) => {}
+            other => panic!("the owner's pinned read refuses typed: {other:?}"),
+        }
+    }
+    assert!(
+        realm
+            .quarantined_scopes()
+            .iter()
+            .any(|scope| scope.scope == chunk),
+        "the chunk is quarantined"
+    );
+
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the chunk's recorded conflict, listed unchanged, keeps the realm: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
 }

@@ -1648,6 +1648,18 @@ impl RoutedRpcResponse {
     fn into_response(self) -> RpcResponse {
         self.response
     }
+
+    /// This response as the answer to the request `request_id` names. A
+    /// handler that refuses before it reads the request's id (the params
+    /// refusal of `handlers::parse_params`, a shared helper's error) builds
+    /// its response with no id; it gets the request's id here. An id the
+    /// handler set is kept.
+    fn answering(mut self, request_id: Option<crate::protocol::RpcId>) -> Self {
+        if self.response.id.is_none() {
+            self.response.id = request_id;
+        }
+        self
+    }
 }
 
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
@@ -2666,8 +2678,22 @@ impl MethodRouter {
             .await
     }
 
-    #[allow(clippy::if_not_else)]
+    /// Route `request` and answer it under its own id. JSON-RPC answers a
+    /// request under the request's id, so a response its handler built with
+    /// none gets the request's id here, once for every route.
     async fn dispatch_routed_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RoutedRpcResponse> {
+        let request_id = request.id.clone();
+        routed_arm(|| self.route_request(request, request_context))
+            .await
+            .map(|routed| routed.answering(request_id))
+    }
+
+    #[allow(clippy::if_not_else)]
+    async fn route_request(
         &self,
         request: RpcRequest,
         request_context: Option<RequestContext>,
@@ -20025,9 +20051,14 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         );
     }
 
-    #[tokio::test]
-    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
-        let (router, _notif_rx) = test_router().await;
+    /// The router the catalog sweeps dispatch to, and the catalog options
+    /// that describe exactly what it serves.
+    async fn catalog_sweep_router() -> (
+        MethodRouter,
+        mpsc::Receiver<RpcNotification>,
+        meerkat_contracts::RpcMethodCatalogOptions,
+    ) {
+        let (router, notif_rx) = test_router().await;
         // Wire a live transport so the `live/*` catalog methods are
         // dispatchable exactly as the catalog advertises them
         // (`runtime_available` => live surface present).
@@ -20079,6 +20110,12 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             // receives them.
             decision_notices_enabled: false,
         };
+        (router, notif_rx, options)
+    }
+
+    #[tokio::test]
+    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
+        let (router, _notif_rx, options) = catalog_sweep_router().await;
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {
             id += 1;
@@ -20115,6 +20152,59 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             .expect("unknown method must produce a response");
         let err = response.error.expect("unknown method must be an error");
         assert_eq!(err.code, error::METHOD_NOT_FOUND);
+    }
+
+    /// Every catalog method answers a request under that request's id, its
+    /// refusal of params it cannot read included: a client that matches
+    /// answers by id never receives an answer with another id. The params
+    /// are a bare number, which no method's params type reads, so every
+    /// method that declares params refuses them as invalid params.
+    #[tokio::test]
+    async fn catalog_methods_answer_unreadable_params_under_the_request_id() {
+        let (router, _notif_rx, options) = catalog_sweep_router().await;
+        let mut other_id = Vec::new();
+        let mut not_refused = Vec::new();
+        for (index, method) in meerkat_contracts::rpc_method_catalog(options)
+            .into_iter()
+            .enumerate()
+        {
+            // Number and string ids alike.
+            let request_id = if index % 2 == 0 {
+                RpcId::Num(i64::try_from(index).expect("catalog index fits i64") + 1)
+            } else {
+                RpcId::Str(format!("request-{index}"))
+            };
+            let response = router
+                .dispatch(RpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    method: method.name.to_string(),
+                    params: Some(RawValue::from_string("42".to_string()).expect("static JSON")),
+                    id: Some(request_id.clone()),
+                })
+                .await
+                .unwrap_or_else(|| panic!("catalog method `{}` produced no response", method.name));
+            if response.id.as_ref() != Some(&request_id) {
+                other_id.push(format!("{} answered id {:?}", method.name, response.id));
+            }
+            if method.params_type.is_some()
+                && response.error.as_ref().map(|error| error.code) != Some(error::INVALID_PARAMS)
+            {
+                not_refused.push(format!(
+                    "{} answered {:?}",
+                    method.name,
+                    response.error.as_ref().map(|error| error.code)
+                ));
+            }
+        }
+        assert!(
+            other_id.is_empty(),
+            "every catalog method answers under the request's id: {other_id:#?}"
+        );
+        assert!(
+            not_refused.is_empty(),
+            "every method that declares params refuses unreadable ones as invalid params: \
+             {not_refused:#?}"
+        );
     }
 
     #[cfg(feature = "openai-live")]

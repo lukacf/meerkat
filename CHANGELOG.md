@@ -2177,6 +2177,15 @@ them.
   and poisoned the realm until a reopen ("another writer committed while
   this one was stopped"). A re-acquire now waits for the open's listing, and
   the realm of an open whose listing failed never re-acquires. Affects 0.9.5
+
+- `meerkat-rpc`: every request is answered under its own id. Params that
+  `mob/stream_open`, `mob/stream_close`, `comms/send`, `comms/peers`,
+  `session/external_event`, `session/peer_response_terminal` or a `live/*`
+  method could not read were refused with `"id": null`, which a client that
+  matches answers by id never received: a call through the TypeScript or
+  Python SDK, which waits for the answer to its own id, never settled. The
+  router now sends a response its handler built without an id under the
+  request's id, for every method. (#2114, thanks @zond) Affects 0.9.0
   through 0.9.10.
 
 ### Security

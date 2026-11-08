@@ -968,6 +968,7 @@ fn grant_of(
         },
         issuer: meerkat_core::tool_grant::ToolGrantIssuer::Operator {
             caller: Some("operator".to_string()),
+            decision_ref: None,
         },
         reason: None,
         window: crate::tool_grant::ToolGrantWindow::For(Duration::from_hours(1)),

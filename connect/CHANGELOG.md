@@ -5,6 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- Application setup refuses a definition whose profile names
+  `auth_binding` (the profile key Meerkat 0.9.11 adds), in TOML or native
+  form, and refuses a retained setup whose definition names one when it is
+  read again: which binding a member's credentials come from is the
+  operator's choice, not the application definition's.
+
 ### Fixed
 
 - Setup: when a setup check answered again for a validation it had already

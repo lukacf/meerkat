@@ -37,6 +37,19 @@ them.
 
 ### Breaking
 
+- `meerkat-mob`: `Profile` gains `auth_binding: Option<AuthBindingRef>`, the
+  realm auth binding the profile's members resolve their credentials
+  through, so code that builds a `Profile` literally must set it (`None`
+  keeps the realm's resolution for the provider, as before). A spawn that
+  names its own binding wins over the profile's. A `[profiles.<name>]`
+  table in an operator's own definition may name it; a mob pack's
+  `definition.json` and a Connect application setup definition may not:
+  `meerkat-mob-pack` validation refuses such a pack
+  (`PackValidationError::BadDefinition`) and Connect refuses such a setup
+  definition. The adaptive layer-decision schema does not offer it,
+  and an adaptive layer refuses a profile that names one. A member placed
+  on a member host does not carry it there.
+
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both
@@ -2547,6 +2560,31 @@ them.
   executor's exact-run boundary handle, and an executor-wide cancel with no
   run active is a no-op for every shipped executor.
 
+- `meerkat-mob-mcp`: after an in-place model, provider, endpoint or
+  auth-binding switch (a turn that names `model`, `provider`,
+  `self_hosted_server_id` or `auth_binding`), `delegate` runs its helper on
+  the session's current identity: the model, provider and self-hosted
+  server the session runs on when the call runs, and its auth binding, so
+  the helper reaches the session's endpoint with the session's credentials.
+  Before, the helper ran on the route the session was built with and
+  resolved its credentials through the realm's default binding. The
+  session's implicit delegation mob records that route, binding included,
+  on its `delegate` profile, and the first `delegate` after the route
+  changed replaces the mob, as a model change did. Replacing the mob
+  destroys everything in it, members the model spawned there included, and
+  that now also happens after an in-place switch. A session with no auth
+  binding leaves its helpers to the realm's resolution, as before. An
+  implicit mob made by an earlier release records no binding, so a session
+  that has one gets its implicit mob replaced, once, at its next
+  `delegate`. Three cases are left as they were: a `delegate` given an
+  inline `tooling` profile builds its helper on that profile, which names
+  no binding; one whose `tooling` names a realm profile builds on that
+  profile's binding, or on the realm's default; and a helper placed on
+  another host resolves its credentials on that host. The current identity
+  is read from the session's retained metadata; a session on
+  `EphemeralSessionService`, which keeps none, still delegates on the route
+  it was built with. (#2102, thanks @zond)
+
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends
@@ -3297,6 +3335,15 @@ them.
 - The derivation of an access offer in a peer work (the asking agent, the
   requester and the origin from the work the asking agent sent) is covered
   at the runtime level only.
+
+- `meerkat-mob-mcp`: on a session service that keeps no retained session
+  metadata (`EphemeralSessionService`), `delegate` still runs its helper on
+  the route the session was built with, and the helper resolves its
+  credentials through the realm, even after an in-place model, provider,
+  endpoint or auth-binding switch. `rkat` and the JSON-RPC, REST and MCP
+  servers run `PersistentSessionService`, so their sessions follow the
+  switch.
+
 
 ## [0.9.10] - 2026-11-04
 

@@ -262,6 +262,9 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
         model: profile.model,
         provider: profile.provider,
         self_hosted_server_id: profile.self_hosted_server_id,
+        // Host-set: the wire profile names no auth binding, so a caller's
+        // profile leaves its members on their realm's binding.
+        auth_binding: None,
         image_generation_provider: profile.image_generation_provider,
         auto_compact_threshold: profile.auto_compact_threshold,
         resume_overrides: profile
@@ -3800,6 +3803,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

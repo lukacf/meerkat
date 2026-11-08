@@ -854,6 +854,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `gate`. Meerkat's own `tool_grants/grant` and `tool_grants/list` report
   both.
 
+- Members of an ephemeral mob spec keep the route they were built with for
+  `delegate`: after an in-place model, provider, endpoint or auth-binding
+  switch, the member's helper still runs on its build-time route and
+  resolves its credentials through the realm. Their session service keeps
+  no retained session metadata, which is where `delegate` reads the
+  current identity (Meerkat's known limitation for `EphemeralSessionService`).
+
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

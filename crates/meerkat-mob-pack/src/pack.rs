@@ -138,6 +138,7 @@ pub(crate) fn validate_extracted_pack_files(
     validate_adaptive_files(&manifest, files)?;
     let definition = parse_definition(files)?;
     reject_realm_refs(&definition)?;
+    reject_profile_auth_bindings(&definition)?;
     validate_skill_paths(&definition, files)?;
     Ok(ValidatedPackFiles {
         manifest,
@@ -533,6 +534,23 @@ fn reject_realm_refs(definition: &MobDefinition) -> Result<(), PackValidationErr
     Ok(())
 }
 
+/// A pack cannot pin its members to a realm binding. A profile's
+/// `auth_binding` is an explicit build input that resolves on the named
+/// realm's chain, so only an operator's own definition may name one.
+fn reject_profile_auth_bindings(definition: &MobDefinition) -> Result<(), PackValidationError> {
+    for (name, binding) in &definition.profiles {
+        if binding
+            .as_inline()
+            .is_some_and(|profile| profile.auth_binding.is_some())
+        {
+            return Err(PackValidationError::BadDefinition(format!(
+                "profile `{name}` names an auth_binding, which a pack cannot set"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_skill_paths(
     definition: &MobDefinition,
     files: &BTreeMap<String, Vec<u8>>,
@@ -825,6 +843,28 @@ mod tests {
             err,
             PackValidationError::RealmRefForbidden { profile_name } if profile_name == "worker"
         ));
+    }
+
+    #[test]
+    fn test_pack_rejects_a_profile_auth_binding() {
+        // A pack's definition cannot pin its members to a realm binding: a
+        // profile binding is an explicit build input, and only an operator's
+        // own definition may name one.
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("definition.json"),
+            br#"{"id":"mob","profiles":{"worker":{"model":"claude-sonnet-4-5","auth_binding":{"realm":"global","binding":"team_key"}}}}"#,
+        )
+        .unwrap();
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PackValidationError::BadDefinition(reason)
+                    if reason.contains("`worker`") && reason.contains("auth_binding")
+            ),
+            "a pack whose profile names an auth binding is refused: {err}"
+        );
     }
 
     #[test]

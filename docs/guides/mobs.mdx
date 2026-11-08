@@ -94,9 +94,23 @@ A delegate helper is ephemeral: it is retired after its one task, and also when
 the calling turn stops waiting for it first.
 
 Unless its `tooling` supplies a profile, a helper runs on the model and
-provider (and self-hosted server) the calling session was built with, so a
-session on a realm `[models.<id>]` entry or a self-hosted model delegates. The
-helper resolves its own credentials from the realm.
+provider (and self-hosted server) the calling session runs on when the call
+runs, so a session on a realm `[models.<id>]` entry or a self-hosted model
+delegates. That is the session's current identity: after a turn that named
+another `model`, `provider`, `self_hosted_server_id` or `auth_binding`, the
+next `delegate` follows the switch. The helper also resolves its credentials
+through the session's auth binding; a session with none leaves the helper to
+the realm's resolution. Three helpers do not take the session's binding: one
+whose `tooling` supplies an inline profile builds on that profile, which names
+no binding; one whose `tooling` names a realm profile builds on that profile's
+binding, or on the realm's default; and one placed on another host resolves
+its credentials on that host. A `delegate` whose session's route changed since
+the last one replaces
+the session's implicit mob, with everything in it (members spawned there
+included), and its result says it created the mob. The current identity is
+read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
+and MCP servers keep; a session on the in-memory ephemeral session service,
+which keeps none, delegates on the route it was built with.
 
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
@@ -401,6 +415,9 @@ provider = "anthropic"
 # Durable self-hosted binding (with provider = "self_hosted" and a
 # [self_hosted.models] entry in the host config).
 # self_hosted_server_id = "local"
+# Realm auth binding the members resolve their credentials through. Omitted,
+# a member resolves its realm's binding for the provider.
+# auth_binding = { realm = "global", binding = "team_key" }
 # Default provider for `Auto` image-generation targets (profile-level wins
 # over the mob-level default below).
 image_generation_provider = "gemini"
@@ -413,15 +430,27 @@ auto_compact_threshold = 60000
 resume_overrides = ["model", "provider"]
 ```
 
-A resumed member keeps its durable credential binding while its provider is
-unchanged. When `provider` in `resume_overrides` moves a member to another
-provider, the member keeps its history and resolves the new provider's binding
-from its realm, as a fresh member of the profile would: the realm's binding for
-that provider, then the parent realms and `global`, then the provider's
-environment key. A durable binding backed by a credential account keeps that
-account; if no binding for the new provider shares it, the resume is refused
-with a typed error and the durable session is left as it was. A host that runs
-a member for another host needs the release with this behaviour to resume it.
+A profile's `auth_binding` is an explicit build input: its members build on
+that binding, a resumed member included, and a spawn that names its own
+binding wins over it. Only an operator's own definition may name it: a mob
+pack whose definition names one fails validation, and Connect refuses an
+application setup definition that names one. An owner can also write a realm
+profile that names one, through JSON-RPC `mob/profile/create` and
+`mob/profile/update` and the MCP profile tools; reading that profile back does
+not show the binding. A member placed on a member host
+resolves its credentials there and does not carry the profile's binding, and
+an adaptive layer refuses a profile that names one.
+
+Otherwise, a resumed member keeps its durable credential binding while its
+provider is unchanged. When `provider` in `resume_overrides` moves a member to
+another provider, the member keeps its history and resolves the new provider's
+binding from its realm, as a fresh member of the profile would: the realm's
+binding for that provider, then the parent realms and `global`, then the
+provider's environment key. A durable binding backed by a credential account
+keeps that account; if no binding for the new provider shares it, the resume is
+refused with a typed error and the durable session is left as it was. A host
+that runs a member for another host needs the release with this behaviour to
+resume it.
 
 Anthropic prompt caching is a per-profile `provider_params` decision. From
 0.8.33 the default is `automatic` on every backend that supports it (Anthropic

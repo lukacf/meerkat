@@ -444,6 +444,10 @@ pub async fn build_agent_config(
     // provider that contradicts a catalogued model's owner at build time.
     config.provider = profile.provider;
     config.self_hosted_server_id = profile.self_hosted_server_id.clone();
+    // The profile's auth binding names the credentials the member resolves
+    // through; a spawn that names its own binding replaces it after this
+    // build. `None` leaves the realm's resolution for the provider.
+    config.auth_binding = profile.auth_binding.clone();
 
     // Mob-scoped `[models.<id>]` entries ride the build config into the
     // effective model registry (single owner for provider inference,
@@ -1328,6 +1332,7 @@ mod tests {
                 model: "claude-opus-4-8".into(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1366,6 +1371,7 @@ mod tests {
                 model: "claude-sonnet-4-5".into(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1766,6 +1772,112 @@ mod tests {
 
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "planner");
+    }
+
+    /// A profile that names an auth binding builds its member through it; a
+    /// profile that names none leaves the binding to the realm's resolution
+    /// for the provider.
+    #[tokio::test]
+    async fn test_build_agent_config_threads_profile_auth_binding() {
+        let def = sample_definition();
+        let profile_name = ProfileName::from("worker");
+        let agent_identity = AgentIdentity::from("worker-1");
+        let unbound = def.profiles[&profile_name].as_inline().unwrap().clone();
+        assert_eq!(unbound.auth_binding, None);
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("profile_named").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let mut bound = unbound.clone();
+        bound.auth_binding = Some(binding.clone());
+
+        let mut builds = Vec::new();
+        for profile in [&unbound, &bound] {
+            builds.push(
+                build_agent_config(BuildAgentConfigParams {
+                    mob_id: &def.id,
+                    profile_name: &profile_name,
+                    agent_identity: &agent_identity,
+                    profile,
+                    definition: &def,
+                    realm_profile_store: None,
+                    external_tools: None,
+                    compaction_curator_override: None,
+                    context: None,
+                    labels: None,
+                    additional_instructions: None,
+                    shell_env: None,
+                    mob_tool_authority_context: None,
+                    mob_incarnation: Some(crate::tests::fresh_live_incarnation()),
+                    tool_access_policy: None,
+                    inherited_tool_filter: None,
+                    system_prompt_override: None,
+                })
+                .await
+                .expect("build_agent_config"),
+            );
+        }
+
+        assert_eq!(builds[0].auth_binding, None);
+        assert_eq!(builds[1].auth_binding, Some(binding.clone()));
+        let request = to_create_session_request(&builds[1], "fresh".into());
+        assert_eq!(
+            request
+                .build
+                .as_ref()
+                .and_then(|build| build.auth_binding.as_ref()),
+            Some(&binding),
+            "the session build names the profile's binding"
+        );
+    }
+
+    /// An operator's own TOML definition keeps the field: a
+    /// `[profiles.<name>]` table that names an `auth_binding` parses, and its
+    /// member builds on that binding. (A pack's or an application setup's
+    /// definition that names one is refused where it is read.)
+    #[tokio::test]
+    async fn test_an_operator_toml_profile_auth_binding_builds_on_that_binding() {
+        let def = crate::definition::MobDefinition::from_toml(
+            "[mob]\nid = \"operator\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-5\"\nauth_binding = { realm = \"tenant_a\", binding = \"team_key\" }\n\n[profiles.worker.tools]\ncomms = true\n",
+        )
+        .expect("an operator definition names a profile binding");
+        let profile_name = ProfileName::from("worker");
+        let agent_identity = AgentIdentity::from("worker-1");
+        let profile = def.profiles[&profile_name]
+            .as_inline()
+            .expect("inline worker profile");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("team_key").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        assert_eq!(profile.auth_binding.as_ref(), Some(&binding));
+
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &profile_name,
+            agent_identity: &agent_identity,
+            profile,
+            definition: &def,
+            realm_profile_store: None,
+            external_tools: None,
+            compaction_curator_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            mob_incarnation: Some(crate::tests::fresh_live_incarnation()),
+            tool_access_policy: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+        assert_eq!(config.auth_binding, Some(binding));
     }
 
     /// Spawn-site threading: the spec's `tool_access_policy` must reach

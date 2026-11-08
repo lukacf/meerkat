@@ -662,6 +662,7 @@ pub fn mob_definition_with(external_addressable: bool) -> MobDefinition {
             model: MODEL.to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),

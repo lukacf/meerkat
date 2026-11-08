@@ -684,6 +684,7 @@ database through the [host store SPI](/reference/host-store-spi).
 - SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows. Declare `[storage] hosting = "multiprocess"` so each session is hosted by one process and deliveries route to it (see [Realms: multi-process hosting](/concepts/realms#multi-process-hosting)).
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
+A per-build compaction threshold (`SessionBuildOptions::auto_compact_threshold_override`) is not part of it: it holds for the build that names it, so a recovered or resumed session is built without it unless its host supplies it again, while realm `[compaction]` config and a mob profile's `auto_compact_threshold` apply to every build.
 
 ### Domain document and store authority
 

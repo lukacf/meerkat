@@ -247,7 +247,11 @@ When compaction triggers:
     `trimmed` with the last kind of text cut, or `requests_only` with how many
     of the user requests it kept), and `estimated_history_tokens_after`: the
     history estimate the rewrite left, in the unit of
-    `estimated_history_tokens`.
+    `estimated_history_tokens`. With the durable memory store the runtime
+    finalizes the projection after the run's boundary commit, so the event
+    follows the run's `run_completed` on the session's event stream, which an
+    RPC client receives through `session/stream_open`; a turn's own
+    `session/event` stream has ended by then and does not carry it.
   </Step>
 </Steps>
 

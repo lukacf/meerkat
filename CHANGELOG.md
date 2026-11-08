@@ -1827,6 +1827,19 @@ them.
 
 ### Fixed
 
+- `meerkat-session`: with the durable memory store (semantic memory on), a
+  compaction's `compaction_completed` reaches the session's event stream when
+  the runtime finalizes the compaction after the run's boundary commit, right
+  after the run's `run_completed`; an RPC client receives it there through
+  `session/stream_open`. It waited in the session's agent channel for the
+  next turn, ahead of that turn's `run_started`, and was lost when the
+  session's actor was replaced first (a restart, an unload, a recovery). A
+  turn's own `session/event` stream has ended by then and does not carry it.
+  A `model_fallback_committed` that a turn's settlement publishes after its
+  run (a sticky fallback its interrupted run left in flight) waited the same
+  way; it now reaches the session's event stream and the turn's own with
+  that turn. (#2113, thanks @zond) Affects 0.9.0 through 0.9.10.
+
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends

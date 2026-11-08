@@ -828,16 +828,25 @@ impl TokenStore for RefusingStore {
         }
         self.inner.load(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         use std::sync::atomic::Ordering::SeqCst;
         self.saves.fetch_add(1, SeqCst);
         if self.refuse_next_save.swap(false, SeqCst) {
             return Err(self.refused("publication save needs credential interaction"));
         }
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        self.inner.clear(key).await
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await
@@ -1100,7 +1109,10 @@ async fn connector_slots_refuse_other_modes_and_the_loader_refuses_their_rows() 
     let key = TokenKey::from_credential_identity(&AuthCredentialIdentity::Account(work.clone()));
     let mut foreign = PersistedTokens::api_key("not-a-connector-credential");
     foreign.auth_mode = PersistedAuthMode::McpOauth;
-    fx.store.save(&key, &foreign).await.unwrap();
+    fx.store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &foreign)
+        .await
+        .unwrap();
     assert_eq!(fx.authority.bearer_token(&work).await.unwrap(), None);
     assert_eq!(
         fx.authority.status(&work).await.unwrap().phase,
@@ -1155,7 +1167,10 @@ async fn logout_frees_the_slot_for_a_new_account_and_refuses_foreign_rows() {
     let key =
         TokenKey::from_credential_identity(&AuthCredentialIdentity::Account(foreign_slot.clone()));
     let foreign = PersistedTokens::api_key("another-owners-credential");
-    fx.store.save(&key, &foreign).await.unwrap();
+    fx.store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &foreign)
+        .await
+        .unwrap();
     assert!(matches!(
         fx.authority.logout(&foreign_slot).await,
         Err(ConnectorLoginError::Slot(
@@ -1242,13 +1257,15 @@ impl TokenStore for FailClearStore {
     }
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.0.save(key, tokens).await
+        self.0.save(fence, key, tokens).await
     }
     async fn clear(
         &self,
+        _fence: &meerkat_core::AdmissionGuard,
         _key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
         Err(meerkat_auth_core::auth_store::TokenStoreError::Io(
@@ -1318,6 +1335,7 @@ async fn status_refuses_an_unmarked_connector_row() {
     let other = slot("tenant-a", "drive-unmarked");
     fx.store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::from_credential_identity(&AuthCredentialIdentity::Account(other.clone())),
             &unmarked,
         )
@@ -1686,9 +1704,15 @@ async fn a_stored_client_secret_is_read_at_each_use_and_rotates() {
     );
     assert!(fx.state.forms.lock().is_empty());
 
-    save_connector_client_secret(fx.store.as_ref(), &realm, &binding, "secret-one")
-        .await
-        .unwrap();
+    save_connector_client_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        fx.store.as_ref(),
+        &realm,
+        &binding,
+        "secret-one",
+    )
+    .await
+    .unwrap();
     *fx.state.expires_in.lock() = 30;
     fx.grant("code-r", "access-r1", "subject-r", Some("files.read"));
     let (state, _) = fx.start(&target, 41001).await;
@@ -1702,9 +1726,15 @@ async fn a_stored_client_secret_is_read_at_each_use_and_rotates() {
 
     // Rotated in the store: the next refresh sends the new secret, and the
     // credential minted under the old one stays valid.
-    save_connector_client_secret(fx.store.as_ref(), &realm, &binding, "secret-two")
-        .await
-        .unwrap();
+    save_connector_client_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        fx.store.as_ref(),
+        &realm,
+        &binding,
+        "secret-two",
+    )
+    .await
+    .unwrap();
     *fx.state.refresh.lock() = Some(("access-r2".into(), None, None));
     fx.subjects
         .lock()
@@ -1728,18 +1758,29 @@ async fn a_refresh_without_the_stored_secret_sends_nothing_and_keeps_the_credent
     with_profiles(&mut fx, vec![profile]);
     let work = slot("tenant-a", "secret-cleared");
     let target = desktop_target(&fx, &work, "desktop");
-    save_connector_client_secret(fx.store.as_ref(), &realm, &binding, "secret-one")
-        .await
-        .unwrap();
+    save_connector_client_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        fx.store.as_ref(),
+        &realm,
+        &binding,
+        "secret-one",
+    )
+    .await
+    .unwrap();
     *fx.state.expires_in.lock() = 30;
     fx.grant("code-c", "access-c1", "subject-c", Some("files.read"));
     let (state, _) = fx.start(&target, 41001).await;
     fx.complete(&work, &state, "code-c", 41001).await.unwrap();
     let before = fx.stored(&work).await.unwrap();
 
-    clear_connector_client_secret(fx.store.as_ref(), &realm, &binding)
-        .await
-        .unwrap();
+    clear_connector_client_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        fx.store.as_ref(),
+        &realm,
+        &binding,
+    )
+    .await
+    .unwrap();
     // No refreshed token: either a refusal or the still-unexpired one.
     let result = fx.authority.bearer_token(&work).await;
     assert!(
@@ -1774,9 +1815,15 @@ async fn a_retargeted_client_never_reads_the_previous_clients_secret() {
     let mut fx = fixture().await;
     let realm = RealmId::parse("tenant-a").unwrap();
     let original = stored_secret_profile(&fx, &realm);
-    save_connector_client_secret(fx.store.as_ref(), &realm, &original.binding(), "secret-a")
-        .await
-        .unwrap();
+    save_connector_client_secret(
+        &meerkat_core::AdmissionGuard::none(),
+        fx.store.as_ref(),
+        &realm,
+        &original.binding(),
+        "secret-a",
+    )
+    .await
+    .unwrap();
     // Same id, another client: its meaning (and so its key) differs.
     let retargeted = ConnectorClientAuthProfile {
         client: "replacement-client".into(),
@@ -1801,6 +1848,7 @@ async fn an_inherited_or_shadowed_client_reads_only_its_defining_realms_secret()
     let child = RealmId::parse("tenant-child").unwrap();
     let parent_profile = stored_secret_profile(&fx, &parent);
     save_connector_client_secret(
+        &meerkat_core::AdmissionGuard::none(),
         fx.store.as_ref(),
         &parent,
         &parent_profile.binding(),
@@ -1831,7 +1879,11 @@ async fn a_row_of_another_mode_or_binding_under_the_secret_key_is_not_a_secret()
     let target = desktop_target(&fx, &work, "desktop");
     // A provider credential row.
     fx.store
-        .save(&key, &PersistedTokens::api_key("not-a-client-secret"))
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &key,
+            &PersistedTokens::api_key("not-a-client-secret"),
+        )
         .await
         .unwrap();
     let refused = fx.authority.login_start(&target, &redirect(41001)).await;
@@ -1840,7 +1892,10 @@ async fn a_row_of_another_mode_or_binding_under_the_secret_key_is_not_a_secret()
     let mut foreign = PersistedTokens::api_key("foreign-secret");
     foreign.auth_mode = PersistedAuthMode::ConnectorClientSecret;
     foreign.metadata = json!({ "connector_client_binding": "desktop@other" });
-    fx.store.save(&key, &foreign).await.unwrap();
+    fx.store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &foreign)
+        .await
+        .unwrap();
     let refused = fx.authority.login_start(&target, &redirect(41001)).await;
     assert!(refused_for_missing_secret(&refused), "{refused:?}");
 }
@@ -2599,12 +2654,17 @@ impl TokenStore for FailSaveAndRollbackStore {
     }
     async fn save(
         &self,
+        _fence: &meerkat_core::AdmissionGuard,
         _key: &TokenKey,
         _tokens: &PersistedTokens,
     ) -> Result<(), TokenStoreError> {
         Err(TokenStoreError::Io("injected save failure".into()))
     }
-    async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        _fence: &meerkat_core::AdmissionGuard,
+        _key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         Err(TokenStoreError::Io("injected clear failure".into()))
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
@@ -2632,7 +2692,7 @@ impl RefreshCoordinator for OwnerLostCoordinator {
     ) -> Result<meerkat_auth_core::auth_store::CredentialMutationOutcome, CredentialMutationError>
     {
         if self.run_mutation {
-            let _ = mutation_fn().await;
+            let _ = mutation_fn(meerkat_core::AdmissionGuard::none()).await;
         }
         Err(CredentialMutationError::Cancelled)
     }

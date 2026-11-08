@@ -2160,7 +2160,7 @@ mod tests {
                 .with_provider_auth_persistence(ProviderAuthPersistence::new(
                     Arc::new(FileTokenStore::new(directory.path().join("credentials"))),
                     Arc::new(FileLockCoordinator::new(
-                        directory.path().join("credential-locks"),
+                        directory.path().join("credentials").join("refresh-locks"),
                     )),
                 ));
             let reviewed = ReviewedConnector {

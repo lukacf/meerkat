@@ -485,6 +485,7 @@ excluded = [
     { path = "tests/connector_oauth_commit.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/connector_protocol_google.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/connector_protocol_providers.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
+    { path = "tests/credential_commit_fence.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/google_auth_authorizer.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/mcp_oauth_account_use.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/mcp_oauth_owner.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },

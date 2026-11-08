@@ -946,7 +946,9 @@ mod tests {
     async fn owner(root: &Path, storage: ResolvedStorage) -> TerminalConnectors {
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("credentials"))),
-            Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage,
@@ -968,7 +970,9 @@ mod tests {
         let native = crate::stdio::tests::realm_native_owner(&storage).await;
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("credentials"))),
-            Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage,
@@ -1541,7 +1545,7 @@ mod tests {
             let persistence = ProviderAuthPersistence::new(
                 Arc::new(FileTokenStore::new(root.path().join("credentials"))),
                 Arc::new(FileLockCoordinator::new(
-                    root.path().join("credential-locks"),
+                    root.path().join("credentials").join("refresh-locks"),
                 )),
             );
             meerkat::set_mcp_service_secret(
@@ -1914,7 +1918,7 @@ mod tests {
                 let persistence = ProviderAuthPersistence::new(
                     Arc::new(FileTokenStore::new(root.path().join("credentials"))),
                     Arc::new(FileLockCoordinator::new(
-                        root.path().join("credential-locks"),
+                        root.path().join("credentials").join("refresh-locks"),
                     )),
                 );
                 meerkat::set_mcp_service_secret(

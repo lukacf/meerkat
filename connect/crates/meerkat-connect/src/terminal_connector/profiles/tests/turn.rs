@@ -211,7 +211,9 @@ fn profile_refusal_schedule(
         let tokens = Arc::new(FileTokenStore::new(directory.path().join("credentials")));
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                directory.path().join("credentials").join("refresh-locks"),
+            )),
         );
         if matches!(schedule, "incompatible" | "changed") {
             let mut client = definition(&target);
@@ -610,7 +612,9 @@ fn initial_secret_refusal_schedule(
         let tokens = Arc::new(FileTokenStore::new(directory.path().join("credentials")));
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                directory.path().join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage: storage.clone(),

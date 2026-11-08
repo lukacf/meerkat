@@ -12,11 +12,22 @@
 //!   its process id and the contents of `FILE` read relative to that
 //!   directory (`null` when it cannot be read), as one JSON text, so a test
 //!   can check where a launch runs and which relative file it sees
+//! - view: with `--ui-view`, a tool declaring the MCP Apps view
+//!   [`UI_VIEW_URI`], which the server then lists and serves as its one
+//!   resource (`resources/list`, `resources/read`), so a test can read a
+//!   resource over a launched connection. Without the flag the server
+//!   advertises tools only, as before.
 
 use schemars::JsonSchema;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
+
+/// The one MCP Apps view `--ui-view` declares and serves.
+const UI_VIEW_URI: &str = "ui://fixture/view.html";
+
+/// The MCP Apps view resource type.
+const UI_VIEW_MIME_TYPE: &str = "text/html;profile=mcp-app";
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
@@ -69,6 +80,10 @@ struct CwdReportArgs {}
 
 #[derive(JsonSchema)]
 #[allow(dead_code)]
+struct ViewArgs {}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
 struct FailArgs {
     /// Error message
     message: String,
@@ -90,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd_report = std::env::args()
         .skip_while(|arg| arg != "--cwd-report")
         .nth(1);
+    let ui_view = std::env::args().any(|arg| arg == "--ui-view");
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let reader = BufReader::new(stdin.lock());
@@ -138,7 +154,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // This is a request, send a response
-        let response = handle_request(&request, env_digest.as_deref(), cwd_report.as_deref());
+        let response = handle_request(
+            &request,
+            env_digest.as_deref(),
+            cwd_report.as_deref(),
+            ui_view,
+        );
         writeln!(stdout, "{response}")?;
         stdout.flush()?;
     }
@@ -156,20 +177,28 @@ fn fnv1a(value: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn handle_request(request: &Value, env_digest: Option<&str>, cwd_report: Option<&str>) -> Value {
+fn handle_request(
+    request: &Value,
+    env_digest: Option<&str>,
+    cwd_report: Option<&str>,
+    ui_view: bool,
+) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
     match method {
         "initialize" => {
+            let capabilities = if ui_view {
+                json!({ "tools": {}, "resources": {} })
+            } else {
+                json!({ "tools": {} })
+            };
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {}
-                    },
+                    "capabilities": capabilities,
                     "serverInfo": {
                         "name": "mcp-test-server",
                         "version": "0.1.0"
@@ -231,7 +260,57 @@ fn handle_request(request: &Value, env_digest: Option<&str>, cwd_report: Option<
                     "inputSchema": schema_for::<CwdReportArgs>()
                 }));
             }
+            if ui_view && let Some(tools) = listed["result"]["tools"].as_array_mut() {
+                tools.push(json!({
+                    "name": "view",
+                    "description": "Opens this server's one MCP Apps view",
+                    "inputSchema": schema_for::<ViewArgs>(),
+                    "_meta": { "ui": { "resourceUri": UI_VIEW_URI } }
+                }));
+            }
             listed
+        }
+        "resources/list" if ui_view => {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resources": [{
+                        "uri": UI_VIEW_URI,
+                        "name": "view",
+                        "mimeType": UI_VIEW_MIME_TYPE
+                    }]
+                }
+            })
+        }
+        "resources/read" if ui_view => {
+            let uri = request
+                .get("params")
+                .and_then(|params| params.get("uri"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if uri == UI_VIEW_URI {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "contents": [{
+                            "uri": UI_VIEW_URI,
+                            "mimeType": UI_VIEW_MIME_TYPE,
+                            "text": "<!doctype html><title>Fixture view</title><p>Fixture view</p>"
+                        }]
+                    }
+                })
+            } else {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32602,
+                        "message": format!("Unknown resource: {uri}")
+                    }
+                })
+            }
         }
         "tools/call" => {
             let params = request.get("params").cloned().unwrap_or(json!({}));
@@ -307,6 +386,14 @@ fn handle_request(request: &Value, env_digest: Option<&str>, cwd_report: Option<
                                 "file": file,
                             })
                             .to_string()
+                        }]
+                    })
+                }
+                "view" if ui_view => {
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "view opened"
                         }]
                     })
                 }

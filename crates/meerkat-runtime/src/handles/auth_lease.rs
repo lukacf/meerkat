@@ -3257,6 +3257,7 @@ mod tests {
 
             async fn save(
                 &self,
+                _fence: &meerkat_core::AdmissionGuard,
                 _key: &meerkat_core::auth::TokenKey,
                 _tokens: &meerkat_core::auth::PersistedTokens,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -3265,6 +3266,7 @@ mod tests {
 
             async fn clear(
                 &self,
+                _fence: &meerkat_core::AdmissionGuard,
                 _key: &meerkat_core::auth::TokenKey,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
                 Ok(())
@@ -3392,6 +3394,7 @@ mod tests {
 
             async fn save(
                 &self,
+                _fence: &meerkat_core::AdmissionGuard,
                 _key: &meerkat_core::auth::TokenKey,
                 tokens: &meerkat_core::auth::PersistedTokens,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -3401,6 +3404,7 @@ mod tests {
 
             async fn clear(
                 &self,
+                _fence: &meerkat_core::AdmissionGuard,
                 _key: &meerkat_core::auth::TokenKey,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
                 self.clear_called
@@ -3825,14 +3829,19 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
-                self.actual.save(key, tokens).await
+                self.actual.save(fence, key, tokens).await
             }
-            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+            async fn clear(
+                &self,
+                fence: &meerkat_core::AdmissionGuard,
+                key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
                 self.clears.fetch_add(1, Ordering::SeqCst);
-                self.actual.clear(key).await
+                self.actual.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
                 self.actual.list().await
@@ -3879,7 +3888,10 @@ mod tests {
                 actual: EphemeralTokenStore::new(),
                 clears: AtomicUsize::new(0),
             });
-            vault.save(&key, &tokens).await.unwrap();
+            vault
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+                .await
+                .unwrap();
             let before_bytes = serde_json::to_vec(&vault.load(&key).await.unwrap()).unwrap();
             let before_state = raw
                 .machines

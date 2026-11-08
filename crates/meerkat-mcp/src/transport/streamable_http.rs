@@ -272,6 +272,14 @@ impl OAuthBearer {
         self.resolver.selected_account(&self.target)
     }
 
+    /// The publication of the credential the resolver's owner holds for
+    /// this target now ([`crate::McpAuthResolver::credential_publication`]).
+    pub(crate) fn credential_publication(
+        &self,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        self.resolver.credential_publication(&self.target)
+    }
+
     /// The bearer for one request. Without a usable credential the request
     /// is refused as `AuthRequired` before anything is sent; an unselected
     /// target with no stored credential sends none, as it always has. An

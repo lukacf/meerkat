@@ -26940,7 +26940,10 @@ mod tests {
             &transition,
         )
         .expect("the login's tokens are marked");
-        token_store.save(&key, &marked).await.unwrap();
+        token_store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .unwrap();
         // What the scenario relies on: the ChatGPT binding resolves, so a
         // target naming no binding can be served by it.
         runtime
@@ -27468,6 +27471,7 @@ mod tests {
         let tokens = meerkat_providers::auth_store::PersistedTokens::api_key("sk-hot-swap");
         token_store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &meerkat_providers::auth_store::TokenKey::from_auth_binding(&auth_binding),
                 &tokens,
             )

@@ -6,11 +6,16 @@
 //!
 //! `InMemoryCoordinator` coalesces concurrent refresh calls for the same
 //! `TokenKey` via a shared future — five parallel resolves trigger exactly
-//! one `refresh_fn` call; subsequent callers await its result.
+//! one `refresh_fn` call; subsequent callers await its result. It fences
+//! nothing: it is the coordinator of stores with no fence, and hands its
+//! closures [`AdmissionGuard::none`] (or, under `_under`, the caller's guard).
 //!
 //! `FileLockCoordinator` (feature `refresh-file-lock`) wraps the in-memory
 //! coordinator with an OS-level lockfile so refreshes are serialized across
-//! processes too. Uses the `fs4` crate.
+//! processes too. Uses the `fs4` crate. It is the coordinator of persisted
+//! stores: every entry takes the credential fence C(r) of the key's realm
+//! under its credential root, after in-process coalescing and before the
+//! lockfile and the closure, and hands the closure that guard.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,6 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt, Shared};
+use meerkat_core::AdmissionGuard;
 use meerkat_core::auth::token_store::{TokenStoreAccess, TokenStoreRefusal};
 use parking_lot::Mutex;
 
@@ -352,7 +358,9 @@ impl InMemoryCoordinator {
                 work_runtime.spawn(async move {
                     let _in_flight_mutation = in_flight_mutation;
                     let result = match Self::admit(placement, mutation_gate, Duration::ZERO).await {
-                        Some(_mutation_guard) => refresh_fn().await,
+                        // A store with no fence: the closure's writes accept
+                        // a guard over nothing.
+                        Some(_mutation_guard) => refresh_fn(AdmissionGuard::none()).await,
                         None => Err(RefreshError::CredentialAccess {
                             refusal: TokenStoreRefusal::Pending,
                             detail: pending_refusal(),
@@ -379,6 +387,43 @@ impl InMemoryCoordinator {
             _ => fut.await,
         }
     }
+
+    /// Run one exclusive mutation on its own task under the per-key gate,
+    /// handing the closure `guard`: [`AdmissionGuard::none`] for a store
+    /// with no fence, or the guard an operation already holds. The task owns
+    /// `guard` until the closure returns, so a caller that stops waiting
+    /// releases nothing before the closure's last write.
+    async fn run_exclusive_mutation(
+        &self,
+        guard: Arc<AdmissionGuard>,
+        key: TokenKey,
+        access: TokenStoreAccess,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
+        let Some(work_runtime) = self.work_runtime() else {
+            return Err(CredentialMutationError::CredentialAccess {
+                refusal: TokenStoreRefusal::Unavailable,
+                detail: custody_unavailable(),
+            });
+        };
+        let mutation_gate = self.mutation_gate(&key);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let in_flight_mutation = InFlightMutation::start();
+        let placement = self.placement;
+        let wait = admission_wait(access);
+        work_runtime.spawn(async move {
+            let _in_flight_mutation = in_flight_mutation;
+            let result = match Self::admit(placement, mutation_gate, wait).await {
+                Some(_mutation_guard) => mutation_fn(guard).await,
+                None => Err(CredentialMutationError::CredentialAccess {
+                    refusal: TokenStoreRefusal::Pending,
+                    detail: pending_refusal(),
+                }),
+            };
+            let _ = tx.send(result);
+        });
+        rx.await.unwrap_or(Err(CredentialMutationError::Cancelled))
+    }
 }
 
 #[async_trait]
@@ -398,29 +443,28 @@ impl RefreshCoordinator for InMemoryCoordinator {
         access: TokenStoreAccess,
         mutation_fn: CredentialMutationFn,
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
-        let Some(work_runtime) = self.work_runtime() else {
-            return Err(CredentialMutationError::CredentialAccess {
-                refusal: TokenStoreRefusal::Unavailable,
-                detail: custody_unavailable(),
-            });
-        };
-        let mutation_gate = self.mutation_gate(&key);
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let in_flight_mutation = InFlightMutation::start();
-        let placement = self.placement;
-        let wait = admission_wait(access);
-        work_runtime.spawn(async move {
-            let _in_flight_mutation = in_flight_mutation;
-            let result = match Self::admit(placement, mutation_gate, wait).await {
-                Some(_mutation_guard) => mutation_fn().await,
-                None => Err(CredentialMutationError::CredentialAccess {
-                    refusal: TokenStoreRefusal::Pending,
-                    detail: pending_refusal(),
-                }),
-            };
-            let _ = tx.send(result);
-        });
-        rx.await.unwrap_or(Err(CredentialMutationError::Cancelled))
+        self.run_exclusive_mutation(AdmissionGuard::none(), key, access, mutation_fn)
+            .await
+    }
+
+    async fn with_exclusive_mutation_under(
+        &self,
+        guard: Arc<AdmissionGuard>,
+        key: TokenKey,
+        access: TokenStoreAccess,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
+        self.run_exclusive_mutation(guard, key, access, mutation_fn)
+            .await
+    }
+
+    /// A store with no fence: there is no credential fence to take.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn credential_fence(
+        &self,
+        _realm: &meerkat_core::RealmId,
+    ) -> Result<Option<meerkat_core::AdmissionFence>, CredentialMutationError> {
+        Ok(None)
     }
 
     async fn with_refresh(
@@ -453,11 +497,13 @@ pub use file_lock::FileLockCoordinator;
 mod file_lock {
     use std::fs::{File, OpenOptions};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use async_trait::async_trait;
     use fs4::fs_std::FileExt;
     use meerkat_core::auth::token_store::{TokenStoreAccess, TokenStoreRefusal};
+    use meerkat_core::{AdmissionFence, AdmissionGuard, AdmissionRefusal, RealmId};
 
     use super::{
         CREDENTIAL_ADMISSION_WAIT, CredentialMutationError, CredentialMutationFn,
@@ -467,7 +513,8 @@ mod file_lock {
     use crate::auth_store::{PersistedTokens, TokenKey};
 
     /// How long a caller-runtime coordinator waits for another holder of the
-    /// cross-process lock before answering with a typed pending refusal.
+    /// credential fence and the cross-process lock before answering with a
+    /// typed refusal.
     const CALLER_RUNTIME_LOCK_WAIT: Duration = Duration::from_mins(2);
 
     /// Pause between non-blocking lock attempts.
@@ -479,8 +526,23 @@ mod file_lock {
     ///
     /// The lock is taken with non-blocking attempts on the async task, so no
     /// thread ever parks on another process's lock, and the wait is bounded.
+    ///
+    /// It is the coordinator of a persisted store, and fences every
+    /// credential write it runs. Each entry takes the credential fence C(r)
+    /// of the key's realm under its credential root EXCLUSIVE: after
+    /// in-process coalescing (a refresh that joins one in flight takes
+    /// nothing) and the per-key gate, before the lockfile and the closure,
+    /// within the same bound as the lockfile. The closure runs on the
+    /// in-memory coordinator's own task with that guard, which the task owns
+    /// until the closure returns. A held fence refuses typed
+    /// (`AdmissionInProgress`; an unavailable one `AdmissionFenceUnavailable`)
+    /// before the closure runs: no token request, nothing written.
     pub struct FileLockCoordinator {
         lock_dir: PathBuf,
+        /// The credential root whose fences C(r) this coordinator takes: the
+        /// lock directory's parent. `None` when the lock directory has none,
+        /// and then every entry refuses `AdmissionFenceUnavailable`.
+        credential_root: Option<PathBuf>,
         inner: InMemoryCoordinator,
         /// The lock wait of refreshes and other unattended work.
         unattended_lock_wait: Duration,
@@ -491,6 +553,66 @@ mod file_lock {
     enum LockAdmission {
         Failed(std::io::Error),
         Busy,
+    }
+
+    /// Why an entry was not admitted under its fence and lockfile: nothing
+    /// ran.
+    enum Refused {
+        /// The credential fence refused, or the operation's guard does not
+        /// cover it.
+        Fence(AdmissionRefusal),
+        /// The coordinator has no credential root to fence under.
+        NoCredentialRoot,
+        /// The cross-process lockfile refused.
+        Lock(LockAdmission),
+    }
+
+    fn no_credential_root() -> String {
+        "the coordinator's lock directory has no parent credential root to fence under; \
+         nothing was started or written"
+            .into()
+    }
+
+    impl Refused {
+        fn into_refresh_error(self) -> RefreshError {
+            match self {
+                Self::Fence(AdmissionRefusal::InProgress) => RefreshError::AdmissionInProgress,
+                Self::Fence(AdmissionRefusal::Unavailable(unavailable)) => {
+                    RefreshError::AdmissionFenceUnavailable(unavailable.to_string())
+                }
+                Self::NoCredentialRoot => {
+                    RefreshError::AdmissionFenceUnavailable(no_credential_root())
+                }
+                Self::Lock(LockAdmission::Failed(error)) => {
+                    RefreshError::LockFailed(error.to_string())
+                }
+                Self::Lock(LockAdmission::Busy) => RefreshError::CredentialAccess {
+                    refusal: TokenStoreRefusal::Pending,
+                    detail: lock_busy_detail(),
+                },
+            }
+        }
+
+        fn into_mutation_error(self) -> CredentialMutationError {
+            match self {
+                Self::Fence(AdmissionRefusal::InProgress) => {
+                    CredentialMutationError::AdmissionInProgress
+                }
+                Self::Fence(AdmissionRefusal::Unavailable(unavailable)) => {
+                    CredentialMutationError::AdmissionFenceUnavailable(unavailable.to_string())
+                }
+                Self::NoCredentialRoot => {
+                    CredentialMutationError::AdmissionFenceUnavailable(no_credential_root())
+                }
+                Self::Lock(LockAdmission::Failed(error)) => {
+                    CredentialMutationError::LockFailed(error.to_string())
+                }
+                Self::Lock(LockAdmission::Busy) => CredentialMutationError::CredentialAccess {
+                    refusal: TokenStoreRefusal::Pending,
+                    detail: lock_busy_detail(),
+                },
+            }
+        }
     }
 
     /// The cross-process lock file, locked exclusively through this
@@ -549,28 +671,119 @@ mod file_lock {
         "another process holds this credential's refresh lock".into()
     }
 
+    /// How a wrapped entry fences its closure.
+    #[derive(Clone, Copy)]
+    enum Fencing {
+        /// Take the credential fence of the key's realm.
+        Acquire,
+        /// The operation already holds it, in the guard the inner
+        /// coordinator hands the closure (`_under`).
+        Held,
+    }
+
+    /// What one wrapped entry takes before its closure runs.
+    struct EntryAdmission {
+        fence: Result<AdmissionFence, Option<AdmissionRefusal>>,
+        fencing: Fencing,
+        lock_dir: PathBuf,
+        lock_path: PathBuf,
+        wait: Duration,
+    }
+
+    impl EntryAdmission {
+        /// Take the fence (unless held) and then the lockfile, both within
+        /// one bound, and return the guard the closure runs under with the
+        /// held lock. `handed` is the guard the inner coordinator handed the
+        /// wrapper: the operation's own under [`Fencing::Held`], and a guard
+        /// over nothing otherwise.
+        async fn admit(
+            self,
+            handed: Arc<AdmissionGuard>,
+        ) -> Result<(Arc<AdmissionGuard>, HeldLock), Refused> {
+            let deadline = tokio::time::Instant::now() + self.wait;
+            let guard = match self.fencing {
+                Fencing::Held => handed,
+                Fencing::Acquire => {
+                    let fence = self.fence.map_err(|refusal| match refusal {
+                        Some(refusal) => Refused::Fence(refusal),
+                        None => Refused::NoCredentialRoot,
+                    })?;
+                    AdmissionGuard::acquire(vec![fence], self.wait)
+                        .await
+                        .map_err(Refused::Fence)?
+                }
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let file = acquire_lock_file(&self.lock_dir, &self.lock_path, remaining)
+                .await
+                .map_err(Refused::Lock)?;
+            Ok((guard, file))
+        }
+    }
+
     impl FileLockCoordinator {
+        /// A coordinator over the refresh locks in `lock_dir`, a credential
+        /// root's refresh-lock directory
+        /// ([`crate::auth_store::TokenStoreBackend::refresh_lock_dir`]). The
+        /// credential fences it takes are those of that root, the lock
+        /// directory's parent: the fences the paired store's writes require,
+        /// so a store under another root refuses its writes.
         pub fn new(lock_dir: impl Into<PathBuf>) -> Self {
-            Self {
-                lock_dir: lock_dir.into(),
-                inner: InMemoryCoordinator::new(),
-                unattended_lock_wait: CALLER_RUNTIME_LOCK_WAIT,
-                interactive_lock_wait: CALLER_RUNTIME_LOCK_WAIT,
-            }
+            Self::with_waits(
+                lock_dir.into(),
+                InMemoryCoordinator::new(),
+                CALLER_RUNTIME_LOCK_WAIT,
+                CALLER_RUNTIME_LOCK_WAIT,
+            )
         }
 
         /// A coordinator for stores whose operations can wait on the
         /// operating system (keyring-capable stores). Its credential work runs
         /// on the process-lifetime custody runtime. Unattended admission never
         /// waits; an interactive mutation waits at most
-        /// [`CREDENTIAL_ADMISSION_WAIT`].
+        /// [`CREDENTIAL_ADMISSION_WAIT`]. Its credential fences are those of
+        /// `lock_dir`'s parent, as for [`Self::new`].
         pub fn retaining_custody(lock_dir: impl Into<PathBuf>) -> Self {
+            Self::with_waits(
+                lock_dir.into(),
+                InMemoryCoordinator::retaining_custody(),
+                Duration::ZERO,
+                CREDENTIAL_ADMISSION_WAIT,
+            )
+        }
+
+        fn with_waits(
+            lock_dir: PathBuf,
+            inner: InMemoryCoordinator,
+            unattended_lock_wait: Duration,
+            interactive_lock_wait: Duration,
+        ) -> Self {
+            let credential_root = lock_dir
+                .parent()
+                .filter(|root| !root.as_os_str().is_empty())
+                .map(Path::to_path_buf);
             Self {
-                lock_dir: lock_dir.into(),
-                inner: InMemoryCoordinator::retaining_custody(),
-                unattended_lock_wait: Duration::ZERO,
-                interactive_lock_wait: CREDENTIAL_ADMISSION_WAIT,
+                lock_dir,
+                credential_root,
+                inner,
+                unattended_lock_wait,
+                interactive_lock_wait,
             }
+        }
+
+        /// The credential fence C(`realm`) under this coordinator's
+        /// credential root; `None` refusal when it has none.
+        fn fence_of(&self, realm: &RealmId) -> Result<AdmissionFence, Option<AdmissionRefusal>> {
+            let root = self.credential_root.as_deref().ok_or(None)?;
+            AdmissionFence::credentials(root, realm).map_err(Some)
+        }
+
+        /// [`Self::fence_of`] as a refusal of the entry it serves.
+        fn fence_or_refused(&self, realm: &RealmId) -> Result<AdmissionFence, Refused> {
+            self.fence_of(realm).map_err(|refusal| match refusal {
+                Some(refusal) => Refused::Fence(refusal),
+                None => Refused::NoCredentialRoot,
+            })
         }
 
         fn lock_path_for(&self, key: &TokenKey) -> PathBuf {
@@ -578,25 +791,39 @@ mod file_lock {
                 .join(format!("{}--{}.lock", key.realm(), key.storage_stem()))
         }
 
-        fn with_locking_refresh(&self, key: &TokenKey, refresh_fn: RefreshFn) -> RefreshFn {
-            let lock_dir = self.lock_dir.clone();
-            let lock_path = self.lock_path_for(key);
-            let lock_wait = self.unattended_lock_wait;
-            Box::new(move || {
-                Box::pin(async move {
-                    let file = acquire_lock_file(&lock_dir, &lock_path, lock_wait)
-                        .await
-                        .map_err(|admission| match admission {
-                            LockAdmission::Failed(error) => {
-                                RefreshError::LockFailed(error.to_string())
-                            }
-                            LockAdmission::Busy => RefreshError::CredentialAccess {
-                                refusal: TokenStoreRefusal::Pending,
-                                detail: lock_busy_detail(),
-                            },
-                        })?;
+        fn entry_admission(
+            &self,
+            key: &TokenKey,
+            fencing: Fencing,
+            wait: Duration,
+        ) -> EntryAdmission {
+            EntryAdmission {
+                fence: self.fence_of(key.realm()),
+                fencing,
+                lock_dir: self.lock_dir.clone(),
+                lock_path: self.lock_path_for(key),
+                wait,
+            }
+        }
 
-                    let result = refresh_fn().await;
+        fn mutation_lock_wait(&self, access: TokenStoreAccess) -> Duration {
+            match access {
+                TokenStoreAccess::Interactive => self.interactive_lock_wait,
+                TokenStoreAccess::Status | TokenStoreAccess::Unattended => {
+                    self.unattended_lock_wait
+                }
+            }
+        }
+
+        fn with_locking_refresh(&self, key: &TokenKey, refresh_fn: RefreshFn) -> RefreshFn {
+            let admission = self.entry_admission(key, Fencing::Acquire, self.unattended_lock_wait);
+            Box::new(move |handed| {
+                Box::pin(async move {
+                    let (guard, file) = admission
+                        .admit(handed)
+                        .await
+                        .map_err(Refused::into_refresh_error)?;
+                    let result = refresh_fn(guard).await;
                     drop(file);
                     result
                 })
@@ -607,31 +834,17 @@ mod file_lock {
             &self,
             key: &TokenKey,
             access: TokenStoreAccess,
+            fencing: Fencing,
             mutation_fn: CredentialMutationFn,
         ) -> CredentialMutationFn {
-            let lock_dir = self.lock_dir.clone();
-            let lock_path = self.lock_path_for(key);
-            let lock_wait = match access {
-                TokenStoreAccess::Interactive => self.interactive_lock_wait,
-                TokenStoreAccess::Status | TokenStoreAccess::Unattended => {
-                    self.unattended_lock_wait
-                }
-            };
-            Box::new(move || {
+            let admission = self.entry_admission(key, fencing, self.mutation_lock_wait(access));
+            Box::new(move |handed| {
                 Box::pin(async move {
-                    let file = acquire_lock_file(&lock_dir, &lock_path, lock_wait)
+                    let (guard, file) = admission
+                        .admit(handed)
                         .await
-                        .map_err(|admission| match admission {
-                            LockAdmission::Failed(error) => {
-                                CredentialMutationError::LockFailed(error.to_string())
-                            }
-                            LockAdmission::Busy => CredentialMutationError::CredentialAccess {
-                                refusal: TokenStoreRefusal::Pending,
-                                detail: lock_busy_detail(),
-                            },
-                        })?;
-
-                    let result = mutation_fn().await;
+                        .map_err(Refused::into_mutation_error)?;
+                    let result = mutation_fn(guard).await;
                     drop(file);
                     result
                 })
@@ -656,10 +869,39 @@ mod file_lock {
             access: TokenStoreAccess,
             mutation_fn: CredentialMutationFn,
         ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
-            let mutation_fn = self.with_locking_mutation(&key, access, mutation_fn);
+            let mutation_fn =
+                self.with_locking_mutation(&key, access, Fencing::Acquire, mutation_fn);
             self.inner
                 .with_exclusive_mutation_for(key, access, mutation_fn)
                 .await
+        }
+
+        async fn with_exclusive_mutation_under(
+            &self,
+            guard: Arc<AdmissionGuard>,
+            key: TokenKey,
+            access: TokenStoreAccess,
+            mutation_fn: CredentialMutationFn,
+        ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
+            // The operation took the fence at its own entry: a guard that
+            // does not cover C of the key's realm here is refused before
+            // anything runs, and the fence is never taken a second time.
+            self.fence_or_refused(key.realm())
+                .and_then(|fence| guard.covers(&fence).map_err(Refused::Fence))
+                .map_err(Refused::into_mutation_error)?;
+            let mutation_fn = self.with_locking_mutation(&key, access, Fencing::Held, mutation_fn);
+            self.inner
+                .with_exclusive_mutation_under(guard, key, access, mutation_fn)
+                .await
+        }
+
+        fn credential_fence(
+            &self,
+            realm: &RealmId,
+        ) -> Result<Option<AdmissionFence>, CredentialMutationError> {
+            self.fence_or_refused(realm)
+                .map(Some)
+                .map_err(Refused::into_mutation_error)
         }
 
         async fn with_refresh(
@@ -793,18 +1035,17 @@ mod tests {
         use fs4::fs_std::FileExt;
         use meerkat_core::auth::token_store::TokenStoreRefusal;
         let dir = tempfile::tempdir().unwrap();
-        let coordinator = FileLockCoordinator::retaining_custody(dir.path());
+        let lock_dir = dir.path().join("refresh-locks");
+        let coordinator = FileLockCoordinator::retaining_custody(&lock_dir);
         let key = key();
         // Another process: its own open file description holds the lock.
+        std::fs::create_dir_all(&lock_dir).unwrap();
         let held = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(
-                dir.path()
-                    .join(format!("{}--{}.lock", key.realm(), key.storage_stem())),
-            )
+            .open(lock_dir.join(format!("{}--{}.lock", key.realm(), key.storage_stem())))
             .unwrap();
         assert!(FileExt::try_lock_exclusive(&held).unwrap());
         let ran = Arc::new(AtomicUsize::new(0));
@@ -813,7 +1054,7 @@ mod tests {
             Duration::from_secs(2),
             coordinator.with_refresh(
                 key.clone(),
-                Box::new(move || {
+                Box::new(move |_guard| {
                     refresh_ran.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async { Ok(tokens("never")) })
                 }),
@@ -836,7 +1077,7 @@ mod tests {
         let mutated = coordinator
             .with_exclusive_mutation(
                 key,
-                Box::new(|| Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })),
+                Box::new(|_guard| Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })),
             )
             .await;
         assert!(
@@ -858,7 +1099,7 @@ mod tests {
             coordinator.with_exclusive_mutation_for(
                 self::key(),
                 TokenStoreAccess::Unattended,
-                Box::new(move || {
+                Box::new(move |_guard| {
                     mutation_ran.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })
                 }),
@@ -880,6 +1121,61 @@ mod tests {
         FileExt::unlock(&held).unwrap();
     }
 
+    /// An operation that already holds the credential fence enters through
+    /// `with_exclusive_mutation_under`: a guard that does not cover the
+    /// key's fence is refused before the closure runs, and a covering one
+    /// runs it with that same guard, taking the fence no second time.
+    #[cfg(feature = "file-lock")]
+    #[tokio::test]
+    async fn an_under_entry_runs_only_under_a_guard_covering_the_keys_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("credentials");
+        let coordinator = FileLockCoordinator::new(root.join("refresh-locks"));
+        let ran = Arc::new(AtomicUsize::new(0));
+        for guard in [
+            AdmissionGuard::none(),
+            crate::auth_store::covering_guard(&dir.path().join("other"), &key()),
+        ] {
+            let mutation_ran = Arc::clone(&ran);
+            let refused = coordinator
+                .with_exclusive_mutation_under(
+                    guard,
+                    key(),
+                    TokenStoreAccess::Interactive,
+                    Box::new(move |_fence| {
+                        mutation_ran.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })
+                    }),
+                )
+                .await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(CredentialMutationError::AdmissionFenceUnavailable(_))
+                ),
+                "got {refused:?}"
+            );
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "no refused closure ran");
+        let held = crate::auth_store::covering_guard(&root, &key());
+        let expected = Arc::clone(&held);
+        let mutated = coordinator
+            .with_exclusive_mutation_under(
+                held,
+                key(),
+                TokenStoreAccess::Interactive,
+                Box::new(move |fence| {
+                    let same = Arc::ptr_eq(&fence, &expected);
+                    Box::pin(async move {
+                        assert!(same, "the closure runs under the caller's guard");
+                        Ok(CredentialMutationOutcome::Cleared)
+                    })
+                }),
+            )
+            .await;
+        assert_eq!(mutated.unwrap(), CredentialMutationOutcome::Cleared);
+    }
+
     /// A retained-custody coordinator whose custody runtime cannot start
     /// admits nothing: refresh and mutation answer a typed unavailability at
     /// once, their bodies never run, and no refresh stays registered.
@@ -895,7 +1191,7 @@ mod tests {
             Duration::from_secs(2),
             coordinator.with_refresh(
                 key(),
-                Box::new(move || {
+                Box::new(move |_guard| {
                     refresh_ran.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async { Ok(tokens("never")) })
                 }),
@@ -922,7 +1218,7 @@ mod tests {
             Duration::from_secs(2),
             coordinator.with_exclusive_mutation(
                 key(),
-                Box::new(move || {
+                Box::new(move |_guard| {
                     mutation_ran.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })
                 }),
@@ -957,7 +1253,7 @@ mod tests {
                 coordinator
                     .with_exclusive_mutation(
                         key(),
-                        Box::new(move || {
+                        Box::new(move |_guard| {
                             Box::pin(async move {
                                 let _ = entered_tx.send(());
                                 let _ = release_rx.await;
@@ -976,7 +1272,7 @@ mod tests {
             coordinator.with_exclusive_mutation_for(
                 key(),
                 TokenStoreAccess::Unattended,
-                Box::new(move || {
+                Box::new(move |_guard| {
                     mutation_ran.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })
                 }),
@@ -1019,7 +1315,7 @@ mod tests {
                 coordinator
                     .with_refresh(
                         key,
-                        Box::new(move || {
+                        Box::new(move |_guard| {
                             Box::pin(async move {
                                 let _ = normal_started_tx.send(());
                                 normal_release_rx
@@ -1039,7 +1335,7 @@ mod tests {
             coordinator
                 .with_forced_refresh(
                     key,
-                    Box::new(move || {
+                    Box::new(move |_guard| {
                         Box::pin(async move {
                             let _ = forced_started_tx.send(());
                             Ok(tokens("forced"))
@@ -1086,7 +1382,7 @@ mod tests {
                 coordinator
                     .with_refresh(
                         key,
-                        Box::new(move || {
+                        Box::new(move |_guard| {
                             Box::pin(async move {
                                 let _ = started_tx.send(());
                                 release_rx

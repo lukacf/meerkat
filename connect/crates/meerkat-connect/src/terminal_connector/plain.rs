@@ -683,7 +683,9 @@ mod selected_tests {
         };
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("credentials"))),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage,
@@ -708,7 +710,9 @@ mod selected_tests {
         let native = crate::stdio::tests::realm_native_owner(&storage).await;
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("credentials"))),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage,

@@ -28,6 +28,16 @@ use std::path::{Path, PathBuf};
 /// and how many shipped definitions of it the file has. Every one takes an
 /// admission guard parameter.
 const PRIMITIVES: &[(&str, &str, usize)] = &[
+    // The credential store's writes, declared once by the trait every
+    // persisted store implements.
+    ("crates/meerkat-core/src/auth/token_store.rs", "save", 1),
+    ("crates/meerkat-core/src/auth/token_store.rs", "clear", 1),
+    ("crates/meerkat-core/src/auth/token_store.rs", "save_for", 1),
+    (
+        "crates/meerkat-core/src/auth/token_store.rs",
+        "clear_for",
+        1,
+    ),
     ("crates/meerkat-core/src/config_store.rs", "set_held", 4),
     ("crates/meerkat-core/src/config_store.rs", "patch_held", 4),
     (
@@ -154,6 +164,15 @@ const ACQUISITION_SITES: &[(&str, &str, &str, usize)] = &[
         "AdmissionGuard::acquire",
         1,
     ),
+    // The credential coordinator's entries (refresh and exclusive
+    // mutation), after in-process coalescing and before the per-key lock
+    // file and the closure, within the lock file's wait.
+    (
+        "crates/meerkat-auth-core/src/auth_store/refresh.rs",
+        "admit",
+        "AdmissionGuard::acquire",
+        1,
+    ),
     // The user document's create-on-read: without waiting.
     (
         "crates/meerkat-core/src/config_store.rs",
@@ -225,6 +244,14 @@ const ACQUISITION_SITES: &[(&str, &str, &str, usize)] = &[
         "crates/meerkat/src/governed_realm/stock/issuance.rs",
         "grant_under_staged_custody",
         "take_realm_fence_now",
+        1,
+    ),
+    // The connector-client writers: the realm document's fences and the
+    // credential fence, before the coordinator's entry and every write.
+    (
+        "crates/meerkat/src/connector_clients.rs",
+        "guarded_profile_update",
+        "AdmissionGuard::acquire",
         1,
     ),
     // The reviewed connector finalization, first on its owned task, before

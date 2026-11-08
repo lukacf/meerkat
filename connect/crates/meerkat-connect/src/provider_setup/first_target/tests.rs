@@ -568,19 +568,21 @@ impl meerkat_auth_core::auth_store::TokenStore for HeldTokens {
     }
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &meerkat_auth_core::auth_store::TokenKey,
         tokens: &meerkat_auth_core::auth_store::PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         self.release.acquire().await.unwrap().forget();
-        self.file.save(key, tokens).await
+        self.file.save(fence, key, tokens).await
     }
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &meerkat_auth_core::auth_store::TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.file.clear(key).await
+        self.file.clear(fence, key).await
     }
     async fn list(
         &self,
@@ -640,7 +642,9 @@ async fn first_target_change_during_native_key_save_keeps_saved_effect_and_refus
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(root.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.path().join("credentials").join("refresh-locks"),
+            )),
         );
         startup.factory = startup
             .factory

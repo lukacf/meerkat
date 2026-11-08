@@ -470,6 +470,8 @@ fn update_kind(error: &meerkat::McpServiceSecretUpdateError) -> &'static str {
         Error::Ownership(_) => "Ownership",
         Error::NotAdmitted(_) => "NotAdmitted",
         Error::OutcomeUnknown(_) => "OutcomeUnknown",
+        Error::AdmissionInProgress => "AdmissionInProgress",
+        Error::AdmissionFenceUnavailable(_) => "AdmissionFenceUnavailable",
     }
 }
 
@@ -702,6 +704,9 @@ impl ReviewedSecretInstallation {
             else {
                 return Ok(outcome);
             };
+            // The written reference this outcome reports: the setter returns
+            // the write's witness, and this is its reference.
+            let result = result.map(|witness| witness.reference().clone());
             let valid = result.as_ref().is_ok_and(|observed| {
                 observed.realm() == &self.storage.locator.realm
                     && observed.server() == self.config.name.as_str()
@@ -875,6 +880,7 @@ mod tests {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
             value: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
@@ -883,7 +889,7 @@ mod tests {
                 self.entered.add_permits(1);
                 self.release.acquire().await.unwrap().forget();
             }
-            self.inner.save(key, value).await?;
+            self.inner.save(fence, key, value).await?;
             if self.fail_after == Some(ordinal) {
                 return Err(TokenStoreError::Unavailable(
                     "controlled lost store acknowledgement".into(),
@@ -891,8 +897,12 @@ mod tests {
             }
             Ok(())
         }
-        async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-            self.inner.clear(key).await
+        async fn clear(
+            &self,
+            fence: &meerkat_core::AdmissionGuard,
+            key: &TokenKey,
+        ) -> Result<(), TokenStoreError> {
+            self.inner.clear(fence, key).await
         }
         async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
             self.inner.list().await
@@ -960,7 +970,9 @@ mod tests {
             let factory = meerkat::AgentFactory::new(root.join("factory"))
                 .with_provider_auth_persistence(ProviderAuthPersistence::new(
                     store.clone(),
-                    Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
+                    Arc::new(FileLockCoordinator::new(
+                        root.join("credentials").join("refresh-locks"),
+                    )),
                 ));
             let installed_root = root.join("installed");
             std::fs::create_dir_all(installed_root.join("ready")).unwrap();
@@ -1985,6 +1997,7 @@ mod tests {
                 "KEY".into(),
                 meerkat_core::auth::McpServiceSecretPresence::NotStored,
             )]),
+            witnesses: BTreeMap::new(),
         };
         assert!(exact_presence(
             &exact,

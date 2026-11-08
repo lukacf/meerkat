@@ -855,9 +855,10 @@ async fn exercise(paused_refresh: bool) {
             .unwrap();
         previous.release_prelock_lifecycle_guard();
         let prepare_binding = binding.clone();
-        let prepare: TokenPrepareFn = Box::new(move |locked, mode| {
+        let prepare: TokenPrepareFn = Box::new(move |fence, locked, mode| {
             Box::pin(async move {
                 prepare_managed_store_oauth_refresh_under_lock(
+                    fence,
                     &env,
                     &prepare_binding,
                     previous,

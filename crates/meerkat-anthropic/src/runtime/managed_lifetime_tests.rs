@@ -84,14 +84,23 @@ impl TokenStore for CountingTokenStore {
         self.inner.load(key).await
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         self.clears.fetch_add(1, Ordering::SeqCst);
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
@@ -429,7 +438,10 @@ async fn managed_lifetime_child() {
     let original =
         meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &original, &transition)
             .unwrap();
-    store.save(&key, &original).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &original)
+        .await
+        .unwrap();
     drop(guard);
     let connection = AnthropicProviderRuntime
         .resolve_binding(&binding, &environment)

@@ -2181,6 +2181,56 @@ pub struct AuthLeaseSnapshot {
     pub credential_published_at_millis: Option<u64>,
 }
 
+/// One publication of credential material to an auth lease, as a call
+/// records the credential it is served by: the lease, the generation that
+/// publication advanced it to, and its publication time
+/// ([`AuthLeaseSnapshot::credential_published_at_millis`]). The generation
+/// counts this process's publications: it advances with each one and never
+/// goes back, and a rollback after a failed durable write restores the
+/// material under the current generation. A lease that adopts a credential
+/// another process published (a newer durable row, after that process's own
+/// login or refresh) keeps the larger of the two generations, so two
+/// credentials can share a generation in one process. Their publication
+/// times tell them apart: the lease's durable lifecycle marker orders
+/// publications by that time. A recorded publication that differs from the
+/// lease's current one means the lease has published or adopted credential
+/// material since. Nonsecret: it names no credential value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CredentialLeasePublication {
+    lease: LeaseKey,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+}
+
+impl CredentialLeasePublication {
+    /// The publication `snapshot` of `lease` holds, or `None` when the lease
+    /// holds no credential material.
+    pub fn of(lease: LeaseKey, snapshot: &AuthLeaseSnapshot) -> Option<Self> {
+        snapshot.credential_present.then_some(Self {
+            lease,
+            generation: snapshot.generation,
+            credential_published_at_millis: snapshot.credential_published_at_millis,
+        })
+    }
+
+    /// The lease the credential was published to.
+    pub fn lease(&self) -> &LeaseKey {
+        &self.lease
+    }
+
+    /// The lease generation the publication advanced it to.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The publication time the lease records, in milliseconds since the
+    /// Unix epoch: for a credential the lease adopted from another process,
+    /// the time that process published it.
+    pub fn credential_published_at_millis(&self) -> Option<u64> {
+        self.credential_published_at_millis
+    }
+}
+
 /// Opaque token for restoring a previously captured auth lease snapshot.
 ///
 /// This is intentionally not constructible from public snapshot fields. A

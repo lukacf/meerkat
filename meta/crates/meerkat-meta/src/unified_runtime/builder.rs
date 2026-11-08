@@ -4935,6 +4935,18 @@ model = "gpt-5.5"
         .expect("credential store")
     }
 
+    /// A guard over the credential fence of `key`'s realm under `root`, for a
+    /// seeding write outside any coordinator.
+    fn covering(
+        root: &std::path::Path,
+        key: &meerkat_core::auth::TokenKey,
+    ) -> std::sync::Arc<meerkat_core::AdmissionGuard> {
+        meerkat_core::AdmissionGuard::try_acquire(vec![
+            meerkat_core::AdmissionFence::credentials(root, key.realm()).expect("credential fence"),
+        ])
+        .expect("the credential fence is free")
+    }
+
     /// A supplied, already-erased spec built its agent factories already: the
     /// builder refuses a provider credential store it could not attach.
     #[tokio::test]
@@ -5050,6 +5062,7 @@ model = "gpt-5.5"
                 member
                     .token_store()
                     .save(
+                        &covering(&root, &key),
                         &key,
                         &meerkat_core::auth::PersistedTokens::api_key(secret.as_str()),
                     )
@@ -5107,6 +5120,7 @@ model = "gpt-5.5"
                 member
                     .token_store()
                     .save(
+                        &covering(&reopened.join("credentials"), &key),
                         &key,
                         &meerkat_core::auth::PersistedTokens::api_key("reopened-key"),
                     )

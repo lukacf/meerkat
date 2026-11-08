@@ -735,9 +735,10 @@ impl McpOAuthAuthority {
         let entered: EnteredSlot = Arc::default();
         let (outcome_slot, entered_slot) = (Arc::clone(&outcome), Arc::clone(&entered));
         let (mutation_key, mutation_target) = (key.clone(), target.clone());
-        let mutation: CredentialMutationFn = Box::new(move || {
+        let mutation: CredentialMutationFn = Box::new(move |fence| {
             Box::pin(async move {
                 let written = write_profile_update(
+                    &fence,
                     store.as_ref(),
                     &mutation_key,
                     &mutation_target,
@@ -778,8 +779,10 @@ impl McpOAuthAuthority {
 }
 
 /// Read the slot's current profile row, check `update` against it, let
-/// `entry` admit the caller, then write. The admission goes to `entered`.
+/// `entry` admit the caller, then write under the coordinator's credential
+/// fence `fence`. The admission goes to `entered`.
 async fn write_profile_update(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn TokenStore,
     key: &TokenKey,
     target: &McpServerIdentity,
@@ -818,14 +821,14 @@ async fn write_profile_update(
         ProfileUpdate::Install(record, secret) | ProfileUpdate::Replace(record, secret) => {
             let row = client_profile_row(&record, &secret)?;
             store
-                .save_for(key, &row, TokenStoreAccess::Interactive)
+                .save_for(fence, key, &row, TokenStoreAccess::Interactive)
                 .await
                 .map_err(mcp_store_error)?;
             Ok(CredentialMutationOutcome::Persisted(row))
         }
         ProfileUpdate::Remove => {
             store
-                .clear_for(key, TokenStoreAccess::Interactive)
+                .clear_for(fence, key, TokenStoreAccess::Interactive)
                 .await
                 .map_err(mcp_store_error)?;
             Ok(CredentialMutationOutcome::Cleared)

@@ -1210,12 +1210,17 @@ mod tests {
             paths.config_path.clone(),
             meerkat_models::canonical(),
         ));
+        let documents = Arc::new(
+            super::super::issuance::realm_config_source(&storage(tmp.path()))
+                .expect("the realm's config documents"),
+        );
         let declare = |authorize_params: Vec<(String, String)>| {
             let store = Arc::clone(&store);
+            let documents = Arc::clone(&documents);
             let persistence = persistence.clone();
             async move {
                 crate::put_connector_client(
-                    Arc::clone(&store),
+                    documents,
                     &persistence,
                     &realm(),
                     "mail-client",

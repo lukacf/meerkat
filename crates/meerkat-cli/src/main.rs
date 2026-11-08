@@ -2790,24 +2790,29 @@ fn read_connector_client_secret(
     Ok(secret)
 }
 
-/// The realm's own (unfolded) config document store: connector client writes
-/// never flatten inherited entries into it.
-async fn cli_realm_doc_store(
+/// The scope's realm config documents, for the guarded connector-client
+/// writes: they write `realm`'s own (unfolded) document, never flattening
+/// inherited entries into it, and take its admission fences. The writers
+/// read and patch the document through a store of their own, which prints
+/// nothing, so the document is first read once here through the CLI warning
+/// sink (`report_cli_config_warnings`).
+async fn cli_realm_documents(
     scope: &RuntimeScope,
     realm: &meerkat_core::connection::RealmId,
-) -> anyhow::Result<Arc<dyn ConfigStore>> {
-    let source = cli_filesystem_realm_config_source(scope);
-    let config_path = source.config_doc_path(realm);
-    if let Some(parent) = config_path.parent() {
+) -> anyhow::Result<Arc<meerkat_store::FilesystemRealmConfigSource>> {
+    let source = Arc::new(cli_filesystem_realm_config_source(scope));
+    let document = source.config_doc_path(realm);
+    if let Some(parent) = document.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     }
-    Ok(Arc::new(CliConfigDocStore::new(
-        config_path,
-        realm.clone(),
-        Arc::new(source),
-    )))
+    // Only the warnings matter here: a document that does not load is the
+    // writer's to refuse, with its own typed error.
+    let _ = CliConfigDocStore::new(document, realm.clone(), source.clone())
+        .get_with_warnings()
+        .await;
+    Ok(source)
 }
 
 async fn handle_connector_client_command(
@@ -2865,15 +2870,16 @@ async fn handle_connector_client_command(
             } else {
                 meerkat::ConnectorClientSecretUpdate::Keep
             };
-            let store = cli_realm_doc_store(scope, &realm).await?;
-            meerkat::put_connector_client(store, &persistence, &realm, &id, config, secret).await?;
+            let documents = cli_realm_documents(scope, &realm).await?;
+            meerkat::put_connector_client(documents, &persistence, &realm, &id, config, secret)
+                .await?;
             println!("Connector client '{id}' configured in realm '{realm}'.");
         }
         ConnectorClientCommands::RotateSecret { id } => {
             let untrusted = cli_scope_launch_guard(scope).await;
             let secret = read_connector_client_secret(untrusted.as_deref())?;
-            let store = cli_realm_doc_store(scope, &realm).await?;
-            meerkat::rotate_connector_client_secret(store, &persistence, &realm, &id, &secret)
+            let documents = cli_realm_documents(scope, &realm).await?;
+            meerkat::rotate_connector_client_secret(documents, &persistence, &realm, &id, &secret)
                 .await?;
             println!("Connector client '{id}' secret replaced in realm '{realm}'.");
         }
@@ -2910,8 +2916,8 @@ async fn handle_connector_client_command(
             }
         }
         ConnectorClientCommands::Remove { id } => {
-            let store = cli_realm_doc_store(scope, &realm).await?;
-            meerkat::remove_connector_client(store, &persistence, &realm, &id).await?;
+            let documents = cli_realm_documents(scope, &realm).await?;
+            meerkat::remove_connector_client(documents, &persistence, &realm, &id).await?;
             println!("Connector client '{id}' removed from realm '{realm}'.");
         }
     }
@@ -6015,7 +6021,8 @@ static CLI_REPORTED_CONFIG_WARNINGS: std::sync::Mutex<
 /// filter is off by default, so every CLI path that loads or rewrites a
 /// persisted config document reports here: `load_config`, the mob deploy
 /// loader, and every [`CliConfigDocStore`] read/patch (`config get/set/patch`,
-/// `auth login`, the credential-read bootstrap).
+/// `auth login`, the credential-read bootstrap, and the read before each
+/// `auth connector-client` write).
 fn report_cli_config_warnings(
     doc: &Path,
     realm: &meerkat_core::connection::RealmId,
@@ -7064,7 +7071,7 @@ async fn refresh_auth_profile(
         .refresh_coordinator()
         .with_exclusive_mutation(
             key.clone(),
-            Box::new(move || {
+            Box::new(move |fence| {
                 Box::pin(async move {
                     use meerkat_providers::auth_store::{
                         CredentialMutationError, CredentialMutationOutcome,
@@ -7103,6 +7110,7 @@ async fn refresh_auth_profile(
                     .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
                     mutation_store
                         .save_for(
+                            &fence,
                             &mutation_key,
                             &committed,
                             meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -8544,7 +8552,7 @@ async fn migrate_one_legacy_login_credential(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             dev_key.clone(),
-            Box::new(move || {
+            Box::new(move |_fence| {
                 Box::pin(async move {
                     // Lock order is permanently source `dev` then target
                     // `global`; every migration follows this one-way order.
@@ -8567,7 +8575,7 @@ async fn migrate_one_legacy_login_credential(
                     target_coordinator
                         .with_exclusive_mutation(
                             global_key,
-                            Box::new(move || {
+                            Box::new(move |fence| {
                                 Box::pin(async move {
                                     if let Some(existing) = target_store
                                         .load_for(&target_key, meerkat_providers::auth_store::TokenStoreAccess::Unattended)
@@ -8614,7 +8622,7 @@ async fn migrate_one_legacy_login_credential(
                                         }
                                     };
                                     if let Err(error) = target_store
-                                        .save_for(&target_key, &committed, meerkat_providers::auth_store::TokenStoreAccess::Unattended)
+                                        .save_for(&fence, &target_key, &committed, meerkat_providers::auth_store::TokenStoreAccess::Unattended)
                                         .await
                                     {
                                         let _ = target_auth_lease
@@ -8843,6 +8851,7 @@ async fn prepare_cli_token_commit_unlocked(
 /// proof-of-acquisition marker or does not exist.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -8876,7 +8885,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
-    save_marked_cli_token_commit_unlocked(store, auth_lease, &commit, tokens, "").await?;
+    save_marked_cli_token_commit_unlocked(fence, store, auth_lease, &commit, tokens, "").await?;
     Ok(commit)
 }
 
@@ -8884,9 +8893,11 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
 /// transition and perform the single durable token write. If the marker
 /// handoff or the durable save fails, the freshly acquired lease is rolled
 /// back via [`rollback_cli_token_commit`] (release + previous
-/// credential/lifecycle restore) so no half-state survives.
+/// credential/lifecycle restore) so no half-state survives. Every write takes
+/// `fence`, the coordinator's credential-fence guard for the commit.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_marked_cli_token_commit_unlocked(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &CliTokenCommitSnapshot,
@@ -8899,7 +8910,7 @@ async fn save_marked_cli_token_commit_unlocked(
         &commit.lifecycle_transition,
     ) {
         Ok(committed_tokens) => committed_tokens,
-        Err(e) => match rollback_cli_token_commit(store, auth_lease, commit).await {
+        Err(e) => match rollback_cli_token_commit(fence, store, auth_lease, commit).await {
             Ok(()) => anyhow::bail!(
                 "AuthMachine lifecycle marker handoff failed{failure_context}: {e}; acquired lease rolled back"
             ),
@@ -8910,13 +8921,14 @@ async fn save_marked_cli_token_commit_unlocked(
     };
     if let Err(e) = store
         .save_for(
+            fence,
             &commit.key,
             &committed_tokens,
             meerkat_providers::auth_store::TokenStoreAccess::Interactive,
         )
         .await
     {
-        match rollback_cli_token_commit(store, auth_lease, commit).await {
+        match rollback_cli_token_commit(fence, store, auth_lease, commit).await {
             Ok(()) => anyhow::bail!(
                 "TokenStore save failed{failure_context}: {e}; acquired lease rolled back"
             ),
@@ -8930,6 +8942,7 @@ async fn save_marked_cli_token_commit_unlocked(
 
 #[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -8952,6 +8965,7 @@ async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
         lifecycle_transition: transition,
     };
     save_marked_cli_token_commit_unlocked(
+        fence,
         store,
         auth_lease,
         &commit,
@@ -8977,12 +8991,13 @@ async fn save_cli_tokens_and_publish_lifecycle(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
                     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
                     let commit = save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+                        &fence,
                         store.as_ref(),
                         &auth_lease,
                         &auth_binding,
@@ -9016,8 +9031,10 @@ async fn save_cli_tokens_and_publish_lifecycle(
 /// here re-assert the previous record and re-stamp its marker from the
 /// restored transition. The lease release always runs first: even if the
 /// durable restore fails, no freshly acquired lease survives a failed commit.
+/// The restore writes take `fence`, the commit's credential-fence guard.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn rollback_cli_token_commit(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &CliTokenCommitSnapshot,
@@ -9030,6 +9047,7 @@ async fn rollback_cli_token_commit(
                     .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
                 store
                     .save_for(
+                        fence,
                         &commit.key,
                         previous,
                         meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -9051,6 +9069,7 @@ async fn rollback_cli_token_commit(
                         .map_err(|e| format!("AuthMachine rollback marker handoff failed: {e}"))?;
                     store
                         .save_for(
+                            fence,
                             &commit.key,
                             &restored_previous,
                             meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -9065,6 +9084,7 @@ async fn rollback_cli_token_commit(
                     .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
                 store
                     .save_for(
+                        fence,
                         &commit.key,
                         previous,
                         meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -9079,6 +9099,7 @@ async fn rollback_cli_token_commit(
                 .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
             store
                 .clear_for(
+                    fence,
                     &commit.key,
                     meerkat_providers::auth_store::TokenStoreAccess::Interactive,
                 )
@@ -9126,7 +9147,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
@@ -9152,6 +9173,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
                             CredentialMutationError::AuthLifecycle(error.to_string())
                         })?;
                     save_prepared_cli_tokens_after_terminal_consume_unlocked(
+                        &fence,
                         store.as_ref(),
                         &auth_lease,
                         &auth_binding,
@@ -12381,6 +12403,15 @@ impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
         // The native authority's own selection: the CLI selects none of its
         // own, and a target without a Known selection states none.
         meerkat_mcp::McpAuthResolver::selected_account(&self.authority, target)
+    }
+
+    /// The native authority's lease publication: the credential the CLI's
+    /// requests read is the authority's own.
+    fn credential_publication(
+        &self,
+        target: &meerkat::McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        meerkat_mcp::McpAuthResolver::credential_publication(&self.authority, target)
     }
 }
 
@@ -26081,13 +26112,18 @@ mod tests {
 
             async fn save(
                 &self,
+                _fence: &meerkat_core::AdmissionGuard,
                 _key: &TokenKey,
                 _tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
                 Err(TokenStoreError::Io("durable save refused".into()))
             }
 
-            async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            async fn clear(
+                &self,
+                _fence: &meerkat_core::AdmissionGuard,
+                _key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
                 Ok(())
             }
 
@@ -27058,7 +27094,11 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let auth_lease = new_cli_auth_handles().0;
         let dev_key = TokenKey::parse("dev", "default_openai").expect("dev key");
         store
-            .save(&dev_key, &openai_oauth_tokens())
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &dev_key,
+                &openai_oauth_tokens(),
+            )
             .await
             .expect("seed dev token");
 
@@ -27088,7 +27128,10 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         // No-clobber: an existing global credential is never overwritten.
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
-        store.save(&global_key, &owned).await.expect("seed global");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &global_key, &owned)
+            .await
+            .expect("seed global");
         let _ = migrate_legacy_login_credentials_to_global(persistence, auth_lease)
             .await
             .expect("migrate no-clobber");
@@ -27147,6 +27190,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
@@ -27159,6 +27203,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn clear(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             self.entries
@@ -27199,7 +27244,11 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         // and confirm the store genuinely cannot enumerate it.
         let dev_key = TokenKey::parse("dev", "anthropic_oauth").expect("dev key");
         store
-            .save(&dev_key, &openai_oauth_tokens())
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &dev_key,
+                &openai_oauth_tokens(),
+            )
             .await
             .expect("seed keyring-resident dev token");
         assert!(
@@ -27239,7 +27288,10 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         // when discovered only via the per-binding probe.
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
-        store.save(&global_key, &owned).await.expect("seed global");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &global_key, &owned)
+            .await
+            .expect("seed global");
         let _ = migrate_legacy_login_credentials_to_global(persistence, auth_lease)
             .await
             .expect("migrate no-clobber");
@@ -27274,7 +27326,11 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let persistence = test_provider_auth_persistence(Arc::clone(&store));
         let dev_key = TokenKey::parse("dev", "openai_oauth").expect("legacy token key");
         store
-            .save(&dev_key, &openai_oauth_tokens())
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &dev_key,
+                &openai_oauth_tokens(),
+            )
             .await
             .expect("seed legacy token");
         assert!(
@@ -27410,6 +27466,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::parse("global", "openai_oauth").expect("token key"),
                 &openai_oauth_tokens(),
             )
@@ -27477,17 +27534,19 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -27599,6 +27658,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let tokens = openai_oauth_tokens();
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &mark_tokens_lifecycle_published_for_test(&auth_binding, &tokens, 1, None),
             )
@@ -27666,7 +27726,10 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
             &transition,
         )
         .expect("account lifecycle marker");
-        store.save(&key, &marked).await.expect("save account token");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .expect("save account token");
 
         let projection = project_cli_auth_status(
             &auth_lease,
@@ -27940,19 +28003,21 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             self.save_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -40591,6 +40656,74 @@ mod cli_mcp_host_auth_resolver_tests {
             meerkat_mcp::McpAuthResolver::http_egress(&resolver)
                 .is_some_and(|bound| bound.same_profile(&profile)),
             "the CLI resolver must report the authority's bound egress profile"
+        );
+    }
+
+    /// The CLI host resolver states its native authority's lease publication
+    /// for a target, as the RPC and REST resolvers (the authority itself)
+    /// do: none while the target's lease in the authority's realm holds no
+    /// credential, the lease's current publication once one is published,
+    /// and none again once the lease is released.
+    #[tokio::test]
+    async fn cli_resolver_forwards_the_authoritys_credential_publication() {
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let realm = meerkat_core::connection::RealmId::parse("team-alpha").unwrap();
+        let service = meerkat::HostAuthService::new(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+            runtime.provider_auth_runtime_authority(),
+        )
+        .with_mcp_realm(realm.clone());
+        let authority = service.mcp_oauth_authority().unwrap().stored_only();
+        let resolver = CliMcpHostAuthResolver {
+            service,
+            authority: authority.clone(),
+            mode: CliMcpAuthMode::Stored,
+            untrusted: None,
+        };
+        let target =
+            meerkat::McpServerIdentity::from_server_config("remote", "https://mcp.example.com/mcp");
+        let lease = target.clone().in_realm(realm).lease_key().unwrap();
+        let leases = runtime.auth_lease_handle();
+
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&authority, &target),
+            None,
+            "no credential is published to the target's lease yet"
+        );
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&resolver, &target),
+            None
+        );
+
+        leases.acquire_lease(&lease, 1_800_000_000).unwrap();
+        let published = meerkat_core::handles::CredentialLeasePublication::of(
+            lease.clone(),
+            &leases.snapshot(&lease),
+        );
+        assert!(published.is_some(), "the lease holds a credential");
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&authority, &target),
+            published,
+            "the authority states its lease's current publication"
+        );
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&resolver, &target),
+            published,
+            "the CLI resolver forwards the authority's publication"
+        );
+
+        leases.release_credential_lifecycle(&lease).unwrap();
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&authority, &target),
+            None,
+            "a released lease names no publication"
+        );
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&resolver, &target),
+            None
         );
     }
 }

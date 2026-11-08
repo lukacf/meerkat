@@ -775,7 +775,7 @@ pub use types::{
     TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
     ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
     ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage,
     TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,

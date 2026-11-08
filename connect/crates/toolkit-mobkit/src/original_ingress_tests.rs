@@ -1354,6 +1354,18 @@ pub(crate) mod cancellation_store_faults {
         pub(crate) async fn wait_for_held_cancellation(&self) {
             self.entered.notified().await;
         }
+        /// The SQLite store under the scripted faults.
+        pub(crate) fn sqlite(&self) -> &Arc<SqliteStore> {
+            &self.sqlite
+        }
+        /// Let the held cancellation's worker write, without joining it.
+        pub(crate) fn release_cancellation(&self) {
+            self.release.notify_one();
+        }
+        /// Join the released cancellation's worker.
+        pub(crate) async fn join_cancellation(&self) {
+            self.join_workers().await;
+        }
         pub(crate) async fn release_and_join_cancellation(&self) {
             self.release.notify_one();
             self.join_workers().await;

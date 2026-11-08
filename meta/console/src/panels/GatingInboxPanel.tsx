@@ -60,6 +60,8 @@ import {
   type DecisionKind,
   type RawRecord,
 } from "./gating-model";
+import { DecisionCardList } from "./DecisionCard";
+import type { DecisionCardView } from "./decision-cards";
 
 interface GatingInboxPanelProps {
   pending: unknown[];
@@ -78,6 +80,10 @@ interface GatingInboxPanelProps {
   /** How many records the audit read asks for: a full read is a window of
    * the newest records, and its counts say so. */
   auditLimit?: number;
+  /** How long the gateway keeps the recorded approvals, as the audit read
+   * reports it: `process` keeps them in the gateway's memory, so decisions
+   * from before a gateway restart may be missing. */
+  auditRetention?: string | null;
   selectedPendingId?: string;
   /** Host-provided attention items, listed on Pending after the approvals. */
   hostAttention?: HostAttentionSnapshot;
@@ -86,6 +92,19 @@ interface GatingInboxPanelProps {
   /** Grows by one each time Needs you opens the inbox: each new value shows
    *  the Pending tab, also in an inbox that is already open on another tab. */
   showPending?: number;
+  /** The durable decisions the caller may see, listed on Pending after the
+   *  approvals. Read only: a decision is decided where it was presented. */
+  decisions?: readonly DecisionCardView[];
+  /** The cursor of the decisions' last page, while more may follow: the
+   *  list then offers "Load more", which asks for the page after it. */
+  decisionsNextAfter?: string;
+  /** Read the page of decisions after `after`. */
+  onLoadMoreDecisions?: (after: string) => void;
+  /** Whether a further page of decisions is being read. */
+  decisionsLoadingMore?: boolean;
+  /** Whether a person is signed in to the console. The decision cards offer
+   *  no decision either way. */
+  signedIn?: boolean;
 }
 
 type Tab = "pending" | "auto" | "audit" | "policies";
@@ -177,6 +196,27 @@ function riskWords(record: GatingAuditEntryView): string {
   return word ? `${word} (${code})` : code;
 }
 
+const ASSURANCE_WORDS: Record<string, string> = {
+  person_authenticated: "person authenticated",
+  service_credential: "service credential",
+  device_trusted: "device trusted",
+};
+
+/// Who decided, in words: the verified principal the record names, the
+/// approver label they decided as when it is another name, and the
+/// assurance the decision was authenticated with:
+/// "alice@example.test (as Release manager) - person authenticated".
+function deciderWords(record: GatingAuditEntryView, directory: AgentDirectory): string {
+  const principal = record.decidingPrincipal ?? "";
+  const as = record.approverId && record.approverId !== principal
+    ? ` (as ${agentDisplayName(record.approverId, directory)})`
+    : "";
+  const assurance = record.deciderAssurance
+    ? ` - ${ASSURANCE_WORDS[record.deciderAssurance] ?? humanizeEnum(record.deciderAssurance).toLowerCase()}`
+    : "";
+  return `${principal}${as}${assurance}`;
+}
+
 /// The recorded facts of a row, each one "Label: value" string. People read
 /// names; an identity the roster does not know reads as its key.
 function recordFacts(
@@ -195,7 +235,10 @@ function recordFacts(
     if (!record.decision || !DECISION_VERDICTS.has(record.decision)) {
       facts.push(`Decision: ${record.decision ? humanizeEnum(record.decision) : "Not recorded"}`);
     }
-    if (record.approverId) facts.push(`Approver: ${agentDisplayName(record.approverId, directory)}`);
+    // A record that names the verified decider reads who decided, as which
+    // approver and with what assurance; an older one keeps its label.
+    if (record.decidingPrincipal) facts.push(`Decided by: ${deciderWords(record, directory)}`);
+    else if (record.approverId) facts.push(`Approver: ${agentDisplayName(record.approverId, directory)}`);
     facts.push(`Outcome: ${outcomeWords(record.outcome) || "Not recorded"}`);
   }
   return facts;
@@ -421,10 +464,16 @@ export function GatingInboxPanel({
   auditUpdatedAtMs,
   auditError,
   auditLimit,
+  auditRetention,
   selectedPendingId,
   hostAttention,
   hostDecideSources,
   showPending,
+  decisions: durableDecisions,
+  decisionsNextAfter,
+  onLoadMoreDecisions,
+  decisionsLoadingMore = false,
+  signedIn = false,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
   const viewer = useApprovalViewer();
@@ -484,16 +533,34 @@ export function GatingInboxPanel({
   // says so in one line, so the items stay in view.
   const hostItems = tab === "pending" ? hostAttention?.items ?? [] : [];
   const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
-  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0;
+  // Durable decisions follow the approvals too, read only: each one is
+  // decided where it was presented. "Load more" follows the list's cursor.
+  const decisionCards = tab === "pending" ? durableDecisions ?? [] : [];
+  const decisionCursor = tab === "pending" && onLoadMoreDecisions ? decisionsNextAfter : undefined;
+  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0
+    || decisionCursor !== undefined;
   const hostList = hostShown ? (
-    <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
-      {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}
-      {hostFailedSources.length ? (
-        <Notice tone="warn" role="status" className="gating-inbox__host-note">
-          {`Could not read: ${hostFailedSources.join(", ")}`}
-        </Notice>
+    <>
+      {decisionCards.length || decisionCursor !== undefined ? (
+        <DecisionCardList
+          cards={decisionCards}
+          signedIn={signedIn}
+          nextAfter={decisionCursor}
+          onLoadMore={onLoadMoreDecisions}
+          loadingMore={decisionsLoadingMore}
+        />
       ) : null}
-    </div>
+      {hostItems.length > 0 || hostFailedSources.length > 0 ? (
+        <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
+          {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}
+          {hostFailedSources.length ? (
+            <Notice tone="warn" role="status" className="gating-inbox__host-note">
+              {`Could not read: ${hostFailedSources.join(", ")}`}
+            </Notice>
+          ) : null}
+        </div>
+      ) : null}
+    </>
   ) : null;
 
   let content: React.ReactNode;
@@ -616,6 +683,11 @@ export function GatingInboxPanel({
         {auditCapped ? (
           <p className="gating-inbox__window" data-testid="gating-audit-window">
             {`The newest ${auditLimit} records. ${tab === "auto" ? `${automaticCount} of them were allowed automatically.` : "Older records are not loaded."}`}
+          </p>
+        ) : null}
+        {auditRetention === "process" ? (
+          <p className="gating-inbox__window" data-testid="gating-audit-retention">
+            Kept in the gateway's memory: decisions from before a gateway restart may be missing.
           </p>
         ) : null}
         {rows.length === 0 ? (

@@ -35,7 +35,14 @@
 //! customizer runs with no lifecycle lock held: it may call into other
 //! identities. Core serializes its declared applies: an apply that meets
 //! another one in progress is declared again after a short wait, within
-//! [`DECLARED_APPLY_PENDING_WAIT`].
+//! [`DECLARED_APPLY_PENDING_WAIT`]. A door's declaration of the one identity
+//! it acts on (a send, a dispatch, a materialization) that Core leaves to its
+//! next apply, because a lifecycle operation of the identity's member is in
+//! flight (a wake, as the kickoff of the fresh life a reset seated; its spawn;
+//! its retirement), waits for that operation to end, on Core's machine state,
+//! and is declared again within the same bound: the door then acts on what
+//! Core decides once the member settled. A roster pass leaves such an
+//! identity to its next apply.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -68,7 +75,9 @@ use super::{
 
 /// How long a registration keeps declaring its identity again while another
 /// declared apply of the mob is in progress, before it answers
-/// [`IdentityRuntimeError::DeclarationNotApplied`], retryable.
+/// [`IdentityRuntimeError::DeclarationNotApplied`], retryable; and how long a
+/// door waits for a lifecycle operation of its identity's member in flight,
+/// before it answers Core's deferral of its declaration.
 pub(super) const DECLARED_APPLY_PENDING_WAIT: Duration = Duration::from_secs(15);
 
 /// The first wait before a registration declares its identity again after
@@ -441,8 +450,12 @@ impl IdentityRuntime {
     /// (`complete` or partial) with their builds in `composed`, under their
     /// lifecycle locks when `locks` says so, applied again while another
     /// apply of the mob is in progress (within
-    /// [`DECLARED_APPLY_PENDING_WAIT`]). Answers each identity, and what a
-    /// complete roster unlisted.
+    /// [`DECLARED_APPLY_PENDING_WAIT`]). A door's declaration of its one
+    /// identity (`locks` [`DeclarationLocks::Held`]) that Core leaves to its
+    /// next apply is applied again once the lifecycle operation of the
+    /// identity's member in flight ended, within the same bound
+    /// ([`Self::door_waits_out_member_lifecycle`]). Answers each identity,
+    /// and what a complete roster unlisted.
     async fn apply_roster_round(
         &self,
         bridge: &Arc<dyn SessionBridge>,
@@ -457,6 +470,7 @@ impl IdentityRuntime {
     ) {
         let pending_deadline = Instant::now() + DECLARED_APPLY_PENDING_WAIT;
         let mut pending_backoff = DECLARED_APPLY_PENDING_FIRST_BACKOFF;
+        let mut declared_again_unwaited = false;
         loop {
             let inputs = match self.declaration_inputs(bridge, specs).await {
                 Ok(inputs) => inputs,
@@ -559,7 +573,81 @@ impl IdentityRuntime {
                 DeclarationLocks::Held => &[],
             };
             self.finish_declaration(bound, applied.rows_settled).await;
+            // A door acts on its identity now: a declaration Core left to its
+            // next apply waits for the lifecycle operation of the member in
+            // flight and is applied again. A roster pass leaves it to its
+            // next apply.
+            if locks == DeclarationLocks::Held
+                && self
+                    .door_waits_out_member_lifecycle(
+                        bridge,
+                        specs,
+                        &applied.outcomes,
+                        pending_deadline,
+                        &mut declared_again_unwaited,
+                    )
+                    .await
+            {
+                continue;
+            }
             return (applied.outcomes, applied.unlisted);
+        }
+    }
+
+    /// Whether a door declares its one identity again after Core's answer
+    /// `outcomes`: Core left the declaration to its next apply
+    /// ([`DeclaredIdentityAnswer::Deferred`]), and the lifecycle operation of
+    /// the identity's member in flight (a wake, as the kickoff of a fresh life
+    /// a reset seated, or a delivery's; its spawn; its retirement) ended
+    /// before `deadline`, read on Core's machine state
+    /// ([`SessionBridge::wait_member_lifecycle_settled`]), so Core decides the
+    /// declaration again on settled facts. When nothing was in flight as the
+    /// wait began (the operation ended before it, or Core left the declaration
+    /// for another cause), the identity is declared again once
+    /// (`declared_again_unwaited`), never more, so a deferral no operation's
+    /// end clears is answered at once. An operation still in flight at
+    /// `deadline`, and a wait the bridge cannot make, leave Core's answer as
+    /// it is: the door's typed retryable refusal.
+    async fn door_waits_out_member_lifecycle(
+        &self,
+        bridge: &Arc<dyn SessionBridge>,
+        specs: &[DurableAgentSpec],
+        outcomes: &BTreeMap<AgentIdentity, Result<DeclaredIdentityAnswer, IdentityRuntimeError>>,
+        deadline: Instant,
+        declared_again_unwaited: &mut bool,
+    ) -> bool {
+        let [spec] = specs else {
+            return false;
+        };
+        let identity = &spec.identity;
+        let Some(Ok(DeclaredIdentityAnswer::Deferred { reason })) = outcomes.get(identity) else {
+            return false;
+        };
+        tracing::debug!(
+            %identity,
+            %reason,
+            "Core left the declaration to its next apply: the door waits for the lifecycle \
+             operation of its member in flight, if any, to end, and declares the identity again"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match bridge
+            .wait_member_lifecycle_settled(identity, remaining)
+            .await
+        {
+            Ok(meerkat_mob::MemberLifecycleSettlement::Settled) => true,
+            Ok(meerkat_mob::MemberLifecycleSettlement::NothingInFlight) => {
+                !std::mem::replace(declared_again_unwaited, true)
+            }
+            Ok(meerkat_mob::MemberLifecycleSettlement::StillInFlight) => false,
+            Err(error) => {
+                tracing::debug!(
+                    %identity,
+                    %error,
+                    "the door cannot wait for its member's lifecycle operation; Core's answer \
+                     stands"
+                );
+                false
+            }
         }
     }
 
@@ -823,7 +911,10 @@ impl IdentityRuntime {
     /// A door's declaration of `spec`'s identity, under the identity's
     /// lifecycle lock, which the caller holds: a one-identity partial
     /// roster ([`Self::declare_roster`]), whose build `customizer` (or the
-    /// installed one) composes when Core's verdict builds a member. An
+    /// installed one) composes when Core's verdict builds a member. A
+    /// declaration Core leaves to its next apply while a lifecycle operation
+    /// of the identity's member is in flight is declared again once that
+    /// operation ended, within [`DECLARED_APPLY_PENDING_WAIT`]. An
     /// identity Core answers hosted on its first use is created through its
     /// host here. Any answer that leaves no member to act on (a held role
     /// move, a held creation, a deferral, a refusal, a failure) is the
@@ -1813,7 +1904,21 @@ impl IdentityRuntime {
                 continue;
             }
             match self.prepare_fresh_reset(identity).await {
-                Ok(reset) => fresh_resets.push(reset),
+                Ok(reset) => {
+                    // The round that carries the identity's build is the one
+                    // Core can carry the reset out in: a compaction
+                    // projection the session still owes is settled before
+                    // Core is asked, and its batch waits for the reset's
+                    // retirement.
+                    if composed.contains_key(identity) {
+                        self.settle_owed_compaction_for_retirement(
+                            identity,
+                            reset.retiring.as_ref(),
+                        )
+                        .await;
+                    }
+                    fresh_resets.push(reset);
+                }
                 Err(error) => {
                     // Nothing was asked of Core: every reset this
                     // declaration recorded is taken back.
@@ -1824,16 +1929,25 @@ impl IdentityRuntime {
                 }
             }
         }
+        let resetting = fresh_resets
+            .iter()
+            .map(|reset| reset.identity.clone())
+            .collect::<BTreeSet<_>>();
+        let owing = self
+            .settle_owed_compactions_of_declaration(&roster, composed, &resetting)
+            .await;
         let answer = match bridge.apply_declared_roster(roster).await {
             Ok(answer) => answer,
             Err(error) => {
                 self.settle_fresh_resets(fresh_resets, &BTreeSet::new())
                     .await;
+                self.hand_back_owed_compactions(owing).await;
                 return Err(declaration_not_applied(error));
             }
         };
         self.settle_fresh_resets(fresh_resets, &answer.first_boot_requests_carried_out)
             .await;
+        self.hand_back_owed_compactions(owing).await;
         // The rows Core carried out leave the manifest; Core ended their
         // first-boot preparation in the step that carried them out.
         for identity in &answer.first_boot_requests_carried_out {
@@ -1897,6 +2011,123 @@ impl IdentityRuntime {
             asked_after,
             first,
         })
+    }
+
+    /// Settle, before a declaration asks Core, the compaction projections
+    /// owed by each session `roster` may end besides its first-boot resets
+    /// (`resetting`, which settle their own): the session of an identity a
+    /// complete roster no longer lists, whose member Core's seal retires
+    /// (one this process registered, or one Core's members name that the
+    /// roster dropped while the process was down), and that of an identity
+    /// declared with its build (`composed`) under another role than its
+    /// live member's, which Core moves to a fresh session. Only the
+    /// identity's own member is settled (an identity-first spawn made it),
+    /// and nothing of an identity a host adopted. What a settle answers
+    /// waits for that incarnation's retirement. Answers each incarnation
+    /// something was kept for, with the session it was on
+    /// ([`Self::hand_back_owed_compactions`]).
+    async fn settle_owed_compactions_of_declaration(
+        &self,
+        roster: &DeclaredRosterRequest,
+        composed: &BTreeMap<AgentIdentity, AgentBuildDraft>,
+        resetting: &BTreeSet<AgentIdentity>,
+    ) -> Vec<(AgentIdentity, u64, Option<SessionId>)> {
+        let distills = match self.agent_memory.read().await.as_ref() {
+            Some(memory) => memory.distills(),
+            None => false,
+        };
+        if !distills || self.is_candidate_launch() {
+            return Vec::new();
+        }
+        let declared = roster
+            .identities
+            .iter()
+            .map(|declared| (declared.spec.identity.clone(), &declared.spec))
+            .collect::<BTreeMap<_, _>>();
+        let mut candidates = declared
+            .iter()
+            .filter(|(identity, _)| {
+                composed.contains_key(*identity) && !resetting.contains(*identity)
+            })
+            .map(|(identity, spec)| (identity.clone(), Some(&spec.profile)))
+            .collect::<Vec<_>>();
+        if roster.complete {
+            let mut unlisted = self
+                .entries
+                .read()
+                .await
+                .keys()
+                .filter(|identity| !declared.contains_key(*identity))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            // Core's members the roster materialized, or Meta 0.9.3
+            // labelled, that it no longer lists, though this process never
+            // registered them: the roster dropped them while it was down.
+            let desired = declared
+                .iter()
+                .map(|(identity, spec)| (identity.clone(), (*spec).clone()))
+                .collect::<BTreeMap<_, _>>();
+            match self.core_unlisted_durable_members(&desired).await {
+                Ok(members) => unlisted.extend(members),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Core's durable identity members could not be read; the declaration settles \
+                     the owed compaction projections of the unlisted identities this process \
+                     registered only"
+                ),
+            }
+            unlisted.extend(self.core_unlisted_labelled_members(&desired).await);
+            candidates.extend(unlisted.into_iter().map(|identity| (identity, None)));
+        }
+        let mut owing = Vec::new();
+        for (identity, profile) in candidates {
+            // The identity's own live incarnation, as the unlisting's
+            // retirement hook reads it ([`Self::keep_unlisting_incarnations`]):
+            // a member a host made directly on the mob under the identity's
+            // member id is not the identity's.
+            let Ok(Some(binding)) = self.core_last_binding(&identity).await else {
+                continue;
+            };
+            if !binding.is_live()
+                || !binding_spawned_for_identity(&binding, &identity)
+                || profile.is_some_and(|profile| profile == binding.role())
+            {
+                continue;
+            }
+            // An identity a host adopted is read-only to Meta.
+            if !self.compile_may_act_on(&identity).await.unwrap_or(false) {
+                continue;
+            }
+            let generation = binding.generation().get();
+            if self
+                .settle_owed_compaction_of_incarnation(&identity, generation)
+                .await
+            {
+                owing.push((identity, generation, binding.session_id().cloned()));
+            }
+        }
+        owing
+    }
+
+    /// What [`Self::settle_owed_compactions_of_declaration`] kept, once
+    /// Core answered the declaration (or refused it): an incarnation whose
+    /// identity Core still holds live on the same session was not ended, so
+    /// its session goes on and what was kept is handed back
+    /// ([`Self::hand_back_owed_compaction`]); an ended one's retirement
+    /// harvests it.
+    async fn hand_back_owed_compactions(
+        &self,
+        owing: Vec<(AgentIdentity, u64, Option<SessionId>)>,
+    ) {
+        for (identity, generation, session) in owing {
+            let goes_on = matches!(
+                self.core_last_binding(&identity).await,
+                Ok(Some(binding)) if binding.is_live() && binding.session_id() == session.as_ref()
+            );
+            if goes_on {
+                self.hand_back_owed_compaction(&identity, generation).await;
+            }
+        }
     }
 
     /// What the resets a declaration recorded for its first-boot `Fresh`

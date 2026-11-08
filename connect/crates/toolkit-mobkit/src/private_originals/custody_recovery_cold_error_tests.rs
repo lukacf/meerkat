@@ -88,7 +88,9 @@ async fn cold_native_observation_survives_failed_terminal_write_and_cached_close
                     store.terminal_returns.load(Ordering::SeqCst),
                     store.terminal_calls.load(Ordering::SeqCst)
                 );
-                let row = fixture.cold_source_record().await;
+                // The close released the store: read what it retained as the
+                // next opener does.
+                let row = fixture.closed_source_record().await;
                 let attempt: CustodyAttempt =
                     serde_json::from_value(row.data.body["custody_attempt"].clone()).unwrap();
                 assert!(attempt.decision() == CustodyDecision::Pending);
@@ -241,7 +243,12 @@ async fn cold_native_observation_survives_failed_terminal_write_and_cached_close
             verify_exact_replay(&observed.state, &input).unwrap();
             assert!(fixture.cold_source_custody(&association).is_none());
             assert_eq!(
-                store.inner.get(&first_row.key).await.unwrap().unwrap(),
+                fixture
+                    .closed_store()
+                    .get(&first_row.key)
+                    .await
+                    .unwrap()
+                    .unwrap(),
                 charged_row
             );
             assert_eq!(

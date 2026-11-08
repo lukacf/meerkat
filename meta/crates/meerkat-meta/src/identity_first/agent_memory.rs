@@ -281,6 +281,20 @@ pub trait AgentMemoryProvider: Send + Sync {
         false
     }
 
+    /// [`Self::remember`] on behalf of `author`, the principal the write is
+    /// recorded as (the console names the person who wrote it). A provider
+    /// that keeps authorship records `author`; the default ignores it and
+    /// calls [`Self::remember`], whose author the provider chooses.
+    async fn remember_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.remember(realm, identity, memory).await
+    }
+
     async fn forget(
         &self,
         _realm: &str,
@@ -294,6 +308,18 @@ pub trait AgentMemoryProvider: Send + Sync {
 
     fn supports_forget(&self) -> bool {
         false
+    }
+
+    /// [`Self::forget`] on behalf of `author`, as
+    /// [`Self::remember_by`] is to [`Self::remember`].
+    async fn forget_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+        self.forget(realm, identity, memory_id).await
     }
 
     // ---- v2 surface (docs/design/agent-memory-architecture.md §7.3) ----
@@ -334,6 +360,18 @@ pub trait AgentMemoryProvider: Send + Sync {
 
     fn supports_supersede(&self) -> bool {
         false
+    }
+
+    /// [`Self::supersede`] on behalf of `author`, as
+    /// [`Self::remember_by`] is to [`Self::remember`].
+    async fn supersede_by(
+        &self,
+        scope: &MemoryScope,
+        prior: &str,
+        record: NewMemoryRecord,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<MemoryId, AgentMemoryError> {
+        self.supersede(scope, prior, record).await
     }
 
     /// Mechanical usage-ledger updates (§9.2). Deliberately flag-less: it is
@@ -664,6 +702,57 @@ impl AgentMemoryRuntimeInjector {
                     .await
             }
             None => Ok(()),
+        }
+    }
+
+    /// Whether a Distiller is wired: the discards of a compaction a
+    /// session still owed are harvested only through one.
+    pub(crate) fn distills(&self) -> bool {
+        self.distiller.is_some()
+    }
+
+    /// The Distiller's harvest of a compaction `session_key` ended owing
+    /// (`DistillerEngine::harvest_compaction_within_bound`), bounded like
+    /// the pre-rotation distillation: of `discards`, the batch Core's cold
+    /// settle answered, or, with none, of the session's compaction
+    /// discards read from its memory. `Ok` once the discards reached the
+    /// distiller, or there was nothing to read; `Err` with why they did
+    /// not (a timeout, a denial of the realm's budget, a failed read or
+    /// extraction). Without a Distiller there is nothing to harvest.
+    pub(crate) async fn harvest_compaction_within_bound(
+        &self,
+        identity: &AgentIdentity,
+        session_key: &str,
+        discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
+    ) -> Result<(), String> {
+        let Some(distiller) = self.distiller.as_ref() else {
+            return Ok(());
+        };
+        match distiller
+            .harvest_compaction_within_bound(identity.as_str(), session_key, discards)
+            .await
+        {
+            Ok(outcome) if outcome.compaction_harvest_satisfied() => Ok(()),
+            Ok(crate::memory::distiller::DistillOutcome::Skipped { reason }) => Err(reason),
+            Ok(outcome) => Err(format!("{outcome:?}")),
+            Err(bound) => Err(format!(
+                "timed out: no answer within {} ms",
+                bound.as_millis()
+            )),
+        }
+    }
+
+    /// The same harvest, detached: of `discards`, or, with none, of the
+    /// session's compaction discards read from its memory. A no-op without
+    /// a Distiller.
+    pub(crate) fn spawn_compaction_harvest(
+        &self,
+        identity: &AgentIdentity,
+        session_key: &str,
+        discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
+    ) {
+        if let Some(distiller) = self.distiller.as_ref() {
+            distiller.spawn_compaction_harvest(identity.as_str(), session_key, discards);
         }
     }
 

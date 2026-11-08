@@ -3901,7 +3901,7 @@ fn render_usage_verdicts(verdicts: &[(String, String, String)]) -> String {
 
 fn render_author(author: &MemoryAuthor) -> String {
     match author {
-        MemoryAuthor::Operator => "operator".to_string(),
+        MemoryAuthor::Operator { .. } => "operator".to_string(),
         MemoryAuthor::Application => "application".to_string(),
         MemoryAuthor::Agent { identity } => format!("agent '{identity}'"),
         MemoryAuthor::Steward { run_id } => format!("steward ({run_id})"),
@@ -6997,7 +6997,9 @@ mod tests {
                 .await
                 .provenance
                 .author,
-            MemoryAuthor::Operator
+            MemoryAuthor::Operator {
+                principal: Some("operator@example.test".to_string())
+            }
         );
         assert!(
             fixture
@@ -7961,7 +7963,7 @@ mod tests {
                         &format!("{identity} fact"),
                         &format!("durable fact for {identity}"),
                     ),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await
                 .expect("seed identity record");
@@ -7974,7 +7976,7 @@ mod tests {
                     operator: "luka".to_string(),
                 },
                 new_record("operator preference", "operator-level durable preference"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("seed operator record");

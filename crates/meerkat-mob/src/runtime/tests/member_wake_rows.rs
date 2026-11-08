@@ -1261,6 +1261,76 @@ async fn a_released_member_reads_unmaterialized_until_its_wake_and_a_subscriptio
     fixture.finish().await;
 }
 
+/// A host waits out a member's lifecycle operation in flight on the machine
+/// state the actor publishes (`MobHandle::wait_member_lifecycle_settled`): with
+/// nothing in flight it answers at once; while a wake is held at its build
+/// preparation the operation is still in flight when the wait's timeout runs
+/// out; and a wait that began while the wake was held answers settled once the
+/// wake ends, woken by the state the wake's end publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lifecycle_wait_answers_once_the_wake_in_flight_ends() {
+    let fixture = WakeFixture::new("wake-lifecycle-wait").await;
+    let member = fixture.spawn("lifecycle-wait-member").await;
+    assert_eq!(
+        fixture
+            .handle
+            .wait_member_lifecycle_settled(&member, STEP)
+            .await
+            .expect("the wait answers"),
+        crate::runtime::MemberLifecycleSettlement::NothingInFlight,
+        "a live member with nothing in flight"
+    );
+    fixture.release(&member).await;
+    fixture.preparer.close_gate();
+    let wake = tokio::spawn({
+        let handle = fixture.handle.clone();
+        let member = member.clone();
+        async move { handle.ensure_member_live(&member).await }
+    });
+    fixture.preparer.wait_entered(1).await;
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Waking))
+        .await;
+    assert_eq!(
+        fixture
+            .handle
+            .wait_member_lifecycle_settled(&member, Duration::from_millis(200))
+            .await
+            .expect("the wait answers"),
+        crate::runtime::MemberLifecycleSettlement::StillInFlight,
+        "the held wake is in flight when the timeout runs out"
+    );
+    {
+        let settled = fixture.handle.wait_member_lifecycle_settled(&member, WAIT);
+        tokio::pin!(settled);
+        assert!(
+            futures::poll!(settled.as_mut()).is_pending(),
+            "the wait began while the wake is held"
+        );
+        fixture.preparer.open_gate();
+        assert_eq!(
+            settled.await.expect("the wait answers"),
+            crate::runtime::MemberLifecycleSettlement::Settled,
+            "the wake's end settles the wait"
+        );
+    }
+    tokio::time::timeout(WAIT, wake)
+        .await
+        .expect("the wake answers")
+        .expect("the wake task")
+        .expect("the wake ends live");
+    assert_eq!(
+        fixture
+            .handle
+            .wait_member_lifecycle_settled(&member, STEP)
+            .await
+            .expect("the wait answers"),
+        crate::runtime::MemberLifecycleSettlement::NothingInFlight,
+        "the woken member has nothing in flight"
+    );
+    fixture.finish().await;
+}
+
 /// A host that subscribes to a released member's agent events and then
 /// sends to it receives the run its send starts, from `RunStarted`: the
 /// subscription opens without waking the member and attaches at the wake

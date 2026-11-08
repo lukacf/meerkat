@@ -6,6 +6,8 @@
  * attempt authority on ordinary gateway RPC.
  */
 
+import type { ToolCallRequester } from "./tool-requester.js";
+
 export type JobRestartClass =
   | "adoptable"
   | "checkpoint_resumable"
@@ -273,6 +275,11 @@ export class DetachedJobContext {
     readonly resumeCheckpoint: string | null,
     readonly signal: AbortSignal,
     private readonly reporter: DetachedJobReporter,
+    /**
+     * The original requester of the run that submitted the job, as
+     * `callback/job/start` named it; `undefined` when that run had none.
+     */
+    readonly requester?: ToolCallRequester,
   ) {
     this.credentials = { ...credentials };
   }

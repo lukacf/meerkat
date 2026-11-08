@@ -783,6 +783,255 @@ fn an_uncertain_consume_never_enters() {
     }
 }
 
+/// The owner's retained state, as its generated machine holds it.
+fn owner_state(fixture: &Fixture) -> dsl::GrantAuthorityMachineState {
+    fixture
+        .authority
+        .owner
+        .lock()
+        .expect("owner")
+        .state()
+        .clone()
+}
+
+/// How a row ends an owner's custody of its retained facts.
+#[derive(Clone, Copy, Debug)]
+enum CustodyEnd {
+    /// Its host's close.
+    Close,
+    /// An earlier append, of another grant's issuance, whose outcome is
+    /// unknown; nothing of it landed.
+    UncertainIssuance,
+}
+
+impl CustodyEnd {
+    const ALL: [Self; 2] = [Self::Close, Self::UncertainIssuance];
+
+    fn apply(self, fixture: &Fixture, store: &Scripted) {
+        match self {
+            Self::Close => fixture
+                .authority
+                .release_custody()
+                .expect("the host's close releases custody"),
+            Self::UncertainIssuance => {
+                store.fail_next(GrantStoreError::Uncertain, false);
+                assert_eq!(
+                    fixture.authority.issue_root(
+                        &AdmissionGuard::none(),
+                        &who("root"),
+                        id("unrelated"),
+                        who("branch"),
+                        None,
+                        offered(),
+                    ),
+                    Err(GrantRefusal::Unavailable)
+                );
+            }
+        }
+    }
+}
+
+/// A spend on an owner whose custody ended, at its host's close or at an
+/// earlier append whose outcome is unknown, is refused as unavailable for
+/// every lineage, one the owner would deny included, before anything is
+/// decided: nothing is written, the use stays unspent, and a successor
+/// restored from the store spends it once.
+#[test]
+fn a_spend_outside_custody_is_refused_and_spends_nothing() {
+    for end in CustodyEnd::ALL {
+        let store = Scripted::new();
+        let fixture = Fixture::durable(store.clone());
+        let parent = fixture.ruled_parent(rule(GrantDeviceTrust::Refused));
+        let lineage = approved_child(&fixture, &parent);
+        // The leaf without its parent: not a lineage this owner retains.
+        let partial = &lineage[1..];
+        assert_eq!(
+            consume_own(&fixture, partial, true),
+            Err(ConsumeUseRefusal::Denied),
+            "in custody, a partial lineage is denied"
+        );
+        end.apply(&fixture, &store);
+        let ended = owner_state(&fixture);
+        assert_ne!(
+            ended.lifecycle_phase,
+            dsl::GrantAuthorityPhase::Active,
+            "{end:?}"
+        );
+        let written = store.inner.inspect().expect("retained owner").changes.len();
+        for approver_current in [true, false] {
+            assert_eq!(
+                consume_own(&fixture, &lineage, approver_current),
+                Err(ConsumeUseRefusal::Unavailable),
+                "{end:?}: the spend's own append never ran, so it is not uncertain"
+            );
+        }
+        assert_eq!(
+            consume_own(&fixture, partial, true),
+            Err(ConsumeUseRefusal::Unavailable),
+            "{end:?}: an owner outside custody decides nothing"
+        );
+        assert!(owner_state(&fixture) == ended, "{end:?}: nothing is spent");
+        assert_eq!(
+            store.inner.inspect().expect("retained owner").changes.len(),
+            written,
+            "{end:?}: nothing is written"
+        );
+        drop(fixture);
+        let successor = Fixture::restored(store);
+        consume_own(&successor, &lineage, true).expect("the use was never spent");
+    }
+}
+
+/// A spend whose append outcome is unknown answers `Uncertain`, landed or
+/// not: the owner records the uncertain append as the end of its custody,
+/// installs nothing, invalidates every observation prepared before it and
+/// refuses every later use, read and change as unavailable; its host's
+/// close still hands the store back, and a successor restores what the
+/// store retained. A spend the store refuses before any write is only
+/// unavailable: the owner keeps its custody and spends the use next time.
+#[test]
+fn an_unknown_spend_outcome_is_uncertain_and_ends_the_owners_custody() {
+    let store = Scripted::new();
+    let fixture = Fixture::durable(store.clone());
+    let parent = fixture.ruled_parent(rule(GrantDeviceTrust::Refused));
+    let lineage = approved_child(&fixture, &parent);
+    store.fail_next(GrantStoreError::Refused, false);
+    assert_eq!(
+        consume_own(&fixture, &lineage, true),
+        Err(ConsumeUseRefusal::Unavailable),
+        "a spend refused before any write is not uncertain"
+    );
+    assert_eq!(
+        owner_state(&fixture).lifecycle_phase,
+        dsl::GrantAuthorityPhase::Active
+    );
+    consume_own(&fixture, &lineage, true).expect("the refused spend left the use unspent");
+
+    for landed in [true, false] {
+        let store = Scripted::new();
+        let fixture = Fixture::durable(store.clone());
+        let parent = fixture.ruled_parent(rule(GrantDeviceTrust::Refused));
+        let lineage = approved_child(&fixture, &parent);
+        let prepared = resolve_own(&fixture, &lineage, None).expect("prepared before the spend");
+        let before = owner_state(&fixture);
+        store.fail_next(GrantStoreError::Uncertain, landed);
+        assert_eq!(
+            consume_own(&fixture, &lineage, true),
+            Err(ConsumeUseRefusal::Uncertain)
+        );
+        let after = owner_state(&fixture);
+        assert_eq!(
+            after.lifecycle_phase,
+            dsl::GrantAuthorityPhase::Uncertain,
+            "the owner records the uncertain append"
+        );
+        assert_eq!(
+            (&after.spent, after.consumed, after.revision),
+            (&before.spent, before.consumed, before.revision),
+            "the spend is never installed"
+        );
+        assert!(
+            prepared.check_current().is_err(),
+            "every observation prepared before the spend is stale"
+        );
+        assert_eq!(
+            consume_own(&fixture, &lineage, true),
+            Err(ConsumeUseRefusal::Unavailable)
+        );
+        assert_eq!(
+            resolve_own(&fixture, &lineage, None).err(),
+            Some(GrantRefusal::Unavailable)
+        );
+        assert_eq!(
+            fixture.authority.retained_grant(&lineage[1]),
+            Err(GrantRefusal::Unavailable)
+        );
+        assert_eq!(
+            fixture.authority.unrevoked_grants(|_| true),
+            Err(GrantRefusal::Unavailable)
+        );
+        assert_eq!(
+            fixture.authority.issue_root(
+                &AdmissionGuard::none(),
+                &who("root"),
+                id("after"),
+                who("branch"),
+                None,
+                offered(),
+            ),
+            Err(GrantRefusal::Unavailable)
+        );
+        fixture
+            .authority
+            .release_custody()
+            .expect("the host's close releases custody");
+        let successor = Fixture::restored(store);
+        if landed {
+            assert_eq!(
+                consume_own(&successor, &lineage, true),
+                Err(ConsumeUseRefusal::Denied),
+                "the landed spend stays spent"
+            );
+        } else {
+            consume_own(&successor, &lineage, true)
+                .expect("nothing landed: the use is still there");
+        }
+        drop(fixture);
+    }
+}
+
+/// The retained facts of a grant are read only while the owner holds
+/// custody of them: after its host's close or an append whose outcome is
+/// unknown, the read is unavailable, as every lookup of such an owner is.
+#[test]
+fn a_retained_grant_read_outside_custody_is_unavailable() {
+    for end in CustodyEnd::ALL {
+        let store = Scripted::new();
+        let fixture = Fixture::durable(store.clone());
+        let parent = fixture.ruled_parent(rule(GrantDeviceTrust::Refused));
+        let lineage = approved_child(&fixture, &parent);
+        let retained = fixture
+            .authority
+            .retained_grant(&lineage[1])
+            .expect("read in custody");
+        assert!(retained.approval.is_some());
+        end.apply(&fixture, &store);
+        for reference in &lineage {
+            assert_eq!(
+                fixture.authority.retained_grant(reference),
+                Err(GrantRefusal::Unavailable),
+                "{end:?}"
+            );
+        }
+    }
+}
+
+/// The unrevoked grants are listed only while the owner holds custody of
+/// its retained facts: after its host's close or an append whose outcome
+/// is unknown, the listing is unavailable rather than read from memory the
+/// store may no longer agree with.
+#[test]
+fn unrevoked_grants_outside_custody_are_unavailable() {
+    for end in CustodyEnd::ALL {
+        let store = Scripted::new();
+        let fixture = Fixture::durable(store.clone());
+        let parent = fixture.ruled_parent(rule(GrantDeviceTrust::Refused));
+        let lineage = approved_child(&fixture, &parent);
+        let listed = fixture
+            .authority
+            .unrevoked_grants(|_| true)
+            .expect("listed in custody");
+        assert_eq!(listed.len(), lineage.len());
+        assert!(lineage.iter().all(|reference| listed.contains(reference)));
+        end.apply(&fixture, &store);
+        assert_eq!(
+            fixture.authority.unrevoked_grants(|_| true),
+            Err(GrantRefusal::Unavailable),
+            "{end:?}"
+        );
+    }
+}
+
 /// The record and journal shapes a reader that predates approval-carried
 /// grants accepts, frozen here as that reader declares them.
 mod reader_0910 {
@@ -1146,4 +1395,59 @@ fn approval_carried_appends_are_made_under_the_free_grant_log_fence() {
             .expect("the restored owner answers")
             .is_some()
     );
+}
+
+/// A spend on a fenced grant log needs both the owner's custody and the
+/// log's admission fence. In custody, a guard that does not hold the fence
+/// is refused with nothing appended, and the owner keeps its custody. Once
+/// the custody ended at its host's close, a guard that holds the fence is
+/// refused as unavailable with nothing appended, and the owner names no
+/// fence; a successor restored from the log spends the use once under the
+/// fence.
+#[test]
+fn a_fenced_spend_needs_both_the_custody_and_the_fence() {
+    let log = FencedLog::new();
+    let fixture = Fixture::fenced(&log);
+    let guard = log.guard();
+    let parent = fixture
+        .try_ruled_parent(&guard, rule(GrantDeviceTrust::Refused))
+        .expect("the ruled root, under the fence");
+    let approval = fixture.approval(&parent, "decision-1");
+    let child = fixture
+        .issue_under(&guard, &parent, "approval-child", approval)
+        .expect("the approval child, under the fence");
+    let lineage = vec![parent, child];
+    let written = log.bytes();
+
+    assert_eq!(
+        consume_own_under(&fixture, &AdmissionGuard::none(), &lineage, true),
+        Err(ConsumeUseRefusal::Unavailable),
+        "in custody, a guard without the fence is refused"
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    assert_eq!(
+        owner_state(&fixture).lifecycle_phase,
+        dsl::GrantAuthorityPhase::Active,
+        "a fence refusal keeps the custody"
+    );
+
+    fixture
+        .authority
+        .release_custody()
+        .expect("the host's close releases custody");
+    assert_eq!(
+        consume_own_under(&fixture, &guard, &lineage, true),
+        Err(ConsumeUseRefusal::Unavailable),
+        "outside custody, the fence's own guard is refused"
+    );
+    assert_eq!(log.bytes(), written, "nothing was appended");
+    assert!(
+        fixture.authority.admission_fences().is_empty(),
+        "a released owner writes nothing, so it names no fence"
+    );
+    drop(fixture);
+
+    let successor = Fixture::restored(log.store());
+    consume_own_under(&successor, &guard, &lineage, true).expect("the use was never spent");
+    assert!(log.bytes().len() > written.len(), "the spend is journaled");
 }

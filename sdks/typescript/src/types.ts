@@ -177,6 +177,30 @@ export interface ToolCallDedupeKey {
   readonly call_digest: string;
 }
 
+/**
+ * The principal a callback call's requester names, as the runtime sends it:
+ * its category (`"human"` for a person), its id, and its trust domain when it
+ * is qualified (for a person signed in through an identity provider,
+ * `"oidc-issuer:"` and the issuer).
+ */
+export interface RequesterPrincipal {
+  readonly kind: string;
+  readonly id: string;
+  readonly trust_domain_id?: string;
+}
+
+/**
+ * The original requester of the run a callback tool call serves. The runtime
+ * sets it from the run's admitted inputs; tool arguments never do. `carried`
+ * is true when the run's work reached its agent through another actor (a peer
+ * hop or an approval): a tool that acts in a person's name serves only a
+ * requester that is not carried.
+ */
+export interface ToolCallRequester {
+  readonly principal: RequesterPrincipal;
+  readonly carried: boolean;
+}
+
 /** Raw blob bytes fetched by blob id. */
 export interface BlobPayload {
   readonly blobId: string;

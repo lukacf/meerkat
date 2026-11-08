@@ -9506,7 +9506,11 @@ fn membership_is_read_from_a_binding_s_label_only_where_allowed() {
         (
             "identity_first/runtime/declare.rs",
             production_code(include_str!("declare.rs")),
-            1,
+            // A candidate launch's deferral (`candidate_deferral`), and the
+            // declaration's settle of the compaction projections the
+            // sessions it ends owe (`settle_owed_compactions_of_declaration`),
+            // which settles only the identity's own member.
+            2,
         ),
         (
             "identity_first/first_boot_manifest.rs",

@@ -145,6 +145,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 )),
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content,

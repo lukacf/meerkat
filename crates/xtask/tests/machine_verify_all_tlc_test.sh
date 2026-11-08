@@ -526,6 +526,36 @@ if run_part audits-c; then
   TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
 fi
 
+# Bounded audit of a client delegation admitted before its channel closed
+# whose worker starts after the close (Turbo S S107): from a bound channel it
+# explores the delegation's admission (joined, or after the provider turn),
+# the close of the channel's delegation intake, the close and close
+# settlement, every transcript reconciliation outcome, worker-start
+# authorization, consequential-effect authority, start resolution, the
+# busy-source requeue and the steer of a continuation held for it
+# (authorization, delivery and reconciliation) through the operation's own
+# channel and a foreign never-bound one, the queued cancellation, terminal
+# recording (blocked and cancelled included) and the revoked-worker
+# reconciliation (restart recovery's completed turn behind a recorded
+# classification included), under every generated invariant plus
+# AuditForeignChannelNeverServes, AuditStaleBindingNeverServes,
+# AuditClosedChannelHoldsNoWorkerCount, AuditRevokedBlockedIsCancelled and
+# AuditNoAdmissionAfterIntakeClose. Its fourteen goals (each post-close arm
+# fired, a worker started after the close settled, a blocked hand-back
+# settled fresh and from bound custody, the intake closed while bound, a
+# delegation admitted before it started after the close, and restart
+# recovery settled each recorded classification) must be reached, and with
+# --mutants its fourteen seeded defects refused.
+live_admitted_start_after_close_audit="${workspace_root}/specs/machines/meerkat_machine/live_delegation_admitted_start_after_close_audit.sh"
+if [[ ! -x "${live_admitted_start_after_close_audit}" ]]; then
+  echo "error: live admitted start after close audit runner is missing from workspace runfiles: ${live_admitted_start_after_close_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded live admitted start after close TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_admitted_start_after_close_audit}" "${LIVE_ADMITTED_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-19}" --mutants
+fi
+
 # The queued heard-speech replays behind a late summary are delivered as one
 # causal-tail batch append over their exact cursor run (Turbo S S99). A
 # hand-written audit over the same generated model explores the batch edge
@@ -694,6 +724,64 @@ fi
 if run_part audits-r; then
   echo "running bounded generation high-water TLC audit"
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
+fi
+
+# The GrantAuthorityMachine custody end (the host's close, ReleaseCustody,
+# into the terminal Released; an append whose outcome is unknown,
+# RecordUncertainAppend, into Uncertain, which a later close releases) is
+# model-checked by a hand-written audit over the same generated model: every
+# generated arm over the generated domains, the spend of an approval-carried
+# use included, under every generated invariant
+# plus three invariants (an ended custody accepts no input but a release; a
+# release ends in Released; an uncertain append ends the custody until a
+# release) and two action properties (an ended custody never returns to
+# Active and Released never changes; the ending step and every later step
+# keep the owner's identity, revision, records, revocations, spent uses and
+# carried decisions). It requires its four witnesses reached and refuses
+# fourteen seeded defects (--mutants), each by its target property alone.
+# 6 steps reach every witness and mutant.
+# It runs in shard audits-r.
+grant_custody_end_audit="${workspace_root}/specs/machines/grant_authority/custody_end_audit.sh"
+if [[ ! -x "${grant_custody_end_audit}" ]]; then
+  echo "error: grant custody end audit runner is missing from workspace runfiles: ${grant_custody_end_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded grant custody end TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${grant_custody_end_audit}" "${GRANT_CUSTODY_END_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
+# The requester batch rule (inputs of different requesters never share a
+# run: each run stages one batch key, which includes an ungoverned input's
+# requester, and a live-boundary join must carry the key the run staged) and
+# the Steer lane's order across requesters (no Steer input is staged or
+# joined while a Steer input admitted before it waits with another key) are
+# structural in the MeerkatMachine ci sweep, which takes one step. A
+# hand-written audit over the same generated model runs one runtime-loop run
+# whose batch input carries one key and a late Steer input of another key
+# (or none), through admission, the durable join and its resolutions,
+# normalization, receipts, staging into the running run or a follow-up run,
+# every run-ending arm, and a fence gap's suspension and resume, under every
+# generated invariant plus two safety invariants (a run's bound inputs share
+# one key; the late input never joins the batch input's run), once per pair
+# of different keys. It then runs an earlier Steer input of another key ahead
+# of a late one of the batch input's key under the order property, once per
+# such pair. It requires four witnesses reached (a late input of the same key
+# joins; one of another key runs in a run of its own; an earlier input of
+# another key runs first; the late input joins once that one left the lane)
+# and refuses five seeded defects (--mutants): the join without its
+# live_join_same_requester guard, admission that records a batch key only
+# for a governed binding, ResumeRun staging no key, and the join and
+# StageForRun without the order guard. 14 steps reach every witness and
+# mutant; deeper bounds run by hand.
+requester_batch_audit="${workspace_root}/specs/machines/meerkat_machine/requester_batch_audit.sh"
+if [[ ! -x "${requester_batch_audit}" ]]; then
+  echo "error: requester batch audit runner is missing from workspace runfiles: ${requester_batch_audit}" >&2
+  exit 1
+fi
+if run_part audits-s; then
+  echo "running bounded requester batch TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${requester_batch_audit}" "${REQUESTER_BATCH_AUDIT_MAX_STEPS:-14}" --mutants
 fi
 
 # The AuthMachine source-credential publication (a publisher that re-reads
@@ -1524,7 +1612,10 @@ run_machine_verify() {
 # audits-c = materialization-rollback keep with --mutants 267-309, live
 # worker start after close 25-29, approval entered-step with --mutants
 # 20-24: 656-663 s with the run-start hold audit (242-293), which moved to
-# audits-q, so about 370-375 s;
+# audits-q, so about 370-375 s; and the live admitted start after close audit
+# with --mutants (twenty-nine runs, 237 s on eight local workers, not yet
+# measured hosted; the live worker start after close audit's three runs take
+# 25-29 s): about 600-700 s;
 # audits-d = durable-tail recovery ownership with --mutants 143-238,
 # live-context outbox 100-146, peer request maps with --mutants 87-134,
 # live-context result barrier with --mutants 25-39: 383-555 s;
@@ -1591,13 +1682,18 @@ run_machine_verify() {
 # audit with --mutants (0.9.11, not yet measured on a hosted runner), its
 # adoption run (0.9.11; 114 s locally with 4 TLC workers, about 130-190 s at
 # the 1.13-1.66x its archive, unlist, placement and recovered runs took
-# hosted over their 202 s there) and the scoped tool grant gate audit with
+# hosted over their 202 s there), the scoped tool grant gate audit with
 # --mutants (0.9.11; its runs 144 s locally, not yet measured on a hosted
-# runner, about 180-270 s at that shard's 1.24-1.88x): about 560-835 s
-# without the settle audit, past the 720 s target below (to be rebalanced);
+# runner, about 180-270 s at that shard's 1.24-1.88x) and the
+# GrantAuthorityMachine custody end audit with --mutants (nineteen runs over
+# the spend arms too, not yet measured hosted; 109 s locally with 4 TLC
+# workers, about 250 s at 2.3x): about 810-1085 s without the settle audit,
+# past the 720 s target below (to be rebalanced);
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
-# (158-233), which moved to audits-u, so about 479-489 s;
+# (158-233), which moved to audits-u, so about 479-489 s, plus the requester
+# batch audit with --mutants (0.9.11; 90 s locally with 4 workers at 14
+# steps, about 210 s at 2.3x), moved from audits-r: about 570-700 s;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
 # the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
 # (eleven runs, not yet measured hosted; the empty-resume residency audit's

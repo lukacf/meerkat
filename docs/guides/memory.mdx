@@ -322,6 +322,20 @@ For each discarded message:
 
 This means previously discarded conversation content becomes searchable via the `memory_search` tool.
 
+With the durable HNSW store, a compaction's staged batch becomes visible
+once the runtime boundary that commits its rewrite is acknowledged: the live
+agent finalizes it at that boundary, or at its startup when the session is
+revived. A session no agent will host again can still owe one, for a mob
+member whose stopped run compacted and that is rotated or deleted before it
+wakes. `PersistentSessionService::settle_owed_compaction_projections`
+finalizes such a session's owed batches cold (no actor is built and no model
+is called) and answers the records it published
+(`OwedCompactionSettlement::Settled`), or `Live` when the session is hosted
+in the process, whose agent owns the finalization. A mob's rotation onto a
+fresh session settles the session it leaves this way, and
+`MobHandle::settle_member_owed_compaction_projections` lets a host settle a
+seated member's session, and read its discards, before it ends that session.
+
 ## The `memory_search` tool
 
 When memory is enabled, the agent gains a `memory_search` tool.

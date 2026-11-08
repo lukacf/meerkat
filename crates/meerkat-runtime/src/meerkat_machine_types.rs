@@ -1400,6 +1400,16 @@ meerkat_machine_runtime_internal_inputs!(
     ExternalSurfaceLifecycle => [
         SurfaceStageGatedAdd,
     ],
+    // A channel's close sweep closes its delegation intake, so a delegation
+    // the lifecycle seam carries past the close is refused admission.
+    LiveExecutionLifecycle => [
+        CloseLiveDelegationIntake,
+    ],
+    // A recovered ungoverned row's requester batch key, rehydrated as
+    // BindInputAuthority rehydrates a governed row's binding.
+    InputQueueLifecycle => [
+        BindInputRequesterBatchKey,
+    ],
     // A host's compaction request, applied directly by
     // `MeerkatMachine::request_compaction`, and its consumption by the
     // agent's compaction check through the session's turn-state handle.

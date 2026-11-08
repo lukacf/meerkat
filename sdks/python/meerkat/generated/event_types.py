@@ -42,6 +42,9 @@ from .types import (  # noqa: F401
     MeerkatSchema,
     OperationId,
     PeerId,
+    PrincipalId,
+    PrincipalKind,
+    PrincipalQualification,
     ProfileId,
     Provider,
     ProviderImageMetadata,
@@ -67,6 +70,7 @@ from .types import (  # noqa: F401
     ToolProcessCessation,
     ToolProcessSpawner,
     TranscriptRewriteSelection,
+    TrustDomainId,
 )
 
 Value = Any
@@ -1876,6 +1880,31 @@ class RealtimeMessageOrigin(TypedDict, total=False):
 TranscriptTurnInput = Literal['runtime_authored', 'typed_text']
 
 
+class PrincipalRef(TypedDict, total=False):
+    """Typed principal reference.
+
+    Public fields preserve the existing data contract, so an in-memory value
+    is not proof of valid or authenticated identity. Governed admission must
+    call [`Self::validate_qualified`] and separately establish caller authority.
+    """
+    id: Required[PrincipalId]
+    kind: Required[PrincipalKind]
+    qualification: NotRequired[PrincipalQualification]
+
+
+class TurnRequester(TypedDict, total=False):
+    """The original requester of a turn: the principal its inputs share, and
+    whether it reached them directly.
+
+    The principal is opaque to Core. A host supplies it for the inputs it
+    admits (the authenticated caller it acts for), or a governed input's work
+    association names it. Core carries it and never interprets it: it has no
+    person, account or assurance concept for it.
+    """
+    carried: NotRequired[bool]
+    principal: Required[PrincipalRef]
+
+
 class TranscriptMessageIdentity(TypedDict, total=False):
     """Stable runtime identity for a transcript message.
 
@@ -1886,6 +1915,7 @@ class TranscriptMessageIdentity(TypedDict, total=False):
     interaction_id: NotRequired[Optional[InteractionId]]
     objective_id: NotRequired[Optional[ObjectiveId]]
     realtime_origin: NotRequired[Optional[RealtimeMessageOrigin]]
+    requester: NotRequired[Optional[TurnRequester]]
     run_id: NotRequired[Optional[RunId]]
     turn_input: NotRequired[Optional[TranscriptTurnInput]]
 

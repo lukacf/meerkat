@@ -4091,6 +4091,7 @@ fn make_runtime_external_event_input(
                 idempotency_key,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: event_type.to_string(),
             payload,

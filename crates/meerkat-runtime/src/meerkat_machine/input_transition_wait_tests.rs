@@ -47,6 +47,7 @@ fn keyed_prompt(key: &str) -> Input {
             idempotency_key: Some(crate::identifiers::IdempotencyKey::new(key)),
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: "held between lifecycle steps".into(),
         typed_turn_appends: Vec::new(),

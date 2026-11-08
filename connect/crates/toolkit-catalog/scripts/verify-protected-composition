@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Check exported protected-boundary rows and attributed mutation traces.
+
+Usage: verify-protected-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY
+This verifies a bounded contract model, not production A/B implementation.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+EXPECTED = {
+    'none': None,
+    'find-first-marks': 'I1_ProtectedBoundary',
+    'launch-first-marks': 'I1_ProtectedBoundary',
+    'one-write-marks': 'I1_ProtectedBoundary',
+    'protected-block': 'I1_ProtectedBoundary',
+    'refusal-classification': 'I5_RefusalClassification',
+    'retry-owner': 'I6_DurableRetryObligation',
+}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def witness(name, text):
+    states = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+    if not states:
+        raise ValueError('missing semantic counterexample')
+    fields = dict(re.findall(r'^/\\ (\w+) = (.*)$', states[-1].split('\n\n', 1)[0], re.MULTILINE))
+    actions = re.findall(r'^State \d+: <(\w+)', text, re.MULTILINE)
+    if name in ['find-first-marks', 'launch-first-marks', 'one-write-marks']:
+        kind = 'GrantOnly' if name == 'one-write-marks' else 'First'
+        door = 'Launch' if name == 'launch-first-marks' else 'Find'
+        ok = (fields.get('stage') == '"A"' and fields.get('door') == json.dumps(door)
+              and fields.get('initial_binding') == json.dumps(kind)
+              and fields.get('attempt_wrote') == 'TRUE' and fields.get('effect_mark') == 'FALSE'
+              and fields.get('decision') == '"NotNow"' and fields.get('cause') == '"SourceHeld"'
+              and 'BindingInside' in actions and ('GrantInside' in actions) == (kind == 'First'))
+    elif name == 'protected-block':
+        ok = (fields.get('stage') == '"B"' and fields.get('protected') == 'TRUE'
+              and fields.get('decision') == '"WaitInPlace"')
+    elif name == 'refusal-classification':
+        ok = fields.get('cause') == '"PolicyDenied"' and fields.get('decision') == '"NotNow"'
+    elif name == 'retry-owner':
+        ok = (fields.get('decision') == '"NotNow"' and fields.get('retry_owed') == 'FALSE'
+              and fields.get('offer1_phase') == '"Prepared"')
+    else:
+        raise ValueError('unexpected mutant')
+    if not ok:
+        raise ValueError('wrong final trace predicate: ' + name)
+    return {'state': fields, 'actions': actions}
+
+
+def main():
+    generated, run = [Path(arg).resolve() for arg in sys.argv[1:]]
+    manifest = json.loads((generated / 'manifest.json').read_text())
+    if {name: profile['expected_invariant'] for name, profile in manifest['profiles'].items()} != EXPECTED:
+        raise ValueError('unexpected mutation attribution')
+    if list(manifest['profiles'])[0] != 'none':
+        raise ValueError('base must run first')
+    generator = Path(__file__).with_name('generate-protected-composition')
+    if sha(generator) != manifest['generator_sha256']:
+        raise ValueError('generator changed after export')
+    artifacts = manifest['artifact_hashes']
+    if any(sha(generated / name) != digest for name, digest in artifacts.items()):
+        raise ValueError('export changed')
+    for name in manifest['profiles']:
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', (generated / (name + '.cfg')).read_text()):
+            raise ValueError('generic deadlock checking must stay on')
+    run.mkdir(exist_ok=False)
+    inputs = run / 'inputs'
+    shutil.copytree(generated, inputs)
+    result = {'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'scope': manifest['scope'], 'full_b1_acceptance': False,
+              'manifest_sha256': sha(generated / 'manifest.json'),
+              'verifier_sha256': sha(Path(__file__)), 'profiles': {},
+              'resources': {'workers': 1, 'heap_mib': 1024, 'timeout_seconds': 90,
+                            'sequential': True, 'generic_deadlock_checking': 'ON'}}
+    save(run / 'STARTED.json', result)
+    env = os.environ.copy()
+    env['JAVA_TOOL_OPTIONS'] = '-Xmx1024m'
+    passed = True
+    for name, profile in manifest['profiles'].items():
+        invariant = profile['expected_invariant']
+        log = run / (name + '.log')
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / 'protected_composition.tla')]
+        row = {'command': command, 'expected_invariant': invariant}
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out, stderr=subprocess.STDOUT,
+                                         env=env, timeout=90, check=False)
+            text = log.read_text()
+            row['exit_code'] = process.returncode
+            row['states'] = re.findall(r'^.*states generated, .*distinct states found, .*states left on queue\.$', text, re.MULTILINE)
+            if invariant is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('base model did not pass')
+                counts = {action: {'distinct': int(distinct), 'total': int(total)}
+                          for action, distinct, total in re.findall(
+                              r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module protected_composition>: (\d+):(\d+)$',
+                              text, re.MULTILINE) if action in manifest['actions']}
+                if set(counts) != set(manifest['actions']) or any(v['total'] == 0 for v in counts.values()):
+                    raise ValueError('not every declared protected action was exercised')
+                row['action_coverage'] = counts
+                row['held_row_coverage'] = {name: counts[name] for name in manifest['held_rows']}
+            else:
+                if process.returncode != 12 or f'Invariant {invariant} is violated.' not in text:
+                    raise ValueError('mutant did not violate its intended invariant')
+                row['witness'] = witness(name, text)
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(json.dumps({'profile': name, 'passed': row['passed'], 'exit': row.get('exit_code'),
+                          'states': row.get('states'), 'error': row.get('error')}), flush=True)
+        if not passed:
+            break
+    result['export_unchanged'] = all(sha(generated / name) == digest for name, digest in artifacts.items())
+    result['inputs_unchanged'] = all(sha(inputs / name) == digest for name, digest in artifacts.items())
+    result['generator_unchanged'] = sha(generator) == manifest['generator_sha256']
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (len(result['profiles']) == len(EXPECTED)
+               and all(value for key, value in result.items() if key.endswith('_unchanged')))
+    result['result'] = 'passed_slice' if passed else 'failed_or_incomplete'
+    result['at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

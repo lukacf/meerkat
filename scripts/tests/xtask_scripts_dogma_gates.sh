@@ -319,6 +319,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # invariant, the generated keep_unregister_only_without_live_input among them.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
 # be reported violated.
+# live_delegation_admitted_start_after_close_audit.sh requires its fourteen
+# goals violated, and with --mutants its nine unreachable-goal mutants' runs
+# to end without an error (the success line above) and its five other
+# mutants' invariants violated.
 # live_context_result_barrier_audit.sh with --mutants requires its
 # summary-dropped mutant to violate AuditResultFollowsSummary.
 # peer_request_maps_audit.sh requires its six witnesses reported violated,
@@ -432,6 +436,16 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # in which each of its four covered Running arms generated a state, its
 # Running witness violated, and with --mutants each seeded defect's target
 # invariant violated.
+# custody_end_audit.sh (grant_authority) requires its four witnesses
+# violated, and with --mutants each seeded defect's target invariant or
+# action property violated.
+# requester_batch_audit.sh requires the success line for its three requester
+# safety runs and its three order safety runs, its four witnesses
+# (AuditLateNeverJoins twice, AuditLateNeverRunsAlone,
+# AuditEarlyNeverRunsAlone) violated, and with --mutants
+# AuditLateNeverInBatchRun or AuditRunsShareOneKey violated for each seeded
+# requester defect and the action property AuditSteerLaneFifo violated for
+# each seeded order defect.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -441,6 +455,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
   'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
   'echo "Error: Invariant AuditLateNeverJoins is violated."' \
+  'echo "Error: Invariant AuditLateNeverRunsAlone is violated."' \
+  'echo "Error: Invariant AuditLateNeverInBatchRun is violated."' \
+  'echo "Error: Invariant AuditEarlyNeverRunsAlone is violated."' \
+  'echo "Error: Action property AuditSteerLaneFifo is violated."' \
   'echo "Error: Invariant AuditCapacityRefusalNeverReached is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \
@@ -523,6 +541,23 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalAudible is violated."' \
   'echo "Error: Invariant AuditNeverResolvedAfterClose is violated."' \
   'echo "Error: Invariant AuditNeverSettledAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverConfirmedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverUnconfirmedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverAuthorizedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverConsequentialAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverRequeuedAfterClose is violated."' \
+  'echo "Error: Invariant AuditStaleBindingNeverServes is violated."' \
+  'echo "Error: Invariant AuditClosedChannelHoldsNoWorkerCount is violated."' \
+  'echo "Error: Invariant AuditNeverSteerSettledAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverFreshBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverCustodyBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditRevokedBlockedIsCancelled is violated."' \
+  'echo "Error: Invariant AuditNeverIntakeClosedWhileBound is violated."' \
+  'echo "Error: Invariant AuditNeverAuthorizedAfterIntakeClose is violated."' \
+  'echo "Error: Invariant AuditNeverRestartBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverRestartFailedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverRestartCancelledSettled is violated."' \
+  'echo "Error: Invariant AuditNoAdmissionAfterIntakeClose is violated."' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
@@ -1285,6 +1320,15 @@ printf '%s\n' \
   'echo "Error: Invariant AuditRefusedOnlyForGatedNoneDerived is violated by the initial state:"' \
   'echo "Error: Invariant AuditStaleRecordNeverMatches is violated by the initial state:"' \
   'echo "Error: Invariant AuditRecordOnlyTheCurrentLocalIncarnation is violated by the initial state:"' \
+  'echo "Error: Invariant NotAuditWitnessReleasedAfterIssuance is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainThenReleased is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedTwice is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainAfterRevocation is violated."' \
+  'echo "Error: Invariant AuditReleaseEndsInReleased is violated."' \
+  'echo "Error: Invariant AuditUncertainAppendEndsCustody is violated."' \
+  'echo "Error: Invariant AuditEndedOwnerAcceptsNothing is violated."' \
+  'echo "Error: Action property AuditCustodyEndLatches is violated."' \
+  'echo "Error: Action property AuditCustodyEndKeepsTheFacts is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

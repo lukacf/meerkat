@@ -584,6 +584,23 @@ export type PendingCallbackToolCall = {
 
 export type PresentedTokenConvention = "anthropic_disjoint_input_components" | "open_ai_input_includes_cached_subset" | "gemini_prompt_includes_cached_subset" | "open_ai_compatible_prompt_includes_cache_details" | "host_declared_inclusive_input_total";
 
+export type PrincipalId = string;
+
+export type PrincipalKind = "human" | "personal_agent" | "shared_agent" | "runtime_host" | "service_account";
+
+export type PrincipalQualification = {
+  kind: "unqualified";
+} | {
+  kind: "qualified";
+  trust_domain_id: TrustDomainId;
+};
+
+export interface PrincipalRef {
+  id: PrincipalId;
+  kind: PrincipalKind;
+  qualification?: PrincipalQualification;
+}
+
 export type ProfileId = string;
 
 export interface PromptText {
@@ -1112,6 +1129,7 @@ export type TranscriptMessageIdentity = {
   interaction_id?: InteractionId | null;
   objective_id?: ObjectiveId | null;
   realtime_origin?: RealtimeMessageOrigin | null;
+  requester?: TurnRequester | null;
   run_id?: RunId | null;
   turn_input?: TranscriptTurnInput | null;
 };
@@ -1173,6 +1191,13 @@ export type TranscriptRewriteSelection = {
 };
 
 export type TranscriptTurnInput = "runtime_authored" | "typed_text";
+
+export type TrustDomainId = string;
+
+export interface TurnRequester {
+  carried?: boolean;
+  principal: PrincipalRef;
+}
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 

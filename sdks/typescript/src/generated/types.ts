@@ -2788,6 +2788,23 @@ export interface MobHelperResult {
   usage: Record<string, unknown>;
 }
 
+export interface MobForkMemberParams {
+  agent_identity: string;
+  message_index?: number | null;
+  mob_id: string;
+  profile?: string | null;
+  runtime_mode?: WireMobRuntimeMode | null;
+  source_member_id: string;
+}
+
+export interface MobForkMemberResult {
+  agent_identity: string;
+  member_ref: WireMemberRef;
+  message_count: number;
+  session_id: string;
+  source_session_id: string;
+}
+
 export interface MobForceCancelResult {
   cancelled: boolean;
 }

@@ -276,6 +276,8 @@ pub use wire::{
     MobFlowsResult,
     MobForceCancelResult,
     MobForkHelperParams,
+    MobForkMemberParams,
+    MobForkMemberResult,
     MobGrantScopesParams,
     MobGrantScopesResult,
     MobGrantsResult,

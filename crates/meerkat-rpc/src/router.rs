@@ -3202,6 +3202,10 @@ impl MethodRouter {
                 routed_arm(|| handlers::mob::handle_fork_helper(id, params, &self.mob_state)).await
             }
             #[cfg(feature = "mob")]
+            "mob/fork_member" => {
+                routed_arm(|| handlers::mob::handle_fork_member(id, params, &self.mob_state)).await
+            }
+            #[cfg(feature = "mob")]
             "mob/force_cancel" => {
                 routed_arm(|| handlers::mob::handle_force_cancel(id, params, &self.mob_state)).await
             }

@@ -2571,6 +2571,18 @@ impl std::fmt::Display for ForkSourceUnavailableCause {
     }
 }
 
+impl ForkSourceUnavailableCause {
+    /// The cause's wire name in a refusal's data: `no_session`, `running`
+    /// or `remote_read_unavailable`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSession => "no_session",
+            Self::Running => "running",
+            Self::RemoteReadUnavailable => "remote_read_unavailable",
+        }
+    }
+}
+
 fn held_cleanup_suffix(cleanup: Option<&MobError>) -> String {
     match cleanup {
         None => String::new(),
@@ -2914,6 +2926,14 @@ impl MobError {
                 "member_id": member_id.as_str(),
                 "bound_mob_id": bound_mob_id.as_str(),
                 "bound_member_id": bound_member_id.as_str(),
+            })),
+            Self::ForkSourceUnavailable {
+                source_member_id,
+                cause,
+            } => Some(serde_json::json!({
+                "kind": "fork_source_unavailable",
+                "source_member_id": source_member_id,
+                "cause": cause.as_str(),
             })),
             // A restore failure that IS a typed resume hold projects the hold
             // under meerkat's own key, so a wire caller classifies the Broken
@@ -3433,6 +3453,12 @@ impl MobError {
                 Self::ResumeSessionBoundToAnotherMember { .. } => {
                     Some(meerkat_contracts::ErrorCode::InvalidParams)
                 }
+                // A fork source that owes work is busy: fork it again once
+                // it is idle.
+                Self::ForkSourceUnavailable {
+                    cause: ForkSourceUnavailableCause::Running,
+                    ..
+                } => Some(meerkat_contracts::ErrorCode::SessionBusy),
                 // The caller named a binding the session's live actor does
                 // not run.
                 Self::MemberAuthBindingConflict { .. } => {

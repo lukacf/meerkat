@@ -154,6 +154,7 @@ from .generated.types import (
     MobMemberLiveOpenParams,
     MobMemberLiveStatusParams,
     MobMemberParams,
+    MobForkMemberResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
     MobRevokeScopesParams,
@@ -4705,6 +4706,58 @@ class MeerkatClient:
         return self._parse_mob_helper_result(
             result,
             "Invalid mob/fork_helper response",
+        )
+
+    async def fork_mob_member(
+        self,
+        mob_id: str,
+        source_member_id: str,
+        agent_identity: str,
+        *,
+        message_index: int | None = None,
+        profile: str | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+    ) -> MobForkMemberResult:
+        """Fork a member's session at a message boundary into a new member.
+
+        The new member ``agent_identity`` holds the source's messages before
+        ``message_index`` (its committed end when ``None``) and takes the
+        source member's profile and runtime mode unless named. A source
+        whose turn is in flight is refused with ``SESSION_BUSY``, and
+        nothing is seated.
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "source_member_id": source_member_id,
+            "agent_identity": agent_identity,
+        }
+        for key, value in {
+            "message_index": message_index,
+            "profile": profile,
+            "runtime_mode": runtime_mode,
+        }.items():
+            if value is not None:
+                params[key] = value
+        result: MobForkMemberResult | dict[str, Any] = await self._request(
+            "mob/fork_member", params
+        )
+        if isinstance(result, MobForkMemberResult):
+            return result
+        context = "Invalid mob/fork_member response"
+        message_count = self._require_number_field(result, "message_count", context)
+        if not isinstance(message_count, int) or message_count < 0:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: message_count must be a non-negative integer",
+            )
+        return MobForkMemberResult(
+            agent_identity=self._require_string_field(result, "agent_identity", context),
+            member_ref=self._require_string_field(result, "member_ref", context),
+            session_id=self._require_string_field(result, "session_id", context),
+            source_session_id=self._require_string_field(
+                result, "source_session_id", context
+            ),
+            message_count=message_count,
         )
 
     async def create_mob_profile(

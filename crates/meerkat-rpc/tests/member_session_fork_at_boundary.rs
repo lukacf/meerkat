@@ -1,20 +1,16 @@
-//! A mob member's session cannot be forked at a chosen message boundary
-//! over RPC.
+//! A mob member's session forked at a chosen message boundary over RPC.
 //!
 //! A standalone session forks at a message boundary through `session/fork_at`
 //! (exact context: the child's history is the prefix). For a mob member's
 //! session that call is refused by the router ("mob-owned session
 //! transcripts cannot be edited through the generic session surface"), and
-//! the mob methods the RPC surface offers give no boundary:
+//! the member counterpart is `mob/fork_member`: the mob runtime's
+//! exact-prefix fork ([`meerkat_mob::MobHandle::fork_member`] with an
+//! explicit `message_count`), which seats the child under a new identity.
 //! `mob/fork_helper` renders `ForkContext::{FullHistory, LastMessages}` as
 //! text into a fresh session's first prompt (prompt context), and
-//! `mob/spawn` with `launch_mode = resume` takes a whole session.
-//!
-//! The mob runtime does own an exact-prefix member fork in process,
-//! [`meerkat_mob::MobHandle::fork_member`] with an explicit
-//! `message_count`, but it seats the child under a new identity and no RPC
-//! method reaches it. The `today_` tests pin all of this; the ignored test
-//! states the intended RPC method.
+//! `mob/spawn` with `launch_mode = resume` takes a whole session. The ignored
+//! test states the same-identity rewind, which no method offers yet.
 
 #![allow(
     clippy::expect_used,
@@ -549,16 +545,17 @@ async fn today_a_member_session_cannot_be_forked_at_a_boundary_over_rpc() {
     );
 }
 
-/// Today, in process: the mob runtime's own exact-prefix fork,
-/// [`meerkat_mob::MobHandle::fork_member`] with `message_count`, gives the
-/// prefix and records the lineage, but under a new identity, and no RPC
-/// method reaches it. The child keeps the source's tool restrictions; a
-/// running source is refused and seats nothing.
-///
-/// Delete with the fix; the intended RPC method is
-/// [`a_member_session_forks_at_a_message_boundary`].
+/// `mob/fork_member` forks a member's session at a message boundary into a
+/// new member. The child is seated under its own new identity with exactly
+/// the source's prefix (the system prompt and the first exchange), answers
+/// `message_count`, records the source session as its fork source and keeps
+/// the source's tool restrictions; the source member keeps its session and
+/// history. A fork onto the seated source identity is refused, and a fork of
+/// a member whose turn is in flight is refused with `SESSION_BUSY`; neither
+/// seats anything.
 #[tokio::test]
-async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
+async fn mob_fork_member_forks_a_member_into_a_new_member_at_a_boundary() {
+    const CHILD: &str = "main-branch";
     let rig = rig();
     let source = rig.seat_main(Some(deny_peers())).await;
     for prompt in PROMPTS {
@@ -566,46 +563,68 @@ async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
     }
     assert_denies_peers(&rig, "setup: the source's deny list took effect");
     assert_eq!(rig.history(&source).await, three_exchanges());
-    let handle = rig.mob().await;
-    let main = meerkat_mob::AgentIdentity::from(MAIN);
 
-    // The same identity cannot receive the fork while it is seated.
-    let same_identity = handle
-        .fork_member(&main, child_spec(MAIN), Some(BOUNDARY))
-        .await;
+    let fork = |agent_identity: &'static str| {
+        rig.call(
+            "mob/fork_member",
+            json!({
+                "mob_id": MOB_ID,
+                "source_member_id": MAIN,
+                "agent_identity": agent_identity,
+                "message_index": BOUNDARY
+            }),
+        )
+    };
+
+    let same_identity = fork(MAIN).await;
     assert!(
-        same_identity.is_err(),
-        "a fork onto the seated identity is refused: {same_identity:?}"
+        same_identity.error.is_some(),
+        "a fork onto the seated source identity is refused: {:?}",
+        same_identity.result
     );
+    assert_eq!(rig.roster().await, vec![MAIN.to_string()]);
 
-    let fork = handle
-        .fork_member(&main, child_spec("main-rewound"), Some(BOUNDARY))
-        .await
-        .expect("the in-process exact-prefix fork");
-    let child = fork.session_id.to_string();
-    assert_eq!(fork.agent_identity.to_string(), "main-rewound");
+    let forked = fork(CHILD).await;
+    assert!(
+        forked.error.is_none(),
+        "mob/fork_member forks the member: {:?}",
+        forked.error
+    );
+    let forked: Value =
+        serde_json::from_str(forked.result.as_ref().expect("a result").get()).expect("json");
+    let child = forked["session_id"].as_str().unwrap().to_string();
     assert_ne!(child, source);
+    assert_eq!(forked["agent_identity"], CHILD);
+    assert_eq!(forked["source_session_id"], source.as_str());
+    assert_eq!(forked["message_count"], BOUNDARY);
     rig.assert_exact_prefix(&child, &source).await;
-    let entry = handle
-        .get_member(&fork.agent_identity)
-        .await
-        .expect("roster read")
-        .expect("the child is seated");
-    let lineage = entry
-        .fork_source
-        .expect("the child records its fork source");
-    assert_eq!(lineage.source_session_id.to_string(), source);
+    assert_eq!(rig.member_session(CHILD).await, child);
+    assert_eq!(rig.member_session(MAIN).await, source);
     assert_eq!(rig.history(&source).await, three_exchanges());
     assert_eq!(
         rig.roster().await,
-        vec![MAIN.to_string(), "main-rewound".to_string()]
+        vec![MAIN.to_string(), CHILD.to_string()]
+    );
+    let entry = rig
+        .mob()
+        .await
+        .get_member(&meerkat_mob::AgentIdentity::from(CHILD))
+        .await
+        .expect("roster read")
+        .expect("the child is seated");
+    assert_eq!(
+        entry
+            .fork_source
+            .expect("the child records its fork source")
+            .source_session_id
+            .to_string(),
+        source
     );
 
-    // The child keeps the source's tool restrictions.
     rig.client.tools.lock().unwrap().clear();
-    rig.member_turn("main-rewound", "child turn").await;
+    rig.member_turn(CHILD, "child turn").await;
     assert_denies_peers(&rig, "the fork child keeps its source's deny list");
-    // A running source is refused and seats nothing.
+
     let held = {
         let router_turn = rig.call(
             "mob/turn_start",
@@ -617,24 +636,29 @@ async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
             () = entered => {}
             response = &mut router_turn => panic!("the held turn finished early: {:?}", response.error),
         }
-        let refused = handle
-            .fork_member(&main, child_spec("main-while-running"), Some(BOUNDARY))
-            .await;
-        assert!(
-            matches!(
-                refused,
-                Err(meerkat_mob::MobError::ForkSourceUnavailable {
-                    ref source_member_id,
-                    cause: meerkat_mob::ForkSourceUnavailableCause::Running,
-                }) if source_member_id == MAIN
-            ),
-            "a running source is refused as Running: {refused:?}"
+        let refused = fork("main-while-running").await;
+        let error = refused
+            .error
+            .expect("a fork of a member whose turn is in flight is refused");
+        assert_eq!(
+            error.code,
+            meerkat_rpc::error::SESSION_BUSY,
+            "a running source answers SESSION_BUSY: {}",
+            error.message
         );
+        let data = error
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("the refusal is typed: {}", error.message));
+        assert_eq!(data["kind"], "fork_source_unavailable", "{data}");
+        assert_eq!(data["cause"], "running", "{data}");
+        assert_eq!(data["source_member_id"], MAIN, "{data}");
         assert_eq!(
             rig.roster().await,
-            vec![MAIN.to_string(), "main-rewound".to_string()],
+            vec![MAIN.to_string(), CHILD.to_string()],
             "the refused fork seats nothing"
         );
+        assert_eq!(rig.member_session(MAIN).await, source);
         rig.client.release.notify_one();
         tokio::time::timeout(Duration::from_secs(30), router_turn)
             .await

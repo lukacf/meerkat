@@ -293,6 +293,24 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
+- `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`, `meerkat-mob`,
+  Python and TypeScript SDKs: `mob/fork_member` forks a member's session at
+  a message boundary into a new member, as `session/fork_at` forks a
+  session. The new member `agent_identity` holds the source's messages
+  before `message_index` (its committed end when absent), takes the source
+  member's profile and runtime mode unless the call names others, keeps the
+  source's tool restrictions and records the source session as its fork
+  source; the result names its `session_id`, `source_session_id` and
+  `message_count`. A source whose turn is in flight is refused with
+  `SESSION_BUSY` and nothing is seated: `MobError::ForkSourceUnavailable`
+  now carries `data.kind` `fork_source_unavailable` (`source_member_id`,
+  `cause`: `running`, `no_session` or `remote_read_unavailable`) on every
+  mob method, and its `running` cause answers `SESSION_BUSY`. New
+  `MobMcpState::mob_fork_member` and `ForkSourceUnavailableCause::as_str`;
+  `ForkMemberResult` gains `source_session_id` and `message_count`. The
+  SDKs add `fork_mob_member` and `Mob.fork_member` (Python) and
+  `forkMobMember` and `Mob.forkMember` (TypeScript). (#2117, thanks @zond)
+
 - Peers keep the original requester in process. A governed agent's comms
   send in process carries the origin of the governed work it was sent
   under: its requester, the sending agent, and every work it names. Core's

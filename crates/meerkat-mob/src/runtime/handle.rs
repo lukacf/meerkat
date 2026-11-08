@@ -5789,6 +5789,11 @@ pub struct ForkMemberResult {
     pub agent_identity: AgentIdentity,
     pub session_id: meerkat_core::SessionId,
     pub cache_inheritance: meerkat_core::ForkCacheInheritance,
+    /// The session the fork was cut from.
+    pub source_session_id: meerkat_core::SessionId,
+    /// Messages in the child's transcript after the fork, as
+    /// [`meerkat_core::SessionForkResult::message_count`] counts them.
+    pub message_count: usize,
     #[serde(skip)]
     pub(crate) agent_runtime_id: AgentRuntimeId,
     #[serde(skip)]
@@ -19220,6 +19225,8 @@ impl MobHandle {
             agent_runtime_id: entry.agent_runtime_id,
             fence_token: entry.fence_token,
             cache_inheritance: fork.cache_inheritance,
+            source_session_id: fork.source_session_id,
+            message_count: fork.message_count,
         })
     }
 

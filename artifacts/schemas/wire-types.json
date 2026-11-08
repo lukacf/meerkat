@@ -129602,6 +129602,47 @@
     "title": "MobForceCancelResult",
     "type": "object"
   },
+  "MobForkMemberResult": {
+    "$defs": {
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/fork_member`.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef"
+      },
+      "message_count": {
+        "description": "Messages in the new member's transcript after the fork, as\n`session/fork_at` counts them.",
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "description": "The new member's session: the committed fork.",
+        "type": "string"
+      },
+      "source_session_id": {
+        "description": "The session the fork was cut from.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_identity",
+      "member_ref",
+      "session_id",
+      "source_session_id",
+      "message_count"
+    ],
+    "title": "MobForkMemberResult",
+    "type": "object"
+  },
   "MobGrantScopesResult": {
     "$defs": {
       "WireControlScope": {

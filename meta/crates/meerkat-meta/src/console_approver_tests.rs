@@ -436,6 +436,7 @@ async fn routed_entry_needs_held_binding() {
                 crate::access::AccessApprover {
                     subjects: holders,
                     groups: Vec::new(),
+                    ..crate::access::AccessApprover::default()
                 },
             )]),
             rules: vec![crate::access::AccessRule {

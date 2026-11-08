@@ -2599,6 +2599,32 @@ impl MobMachineState {
         }
     }
 
+    /// Whether a lifecycle operation of `agent_identity`'s member is in
+    /// flight: its spawn, a wake, its retirement, its identity entry's
+    /// removal or archive, or the identity's held construction (held or
+    /// activating). These are the facts on which the declared apply's verdict
+    /// rule leaves a declaration of the identity to the next apply
+    /// (`identity_entry_verdict`'s `lifecycle_in_flight`, the verdict
+    /// `LifecycleInFlight`), read as the rule reads them.
+    pub fn member_lifecycle_in_flight_for_identity(&self, agent_identity: &AgentIdentity) -> bool {
+        self.spawn_exec_phase.contains_key(agent_identity)
+            || self.member_wake_attempts.contains_key(agent_identity)
+            || self
+                .identity_to_runtime
+                .get(agent_identity)
+                .is_some_and(|runtime_id| {
+                    self.member_state_markers.get(runtime_id) == Some(&MobMemberState::Retiring)
+                })
+            || self.identity_entry_removing.contains(agent_identity)
+            || self.identity_entry_archiving.contains(agent_identity)
+            || self
+                .identity_entry_constructions_held
+                .contains_key(agent_identity)
+            || self
+                .identity_entry_constructions_activating
+                .contains_key(agent_identity)
+    }
+
     /// Project kickoff truth for a member from the generated phase sets.
     pub fn kickoff_material_for_member_id(
         &self,
@@ -15339,6 +15365,99 @@ mod tests {
             declare(&mut authority, &fresh, Declaration::default()),
             IdentityEntryVerdict::MobNotRunning
         );
+    }
+
+    /// The read of a member's lifecycle operation in flight
+    /// (`member_lifecycle_in_flight_for_identity`, which a host's wait for
+    /// the operation to settle reads) is the fact the declared apply's
+    /// verdict rule defers on: each in-flight fact alone leaves the
+    /// declaration of a seated entry to the next apply and reads in flight,
+    /// and with none of them the seat is kept and nothing reads in flight.
+    /// The states are built from the settled one with one fact added, and
+    /// decided without the debug invariant check, which a single added fact
+    /// can break: the row pins the facts the verdict reads, one by one.
+    #[test]
+    fn the_lifecycle_in_flight_read_is_the_declared_apply_s_deferral_fact() {
+        type AddFact = fn(&mut MobMachineState, &SeatedMember);
+        let mut authority = MobMachineAuthority::new();
+        let seated = seat_live_entry_member(&mut authority, "settled-entry", 81);
+        let settled = authority.state().clone();
+        assert!(!settled.member_lifecycle_in_flight_for_identity(&seated.identity));
+        assert_eq!(
+            declare(&mut authority, &seated.identity, Declaration::default()),
+            IdentityEntryVerdict::Kept
+        );
+        let facts: [(&str, AddFact); 7] = [
+            ("its spawn", |state, member| {
+                state
+                    .spawn_exec_phase
+                    .insert(member.identity.clone(), SpawnExecPhase::MaterializePending);
+            }),
+            ("a wake", |state, member| {
+                state
+                    .member_wake_attempts
+                    .insert(member.identity.clone(), 1);
+            }),
+            ("its retirement", |state, member| {
+                state
+                    .member_state_markers
+                    .insert(member.runtime_id.clone(), MobMemberState::Retiring);
+            }),
+            ("its entry's removal", |state, member| {
+                state
+                    .identity_entry_removing
+                    .insert(member.identity.clone());
+            }),
+            ("its entry's archive", |state, member| {
+                state
+                    .identity_entry_archiving
+                    .insert(member.identity.clone());
+            }),
+            ("its held construction", |state, member| {
+                state
+                    .identity_entry_constructions_held
+                    .insert(member.identity.clone(), 1);
+            }),
+            ("its activating construction", |state, member| {
+                state
+                    .identity_entry_constructions_activating
+                    .insert(member.identity.clone(), 1);
+            }),
+        ];
+        for (fact, add) in facts {
+            let mut state = settled.clone();
+            add(&mut state, &seated);
+            assert!(
+                state.member_lifecycle_in_flight_for_identity(&seated.identity),
+                "{fact} reads in flight"
+            );
+            let mut snapshot = authority.snapshot();
+            snapshot.state = state;
+            authority.restore_snapshot(snapshot);
+            let transition = authority
+                .apply_without_invariant_validation(declare_input(
+                    &seated.identity,
+                    Declaration::default(),
+                ))
+                .expect("the declared apply answers every declaration");
+            let verdict = transition
+                .effects()
+                .iter()
+                .find_map(|effect| match effect {
+                    MobMachineEffect::IdentityEntryDeclared {
+                        agent_identity,
+                        verdict,
+                        ..
+                    } if agent_identity == &seated.identity => Some(*verdict),
+                    _ => None,
+                })
+                .expect("the declaration emits its verdict");
+            assert_eq!(
+                verdict,
+                IdentityEntryVerdict::LifecycleInFlight,
+                "{fact} leaves the declaration to the next apply"
+            );
+        }
     }
 
     /// A candidate (NonAuthoritative) composition declares and seals

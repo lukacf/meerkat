@@ -264,17 +264,26 @@ impl MeerkatMachine {
     ///   reload: the reload refusal too. The run's inputs keep their
     ///   committed terminals, so the reloaded registration keeps no run, and
     ///   the tail is left to the session's durable-tail recovery;
-    /// - another writer took the session store's fence, or an unregister
-    ///   ended the run first: the refusal of a session that leaves this
-    ///   process ([`RuntimeDriverError::UnregisterInProgress`] while it
-    ///   drains, the unregister's own refusal while one is owed,
-    ///   [`RuntimeDriverError::NotReady`] once it is gone). An unregister
-    ///   that keeps queued work (a mob Shutdown's default) ends the run's
-    ///   inputs `Abandoned { Stopped }`, whatever each input's state; one
-    ///   that stops ends them `Abandoned { Cancelled }`.
+    /// - the session's store realm lost its fence (another writer took it,
+    ///   or the realm stopped itself), or an unregister ended the run first:
+    ///   the refusal of a session that leaves this process
+    ///   ([`RuntimeDriverError::UnregisterInProgress`] while it drains, the
+    ///   unregister's own refusal while one is owed,
+    ///   [`RuntimeDriverError::NotReady`] once it is gone). A realm that lost
+    ///   its fence refuses this writer's every read and write until it is
+    ///   opened again, so the registration cannot record its unregister and
+    ///   needs a reload that no reload in this process can make: a settle
+    ///   answers [`RuntimeDriverError::StaleAuthority`] every time, never
+    ///   the reload refusal.
+    ///   An unregister that keeps queued work (a mob Shutdown's default)
+    ///   ends the run's inputs `Abandoned { Stopped }`, whatever each
+    ///   input's state; one that stops ends them `Abandoned { Cancelled }`.
     ///
-    /// A registration that replaced the one that accepted the settle (a
-    /// reload) and keeps the run again is settled again within the call.
+    /// A registration that still keeps the run once the waits end is settled
+    /// again within the call: one that replaced the registration that
+    /// accepted the settle (a reload) keeps the run again, and a runtime loop
+    /// that met a lost store fence answers the run's waiters before it tears
+    /// the session down, without settling the run.
     ///
     /// A run that is current (the marked run resumed, or another run
     /// started) is never stopped here: the answer is
@@ -301,6 +310,8 @@ impl MeerkatMachine {
     /// in this process, the refusal of a registration that needs a
     /// durability reload, the refusal of one whose unregister is owed or
     /// running, and those refusals for a settlement that did not commit.
+    /// [`RuntimeDriverError::StaleAuthority`] when the registration needs a
+    /// durability reload while the session's store realm has lost its fence.
     /// [`RuntimeDriverError::InputTerminalNotYetReadable`] when the
     /// registration no longer keeps the run but an input bound to it reads
     /// no committed terminal.
@@ -310,9 +321,7 @@ impl MeerkatMachine {
     ) -> Result<crate::retained_run::RetainedRunSettlement, RuntimeDriverError> {
         use crate::retained_run::{RetainedRunSettledInput, RetainedRunSettlement};
 
-        let mut gate = self
-            .lock_current_durability_ready_session_mutation_gate(session_id)
-            .await?;
+        let mut gate = self.lock_retained_run_settle_gate(session_id).await?;
         loop {
             if let Some(refusal) = self
                 .lifecycle_mutation_refused_by_unregister(session_id)
@@ -409,12 +418,13 @@ impl MeerkatMachine {
                 // (a reload, a teardown): what committed is read below.
                 let _ = waiter.try_wait_with_terminal_outcome().await;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            self.run_retained_run_settle_before_gate_test_hook(session_id)
+                .await;
             // The facts, under the gate the loop holds through the
             // settlement's commit and its tail repair. A registration that
             // needs a reload, or is gone, refuses here.
-            gate = self
-                .lock_current_durability_ready_session_mutation_gate(session_id)
-                .await?;
+            gate = self.lock_retained_run_settle_gate(session_id).await?;
             if let Some(refusal) = self
                 .lifecycle_mutation_refused_by_unregister(session_id)
                 .await
@@ -430,8 +440,11 @@ impl MeerkatMachine {
                 });
             }
             if self.marked_resumable_run_id(session_id).await?.as_ref() == Some(&run_id) {
-                // A registration that replaced the one that accepted the
-                // settle (a reload) keeps the run again: settle it again.
+                // The registration still keeps the run: one that replaced
+                // the registration that accepted the settle (a reload) keeps
+                // it again, or the loop answered the waiters without settling
+                // it (a lost store fence, before its teardown). Settle it
+                // again, under the registration as it is now.
                 continue;
             }
             let mut inputs = Vec::with_capacity(bound_input_ids.len());
@@ -449,6 +462,36 @@ impl MeerkatMachine {
                 inputs.push(RetainedRunSettledInput { input_id, terminal });
             }
             return Ok(RetainedRunSettlement::Settled { run_id, inputs });
+        }
+    }
+
+    /// The session's durability-ready mutation gate, for
+    /// [`Self::settle_retained_run`]. A registration that needs a durability
+    /// reload while the store realm has lost its fence (another writer took
+    /// it, or the realm stopped itself) refuses as a session that leaves this
+    /// process, [`RuntimeDriverError::StaleAuthority`]: the realm refuses
+    /// this writer until it is opened again, the reload's reads included, so
+    /// no reload here can serve the session.
+    async fn lock_retained_run_settle_gate(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        match self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await
+        {
+            Err(RuntimeDriverError::RecoveryRepairBlocked { .. })
+                if self.store_self_fence().is_some_and(|fence| fence.lost()) =>
+            {
+                Err(RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "the store realm of session {session_id} lost its fence and refuses \
+                         this writer until it is opened again; the run it retained is not \
+                         settled in this process"
+                    ),
+                })
+            }
+            gate => gate,
         }
     }
 

@@ -530,6 +530,34 @@ pub fn callback_result_to_content(result: &Value) -> Vec<ContentBlock> {
 /// it strictly by kind and source id.
 pub(crate) const SDK_CALLBACK_SOURCE_ID: &str = "meta-callback:sdk-host";
 
+/// The params of one `callback/call_tool` request: the build's routing
+/// `scope_id`, the tool, its arguments, and `requester`, the original
+/// requester of the run the call serves, when the run has one. The requester
+/// comes from the run's dispatch context only; a `requester` inside the
+/// arguments is just an argument.
+pub(crate) fn callback_call_tool_params(
+    scope_id: &str,
+    call: ToolCallView<'_>,
+    requester: Option<&meerkat_core::TurnRequester>,
+) -> Result<Value, ToolError> {
+    let arguments: Value =
+        serde_json::from_str(call.args.get()).map_err(|err| ToolError::InvalidArguments {
+            name: call.name.to_string(),
+            reason: err.to_string(),
+        })?;
+    let mut params = json!({
+        "scope_id": scope_id,
+        "tool": call.name,
+        "arguments": arguments,
+    });
+    if let Some(requester) = requester {
+        params["requester"] = serde_json::to_value(requester).map_err(|error| {
+            ToolError::execution_failed(format!("failed to encode the call's requester: {error}"))
+        })?;
+    }
+    Ok(params)
+}
+
 struct GatewayCallbackToolDispatcher {
     bridge: Arc<dyn CallbackBridge>,
     scope_id: String,
@@ -577,6 +605,37 @@ impl GatewayCallbackToolDispatcher {
             tool_defs,
         }
     }
+
+    /// Send one `callback/call_tool` request for `call`, naming `requester`
+    /// when the run it serves has one, and turn the SDK host's answer into
+    /// the call's result.
+    async fn call_tool(
+        &self,
+        call: ToolCallView<'_>,
+        requester: Option<&meerkat_core::TurnRequester>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let params = callback_call_tool_params(&self.scope_id, call, requester)?;
+        match self.bridge.call("callback/call_tool", params).await {
+            Ok(result) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                settlement_failures: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: callback_result_to_content(&result),
+                is_error: false,
+            }
+            .into()),
+            Err(err) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                settlement_failures: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: format!("Tool execution failed: {err}"),
+                }],
+                is_error: true,
+            }
+            .into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -603,36 +662,17 @@ impl AgentToolDispatcher for GatewayCallbackToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value =
-            serde_json::from_str(call.args.get()).map_err(|err| ToolError::InvalidArguments {
-                name: call.name.to_string(),
-                reason: err.to_string(),
-            })?;
-        let params = json!({
-            "scope_id": self.scope_id,
-            "tool": call.name,
-            "arguments": args,
-        });
-        match self.bridge.call("callback/call_tool", params).await {
-            Ok(result) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                settlement_failures: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: callback_result_to_content(&result),
-                is_error: false,
-            }
-            .into()),
-            Err(err) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                settlement_failures: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: vec![ContentBlock::Text {
-                    text: format!("Tool execution failed: {err}"),
-                }],
-                is_error: true,
-            }
-            .into()),
-        }
+        self.call_tool(call, None).await
+    }
+
+    /// A `callback/call_tool` request that names the original requester of
+    /// the run the call serves, from its dispatch context.
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        self.call_tool(call, context.requester()).await
     }
 }
 
@@ -2097,5 +2137,102 @@ model = "gpt-5.5"
         assert!(v.get("data").and_then(|d| d.as_str()).is_some());
         let decoded: SessionSnapshot = serde_json::from_value(v).unwrap();
         assert_eq!(decoded.data, b"hello world");
+    }
+
+    /// Dispatch one call of a customizer's SDK tool through Core's fenced
+    /// plan, as a run whose dispatch context is `context`, and return the
+    /// params of the `callback/call_tool` it sent.
+    async fn customizer_tool_call_params(
+        context: &meerkat_core::ToolDispatchContext,
+        arguments: &str,
+    ) -> Value {
+        let mock = Arc::new(MockBridge::new());
+        mock.set_response("callback/call_tool", Ok(json!({"content": "ok"})))
+            .await;
+        let dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(GatewayCallbackToolDispatcher::new(
+                Arc::new(mock.clone()),
+                "customize-agent:alpha-0".to_string(),
+                vec![ExternalToolDef {
+                    name: "my_tool".to_string(),
+                    description: "A custom tool".to_string(),
+                    input_schema: json!({"type": "object"}),
+                    artifact: None,
+                }],
+            ));
+        let raw_args = serde_json::value::RawValue::from_string(arguments.to_string()).unwrap();
+        let call = ToolCallView {
+            id: "call-requester",
+            name: "my_tool",
+            args: &raw_args,
+        };
+        let plan = meerkat_core::resolve_tool_execution_plan_fenced(
+            &dispatcher,
+            call,
+            context,
+            &meerkat_core::ToolExecutionResolutionContext::new(
+                meerkat_core::ToolDeadlineChain::new(vec![
+                    meerkat_core::ToolDeadlineContributor::finite(
+                        meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(30),
+                    ),
+                ])
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        meerkat_core::dispatch_tool_execution_plan_fenced(&dispatcher, call, context, &plan)
+            .await
+            .unwrap();
+        let (method, params) = mock.last_call().await;
+        assert_eq!(method, "callback/call_tool");
+        params
+    }
+
+    fn person(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A customizer's SDK tool call names the original requester of the run
+    /// it serves, typed, beside its routing scope; tool arguments that name a
+    /// requester reach the host as arguments only, and a run without a
+    /// requester sends none.
+    #[tokio::test]
+    async fn customizer_tool_callback_carries_the_run_requester() {
+        let forged = r#"{"requester":{"principal":{"kind":"human","id":"mallory"}}}"#;
+        let params = customizer_tool_call_params(
+            &meerkat_core::ToolDispatchContext::default()
+                .with_requester(Some(meerkat_core::TurnRequester::carried(person("alice")))),
+            forged,
+        )
+        .await;
+        assert_eq!(params["scope_id"], "customize-agent:alpha-0");
+        assert_eq!(params["tool"], "my_tool");
+        assert_eq!(
+            params["requester"],
+            json!({
+                "principal": serde_json::to_value(person("alice")).unwrap(),
+                "carried": true,
+            }),
+            "the call names the run's requester: {params}"
+        );
+        assert_eq!(
+            params["arguments"],
+            serde_json::from_str::<Value>(forged).unwrap(),
+            "the arguments reach the host unchanged"
+        );
+
+        let without =
+            customizer_tool_call_params(&meerkat_core::ToolDispatchContext::default(), forged)
+                .await;
+        assert!(
+            without.get("requester").is_none(),
+            "arguments never supply a requester the run lacks: {without}"
+        );
     }
 }

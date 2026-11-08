@@ -3129,6 +3129,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::WorkInputCompletionUnavailable { .. }
         | MobError::MemberInputRequeuedAcrossStop { .. }
         | MobError::MemberInputRequeueExpired { .. }
+        | MobError::MemberInputTerminalNotYetReadable { .. }
         | MobError::ActorCommandTimedOut { .. }
         | MobError::MemberReloadRefused { .. }
         | MobError::MemberReloadRepairBlocked { .. }
@@ -3759,6 +3760,7 @@ impl MemberTurnOptions {
                 objective_id: self.objective_id,
                 run_id: None,
                 turn_input: None,
+                requester: None,
             },
             ..Default::default()
         }
@@ -4038,6 +4040,8 @@ fn submit_work_payload(
         llm_identity_applied_tx,
         ack_mode,
         content_attribution,
+        requester: spec.requester,
+        sender_label: spec.sender_label,
         governed_input: None,
     }))
 }
@@ -6461,6 +6465,21 @@ impl MobMachineStateChanges {
     pub fn is_closed(&self) -> bool {
         self.rx.has_changed().is_err()
     }
+}
+
+/// What [`MobHandle::wait_member_lifecycle_settled`] saw of a member's
+/// lifecycle operations. A closed vocabulary: a host matches every answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberLifecycleSettlement {
+    /// No lifecycle operation of the member was in flight when the wait
+    /// began.
+    NothingInFlight,
+    /// A lifecycle operation of the member was in flight when the wait
+    /// began, and the actor then published a state with none in flight.
+    Settled,
+    /// A lifecycle operation of the member was still in flight when the
+    /// wait's timeout ran out.
+    StillInFlight,
 }
 
 /// Clone-cheap, thread-safe handle for interacting with a running mob.
@@ -10193,6 +10212,51 @@ impl MobHandle {
         }
     }
 
+    /// Settle the owed compaction projections of `identity`'s current
+    /// session cold, before a host ends that session: finalize each memory
+    /// batch the runtime's compaction outbox still owes for it, acknowledge
+    /// its row, and answer the finalized batches
+    /// ([`MobSessionService::settle_owed_compaction_projections`]).
+    ///
+    /// A member that compacted inside a run its stop committed as
+    /// interrupted owes the compaction's memory projection until it wakes
+    /// again, and a start does not wake it for that. A host that is about to
+    /// end such a member's session (a reset, a delete, a role move) settles
+    /// it here first, so the compaction's discards reach the host instead of
+    /// waiting for a wake that never comes. The mob's own rotation onto a
+    /// fresh session settles the session it leaves the same way, so every
+    /// host gets the finalization; it does not hand the batch to anyone.
+    ///
+    /// Read and checked without an actor command, under the
+    /// [`crate::ControlScope::Retire`] scope: the session is the one
+    /// MobMachine binds the seated member to now. A member whose session is
+    /// unborn (no wake created it) owes nothing. A session this process
+    /// hosts answers [`meerkat_session::OwedCompactionSettlement::Live`]:
+    /// its live agent owns the finalization. Nothing is woken and no model
+    /// is asked. An identity the mob does not hold seated is refused with
+    /// [`MobError::MemberNotFound`].
+    pub async fn settle_member_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, MobError> {
+        let session = self.read_published_machine_state(crate::ControlScope::Retire, |state| {
+            Self::machine_bridge_session_id_for_identity(identity, state).map(|session_id| {
+                let unborn = super::boot_plan::domain_seat_session_never_born(state, &session_id);
+                (session_id, unborn)
+            })
+        })?;
+        let Some((session_id, unborn)) = session else {
+            return Err(MobError::MemberNotFound(identity.clone()));
+        };
+        if unborn {
+            return Ok(meerkat_session::OwedCompactionSettlement::NothingOwed);
+        }
+        self.session_service
+            .settle_owed_compaction_projections(&session_id)
+            .await
+            .map_err(MobError::SessionError)
+    }
+
     /// The fresh life a rotation starts for an identity entry no member
     /// holds takes a fresh session: the entry's archived session record, if
     /// it has one, is let go first (`ForgetArchivedSession`,
@@ -10561,6 +10625,61 @@ impl MobHandle {
             &self.machine_state_watch_rx.borrow(),
             identity,
         )
+    }
+
+    /// Wait until MobMachine holds no lifecycle operation of `identity`'s
+    /// member in flight: its spawn, a wake, its retirement, its identity
+    /// entry's removal or archive, or the identity's held construction. These
+    /// are the facts on which MobMachine leaves a declaration of the identity
+    /// to the next apply (its verdict `LifecycleInFlight`, which
+    /// [`Self::apply_declared_roster`] answers
+    /// [`super::DeclaredEntryOutcome::Deferred`]), so a host that waits here
+    /// and declares the identity again is answered on the settled facts.
+    ///
+    /// Read from the machine state the actor publishes, as
+    /// [`Self::identity_entry`] is, and woken by each state the actor
+    /// publishes (see [`Self::machine_state_changes`]), never by polling: the
+    /// wait sends no actor command and wakes no member. It answers
+    /// [`MemberLifecycleSettlement::NothingInFlight`] at once when nothing is
+    /// in flight, [`MemberLifecycleSettlement::Settled`] once the actor
+    /// published a state with nothing in flight, and
+    /// [`MemberLifecycleSettlement::StillInFlight`] when `timeout` ran out
+    /// first. A mob whose actor is gone answers
+    /// [`MobError::ActorCommandChannelClosed`]. The handle's principal must
+    /// hold [`crate::ControlScope::List`]; a refusal is
+    /// [`MobError::ScopeDenied`].
+    pub async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: Duration,
+    ) -> Result<MemberLifecycleSettlement, MobError> {
+        let member = mob_dsl::AgentIdentity::from_domain(identity);
+        let in_flight = |state: &mob_dsl::MobMachineState| {
+            state.member_lifecycle_in_flight_for_identity(&member)
+        };
+        // Seen before each read: a state the actor publishes after the read
+        // wakes the wait.
+        let mut changes = self.machine_state_watch_rx.clone();
+        changes.mark_unchanged();
+        if !self.read_published_machine_state(crate::ControlScope::List, in_flight)? {
+            return Ok(MemberLifecycleSettlement::NothingInFlight);
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                changed = changes.changed() => {
+                    changed.map_err(|_| MobError::ActorCommandChannelClosed)?;
+                }
+                () = tokio::time::sleep(remaining) => {
+                    return Ok(MemberLifecycleSettlement::StillInFlight);
+                }
+            }
+            changes.mark_unchanged();
+            if !self.read_published_machine_state(crate::ControlScope::List, in_flight)? {
+                return Ok(MemberLifecycleSettlement::Settled);
+            }
+        }
     }
 
     /// Read the machine state the actor last published under `scope`, with
@@ -11600,17 +11719,31 @@ impl MobHandle {
     /// terminals through
     /// [`meerkat_runtime::MeerkatMachine::input_terminal_receipt`].
     ///
-    /// The verb never wakes a member. A member the mob does not hold is
-    /// [`MobError::MemberNotFound`]; one not materialized in this process
-    /// (dormant, or waking), or whose registration is gone or leaving
-    /// through its unregister, is [`MobError::MemberSessionNotLive`]: wake it
-    /// under the host's hold first, or read its stored work cold with
+    /// The verb never wakes a member. A member the mob does not hold (a
+    /// retired one) is [`MobError::MemberNotFound`]; once the mob is destroyed
+    /// or shut down, every command to its actor answers
+    /// [`MobError::ActorCommandChannelClosed`]. A member not materialized in
+    /// this process (dormant, or waking), or whose registration is gone or
+    /// leaving through its unregister, is [`MobError::MemberSessionNotLive`]:
+    /// wake it under the host's hold first, or read its stored work cold with
     /// [`meerkat_runtime::MeerkatMachine::session_work_state`]. A member
-    /// whose runtime needs a durability reload, also when the settlement's
-    /// own write failed (the reload loses the settle) or its tail repair
-    /// left the run's tail standing (the reloaded member keeps no run), is
-    /// refused with [`MobError::MemberReloadRequired`]: reload it
+    /// whose session's store realm lost its fence (another writer took it, or
+    /// the realm stopped itself) is [`MobError::MemberSessionNotLive`] at
+    /// every call too, and neither remedy serves it: the realm refuses this
+    /// process until it is opened again, and the realm's next owner recovers
+    /// the run. A member whose runtime needs a durability reload, also when
+    /// the settlement's own write failed (the reload loses the settle) or its
+    /// tail repair left the run's tail standing (the reloaded member keeps no
+    /// run), is refused with [`MobError::MemberReloadRequired`]: reload it
     /// ([`Self::reload_member_registration`]) under the hold and settle
+    /// again. On a host store realm, a settlement write whose batch the store
+    /// refused, or left unsettled, poisons the session's scopes instead:
+    /// every settle then answers [`MobError::MemberReloadRequired`] and the
+    /// reload fails until the realm is opened again, so the member stays
+    /// held, and nothing of its run runs, until then. A registration that
+    /// no longer keeps the run while an input
+    /// bound to it reads no committed terminal yet is refused with the
+    /// retryable [`MobError::MemberInputTerminalNotYetReadable`]: settle
     /// again. A placed member is refused with
     /// [`MobError::UnsupportedForMode`]. `Cancel`-scoped at chokepoint (a).
     pub async fn settle_member_retained_run(
@@ -13509,6 +13642,10 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            // A governed input's requester is its own association's; the
+            // member's native admission alone reads it.
+            requester: None,
+            sender_label: None,
             // Governed input is bound to the session read above: the
             // admission refuses it if the member's binding moved since.
             expected_session_id: Some(session_id.clone()),

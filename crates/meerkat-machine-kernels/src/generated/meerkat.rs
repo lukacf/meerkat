@@ -14453,6 +14453,9 @@ pub struct State {
     pub live_delegation_steer_delivered_by_continuation: std::collections::BTreeMap<String, bool>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_delegation_member_turn_reasoning_by_operation:
+        std::collections::BTreeMap<OperationId, LiveMemberTurnReasoning>,
+    pub live_delegation_intake_closed_channels: std::collections::BTreeSet<String>,
     pub live_delegation_schedule_state_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationScheduleState>,
     pub live_delegation_active_worker_count_by_channel: std::collections::BTreeMap<String, u64>,
@@ -15476,6 +15479,14 @@ impl std::fmt::Debug for State {
             .field(
                 "live_delegation_channel_by_operation",
                 &self.live_delegation_channel_by_operation,
+            )
+            .field(
+                "live_delegation_member_turn_reasoning_by_operation",
+                &self.live_delegation_member_turn_reasoning_by_operation,
+            )
+            .field(
+                "live_delegation_intake_closed_channels",
+                &self.live_delegation_intake_closed_channels,
             )
             .field(
                 "live_delegation_schedule_state_by_operation",
@@ -19201,6 +19212,26 @@ pub mod inputs {
         pub surface_id: String,
         pub now_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CloseLiveDelegationIntake {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindInputRequesterBatchKey {
+        pub input_id: String,
+        pub authority_batch_key: String,
+    }
+    impl std::fmt::Debug for BindInputRequesterBatchKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BindInputRequesterBatchKey")
+                .field("input_id", &self.input_id)
+                .field("authority_batch_key", &"<redacted>")
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19640,6 +19671,8 @@ pub enum Input {
     ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
     ExtendToolGrantGate(inputs::ExtendToolGrantGate),
     SurfaceStageGatedAdd(inputs::SurfaceStageGatedAdd),
+    CloseLiveDelegationIntake(inputs::CloseLiveDelegationIntake),
+    BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20245,6 +20278,8 @@ impl Input {
             Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
             Self::ExtendToolGrantGate(_) => InputKind::ExtendToolGrantGate,
             Self::SurfaceStageGatedAdd(_) => InputKind::SurfaceStageGatedAdd,
+            Self::CloseLiveDelegationIntake(_) => InputKind::CloseLiveDelegationIntake,
+            Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
         }
     }
 }
@@ -20673,6 +20708,8 @@ pub enum InputKind {
     ReleaseResumedRunAdmission,
     ExtendToolGrantGate,
     SurfaceStageGatedAdd,
+    CloseLiveDelegationIntake,
+    BindInputRequesterBatchKey,
 }
 
 pub mod signals {
@@ -26276,6 +26313,16 @@ pub enum TransitionId {
     SurfaceStageGatedAddIdle,
     SurfaceStageGatedAddAttached,
     SurfaceStageGatedAddRunning,
+    CloseLiveDelegationIntakeIdle,
+    CloseLiveDelegationIntakeAttached,
+    CloseLiveDelegationIntakeRunning,
+    CloseLiveDelegationIntakeRetired,
+    CloseLiveDelegationIntakeStopped,
+    BindInputRequesterBatchKeyIdle,
+    BindInputRequesterBatchKeyAttached,
+    BindInputRequesterBatchKeyRunning,
+    BindInputRequesterBatchKeyRetired,
+    BindInputRequesterBatchKeyStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26600,6 +26647,8 @@ pub fn initial_state() -> State {
         live_delegation_steer_delivered_by_continuation: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
+        live_delegation_member_turn_reasoning_by_operation: Default::default(),
+        live_delegation_intake_closed_channels: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),
         live_delegation_active_worker_count_by_channel: Default::default(),
         live_delegation_channel_worker_cap: 4,

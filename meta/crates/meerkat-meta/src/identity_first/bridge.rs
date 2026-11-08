@@ -2635,6 +2635,12 @@ struct InternalBridgeWork<'a> {
     /// Selected skills for the explicit human lane, resolved natively by
     /// the target member. Empty on every other lane.
     skill_references: &'a [meerkat_core::skills::SkillKey],
+    /// The original requester of the explicit human lane's turn, carried to
+    /// the member's admitted input. Absent on every other lane.
+    requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// The sender label of the explicit human lane's message, which the
+    /// member's model reads right before it. Absent on every other lane.
+    sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
 /// Which lane a submission runs in.
@@ -2776,12 +2782,21 @@ async fn submit_internal_bridge_work(
                 BridgeError::Mob(format!("member not found: {member_id}"))
             }
         })?;
-    let spec = internal_bridge_work_spec(
+    let mut spec = internal_bridge_work_spec(
         work.content,
         work.system_prompt,
         work.injected_context,
         work.interaction_id,
     );
+    // The original requester and the sender label ride only the explicit
+    // human lane (refused on every other lane before this), onto the
+    // member's admitted input.
+    if let Some(requester) = work.requester {
+        spec = spec.with_requester(requester.clone());
+    }
+    if let Some(label) = work.sender_label {
+        spec = spec.with_sender_label(label.clone());
+    }
     if let Some(expected_session) = work.host_human_session {
         if entry.bridge_session_id() != Some(expected_session) {
             return Err(BridgeError::HostHumanInput(
@@ -3881,6 +3896,16 @@ pub struct BridgeDelivery {
     /// references); every other lane refuses a nonempty selection typed
     /// instead of delivering the turn without it.
     pub skill_references: Vec<meerkat_core::skills::SkillKey>,
+    /// The original requester of this turn: the authenticated person the
+    /// host sends for. Only the explicit local host-human lane carries it, to
+    /// the member's admitted input; every other lane refuses one typed
+    /// instead of delivering the turn without it.
+    pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The sender label of this turn's message, which the member's model
+    /// reads right before it (see [`meerkat_mob::SenderLabel`]). Only the
+    /// explicit local host-human lane carries it; every other lane refuses
+    /// one typed instead of delivering the turn without it.
+    pub sender_label: Option<meerkat_mob::SenderLabel>,
 }
 
 impl BridgeDelivery {
@@ -3893,6 +3918,8 @@ impl BridgeDelivery {
             interaction_id: None,
             delivery_identity: None,
             skill_references: Vec::new(),
+            requester: None,
+            sender_label: None,
         }
     }
 }
@@ -5111,6 +5138,25 @@ pub trait SessionBridge: Send + Sync {
         )))
     }
 
+    /// Settle the owed compaction projections of `identity`'s current
+    /// session cold (`MobHandle::settle_member_owed_compaction_projections`),
+    /// before a verb asks Core to end that session: Core finalizes each
+    /// memory batch its runtime still owes for the session, and answers the
+    /// finalized batches, whose discards the caller harvests. A session Core
+    /// hosts live answers `Live` (its live agent finalizes, and its
+    /// `CompactionCompleted` triggers the harvest); nothing owed answers
+    /// `NothingOwed`. Nothing is woken.
+    ///
+    /// The default settles nothing: the bridge cannot reach Core's settle.
+    async fn settle_owed_compaction_projections(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "settle_owed_compaction_projections",
+        })
+    }
+
     /// Release `identity`'s live materialization (`MobHandle::release_member`):
     /// the member stays seated, on the same session and generation, and Core
     /// materializes it again on its next delivery. A member Core holds
@@ -5239,6 +5285,28 @@ pub trait SessionBridge: Send + Sync {
     ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
         Err(BridgeError::Unsupported {
             operation: "ensure_member_live",
+        })
+    }
+
+    /// Wait, at most `timeout`, until Core holds no lifecycle operation of
+    /// `identity`'s member in flight (`MobHandle::wait_member_lifecycle_settled`):
+    /// its spawn, a wake, its retirement, its entry's removal or archive, or
+    /// its held construction. These are the facts on which Core's declared
+    /// apply leaves the identity's declaration to its next apply
+    /// ([`DeclaredIdentityAnswer::Deferred`]). It sends Core no command and
+    /// wakes nothing.
+    ///
+    /// The default answers [`BridgeError::Unsupported`]: a bridge that cannot
+    /// read Core's member lifecycle waits for nothing, and a door whose
+    /// declaration Core left to its next apply answers its typed refusal at
+    /// once. A bridge that wraps another forwards it.
+    async fn wait_member_lifecycle_settled(
+        &self,
+        _identity: &AgentIdentity,
+        _timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "wait_member_lifecycle_settled",
         })
     }
 
@@ -8896,6 +8964,21 @@ impl SessionBridge for MobSessionBridge {
         Ok(session_id)
     }
 
+    async fn settle_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        let member = member_id_for_identity(identity);
+        self.handle
+            .settle_member_owed_compaction_projections(&member)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "settling the owed compaction projections of {identity}: {error}"
+                ))
+            })
+    }
+
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         let member = member_id_for_identity(identity);
         self.handle
@@ -9576,6 +9659,21 @@ impl SessionBridge for MobSessionBridge {
                 .await;
         }
         Ok(Some(binding))
+    }
+
+    async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        self.handle
+            .wait_member_lifecycle_settled(&member_id_for_identity(identity), timeout)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "waiting for the lifecycle of {identity}'s member to settle: {error}"
+                ))
+            })
     }
 
     async fn identity_convergence_status(
@@ -10469,6 +10567,18 @@ impl MobSessionBridge {
                 "selected skills are carried only on the local host-human lane".to_string(),
             ));
         }
+        let requester = delivery.requester.as_ref();
+        if requester.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a requester is carried only on the local host-human lane".to_string(),
+            ));
+        }
+        let sender_label = delivery.sender_label.as_ref();
+        if sender_label.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a sender label is carried only on the local host-human lane".to_string(),
+            ));
+        }
         let mid = self.member_id_for_runtime_id(runtime_id).await?;
         // One admission budget for the whole attempt, shared by every actor
         // round trip below: the serialized hops must not each cost a budget.
@@ -10518,6 +10628,8 @@ impl MobSessionBridge {
                 delivery_identity,
                 host_human_session,
                 skill_references,
+                requester,
+                sender_label,
             },
             handling_mode,
             &deadline,
@@ -10737,6 +10849,15 @@ impl SessionBridge for super::PublicSessionBridge {
         self.bridge.rotate_member(identity, spec, draft).await
     }
 
+    async fn settle_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        self.bridge
+            .settle_owed_compaction_projections(identity)
+            .await
+    }
+
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         self.bridge.release_member(identity).await
     }
@@ -10801,6 +10922,16 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<Option<MemberRuntimeBinding>, BridgeError> {
         self.bridge.ensure_member_live(identity).await
+    }
+
+    async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: std::time::Duration,
+    ) -> Result<meerkat_mob::MemberLifecycleSettlement, BridgeError> {
+        self.bridge
+            .wait_member_lifecycle_settled(identity, timeout)
+            .await
     }
 
     async fn identity_convergence_status(
@@ -11247,6 +11378,7 @@ mod tests {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         }
     }
 

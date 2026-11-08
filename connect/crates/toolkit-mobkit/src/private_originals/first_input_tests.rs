@@ -805,6 +805,30 @@ impl<S> FirstFixture<S> {
             .unwrap()
             .unwrap()
     }
+    /// The originals store as a successor opens it: once this host's close
+    /// released the store's custody, this host's own handle refuses every
+    /// read, so what the close retained is read through a new opener.
+    pub(crate) fn closed_store(&self) -> toolkit_store::SqliteStore {
+        toolkit_store::SqliteStore::open_existing(&self.source_path)
+            .expect("the close released the originals store")
+    }
+    /// [`Self::cold_source_record`] after this host's close.
+    pub(crate) async fn closed_source_record(&self) -> toolkit_store::StoredRecord {
+        self.closed_store()
+            .get(&self.source.key(&self.submission.original).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    /// [`Self::binding`] after this host's close, from the record a new
+    /// opener of the same database reads.
+    pub(crate) async fn closed_binding(&self) -> Option<InputAuthorityAssociation> {
+        let record = self.closed_source_record().await;
+        self.source
+            .decode_record(&record, &self.submission.original)
+            .unwrap()
+            .final_association
+    }
     pub(crate) fn cold_source_custody(
         &self,
         association: &InputAuthorityAssociation,

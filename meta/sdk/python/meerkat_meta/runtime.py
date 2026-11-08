@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger("meerkat_meta")
 
 from .agent_builder import CallbackDispatcher, SessionAgentBuilder
+from .decisions import DecisionAttestation, _refuse_inside_tool_callback
 from .errors import (
     CAPABILITY_UNAVAILABLE_CODE,
     CompletionCursorUnavailableError,
@@ -1204,6 +1205,10 @@ class MetaRuntime:
             runtime_options["mob_announcements"] = dict(self._config.mob_announcements)
         if self._config.fork_instruction_policy is not None:
             runtime_options["fork_instruction_policy"] = self._config.fork_instruction_policy
+        if self._config.decision_ingresses is not None:
+            runtime_options["decisions"] = {
+                "ingresses": [dict(entry) for entry in self._config.decision_ingresses]
+            }
         if self._config.routing_config_path:
             runtime_options["routing_config_path"] = self._config.routing_config_path
         if self._config.host_runnables:
@@ -1357,6 +1362,14 @@ class MetaRuntime:
 
     def mob_handle(self) -> MobHandle:
         return MobHandle(self)
+
+    def on_decision_notice(self, handler: Callable[[dict[str, Any]], Any]) -> None:
+        """Receive each ``meta/decisions/notice`` the stdio gateway writes:
+        one open durable decision, noticed once per connection when the host
+        lists it. ``event`` is ``held`` (nothing of its content shown) or
+        ``presented`` (shown to the stdio operator, with the rendering). The
+        handler may be a coroutine function."""
+        self._dispatcher.register_decision_notice_handler(handler)
 
     def sse_bridge(self) -> SseBridge:
         return SseBridge(self)
@@ -4328,6 +4341,109 @@ class MobHandle:
         raw = await self._runtime._rpc("meta/gating/audit", {"limit": limit})
         entries = raw.get("entries", []) if isinstance(raw, dict) else []
         return [GatingAuditEntry.from_dict(e) for e in entries]
+
+    # -----------------------------------------------------------------
+    # Durable decisions (the stdio host's `meta/decisions/*`)
+    # -----------------------------------------------------------------
+
+    async def decisions_list(
+        self,
+        *,
+        kind: str | None = None,
+        phase: str | None = None,
+        approver_id: str | None = None,
+        requester: str | None = None,
+        after: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """One page of durable decisions, in decision id order.
+
+        Before the gateway answers, it writes one ``meta/decisions/notice``
+        for each open decision of the page it has not noticed on this
+        connection (see :meth:`MetaRuntime.on_decision_notice`), and presents
+        to the stdio operator those the approver map lets it decide. The
+        answer carries ``decisions``, ``statuses``, ``unreadable`` and
+        ``next_after``.
+        """
+        params: dict[str, Any] = {}
+        for name, value in (
+            ("kind", kind),
+            ("phase", phase),
+            ("approver_id", approver_id),
+            ("requester", requester),
+            ("after", after),
+            ("limit", limit),
+        ):
+            if value is not None:
+                params[name] = value
+        return await self._runtime._rpc("meta/decisions/list", params)
+
+    async def decisions_get(
+        self, decision_id: str, *, include_request: bool = False
+    ) -> dict[str, Any]:
+        """One durable decision (``{"decision": ...}``), with its held
+        request when ``include_request``."""
+        params: dict[str, Any] = {"decision_id": decision_id}
+        if include_request:
+            params["include_request"] = True
+        return await self._runtime._rpc("meta/decisions/get", params)
+
+    async def decisions_rendering(
+        self, decision_id: str, *, max_part_bytes: int | None = None
+    ) -> dict[str, Any]:
+        """A decision's one canonical rendering and its parts for
+        ``max_part_bytes`` (one part when absent)."""
+        params: dict[str, Any] = {"decision_id": decision_id}
+        if max_part_bytes is not None:
+            params["max_part_bytes"] = max_part_bytes
+        return await self._runtime._rpc("meta/decisions/rendering", params)
+
+    async def decisions_present(
+        self, decision_id: str, presentation: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Record what the host presenter showed on its channel: the
+        audience, the subject digest, the parts shown, the channel and
+        message references, and the host clock reading ``at_ms``."""
+        return await self._runtime._rpc(
+            "meta/decisions/present",
+            {"decision_id": decision_id, "presentation": dict(presentation)},
+        )
+
+    async def decisions_withdraw(self, decision_id: str) -> dict[str, Any]:
+        """Withdraw an open decision as the host."""
+        return await self._runtime._rpc(
+            "meta/decisions/withdraw", {"decision_id": decision_id}
+        )
+
+    async def decisions_decide(
+        self,
+        decision_id: str,
+        *,
+        approve: bool,
+        presented_digest: str,
+        reason: str | None = None,
+        attestation: DecisionAttestation | None = None,
+    ) -> dict[str, Any]:
+        """Decide an open decision.
+
+        Without ``attestation`` the stdio operator decides, eligible only for
+        a decision the gateway presented to it on this connection. With one,
+        a declared decision ingress attests the person who decided. Refused
+        while this SDK serves a host tool callback
+        (:class:`~meerkat_meta.errors.DecideInsideToolCallbackError`): an
+        agent's tool call never decides.
+        """
+        _refuse_inside_tool_callback()
+        params: dict[str, Any] = {
+            "decision_id": decision_id,
+            "approve": approve,
+            "presented_digest": presented_digest,
+        }
+        if reason is not None:
+            params["reason"] = reason
+        if attestation is not None:
+            params["attestation"] = attestation.to_dict()
+        return await self._runtime._rpc("meta/decisions/decide", params)
 
     # -----------------------------------------------------------------
     # Memory — store management

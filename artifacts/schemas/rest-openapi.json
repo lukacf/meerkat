@@ -21842,6 +21842,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -22210,6 +22221,22 @@
         "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
         "minLength": 1,
         "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/components/schemas/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",

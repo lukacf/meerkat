@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Verify an exported recovery slice and attributed counterexamples.
+
+Usage: verify-original-recovery GENERATED_ROOT NEW_RESULT_DIRECTORY
+Generate with the generate_originals example first. No native runtime, source
+composition, full I1-I13 suite or liveness acceptance is claimed here.
+"""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+EXPECTED = {
+    'none': None,
+    'fresh-key-replay': 'I3_ExactKeyAtMostOnce',
+    'forge-admission': 'I7_CoreReceiptProvenance',
+    'unavailable-as-absent': 'I13_ReadClassification',
+}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def coverage(model, text):
+    # Derive the action roster from each RecoveryNext disjunct. Fail closed if
+    # a new disjunct uses syntax this deliberately small parser cannot handle.
+    body = model.split('RecoveryNext ==\n', 1)[1].split('RecoverySpec ==', 1)[0]
+    disjuncts = body.split('\\/')[1:]
+    actions = []
+    for disjunct in disjuncts:
+        match = re.fullmatch(r'\s*(\w+)\s*', disjunct)
+        if not match:
+            match = re.fullmatch(r'\s*\(\\E available \\in BOOLEAN : (\w+)\(available\)\)\s*', disjunct)
+        if not match:
+            raise ValueError(f'unsupported recovery disjunct: {disjunct!r}')
+        actions.append(match[1])
+    if not actions or len(set(actions)) != len(actions):
+        raise ValueError('missing or duplicate recovery actions')
+    counts = {}
+    pattern = r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module original_offer_recovery>: (\d+):(\d+)$'
+    for name, distinct, total in re.findall(pattern, text, re.MULTILINE):
+        if name in actions:
+            if name in counts:
+                raise ValueError(f'duplicate coverage for {name}')
+            counts[name] = {'distinct': int(distinct), 'total': int(total)}
+    if set(counts) != set(actions) or any(row['total'] == 0 for row in counts.values()):
+        raise ValueError('every recovery action must have successor coverage')
+    return counts
+
+
+def counterexample(name, text):
+    # An exit code or setup failure alone is never a successful mutation test.
+    states = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+    if not states:
+        raise ValueError('mutant has no counterexample state')
+    last = states[-1].split('\n\n', 1)[0]
+    fields = dict(re.findall(r'^/\\ (\w+) = (.*)$', last, re.MULTILINE))
+    if name == 'fresh-key-replay':
+        keys = set(re.findall(r'"([^"]+)"', fields.get('native_keys', '')))
+        witnessed = fields.get('epoch') == '2' and keys == {
+            'session-one:raw-key', 'session-one:replacement-key',
+        }
+    elif name == 'forge-admission':
+        witnessed = (fields.get('phase') == '"CoreObserved"'
+                     and fields.get('native_keys') == '{}'
+                     and fields.get('core_receipt_ref') == '"receipt-session-one:raw-key"')
+    elif name == 'unavailable-as-absent':
+        witnessed = (fields.get('raw_read') == '"Unavailable"'
+                     and fields.get('published_read') == '"Absent"')
+    else:
+        raise ValueError(f'unknown mutant: {name}')
+    if not witnessed:
+        raise ValueError(f'wrong final counterexample predicate: {name}')
+    return fields
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise ValueError(__doc__)
+    root = Path(sys.argv[1]).resolve()
+    exported = root / 'original_offer_recovery'
+    run = Path(sys.argv[2]).resolve()
+    profiles = json.loads((exported / 'profiles.json').read_text())
+    if (len(profiles) != len(EXPECTED)
+            or {p['name']: p['expected_invariant'] for p in profiles} != EXPECTED
+            or profiles[0]['name'] != 'none'):
+        raise ValueError('unexpected recovery profiles or attribution')
+    owner = root / 'original_offer' / 'model.tla'
+    if (exported / 'model.tla').read_bytes() != owner.read_bytes():
+        raise ValueError('recovery must compose the unchanged exported owner')
+    source = Path(__file__).resolve().parents[1] / 'models' / 'original_offer_recovery.tla'
+    if (exported / source.name).read_bytes() != source.read_bytes():
+        raise ValueError('exported recovery model differs from repository source')
+    files = sorted(exported.glob('*'))
+    before = {path.name: sha(path) for path in files if path.is_file()}
+    for profile in profiles:
+        config = (exported / (profile['name'] + '.cfg')).read_text()
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', config):
+            raise ValueError('generic deadlock checking must remain enabled')
+    # An exclusive output directory prevents overwriting or replacing a run.
+    run.mkdir(parents=False, exist_ok=False)
+    # TLC may write counterexample replay modules next to the entrypoint. Keep
+    # those outputs inside this run, separate from immutable generator exports.
+    inputs = run / 'inputs'
+    inputs.mkdir()
+    for name in before:
+        shutil.copyfile(exported / name, inputs / name)
+    result = {
+        'scope': 'one offer, one session, two dispatch epochs, eight owner steps; Core ledger semantics assumed',
+        'full_b1_acceptance': False,
+        'artifacts': before,
+        'canonical_owner_sha256': sha(owner),
+        'verifier_sha256': sha(Path(__file__)),
+        'tlc_launcher': shutil.which('tlc'),
+        'resources': {'workers': 1, 'heap_mib': 1024, 'timeout_seconds': 90, 'sequential': True},
+        'profiles': {},
+        'result': 'running',
+    }
+    save(run / 'STARTED.json', result)
+    env = os.environ.copy()
+    env['JAVA_TOOL_OPTIONS'] = '-Xmx1024m'
+    model = (exported / source.name).read_text()
+    passed = True
+    for profile in profiles:
+        name, invariant = profile['name'], profile['expected_invariant']
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / source.name)]
+        log = run / (name + '.log')
+        row = {'command': command, 'expected_invariant': invariant}
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out,
+                                         stderr=subprocess.STDOUT, env=env, timeout=90, check=False)
+            row['exit_code'] = process.returncode
+            text = log.read_text()
+            if invariant is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('base recovery model did not pass')
+                row['actions'] = coverage(model, text)
+            else:
+                if (process.returncode != 12
+                        or f'Invariant {invariant} is violated.' not in text):
+                    raise ValueError('mutant did not violate its intended invariant')
+                row['counterexample'] = counterexample(name, text)
+            row['states'] = re.findall(r'^.*states generated, .*distinct states found, .*states left on queue\.$', text, re.MULTILINE)
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(f'{name}: passed={row["passed"]}', flush=True)
+        if not passed:
+            break
+    result['artifacts_unchanged'] = before == {
+        path.name: sha(path) for path in sorted(exported.glob('*')) if path.is_file()
+    }
+    result['source_unchanged'] = sha(source) == before[source.name]
+    result['canonical_owner_unchanged'] = sha(owner) == result['canonical_owner_sha256']
+    result['input_copies_unchanged'] = all(sha(inputs / name) == digest for name, digest in before.items())
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (result['artifacts_unchanged'] and result['source_unchanged']
+               and result['canonical_owner_unchanged'] and result['input_copies_unchanged']
+               and result['verifier_unchanged'] and len(result['profiles']) == len(EXPECTED))
+    result['result'] = 'passed_slice' if passed else 'failed_or_incomplete'
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

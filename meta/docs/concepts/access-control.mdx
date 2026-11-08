@@ -34,6 +34,9 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.reset` | Reset durable agent state |
 | `agent.tool_grants.manage` | Grant and revoke the agent's [scoped tool grants](/api/rpc#scoped-tool-grants) (`meta/tool_grants/grant` and `revoke`); listing them and reading their audit needs `agent.view` |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
+| `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
+| `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
+| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`) |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
@@ -45,6 +48,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `topology.audit` | Read durable topology mutation attempts and actor/principal attribution; required on every endpoint returned |
 | `mobpack.author` | Author mobpacks in the Flow Editor: drafts, authoring operations, validation, source rendering, export/import, authoring catalogs |
 | `mobpack.deploy` | Execute a mobpack flow run on the host (`rkat mob run`); also unlocks the editor's deploy affordances |
+| `audit.view` | Read the console audit log (`meta/console/audit`): who made each console change, when, and how it ended |
 | `access.admin` | Read and edit this configuration |
 
 - **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
@@ -81,6 +85,8 @@ So a rule that matches the agent covers its side chats for every action (`agent.
 A Console with no local runtime (one that serves its runtimes through the aggregator) records those runtimes' members before it decides a send, as every route does, so a send to a side chat is decided as its agent there too; a member whose record names a lineage the cache still does not know is refused rather than decided by its bare name.
 
 The relation is runtime-derived, from Meerkat's durable record of the fork, so unlike the spawn registry it survives a restart, and it holds after the agent is respawned or retired. A `side_chat_of` claim in caller-controlled labels (spawn specs, roster labels, an identity's declaration) is stripped like `spawned_by`. A multi-runtime Console names the agent with its runtime's prefix, as it names the side chat, so a rule on the prefixed agent (`b/ops-lead`) reaches its side chats and one on the bare name does not.
+
+A side chat also records who opened it: the fork writes the caller's console principal into its `side_chat_creator` label (nothing for an anonymous caller of an open Console). The label is read the same way as `side_chat_of`, only from a side chat Meerkat's roster verifies, and a `side_chat_creator` claim in caller-controlled labels is stripped, so a rule over it (`match_labels`) reads only the creator a fork recorded. It grants nothing by itself. The console shows the label only to the creator and to the admins of an enforced policy (a policy that is installed but not enforced has no admins for it); every other caller reads the side chat without it, while access rules still read it.
 
 <Warning>
 Upgrading changes what existing rules grant: an operator holding `agent.view`/`agent.send` on a coordinator now also holds those actions on every member that coordinator spawns. This is the intended default — agent-spawned workers are part of the parent's work — but deployments with tight per-agent rules should review coordinator grants, and can add member-specific `deny` rules where inheritance is unwanted.
@@ -178,6 +184,26 @@ groups = ["release-managers"]
 ```
 
 Holders are read from the live configuration when a decision is made, so removing a subject from a binding or from a holding group revokes the identity for the next request. An approver id must not be empty or carry surrounding whitespace, must have at least one holder, and may only reference defined groups. A binding grants no permission by itself: deciding still requires `gating.decide`. Bindings apply only to console decisions by a signed-in person: on an open console a caller without a token decides nothing (`approver_unauthenticated`), and the host's stdio RPC gateway names the approver id itself. The console re-checks `gating.decide`, the request's origin and the held approver ids against the live configuration while it records the decision, so a revocation published while a decision waits is honored.
+
+The same map is the only approver source for durable decisions (see [durable decision methods](/api/rpc#durable-decision-methods)). Besides console subjects and groups, a binding lists the people a host channel attests and the stdio operator:
+
+```toml
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [
+  { ingress = "chat", subject = "U555" },   # a person the "chat" ingress attests
+]
+people = [
+  # One person: the stdio operator of the gateway and the chat identity U123.
+  { ingress_subjects = [{ ingress = "operator" }, { ingress = "chat", subject = "U123" }] },
+]
+```
+
+- `ingress_subjects` lists holders as a declared decision ingress attests them. An ingress must be declared in the launch's `runtime_options.decisions` (see [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); a configuration that names another ingress is refused at load (`unknown_ingress`), and so is a later edit from the Console. The built-in ingress `operator`, the operating-system user that started the stdio gateway, names no subject and decides only the decisions of the approver ids that list it.
+- `people` holds one entry per person, within this binding. An entry links the stdio operator and the declared-ingress identities it lists as one person: the person holds the approver id through any of them, and a decision one of them requested is the person's own, so its approval by any of them is refused as self approval. Linking is per binding, so link a person in every binding they hold. An identity appears in at most one entry of a binding; a configuration that lists one in two entries is refused at load and on a Console edit (`duplicate_person_identity`). Identities that no entry links cannot be recognised as one person.
+- An entry's `subjects` name the person's Console subjects. They hold the approver id for the Console's decision reads and the gating decide, but a decision requested from the Console is not matched to the person, since the Console decides no durable decision.
+- A Console caller who holds a decision's approver id reads the decision whole; see [On the Console](/api/rpc#on-the-console) for who else sees what.
+- `meta_gateway` keeps no durable decisions and declares no ingress, so it does not check the ingress names of the approver map. Edit an access file shared with an `rpc_gateway` through that `rpc_gateway`: it declares the ingresses and refuses an edit that names another.
 
 ## Live administration from the console
 
@@ -295,6 +321,12 @@ nothing, so no save lands over an edit its client did not see. Do not
 duplicate the payload at the top level: the request is then mixed, and
 refused.
 
+`meta/access/get` also returns `last_edit` once this controller committed an
+edit: `principal` (the console caller who made it; `null` when the edit named
+no one, as the host's own edit does), `at_ms` (milliseconds since the epoch)
+and the `revision` it committed. It is not kept across a restart: the console
+audit log (`meta/console/audit`) records every edit with its author.
+
 Use the error code together with `data.kind`, rather than matching free-form
 server messages:
 
@@ -315,8 +347,11 @@ for example `"reason": "unknown_group"` with
 `enabled_without_admins`, `empty_rule_id`, `duplicate_rule_id`,
 `empty_actions`, `unknown_action`, `unknown_group`, `empty_approver_id`,
 `padded_approver_id`, `approver_without_holders`, `unknown_approver_group`,
-`unknown_rule` and `invalid_toml` (a configuration the owner could not write
-as TOML), and the list can grow. Map the reasons you know to your own words.
+`unknown_rule`, `invalid_ingress_name`, `operator_ingress_with_subject`,
+`invalid_ingress_subject`, `approver_person_without_identity`,
+`unknown_ingress`, `duplicate_person_identity` and `invalid_toml` (a
+configuration the owner could not write as TOML), and the list can grow. Map
+the reasons you know to your own words.
 Only an administrator receives this refusal, and `detail` names only entries
 of the configuration that was saved, so an access editor may show it, also
 for a reason it does not know.
@@ -406,6 +441,10 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 ## Relationship to authentication
 
 Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). With authentication optional, a valid voluntarily supplied token can still establish a named principal when trusted-token validation and access control are configured. Callers without one are anonymous: allow rules that name subjects or groups never match them, and deny rules that name subjects or groups always do, because the console cannot tell an anonymous caller from the person a deny names. For per-user deployments, require authentication rather than relying on optional identification.
+
+### Requesters on an open console
+
+A run's requester is the person the agent works for (Meerkat's `ToolDispatchContext::requester`): on a console that requires sign-in, a person's console send names that person. An open console's own sends name no requester, a verified token a person volunteered included, and its messages carry no sender label. Open means that no sign-in is required, not that a verified identity is dropped: the message's `sender` still names the person, and a host that governs console sends receives the verified person and may bind them as the requester of the work it binds (a governed send carries its association's requester). A send without a token, or with a token that does not verify, is an anonymous caller's and names no requester on either path.
 
 ## Timeline frames of members that changed or left
 

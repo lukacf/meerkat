@@ -258,6 +258,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_steer_delivered_by_continuation`: `Map<String, Bool>`
 - `live_delegation_operation_by_interaction`: `Map<String, OperationId>`
 - `live_delegation_channel_by_operation`: `Map<OperationId, String>`
+- `live_delegation_member_turn_reasoning_by_operation`: `Map<OperationId, LiveMemberTurnReasoning>`
+- `live_delegation_intake_closed_channels`: `Set<String>`
 - `live_delegation_schedule_state_by_operation`: `Map<OperationId, LiveDelegationScheduleState>`
 - `live_delegation_active_worker_count_by_channel`: `Map<String, u64>`
 - `live_delegation_channel_worker_cap`: `u64`
@@ -926,6 +928,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReleaseResumedRunAdmission`(run_id: RunId)
 - `ExtendToolGrantGate`(server: String, gated: Set<ToolName>)
 - `SurfaceStageGatedAdd`(surface_id: String, now_ms: u64)
+- `CloseLiveDelegationIntake`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `BindInputRequesterBatchKey`(input_id: String, authority_batch_key: String)
 
 ## Signals
 - `Initialize`
@@ -1319,11 +1323,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `StageForRun`
 - Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
 - Guard Expansion:
-  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
 - Emitted By Transitions: `RecordRunAssociation`
 
 ### `AuthorizedResumedRun`
@@ -10034,6 +10038,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `immutable_batch_key`
 - To: `Stopped`
 
+### `BindInputRequesterBatchKeyIdle`
+- From: `Idle`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Idle`
+
+### `BindInputRequesterBatchKeyAttached`
+- From: `Attached`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Attached`
+
+### `BindInputRequesterBatchKeyRunning`
+- From: `Running`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Running`
+
+### `BindInputRequesterBatchKeyRetired`
+- From: `Retired`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Retired`
+
+### `BindInputRequesterBatchKeyStopped`
+- From: `Stopped`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Stopped`
+
 ### `BindScopedContextIdle`
 - From: `Idle`
 - On: `BindScopedContext`(binding, scope, generation)
@@ -12987,6 +13041,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -13002,6 +13057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -13017,6 +13073,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -13032,6 +13089,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -13047,6 +13105,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 
@@ -13621,6 +13680,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `current_run_matches`
   - `input_tracked`
+  - `live_join_same_requester`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `LiveBoundaryContextReceiptResolved`
 - To: `Running`
 
@@ -13667,6 +13728,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `live_join_input_is_ungoverned`
   - `live_join_run_is_ungoverned`
+  - `live_join_same_requester`
+  - `steer_lane_fifo_across_requesters`
   - `turn_at_model_boundary`
   - `no_cancel_after_boundary`
   - `run_not_stopped`
@@ -16612,6 +16675,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Idle`
 
@@ -16628,6 +16692,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Attached`
 
@@ -16644,6 +16709,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
+  - `delegation_intake_open`
 - Emits: `LiveDelegationAdmitted`
 - To: `Running`
 
@@ -16659,6 +16725,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Idle`
 
@@ -16674,6 +16741,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Attached`
 
@@ -16689,6 +16757,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
+  - `delegation_intake_open`
 - Emits: `LiveInteractionDelegationAdmitted`
 - To: `Running`
 
@@ -17798,6 +17867,51 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `schedule_state_is_queued`
   - `no_live_worker`
 - Emits: `LiveDelegationQueuedCancelled`
+- To: `Stopped`
+
+### `CloseLiveDelegationIntakeIdle`
+- From: `Idle`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Idle`
+
+### `CloseLiveDelegationIntakeAttached`
+- From: `Attached`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Attached`
+
+### `CloseLiveDelegationIntakeRunning`
+- From: `Running`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Running`
+
+### `CloseLiveDelegationIntakeRetired`
+- From: `Retired`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+- To: `Retired`
+
+### `CloseLiveDelegationIntakeStopped`
+- From: `Stopped`
+- On: `CloseLiveDelegationIntake`(channel_id, runtime_id, fence_token, generation)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
 - To: `Stopped`
 
 ### `AuthorizeLiveDelegationNarrationIdle`

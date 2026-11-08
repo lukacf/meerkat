@@ -12199,6 +12199,7 @@ mod tests {
                     run_id: Some(crate::lifecycle::RunId::new()),
                     objective_id: None,
                     turn_input: None,
+                    requester: None,
                 },
                 created_at: base_time,
                 assistant_message_id: None,
@@ -12217,6 +12218,7 @@ mod tests {
                         run_id: Some(crate::lifecycle::RunId::new()),
                         objective_id: None,
                         turn_input: None,
+                        requester: None,
                     };
                     assistant.created_at = base_time + chrono::Duration::hours(2);
                 }

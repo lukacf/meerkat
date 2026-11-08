@@ -480,6 +480,14 @@ pub(crate) fn render_console_rest_json_route(
         apply_memory_to_experience(&mut body, access_view.as_ref(), memory_panel_available);
         apply_workgraph_to_experience(&mut body, access_view.as_ref(), workgraph_available);
     }
+    // A side chat's creator shows only to that person and to access admins.
+    crate::side_chat::clear_unseen_side_chat_creators(
+        &mut body,
+        crate::side_chat::SideChatCreatorViewer::new(
+            access_subject.as_deref(),
+            access_view.as_ref(),
+        ),
+    );
     ConsoleRestJsonResponse { status: 200, body }
 }
 
@@ -1856,6 +1864,24 @@ impl std::fmt::Debug for ConsoleCallerVerification {
 /// domain is this prefix followed by the exact verified OIDC issuer.
 pub const CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX: &str = "oidc-issuer:";
 
+/// The qualified principal of the Console human a verified OIDC `issuer`
+/// and `sub` name: a `Human` whose id is `subject`, in the trust domain
+/// [`CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX`] + `issuer`. The one qualification
+/// of a Console human ([`AuthenticatedConsoleHuman::principal`]), also for a
+/// schedule's recorded human sender.
+pub(crate) fn console_human_principal(
+    issuer: &str,
+    subject: &str,
+) -> Result<meerkat_core::PrincipalRef, meerkat_core::PrincipalContractError> {
+    let domain =
+        meerkat_core::TrustDomainId::new(format!("{CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX}{issuer}"))?;
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject.to_string(),
+        domain,
+    )
+}
+
 /// A human the Console authenticated from a verified OIDC token: the
 /// verified issuer and `sub` (the OIDC stable identifier), the provider
 /// classification and the token's expiry and digest.
@@ -1975,15 +2001,7 @@ impl AuthenticatedConsoleHuman {
     pub fn principal(
         &self,
     ) -> Result<meerkat_core::PrincipalRef, meerkat_core::PrincipalContractError> {
-        let domain = meerkat_core::TrustDomainId::new(format!(
-            "{CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX}{}",
-            self.issuer
-        ))?;
-        meerkat_core::PrincipalRef::in_domain(
-            meerkat_core::PrincipalKind::Human,
-            self.subject.clone(),
-            domain,
-        )
+        console_human_principal(&self.issuer, &self.subject)
     }
 
     /// Re-verify this human now, after any await, by the rule every Console

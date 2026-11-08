@@ -38,6 +38,8 @@ impl Context for EmptyContext {}
 pub enum Phase {
     Unconfigured,
     Active,
+    Released,
+    Uncertain,
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -238,6 +240,10 @@ pub mod inputs {
                 .finish()
         }
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseCustody {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordUncertainAppend {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -248,6 +254,8 @@ pub enum Input {
     Revoke(inputs::Revoke),
     ResolveUse(inputs::ResolveUse),
     ConsumeUse(inputs::ConsumeUse),
+    ReleaseCustody(inputs::ReleaseCustody),
+    RecordUncertainAppend(inputs::RecordUncertainAppend),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -258,6 +266,8 @@ impl Input {
             Self::Revoke(_) => InputKind::Revoke,
             Self::ResolveUse(_) => InputKind::ResolveUse,
             Self::ConsumeUse(_) => InputKind::ConsumeUse,
+            Self::ReleaseCustody(_) => InputKind::ReleaseCustody,
+            Self::RecordUncertainAppend(_) => InputKind::RecordUncertainAppend,
         }
     }
 }
@@ -269,6 +279,8 @@ pub enum InputKind {
     Revoke,
     ResolveUse,
     ConsumeUse,
+    ReleaseCustody,
+    RecordUncertainAppend,
 }
 
 pub mod effects {
@@ -320,6 +332,10 @@ pub mod effects {
                 .finish()
         }
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CustodyReleased {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CustodyUncertain {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -329,6 +345,8 @@ pub enum Effect {
     Revoked(effects::Revoked),
     UseResolved(effects::UseResolved),
     UseConsumed(effects::UseConsumed),
+    CustodyReleased(effects::CustodyReleased),
+    CustodyUncertain(effects::CustodyUncertain),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -337,6 +355,8 @@ pub enum EffectKind {
     Revoked,
     UseResolved,
     UseConsumed,
+    CustodyReleased,
+    CustodyUncertain,
 }
 
 #[allow(non_camel_case_types)]
@@ -350,6 +370,10 @@ pub enum TransitionId {
     ResolveUse,
     ConsumeUse,
     ConsumeUseRefusedApproverRevoked,
+    ReleaseCustody,
+    RecordUncertainAppend,
+    ReleaseUncertainCustody,
+    ReleaseCustodyAgain,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

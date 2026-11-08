@@ -44,6 +44,12 @@ use meerkat_toolkit::host_lifetime::{
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// How long a host's close waits for the joins that can wait (its recovery
+/// workers, the private host's admitted work, its presenters) before it goes
+/// on: the close then reports itself incomplete, and the final release of
+/// the native custody follows, so work still running fails closed.
+pub const CLOSE_JOIN_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Pure pre-build projection of an already authenticated setup profile.
 /// The application supplies the existing prepared helper; no resolver, backend
 /// constructor or source/grant authority is hidden in this closure.
@@ -280,6 +286,18 @@ impl ToolkitGatewayHost {
             .ok_or(HostLifetimeError::Unavailable)?
             .local_operator_setup(self.owner.clone())?
             .with_helper_selections(helpers)
+    }
+
+    /// The close's final release: end the custody of the native grant owner
+    /// and originals store this host's lifetime binds, once its activation
+    /// close has settled. The process's close takes it after Meta's join of
+    /// this host, the private host's finish and its presenters' joins, so
+    /// work admitted before the close is not refused by it.
+    pub async fn release_native_custody(&self) -> Result<(), GatewayHostError> {
+        self.owner
+            .release_native_custody()
+            .await
+            .map_err(host_error)
     }
 
     /// Apply an authenticated application's exact access decision through the
@@ -942,13 +960,17 @@ impl GatewayHostComposition for ToolkitGatewayHost {
                 tokio::join!(self.acquisition_recovery.join(), custody_close);
             recovered.and(custody)
         };
-        let (recovery, native) = tokio::join!(
-            tokio::time::timeout(std::time::Duration::from_secs(30), recovery_close),
-            native_close,
-        );
+        // Recovery drains first, custody recovery's final round after stop
+        // included, then the native join confirms settlement. Neither ends
+        // the native custody: the process's close releases it after every
+        // join (`release_native_custody`). The host refuses new work since
+        // its close began above, and its join only waits for work already
+        // entered, so this cannot wait on it.
+        let recovery = tokio::time::timeout(CLOSE_JOIN_BOUND, recovery_close).await;
+        let native = native_close.await;
         let settled = native.map_err(host_error)?;
         // A timed-out join leaves the same task handle retained for a later
-        // join_close; native closure was still allowed to complete above.
+        // join_close; native closure still completed after it.
         recovery
             .map_err(|_| GatewayHostError::SettlementIncomplete)?
             .map_err(host_error)?;

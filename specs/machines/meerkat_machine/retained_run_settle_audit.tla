@@ -46,6 +46,15 @@
 \*     no run current (SettleRetainedRunBusyNotServingRunning) and its
 \*     not-retained twin are total-arm completions no state reaches.
 \*
+\* Four more busy arms are total-arm completions no state reaches:
+\*   SettleRetainedRunBusyRunCurrentInitializing,
+\*   SettleRetainedRunBusyRunCurrentIdle,
+\*   SettleRetainedRunBusyRunCurrentAttached and
+\*   SettleRetainedRunBusyRunCurrentStopped
+\* need a run current in a phase where the generated invariant
+\* current_run_only_while_running_or_retired allows none (every run of this
+\* audit checks it with the model's other generated invariants).
+\*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous. The runner's
 \* --mutants mode also checks that eight seeded model defects are refused (an

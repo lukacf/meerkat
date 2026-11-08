@@ -609,6 +609,19 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SurfaceStageGatedAddIdle",
     "SurfaceStageGatedAddAttached",
     "SurfaceStageGatedAddRunning",
+    // A channel's close sweep closes its delegation intake (0.9.11).
+    "CloseLiveDelegationIntakeIdle",
+    "CloseLiveDelegationIntakeAttached",
+    "CloseLiveDelegationIntakeRunning",
+    "CloseLiveDelegationIntakeRetired",
+    "CloseLiveDelegationIntakeStopped",
+    // The recovered ungoverned row's requester batch key (0.9.11), declared
+    // beside BindInputAuthority in the catalog.
+    "BindInputRequesterBatchKeyIdle",
+    "BindInputRequesterBatchKeyAttached",
+    "BindInputRequesterBatchKeyRunning",
+    "BindInputRequesterBatchKeyRetired",
+    "BindInputRequesterBatchKeyStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

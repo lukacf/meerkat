@@ -170,6 +170,28 @@ class MetaError(Exception):
     """Base exception for all Meta SDK errors."""
 
 
+#: The kind of :class:`DecideInsideToolCallbackError`.
+DECIDE_INSIDE_TOOL_CALLBACK_KIND = "decide_inside_tool_callback"
+
+
+class DecideInsideToolCallbackError(MetaError):
+    """A durable decision's decide was called while this SDK serves a host
+    tool callback.
+
+    An agent's tool call must never become the operator's (or an attested
+    person's) decision, so ``decisions_decide`` refuses before anything is
+    sent. Decide from the host's own code, outside the tool's handler.
+    """
+
+    kind = DECIDE_INSIDE_TOOL_CALLBACK_KIND
+
+    def __init__(self) -> None:
+        super().__init__(
+            "meta/decisions/decide is refused inside a host tool callback: an "
+            "agent's tool call never decides a durable decision"
+        )
+
+
 class TransportError(MetaError):
     """Raised when the transport layer fails (subprocess died, connection refused, etc.)."""
 

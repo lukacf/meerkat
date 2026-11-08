@@ -27,6 +27,7 @@ import {
   type ToolArtifactRef,
 } from "./models.js";
 import type { MetaRuntime } from "./runtime.js";
+import type { DecisionIngressDeclaration } from "./decisions.js";
 import type { ExperimentalLiveGatewayConfig, OpenAiLiveGatewayConfig } from "./live.js";
 import type { JobCredentialResolver } from "./jobs.js";
 import type { GatewayTransportFactory } from "./transport.js";
@@ -159,6 +160,8 @@ export interface MetaBuilderConfig {
   mobAnnouncements?: Record<string, unknown> | null;
   /** `runtime_options.fork_instruction_policy`; `null` sends nothing (the gateway default). */
   forkInstructionPolicy: ForkInstructionPolicy | null;
+  /** `runtime_options.decisions` ingresses; absent or `null` sends nothing. */
+  decisionIngresses?: DecisionIngressDeclaration[] | null;
   /** `runtime_options.member_restore`; absent or `null` sends nothing (on demand). */
   memberRestore?: MemberRestore | null;
   memoryConfig: unknown;
@@ -746,6 +749,17 @@ export class MetaBuilder {
       );
     }
     this._config.forkInstructionPolicy = policy;
+    return this;
+  }
+
+  /**
+   * Declare the decision ingresses the host attests people through
+   * (`runtime_options.decisions`). The gateway refuses the init when an
+   * entry is malformed, or when the access configuration's approver map
+   * names an ingress not declared here.
+   */
+  decisionIngresses(ingresses: readonly DecisionIngressDeclaration[]): this {
+    this._config.decisionIngresses = ingresses.map((entry) => ({ ...entry }));
     return this;
   }
 

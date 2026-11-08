@@ -4321,6 +4321,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             operation_id: operation_id.clone(),
             event: meerkat_core::OpEvent::Cancelled { id: operation_id },

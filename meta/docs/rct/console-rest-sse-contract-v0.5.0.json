@@ -1359,13 +1359,82 @@
           "success": {
             "required_fields": [
               "entries"
-            ]
+            ],
+            "optional_fields": [
+              "retention"
+            ],
+            "note": "retention is durable when the runtime keeps the gating state across a restart, process when it keeps it in memory."
           },
           "errors": [
             {
               "codes": [
                 -32004,
                 -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/decisions/list": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "kind",
+              "phase",
+              "approver_id",
+              "requester",
+              "after",
+              "limit"
+            ],
+            "note": "The rows a caller reads whole are under decisions, the rows it may see only the status of under statuses; a decision the caller may not see is not listed. decisions.view is needed while access control is enforced."
+          },
+          "success": {
+            "required_fields": [
+              "decisions",
+              "statuses",
+              "unreadable"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32020,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/decisions/rendering": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "decision_id"
+            ],
+            "optional_fields": [
+              "max_part_bytes"
+            ],
+            "note": "A caller who may see only the decision's status is refused with -32030, data.kind content_not_visible; a decision it may not see reads as decision_not_found."
+          },
+          "success": {
+            "required_fields": [
+              "decision_id",
+              "rendering",
+              "renderer",
+              "subject_digest",
+              "parts"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32030,
+                -32020,
                 -32601
               ]
             }
@@ -1443,9 +1512,10 @@
             ],
             "optional_fields": [
               "owner_instance",
-              "conditional_mutations"
+              "conditional_mutations",
+              "last_edit"
             ],
-            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes."
+            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes. last_edit (principal, at_ms, revision) is present once the controller committed an edit since it started; principal is null when the edit named no one."
           },
           "errors": [
             {

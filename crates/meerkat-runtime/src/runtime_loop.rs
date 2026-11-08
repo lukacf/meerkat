@@ -106,6 +106,10 @@ fn stamp_input(
     semantics: crate::ingress_types::RuntimeInputSemantics,
 ) -> StampedInput {
     let mut metadata = input_own_turn_metadata(input);
+    // The turn's requester is runtime-owned: the admitted input's own (the
+    // one accessor over its association and its host-supplied requester),
+    // never a value written into caller-authored metadata.
+    metadata.transcript_identity.requester = input.turn_requester();
     // Directed terminal publication is runtime-minted capability data. Never
     // preserve IDs supplied through caller-authored turn metadata.
     metadata.directed_interaction_ids.clear();
@@ -229,6 +233,7 @@ pub(crate) fn merge_batch_turn_metadata(
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
     let mut transcript_identity = TranscriptIdentityConsensus::default();
+    let mut batch_requester = RequesterConsensus::default();
     let mut request_reasoning = ReasoningPreferenceConsensus::default();
     // A batch executes as one turn, so it cannot honor multiple per-input
     // handling modes. The machine has already admitted and ordered every
@@ -248,6 +253,7 @@ pub(crate) fn merge_batch_turn_metadata(
         meta.work_authorization = None; // Rebuilt only from accepted contributor rows at staging.
         meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity, own_interaction);
+        batch_requester.observe(meta.transcript_identity.requester.as_ref());
         // The reasoning preference is folded across the whole batch (set
         // semantics, never a pairwise conflict), from each contributor's own
         // preference and its own explicit reasoning settings.
@@ -268,6 +274,7 @@ pub(crate) fn merge_batch_turn_metadata(
     if let Some(metadata) = acc.as_mut() {
         metadata.handling_mode = batch_handling_mode;
         metadata.transcript_identity = transcript_identity.finish();
+        metadata.transcript_identity.requester = batch_requester.finish()?;
         metadata.request_reasoning_disposition = request_reasoning.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
@@ -417,6 +424,59 @@ impl TurnInputConsensus {
     }
 }
 
+/// The requester a batch's inputs share. Absence is a value here: an input
+/// without a requester and one with a requester never share a run, nor do
+/// two inputs of different requesters (the machine's batch key keeps them
+/// apart), so a disagreement fails the fold closed instead of naming a
+/// requester the batch does not have. The same principal that one input
+/// carried across a hop and another brought directly is carried for the
+/// batch: a run is direct only when every one of its inputs is.
+#[derive(Debug, Clone, Default)]
+enum RequesterConsensus {
+    #[default]
+    Unseen,
+    Agreed(Option<meerkat_core::types::TurnRequester>),
+    Conflicted,
+}
+
+impl RequesterConsensus {
+    fn observe(&mut self, candidate: Option<&meerkat_core::types::TurnRequester>) {
+        use meerkat_core::types::TurnRequester;
+        *self = match (std::mem::take(self), candidate) {
+            (Self::Unseen, candidate) => Self::Agreed(candidate.cloned()),
+            (Self::Agreed(None), None) => Self::Agreed(None),
+            (Self::Agreed(Some(current)), Some(candidate))
+                if current.principal() == candidate.principal() =>
+            {
+                Self::Agreed(Some(if current.is_carried() || candidate.is_carried() {
+                    TurnRequester::carried(current.principal().clone())
+                } else {
+                    current
+                }))
+            }
+            _ => Self::Conflicted,
+        };
+    }
+
+    fn finish(
+        self,
+    ) -> Result<
+        Option<meerkat_core::types::TurnRequester>,
+        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+    > {
+        match self {
+            Self::Unseen => Ok(None),
+            Self::Agreed(requester) => Ok(requester),
+            Self::Conflicted => Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "transcript_identity.requester",
+                    reason: "inputs of different requesters never share a run",
+                },
+            ),
+        }
+    }
+}
+
 impl TranscriptIdentityConsensus {
     fn observe(&mut self, identity: &TranscriptMessageIdentity, own_interaction: bool) {
         if own_interaction {
@@ -444,6 +504,7 @@ impl TranscriptIdentityConsensus {
             run_id: self.run_id.finish(),
             objective_id: self.objective_id.finish(),
             turn_input: self.turn_input.finish(),
+            requester: None,
         }
     }
 }
@@ -11796,6 +11857,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: text.into(),
             typed_turn_appends: Vec::new(),
@@ -11833,6 +11895,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: None,
             content: "peer message".into(),
@@ -11867,6 +11930,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: "plain body payload".into(),
@@ -11902,6 +11966,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Request {
                 request_id: "req-123".into(),
@@ -11948,6 +12013,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12007,6 +12073,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12237,6 +12304,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12314,6 +12382,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12375,6 +12444,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12432,6 +12502,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12504,6 +12575,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12581,6 +12653,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: body.into(),
@@ -13207,6 +13280,77 @@ mod tests {
             .expect("generated admission semantics")
     }
 
+    fn requester_principal(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("qualified requester")
+    }
+
+    /// The turn's requester is the admitted input's own. A requester written
+    /// into a prompt's caller-authored turn metadata never reaches the turn:
+    /// the input's own requester replaces it, and an input without one
+    /// stamps none.
+    #[test]
+    fn a_caller_written_turn_requester_is_replaced_by_the_input_s_own() {
+        use meerkat_core::types::TurnRequester;
+        let written = TurnRequester::direct(requester_principal("caller-written"));
+        let prompt = |own: Option<meerkat_core::PrincipalRef>| {
+            let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+            metadata.transcript_identity.requester = Some(written.clone());
+            let mut input = make_prompt("a prompt whose metadata names a requester");
+            if let Input::Prompt(prompt) = &mut input {
+                prompt.turn_metadata = Some(metadata);
+            }
+            input.header_mut().requester = own;
+            input
+        };
+        for (own, expected) in [
+            (None, None),
+            (
+                Some(requester_principal("own")),
+                Some(TurnRequester::direct(requester_principal("own"))),
+            ),
+        ] {
+            let input = prompt(own);
+            let stamped = for_input(&input, admission_semantics(&input));
+            assert_eq!(
+                stamped.transcript_identity.requester, expected,
+                "the turn names the input's own requester, never the caller-written one"
+            );
+        }
+    }
+
+    /// One principal, carried across a hop by one input of a batch and
+    /// brought directly by another, is carried for the batch, in either
+    /// order: a run is direct only when every one of its inputs is. Two
+    /// direct inputs stay direct.
+    #[test]
+    fn one_principal_direct_and_carried_folds_to_carried() {
+        use meerkat_core::types::TurnRequester;
+        let principal = requester_principal("p");
+        let direct = TurnRequester::direct(principal.clone());
+        let carried = TurnRequester::carried(principal.clone());
+        for (batch, expected) in [
+            ([direct.clone(), carried.clone()], carried.clone()),
+            ([carried.clone(), direct.clone()], carried.clone()),
+            ([direct.clone(), direct.clone()], direct.clone()),
+        ] {
+            let mut consensus = RequesterConsensus::default();
+            for requester in &batch {
+                consensus.observe(Some(requester));
+            }
+            assert_eq!(
+                consensus.finish().expect("one principal agrees"),
+                Some(expected),
+                "batch {batch:?}"
+            );
+        }
+    }
+
     fn reply_context_from_overlay(
         overlay: &meerkat_core::service::TurnToolOverlay,
     ) -> meerkat_core::comms::PeerReplyDispatchContext {
@@ -13469,6 +13613,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_id.into(),
@@ -15082,6 +15227,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15150,6 +15296,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15212,6 +15359,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15273,6 +15421,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15334,6 +15483,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             step_id: "step-1".into(),
             content: meerkat_core::types::ContentInput::Blocks(blocks),
@@ -15391,6 +15541,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see this event"}),
@@ -15443,6 +15594,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see attached screenshot"}),
@@ -15489,6 +15641,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "invoice.created".into(),
             payload: serde_json::json!({"invoice_id": "inv_123"}),
@@ -15557,6 +15710,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "build failed"}),
@@ -15595,6 +15749,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "urgent"}),
@@ -17132,6 +17287,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -17181,6 +17337,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: "msg".into(),

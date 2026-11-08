@@ -994,6 +994,113 @@ them.
   trait's documented contract): an error there stops the session's runtime
   loop.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine copies a GPT Live delegation's member-turn reasoning
+  preference per operation, and a channel's close closes its delegation
+  intake (see Fixed). `MeerkatMachineState` (meerkat-machine-schema and
+  meerkat-runtime) and the kernel `generated::meerkat` `State` gain the
+  public fields `live_delegation_member_turn_reasoning_by_operation` and
+  `live_delegation_intake_closed_channels`. `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel
+  `generated::meerkat` `Input` gain `CloseLiveDelegationIntake { channel_id,
+  runtime_id, fence_token, generation }`, and `MeerkatMachineInputVariant`
+  (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `InputKind` gain `CloseLiveDelegationIntake`. The kernel
+  `generated::meerkat::TransitionId` gains `CloseLiveDelegationIntakeIdle`,
+  `CloseLiveDelegationIntakeAttached`, `CloseLiveDelegationIntakeRunning`,
+  `CloseLiveDelegationIntakeRetired` and `CloseLiveDelegationIntakeStopped`.
+  Every new variant is appended last, so no existing variant's implicit
+  discriminant moves. Every enum named here is exhaustive, so a downstream
+  exhaustive match needs the new arms, or a wildcard arm, and a struct
+  literal of either state type needs the new fields.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`: GrantAuthorityMachine
+  (version 3) ends a grant owner's custody at its host's close or after an
+  append whose outcome is unknown (see Added). The catalog's
+  `catalog::dsl::grant_authority::GrantAuthorityPhase` (meerkat-machine-schema)
+  and the kernel `generated::grant_authority::Phase` gain `Released` and
+  `Uncertain`. `GrantAuthorityInput` and `GrantAuthorityInputVariant`
+  (meerkat-machine-schema), and the kernel `Input` and `InputKind`, gain
+  `ReleaseCustody` and `RecordUncertainAppend`. `GrantAuthorityEffect` and
+  `GrantAuthorityEffectVariant` (meerkat-machine-schema), and the kernel
+  `Effect` and `EffectKind`, gain `CustodyReleased` and `CustodyUncertain`.
+  The kernel `generated::grant_authority::TransitionId` gains
+  `ReleaseCustody`, `RecordUncertainAppend`, `ReleaseUncertainCustody` and
+  `ReleaseCustodyAgain`. Every new variant is appended last, so no existing
+  variant's implicit discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm.
+
+- Behaviour-only (not measured by the gate): `meerkat-session`,
+  `meerkat-runtime`: `PersistentSessionService::try_shutdown` and `shutdown`,
+  once the shutdown completes, end the custody of the grant owner a governed
+  realm's open restored (`MeerkatMachine::release_realm_custody`, see Added).
+  From then on that owner refuses every change and use as
+  `GrantRefusal::Unavailable`, so the closed realm's machine serves no more
+  governed work; open the realm again to continue. A machine without such an
+  owner (an ungoverned realm, or a grant owner a host supplied) is unchanged.
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`:
+  `LocalGrantAuthority::reconstruct` of an owner whose custody ended (its
+  host's close, or an append whose outcome is unknown) answers
+  `GrantReconstructionError::RestartRequired`. Before, an owner with an
+  uncertain append reconstructed and stayed unavailable; it is unusable
+  either way.
+
+- `meerkat-core`, `meerkat-runtime`: an admitted input can carry its original
+  requester (see Added), so three public structs gain a public field, and
+  code that builds them literally must set it (`None` keeps the previous
+  behaviour): `types::TranscriptMessageIdentity.requester:
+  Option<TurnRequester>`, `service::StartTurnRuntimeSemantics.requester:
+  Option<PrincipalRef>` (meerkat-core) and `input::InputHeader.requester:
+  Option<PrincipalRef>` (meerkat-runtime).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`: the
+  MeerkatMachine gains the input `BindInputRequesterBatchKey`.
+  `MeerkatMachineInput` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and meerkat-runtime `meerkat_machine::dsl`)
+  gains the variant `BindInputRequesterBatchKey { input_id,
+  authority_batch_key }`, `MeerkatMachineInputVariant` (meerkat-machine-schema
+  and meerkat-runtime) and `MeerkatMachineRuntimeInternalInput`
+  (meerkat-runtime) gain `BindInputRequesterBatchKey`, the kernel
+  `generated::meerkat::Input` and `InputKind` gain `BindInputRequesterBatchKey`
+  (with the struct `inputs::BindInputRequesterBatchKey`), and the kernel
+  `generated::meerkat::TransitionId` gains `BindInputRequesterBatchKeyIdle`,
+  `BindInputRequesterBatchKeyAttached`, `BindInputRequesterBatchKeyRunning`,
+  `BindInputRequesterBatchKeyRetired` and `BindInputRequesterBatchKeyStopped`,
+  all appended last, so an exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a steer from
+  another requester no longer joins a running turn; it keeps its place in
+  the Steer lane and waits for a turn of its own, and a later steer of the
+  running turn's requester waits behind it (see Changed). An input is
+  refused when its host-supplied requester is not a qualified principal or
+  differs from its governed association's requester, a keyed retry for
+  another requester than the input it would replay is an
+  `InputIdempotencyConflict`, and an input whose supersession key names a
+  queued input of another requester is refused, as one of another governed
+  binding already is.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: work that
+  carries a requester (`WorkSpec::with_requester`) is refused with
+  `MobError::UnsupportedForMode` unless it is host human input to a local
+  runtime-backed member, so the requester is never dropped on the way.
+
+- `meerkat-jobs`, `meerkat-contracts`: host tool callbacks carry the run's
+  original requester (see Added), so two public structs gain a public field,
+  and code that builds them literally must set it (`requester: None` keeps
+  the previous behaviour): `JobSpec.requester: Option<TurnRequester>`
+  (meerkat-jobs, also reached as `meerkat::JobSpec`) and
+  `CallbackJobStartParams.requester: Option<TurnRequester>`
+  (meerkat-contracts).
+
+- Behaviour-only (not measured by the gate): `meerkat-jobs`: a detached
+  job's requester is part of its submission's replay identity. A submission
+  under an admitted job's submission key that names another requester, or
+  none where the admitted job names one (or the reverse), is refused with
+  `DetachedJobError::SubmissionConflict`, and a compare-and-swap that would
+  change a stored job's requester is refused.
 
 - `meerkat`, `meerkat-core`, `meerkat-mcp`: MCP service-secret write
   witnesses (see Added). `meerkat`: `set_mcp_service_secret` and
@@ -1665,20 +1772,31 @@ them.
   - A settlement that did not commit, or whose tail repair left the run's
     tail standing, answers the registration's refusal, never `Settled`: a
     durability reload refusal when its write failed (the reload loses the
-    stop, so the host keeps its hold, reloads and settles again) or its tail
+    stop, so the host keeps its hold, reloads and settles again; on a host
+    store realm, a write the store refused or left unsettled poisons the
+    session's scopes instead, and the reload fails until the realm is opened
+    again) or its tail
     repair failed (the reloaded registration keeps no run), and the refusal
-    of a session that leaves the process when another writer took its store
-    fence, or when an unregister ended the run first (its inputs then end
+    of a session that leaves the process when its store realm lost its
+    fence (another writer took it, or the realm stopped itself:
+    `RuntimeDriverError::StaleAuthority` at every call on a host store realm,
+    which refuses that writer until it is opened again), or when an
+    unregister ended the run first (its inputs then end
     `Abandoned { Stopped }` when it keeps queued work, a mob Shutdown's
     default, whatever their state, and `Abandoned { Cancelled }` when it
     stops).
   A repeat that arrives while the settle is pending joins it. The mob verb
   never wakes a member, and answers typed refusals: `MemberNotFound`,
-  `MemberSessionNotLive` (not live in this process: dormant, gone, or leaving
-  through its unregister), `MemberReloadRequired` (its registration needs a
-  durability reload) and `UnsupportedForMode` (a placed member). The
+  `MemberSessionNotLive` (not live in this process: dormant, gone, leaving
+  through its unregister, or its store realm's fence lost),
+  `MemberReloadRequired` (its registration needs a durability reload),
+  `UnsupportedForMode` (a placed member) and the new
+  `MobError::MemberInputTerminalNotYetReadable` (the run is no longer kept,
+  but an input of it reads no committed terminal yet: settle again). The
   durable-runs guide has the Recover recipe: hold, wake, settle, release on
-  every path that leaves no open run.
+  every path that leaves no open run, count a member the mob no longer
+  holds or the hold never applied to as done, and end the recovery when the
+  mob is gone or its store realm lost its fence.
 - `meerkat-runtime`: `MeerkatMachine::session_work_state(&session_id)` reads
   cold whether one session holds the work a start wakes a member for,
   without loading its body or registering it, so a dormant mob member stays
@@ -2216,6 +2334,121 @@ them.
   `WireMobToolConfig` and `MobToolConfigInput` carry `grant_gated` as the
   generated `WireGrantGatedTools`.
 
+- `meerkat-authorization`: `LocalGrantAuthority::release_custody` ends a
+  grant owner's custody at its host's close, as the generated
+  `GrantAuthorityMachine` input `ReleaseCustody` (into the terminal phase
+  `Released`). From then on every change and use of that owner is refused as
+  `GrantRefusal::Unavailable`, whoever still holds a reference to it, and
+  every earlier observation of it fails its final currentness check. A
+  durable owner hands its store's lease back after any append in flight, so
+  a successor in the same process restores the same owner at once. A second
+  call changes nothing. An append whose outcome is unknown now ends the
+  custody in the machine too (`RecordUncertainAppend`, into `Uncertain`),
+  and the owner's close then releases its lease. `reconstruct` answers
+  `RestartRequired` for an owner whose custody ended.
+  `MeerkatMachine::install_realm_grant_custody` (`meerkat-runtime`,
+  `local-authorization`) names the grant owner a governed realm's open
+  restored, and `MeerkatMachine::release_realm_custody` ends its custody;
+  `PersistentSessionService::try_shutdown` and `shutdown` call it once the
+  shutdown completes.
+
+- `meerkat-core`, `meerkat-runtime`, `meerkat-mob`: an admitted input can
+  carry its original requester, an opaque, qualified principal that the host
+  supplies from the caller it authenticated, never from a request body, a
+  tool argument or model output. Core never interprets it. A host sets it
+  with `StartTurnRuntimeSemantics::with_requester` or `InputHeader.requester`
+  (for a mob member's host human input, `WorkSpec::with_requester`). It is
+  stored with the admitted input and returned on the input's receipt
+  (`InputState::requester`, after a restart too, and after the input's
+  payload retired), on the turn's transcript rows
+  (`TranscriptMessageIdentity.requester`, a `TurnRequester` that is direct
+  or carried) and to tool dispatch (`ToolDispatchContext::requester`, and
+  `ToolDispatchContext::direct_requester` for a requester that asked
+  directly, never one carried across a peer hop). `Input::requester` is the
+  one accessor: a governed input's requester is its work association's, any
+  other input's is the one its host supplied. The run's lifecycle events
+  (`run_started`, `run_completed` and `run_failed`) carry it in their
+  transcript identity too, so a host that shows an agent's events or
+  transcript to other viewers leaves it out there.
+
+- `meerkat-mob`: a host labels the person who sent host human input for the
+  member's model with `SenderLabel` (`WorkSpec::with_sender_label`), such as
+  "Message from" and the person's name. The member's turn receives it as an
+  injected-context row of its own right before the message, on a steer too,
+  whether the steer joins the running turn or runs as its own; ordinary
+  injected context on a steer is still refused. Work that is not host human
+  input refuses a label (`MobError::UnsupportedForMode`). The label is
+  attribution the model reads, never control data.
+
+- `meerkat-rpc`, `meerkat-jobs`, `meerkat-contracts`: host tool callbacks
+  carry the original requester of the run they serve, typed, so a host can
+  refuse a person-scoped tool (one person's mail, documents or accounts) for
+  anyone but its owner. The JSON-RPC `tool/execute` request carries
+  `requester`, the run's `TurnRequester` (its principal, and `carried` when
+  the run's work reached its agent through another actor), when the run has
+  one. A detached callback job records the requester of the run that
+  submitted it (`JobSpec::requester`, set with `JobSpec::with_requester`),
+  and every `callback/job/start` for the job names it
+  (`CallbackJobStartParams.requester`), also after a restart. Only the
+  runtime sets it, from the run's tool dispatch context; a `requester`
+  inside a call's arguments is just an argument. The Python and TypeScript
+  SDKs pass it to a tool handler (`ToolCallRequester`, its
+  `RequesterPrincipal`, and `carried`): in Python to a handler that declares
+  a `requester` parameter, in TypeScript as the handler's optional third
+  argument (`MeerkatClient.parseToolCallRequester` reads one). A malformed
+  requester reads as none, so a person-scoped tool fails closed.
+
+- `meerkat-core`: a trusted tool application ingress can name the original
+  requester of its operation (`ToolApplicationIngress::requester`, none by
+  default; `ToolApplicationControlRequest::requester` reads what it named at
+  submission). An MCP App's action then runs for that requester as a direct
+  requester, never for the requester of the model run whose result the app
+  shows, and an ingress that names an unqualified principal is refused.
+
+- `meerkat-mob`: `MobHandle::wait_member_lifecycle_settled(identity,
+  timeout)` waits until MobMachine holds no lifecycle operation of the
+  member in flight (its spawn, a wake, its retirement, its identity entry's
+  removal or archive, or its held construction): the facts on which the
+  declared apply leaves the identity's declaration to the next apply
+  (`DeclaredEntryOutcome::Deferred`), so a host that waits and declares the
+  identity again is answered on the settled facts. It reads the machine
+  state the actor publishes (`MobMachineState::member_lifecycle_in_flight_for_identity`,
+  the `List` scope) and wakes on each state the actor publishes, with no
+  actor command and no polling, and answers the new
+  `MemberLifecycleSettlement`: `NothingInFlight`, `Settled`, or
+  `StillInFlight` when the timeout ran out.
+
+- `meerkat-session`: `PersistentSessionService::settle_owed_compaction_projections`
+  settles a session's owed compaction projections cold: for each memory
+  batch the runtime's compaction outbox still owes, the batch is finalized
+  and its row acknowledged (which removes the intent from the committed
+  session), with no actor built and no model called. It answers the new
+  `OwedCompactionSettlement` (also re-exported from `meerkat`):
+  `NothingOwed`, `Settled { projections }` (each a
+  `SettledCompactionProjection` with the intent's summary facts and the
+  records the finalization published, in outbox order), or `Live` for a
+  session hosted in the process, whose agent owns the finalization. A
+  session another runtime owner hosts is refused `ServedElsewhere`, and one
+  under a standing provisional tail `Busy`. The builder seam
+  `SessionAgentBuilder::finalize_absent_session_compaction_stages`
+  (provided, fails closed) finalizes the stages; `FactoryAgentBuilder`
+  implements it over its canonical memory store, and a wrapping builder
+  forwards it.
+
+- `meerkat-core`: `MemoryStore::finalize_compaction_batch_reporting`
+  (provided, unsupported by default) finalizes a staged batch as
+  `finalize_compaction_batch` does and answers the records it published, as
+  `enumerate_scoped` then reads them. `meerkat-memory`'s `HnswMemoryStore`
+  implements it.
+
+- `meerkat-mob`: `MobHandle::settle_member_owed_compaction_projections`
+  settles a seated member's current session the same way, under the
+  `Retire` control scope and without an actor command, so a host can read a
+  compaction's discards before it ends the member's session.
+  `MobSessionService::settle_owed_compaction_projections` (provided) is its
+  seam: a service without durable sessions owes nothing, and one with them
+  that does not forward refuses typed.
+
 - `meerkat-core`, `meerkat-mcp`, `meerkat`: a credential continuity witness
   for MCP stdio service secrets. Every write of a service secret draws a
   write identity (`McpServiceSecretWriteId`: 128 bits of OS entropy, never
@@ -2579,6 +2812,35 @@ them.
   credentials current then. A held resume of retained work still causes
   them, within its 30 s budget, and a revocation of a grant in a held
   input's stored controller lineage is still refused as in use.
+
+- `meerkat-runtime`: inputs of different requesters never share a run. The
+  requester joins the batch key the MeerkatMachine keeps for each input: an
+  ungoverned input with a requester is keyed by it (a governed input keeps
+  its binding's key, which already names its requester), so coalescing and
+  staging keep one requester per run, and a live-boundary join takes an
+  input only of the key its run staged. A steer from another requester, or
+  without a requester while the run has one (or the reverse), keeps its
+  place in the Steer lane and runs in a turn of its own. The Steer lane
+  stays first in, first out across requesters: a later steer of the running
+  turn's requester waits behind it too, rather than join the turn, so an
+  earlier steer of another requester is never overtaken. The MeerkatMachine
+  owns that order: `StageForRun`, `JoinLiveBoundaryDurableAppend` and the
+  request-only receipt `ResolveLiveBoundaryContextReceipt` refuse a
+  Steer-lane input while a Steer-lane input admitted before it waits with
+  another key, and the receipt, as the durable join does, takes only an
+  input of the key its run staged, so an input with a requester never
+  enters a run that staged nothing (a direct service turn). A recovered row
+  keeps its requester's key, and a run resumed after a restart stages its
+  batch under it. The TLC lane runs a new audit of the rule and the order
+  (`specs/machines/meerkat_machine/requester_batch_audit.sh`).
+  So content from another party never enters a person's run: a
+  requester-less input (a peer message, request or response, a flow step,
+  an external event, a runtime continuation such as a detached job's
+  completion) that arrives while a person's run is going is handled in a
+  follow-up run of its own. The transcript keeps it, so the model still
+  sees it in context; only the per-person mechanics are absent in that run.
+  Operation inputs, which carry no content and are consumed on admission,
+  are unchanged.
 
 - `rkat realm delete` and `rkat realm prune` take the realm's admission fence
   first, without waiting and before the lease check, and hold it through the
@@ -3052,6 +3314,101 @@ them.
   token from its cache, for an operator token kept in the credential store
   and for the device sign-in alike.
 
+- `meerkat-mob-mcp`, `meerkat-runtime`: a GPT Live voice request that the
+  voice model had turned into a client delegation just before its channel
+  closed (Turbo S S107), or that was still waiting behind a running
+  delegation when the user ended the call (a channel whose own member
+  executes its delegations runs one at a time), now still runs after the
+  close. The close cancelled every admitted delegation whose worker had not
+  started as work that never started, so the spoken request was neither
+  executed nor recorded, and nothing said so. A delegation admitted before
+  the close now starts after it once a worker slot frees, on its operation's
+  own closed channel: the generated `ReconcileLiveDelegationTranscript*`,
+  `AuthorizeLiveDelegationWorkerStart`, `AuthorizeLiveConsequentialEffect`,
+  `RequeueUnstartedLiveDelegation` and steer (`AuthorizeLiveDelegationSteer`,
+  `ResolveLiveDelegationSteerDelivery`, `ReconcileLiveDelegationSteer*`)
+  guards also admit a channel that carries no runtime, fence or generation
+  binding at all, on the exact operation join and while the session is
+  still registered, as `ResolveLiveDelegationWorkerStart` now does too, and
+  a worker started that way takes no worker slot of the closed channel. The
+  words the user spoke to continue the request while it waited join its
+  task as on an open channel; a held continuation that cannot join retires
+  the start instead of running the request without it, recorded as failed.
+  The worker keeps the member-turn reasoning preference the channel sealed:
+  the machine copies it per operation at admission, so it outlives the
+  channel's own. It settles like a worker that was running at the close: an
+  owned fork's result merges into the source member exactly once, and an
+  existing member keeps the request, its executor input and its answer in
+  its own session. A blocked hand-back on the unbound channel settles
+  Cancelled in the machine, as do blocked work the close finds, a hand-back
+  the close finds mid-realization, and a blocked hand-back recorded while
+  the channel was still bound once it is reconciled after the close: a
+  requeue needs the channel's binding, so nothing could serve it again. A
+  delegation the channel loop had not claimed yet when a retirement
+  cancelled the loop is cancelled at the close in the machine instead of
+  staying admitted with no schedule (it cannot run: its control payload
+  never arrived). A delegation that reaches Meerkat after the close began
+  is refused admission: the close first closes the channel's delegation
+  intake in the machine (`CloseLiveDelegationIntake`), which
+  `AdmitLiveDelegation` and `AdmitLiveInteractionDelegation` now refuse,
+  and one admitted just before whose custody lands after the close is
+  cancelled. A start deferred after its spoken request was committed (a
+  busy source at the fork cut, or a WorkGraph claim refusal) now keeps that
+  commit for its retry; before, the retry committed the request again, the
+  session refused, and the request was retired. A start whose not-started
+  report the machine refuses is retired instead of reported again for good.
+  Affects 0.8.41 through 0.9.10.
+
+- `meerkat-mob-mcp`, `meerkat-runtime`: restart recovery of a GPT Live
+  delegation whose worker finished its turn no longer stops with recovery
+  debt when that turn was recorded as a blocked hand-back, or as Failed or
+  Cancelled because its work item failed or was cancelled. Restart recovery
+  passes the Mob's durable terminal, a completed turn, and the generated
+  `ReconcileRevokedLiveDelegationWorkerAfterRestart` refused it against the
+  recorded terminal, so the delegation was reported Broken and never
+  settled: a blocked hand-back stayed Blocked and its work item open. The
+  reconciliation now accepts a completed turn against a recorded Blocked,
+  Failed or Cancelled terminal, and the recorded terminal decides the
+  settlement, as the close settles it: a blocked hand-back is cancelled,
+  its work item too, and a failed or cancelled one keeps its state, each
+  late and never result-eligible. Voice work items now name their
+  operation in an evidence reference (`live_delegation_operation`), which
+  restart recovery reads to find the item; an item created before this
+  release names none, so recovery leaves it open. Affects 0.8.41 through
+  0.9.10.
+
+- `meerkat-mob-mcp`: words a GPT Live user spoke to continue a delegated
+  request while it waited for its worker are recorded delivered only once a
+  worker started with them. A start folded them into the worker's task
+  under generated steer authority and recorded them delivered before it
+  started; when that start met a busy source member at the fork cut, the
+  retry was refused and the request retired (the deferred-start fix above),
+  with the words recorded delivered although no worker had run with them.
+  A start that meets a busy source now keeps the folded words for its retry,
+  on an open channel as after the channel closed, and their delivery is
+  recorded once a worker started with them, or as not delivered when the
+  request is retired. Affects 0.8.50 through 0.9.10.
+
+- `meerkat`: a governed realm closed and reopened in one process (its
+  session service's `try_shutdown`, then a new open of the same realm) could
+  open with its governed work and configured MCP attachments unavailable
+  ("governed realm's grant owner did not restore"), and an administrative
+  restore of its grant owner could be refused, while a task of the closed
+  realm still held the realm's grant owner. The realm's terminal shutdown
+  now ends the custody of the grant owner its open restored, so the reopen
+  restores it at once.
+
+- `meerkat-mob`: a rotation of a member onto a fresh session (a
+  `rotate_member`: a reset, or a deleted identity created anew) settles the
+  session it leaves before its terminal step. A member that compacted inside
+  a run its stop committed as interrupted owed that compaction's memory
+  projection until its next wake, and a lazy start does not wake it for
+  that: rotated while dormant, its batch stayed staged and invisible and its
+  outbox row pending, for good. Now the batch is finalized into the old
+  session's memory and the row acknowledged. A settle that fails leaves
+  them owed, as before, and never fails the rotation.
+
+
 ### Security
 
 - `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
@@ -3388,6 +3745,31 @@ them.
   family only). Take the server gates out, or the servers they gate, before
   a rollback.
 
+- Stored input rows and transcript rows write the requester as one more
+  optional field. An older Core that reads them drops it, which leaves the
+  input and its turn without a requester, so nothing then acts for that
+  person. A keyed retry, under an older Core, of an input this release
+  admitted with a requester is refused as an idempotency conflict
+  (`InputIdempotencyConflict`), not deduplicated: the input's replay
+  identity includes the requester, and an older Core computes it without
+  one.
+
+- A stored detached job writes its requester as one more optional field. An
+  older Core that reads the job drops it, so the job's later attempts start
+  with no requester and a person-scoped tool refuses them. An older Core that
+  writes the job (its claim, a heartbeat, its completion) removes the field
+  for good: after upgrading again, the job's attempts still name no
+  requester, and a replay of the submitting call (the same submission key,
+  now with its requester) is refused with
+  `DetachedJobError::SubmissionConflict` instead of deduplicating.
+
+- A host that supplies its own `DetachedJobStore` persists
+  `JobSpec::requester`, treats a submission under an admitted key with
+  another requester (or none where the job has one, or the reverse) as a
+  conflict, and keeps the field unchanged through compare-and-swap, as the
+  bundled stores do; `requester: None` keeps a struct literal compiling, not
+  a store correct.
+
 - Upgrade every process that launches from a realm's credential store
   before setting MCP service-secret values with this version: a rollback to
   0.9.10 or earlier reads a value stored by this version as not stored and
@@ -3486,6 +3868,33 @@ them.
   endpoint or auth-binding switch. `rkat` and the JSON-RPC, REST and MCP
   servers run `PersistentSessionService`, so their sessions follow the
   switch.
+
+- `meerkat-mob-mcp`: when the machine refuses the report that a GPT Live
+  delegation's worker did not start, the start is retired without a
+  narration. The machine refuses that report only when the session or the
+  channel is gone or its binding is stale.
+
+- The original requester does not cross the supervisor bridge: a console
+  send to a member hosted on another runtime acts for no person there (its
+  runs have no requester). The mob refuses a requester on any delivery that
+  cannot carry it, so none is dropped silently.
+
+- `meerkat-mob`: a rotation a host starts directly on the mob
+  (`MobHandle::rotate_member`) finalizes a dormant member's owed compaction
+  projection, but Meerkat Meta does not distill its discards into agent
+  memory; use Meta's verbs (delete, reset, a role move, the roster's
+  unlisting) to have them distilled.
+
+- `meerkat-mob`: a worker's `respawn` and a mob's destroy end a member's
+  session for good without settling it: a dormant worker that owes a
+  compaction projection keeps its batch staged and its outbox row pending,
+  as before.
+
+- Meerkat Meta keeps the compaction harvest a step owes the session it
+  ends (the settled batch, or the fallback read of the session's memory)
+  in process until the retirement's side effects run: a restart in
+  between leaves the records searchable in the old session's memory but
+  never distilled.
 
 
 ## [0.9.10] - 2026-11-04

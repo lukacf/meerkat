@@ -76,6 +76,48 @@ cannot be chosen per fork. See
 [Fork instruction policy](/reference/configuration#fork-instruction-policy)
 for what each value does and what `reactivate_inherited` trusts.
 
+## Durable decisions
+
+`MobHandle` calls the [durable decision methods](/api/rpc#durable-decision-methods)
+of the stdio gateway: `decisionsList({kind, phase, approverId, requester,
+after, limit})`, `decisionsGet(decisionId, {includeRequest})`,
+`decisionsRendering(decisionId, {maxPartBytes})`,
+`decisionsPresent(decisionId, presentation)`, `decisionsWithdraw(decisionId)`
+and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
+attestation})`. Each resolves to the gateway's result object.
+
+```typescript
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .persistentState("./state")
+  .accessControl("config/access.toml")
+  .decisionIngresses([{ ingress: "chat", attests: "person", maxClockSkewMs: 5000 }])
+  .build();
+
+rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
+const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
+await mob.decisionsDecide(decisionId, {
+  approve: true,
+  presentedDigest: subjectDigest,
+  attestation: {
+    ingress: "chat",
+    subject: "U123",
+    scope: "chat-session-1",
+    eventRef: "chat:event-1",
+    observedAtMs: Date.now(),
+  },
+});
+```
+
+`decisionIngresses` declares the ingresses as `runtime_options.decisions`.
+`MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.
+The gateway writes the notices before a list answers; a handler may still be
+running after `decisionsList` resolves. Without an `attestation` the stdio
+operator decides, eligible only for a decision presented to it on this
+connection. A decide called while the SDK serves a host tool callback rejects
+with `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`)
+and sends nothing: an agent's tool call never decides.
+
 ## Member restore
 
 Every roster identity is a member of the gateway's mob from ready, and is
@@ -299,7 +341,35 @@ inside the 120-second public contract (125-second host and 130-second wire
 margins). Reconnect offers the exact committed attempt, fence, lease,
 checkpoint, and runner handle. Reopening never mints a fence; only a
 machine-authorized claim or retry does. Credentials are resolved per attempt
-and never serialized into durable job state.
+and never serialized into durable job state. `ctx.requester` is the requester
+of the run that submitted the job (see below), recorded with the job, or
+`undefined` when that run had none.
+
+## Who a tool call serves
+
+A tool handler's optional second argument is the original requester of the
+run the call serves (`ToolCallRequester`): its `principal` (`kind`, `id`, and
+`trustDomainId` when it is qualified) and `carried`, true when the run's work
+reached the agent through another actor, such as a peer hop. A person the
+Meta console authenticated appears with `trustDomainId` `oidc-issuer:`
+followed by the token's issuer; a run without a requester
+passes `undefined`. The runtime sets it, never the arguments, so a tool that
+acts in one person's name can refuse everyone else:
+
+```typescript
+draft.registerTool("read_mail", async (args, requester) => {
+  if (
+    requester === undefined ||
+    requester.carried ||
+    requester.principal.kind !== "human" ||
+    requester.principal.id !== OWNER_SUB ||
+    requester.principal.trustDomainId !== OWNER_DOMAIN
+  ) {
+    throw new Error("this mailbox serves its owner only");
+  }
+  return readMail(args);
+});
+```
 
 For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and delete them with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context.
 

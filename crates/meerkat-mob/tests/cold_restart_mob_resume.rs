@@ -13536,7 +13536,9 @@ async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
 /// `HostRecovery` staged for the member's session: once the member left the
 /// roster, the host can no longer release the hold through the mob, so the
 /// retire drops it, as it drops a mob Stop's `MobStop`, and a later
-/// registration of that session id is not held for it. RED before: the
+/// registration of that session id is not held for it. A settle and a
+/// release of the retired member then both answer `MemberNotFound`, the
+/// answer a host's Recover flow counts as that member's end. RED before: the
 /// retire dropped only `MobStop`.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
@@ -13589,6 +13591,28 @@ async fn a_retire_drops_the_departed_members_host_recovery_hold() {
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "no model request"
+    );
+    let settle = held.handle.settle_member_retained_run(&held.worker).await;
+    assert!(
+        matches!(
+            &settle,
+            Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &held.worker
+        ),
+        "a settle of the retired member answers MemberNotFound, not {settle:?}"
+    );
+    let release = held
+        .handle
+        .release_member_run_starts(
+            &held.worker,
+            meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        )
+        .await;
+    assert!(
+        matches!(
+            &release,
+            Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &held.worker
+        ),
+        "a release of the retired member's hold answers MemberNotFound, not {release:?}"
     );
     let _ = held.handle.shutdown().await;
 }
@@ -14644,4 +14668,509 @@ async fn a_revived_member_finalizes_a_committed_intent_before_its_binding() {
     )
     .await;
     let _ = handle.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A dormant member's owed compaction projection, settled cold
+// ---------------------------------------------------------------------------
+
+/// The texts of the session's published memory records, in durable-id
+/// order, read from the memory store's database.
+#[cfg(feature = "test-support")]
+fn published_memory_texts(
+    paths: &Paths,
+    session_id: &meerkat_core::types::SessionId,
+) -> Vec<String> {
+    let db = paths
+        .runtime_root
+        .join("factory-store")
+        .join("memory")
+        .join("memory.sqlite3");
+    let connection =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open the memory store's database");
+    let mut statement = connection
+        .prepare(
+            "SELECT t.content FROM memory_text t \
+             JOIN memory_metadata m ON m.point_id = t.point_id \
+             WHERE m.session_id = ?1 ORDER BY m.point_id",
+        )
+        .expect("prepare the published texts query");
+    statement
+        .query_map([session_id.to_string()], |row| row.get::<_, Vec<u8>>(0))
+        .expect("query the published texts")
+        .map(|row| String::from_utf8(row.expect("read a published text")).expect("utf-8 text"))
+        .collect()
+}
+
+/// What the second process start holds: the member `w-1` dormant over the
+/// session whose stopped run committed a compaction's intent, the outbox
+/// owing that projection, and its memory stage staged.
+#[cfg(feature = "test-support")]
+struct DormantOwedProjection {
+    run: CompactedMemberRun,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    client: Arc<HoldingToolLoopClient>,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    handle: MobHandle,
+    /// The projections the outbox owes after the start.
+    owed: Vec<meerkat_core::CompactionProjectionId>,
+}
+
+#[cfg(feature = "test-support")]
+impl DormantOwedProjection {
+    /// No model request reached the second start's client.
+    fn assert_no_model_request(&self, context: &str) {
+        assert_eq!(
+            self.client
+                .loop_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                + self.client.other_requests(),
+            0,
+            "[{context}] no model request was made"
+        );
+    }
+
+    /// The member is still seated Dormant and no actor hosts its session.
+    async fn assert_still_dormant(&self, context: &str) {
+        use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+        assert_eq!(
+            self.handle
+                .member_materialization_for_test(&AgentIdentity::from("w-1")),
+            Some(MemberMaterializationPhase::Dormant),
+            "[{context}] the member stays Dormant"
+        );
+        assert!(
+            !self
+                .service
+                .live_session_actor_registered(&self.run.w1_sid)
+                .await,
+            "[{context}] no actor hosts the member's session"
+        );
+    }
+}
+
+/// The first process start compacts inside a run of member `w-1` (durable
+/// memory, a compaction at every boundary) and its shutdown stops the run
+/// (`QueuedInputsOnShutdown::Stop`), which commits the run's tail as
+/// interrupted: the outbox then owes the compaction's memory projection and
+/// its stage stays staged. The second start runs over the SQLite runtime
+/// store, whose start is lazy: a pending projection is no recovery work, so
+/// the start (and the lift that resumes the mob) leaves the member dormant,
+/// and the projection waits for a wake.
+#[cfg(feature = "test-support")]
+async fn start_lazily_over_an_owed_projection(paths: &Paths) -> DormantOwedProjection {
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the durable runtime store"),
+    );
+    let run = stop_over_a_member_run_that_compacted(
+        paths,
+        runtime_store.clone(),
+        meerkat_mob::QueuedInputsOnShutdown::Stop,
+    )
+    .await;
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        None,
+        "the stop committed the run's tail as interrupted"
+    );
+
+    let client = Arc::new(HoldingToolLoopClient::new(0));
+    let (service, _store) = memory_compacting_service(paths, runtime_store.clone(), client.clone());
+    let handle = start_again(paths, service.clone(), client.clone())
+        .await
+        .unwrap_or_else(|error| panic!("the lazy start: {error}"));
+    handle.resume().await.expect("the mob resumes");
+    // A start that woke the member would have finalized its projection by
+    // now; the lazy start leaves it owed.
+    sleep(Duration::from_millis(500)).await;
+    let owed = runtime_store
+        .load_pending_compaction_projections(&run.runtime_id)
+        .await
+        .expect("read the compaction outbox")
+        .into_iter()
+        .map(|intent| intent.projection)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owed.len(),
+        1,
+        "the stopped run's commit owes one projection: {owed:?}"
+    );
+    for projection in &owed {
+        assert_eq!(
+            compaction_stage_state(paths, projection).as_deref(),
+            Some("staged"),
+            "the owed projection's memory stage is staged"
+        );
+        assert_eq!(
+            compaction_outbox_states(paths, projection),
+            vec!["pending".to_string()],
+            "the outbox row is pending"
+        );
+    }
+    let start = DormantOwedProjection {
+        run,
+        runtime_store,
+        client,
+        service,
+        handle,
+        owed,
+    };
+    start.assert_still_dormant("lazy start").await;
+    start.assert_no_model_request("lazy start");
+    start
+}
+
+/// The owed projection of `start` is settled: its outbox row is finalized
+/// and nothing is pending, its stage is finalized, and the session's memory
+/// holds each finalized stage's entries exactly once.
+#[cfg(feature = "test-support")]
+async fn assert_the_owed_projection_settled(
+    paths: &Paths,
+    start: &DormantOwedProjection,
+    context: &str,
+) {
+    assert!(
+        start
+            .runtime_store
+            .load_pending_compaction_projections(&start.run.runtime_id)
+            .await
+            .expect("read the compaction outbox")
+            .is_empty(),
+        "[{context}] the outbox owes nothing"
+    );
+    for projection in &start.owed {
+        assert_eq!(
+            compaction_outbox_states(paths, projection),
+            vec!["finalized".to_string()],
+            "[{context}] the owed projection's outbox row is finalized"
+        );
+        assert_eq!(
+            compaction_stage_state(paths, projection).as_deref(),
+            Some("finalized"),
+            "[{context}] the owed projection's memory stage is finalized"
+        );
+    }
+    let (records, published) = published_compaction_entries(paths, &start.run.w1_sid);
+    assert!(
+        published > 0,
+        "[{context}] the finalized stage published entries"
+    );
+    assert_eq!(
+        records, published,
+        "[{context}] every finalized stage's entries are in the session's memory exactly once"
+    );
+}
+
+/// A dormant member's owed projection settles cold through the mob: the
+/// settle finalizes the batch and acknowledges the outbox row, and answers
+/// the batch, whose entries are the records the session's memory now holds
+/// for it. The member stays dormant and no model is asked. RED before: no
+/// verb finalized the projection; the outbox kept owing it.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dormant_members_owed_compaction_projection_settles_cold() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    let before = published_memory_texts(&paths, &start.run.w1_sid);
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&AgentIdentity::from("w-1"))
+        .await
+        .expect("the settle answers");
+    let projections = match settlement {
+        meerkat_session::OwedCompactionSettlement::Settled { projections } => projections,
+        other => panic!("the dormant member's owed projection settles: {other:?}"),
+    };
+    assert_eq!(
+        projections
+            .iter()
+            .map(|settled| settled.projection.clone())
+            .collect::<Vec<_>>(),
+        start.owed,
+        "the settle answers the owed projections, in outbox order"
+    );
+    for settled in &projections {
+        assert!(
+            settled.messages_before > settled.messages_after,
+            "the settled projection carries its compaction's summary facts"
+        );
+    }
+    assert_the_owed_projection_settled(&paths, &start, "settle").await;
+    let after = published_memory_texts(&paths, &start.run.w1_sid);
+    let mut published_now = after[before.len()..].to_vec();
+    let mut answered = projections
+        .iter()
+        .flat_map(|settled| settled.entries.iter().map(|entry| entry.content.clone()))
+        .collect::<Vec<_>>();
+    assert!(!answered.is_empty(), "the settled batch holds entries");
+    published_now.sort();
+    answered.sort();
+    assert_eq!(
+        answered, published_now,
+        "the answered batch is exactly the records the settle published"
+    );
+    start.assert_still_dormant("settle").await;
+    start.assert_no_model_request("settle");
+    let _ = start.handle.shutdown().await;
+}
+
+/// The design row: a rotation of the dormant member onto a fresh session
+/// settles the session it leaves, before the rotation's terminal step. The
+/// old session's outbox owes nothing, its stage is finalized, its entries
+/// are published once, the old session was never registered, and no model
+/// was asked. RED before: after the rotation the outbox still owed the
+/// projection and its stage stayed staged, forever.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_of_a_dormant_member_settles_its_owed_compaction_projection() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("w-1"));
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    let fresh = tokio::time::timeout(Duration::from_mins(1), start.handle.rotate_member(spec))
+        .await
+        .expect("the rotation answers")
+        .expect("the rotation of the dormant member succeeds");
+    assert_ne!(
+        fresh, start.run.w1_sid,
+        "the rotation seats a fresh session"
+    );
+
+    assert_the_owed_projection_settled(&paths, &start, "rotation").await;
+    assert!(
+        !start
+            .service
+            .live_session_actor_registered(&start.run.w1_sid)
+            .await,
+        "the old session was never registered"
+    );
+    start.assert_no_model_request("rotation");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A second settle of a settled session owes nothing and changes nothing:
+/// the outbox row, the stage and the published records stay as the first
+/// settle left them.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_settle_of_an_owed_compaction_projection_owes_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    let identity = AgentIdentity::from("w-1");
+
+    let first = start
+        .handle
+        .settle_member_owed_compaction_projections(&identity)
+        .await
+        .expect("the first settle answers");
+    assert!(
+        matches!(
+            first,
+            meerkat_session::OwedCompactionSettlement::Settled { .. }
+        ),
+        "the first settle settles the owed projection: {first:?}"
+    );
+    let published = published_memory_texts(&paths, &start.run.w1_sid);
+    let entries = published_compaction_entries(&paths, &start.run.w1_sid);
+
+    let second = start
+        .handle
+        .settle_member_owed_compaction_projections(&identity)
+        .await
+        .expect("the second settle answers");
+    assert!(
+        matches!(
+            second,
+            meerkat_session::OwedCompactionSettlement::NothingOwed
+        ),
+        "the second settle owes nothing: {second:?}"
+    );
+    assert_the_owed_projection_settled(&paths, &start, "second settle").await;
+    assert_eq!(
+        published_memory_texts(&paths, &start.run.w1_sid),
+        published,
+        "the second settle published nothing"
+    );
+    assert_eq!(
+        published_compaction_entries(&paths, &start.run.w1_sid),
+        entries,
+        "the second settle changed no stage"
+    );
+    start.assert_still_dormant("second settle").await;
+    start.assert_no_model_request("second settle");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A session this process hosts answers `Live`: its live agent owns the
+/// finalization, and the settle writes nothing. Here the member's wake
+/// finalized the owed projection at its startup reconciliation; the settle
+/// of the live session then leaves the outbox, the stage and the published
+/// records exactly as the wake left them.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_session_answers_live_to_the_owed_compaction_settle() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    let identity = AgentIdentity::from("w-1");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        start.handle.ensure_member_live(&identity),
+    )
+    .await
+    .expect("the wake answers")
+    .expect("the wake materializes the member");
+    assert!(
+        start
+            .service
+            .live_session_actor_registered(&start.run.w1_sid)
+            .await,
+        "an actor hosts the member's session"
+    );
+    let outbox = start
+        .owed
+        .iter()
+        .map(|projection| compaction_outbox_states(&paths, projection))
+        .collect::<Vec<_>>();
+    let stages = compaction_stage_states(&paths, &start.run.w1_sid);
+    let published = published_memory_texts(&paths, &start.run.w1_sid);
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&identity)
+        .await
+        .expect("the settle answers");
+    assert!(
+        matches!(settlement, meerkat_session::OwedCompactionSettlement::Live),
+        "a registered session answers Live: {settlement:?}"
+    );
+    assert_eq!(
+        start
+            .owed
+            .iter()
+            .map(|projection| compaction_outbox_states(&paths, projection))
+            .collect::<Vec<_>>(),
+        outbox,
+        "the settle changed no outbox row"
+    );
+    assert_eq!(
+        compaction_stage_states(&paths, &start.run.w1_sid),
+        stages,
+        "the settle changed no stage"
+    );
+    assert_eq!(
+        published_memory_texts(&paths, &start.run.w1_sid),
+        published,
+        "the settle published nothing"
+    );
+    let _ = start.handle.shutdown().await;
+}
+
+/// A settle that meets a stage an earlier finalization already published,
+/// without reaching its acknowledgement (a crash between the two, a scope
+/// index rebuild that failed after the commit, a cancelled settle),
+/// acknowledges the owed row and answers the projection with no entries,
+/// though the session's memory holds the published discards: a host that
+/// harvests the answered batch reads them from the session's memory
+/// instead.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_after_an_unacknowledged_finalization_answers_no_entries() {
+    use meerkat_core::memory::MemoryStore as _;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    // An earlier finalization published the stage but never acknowledged
+    // its outbox row.
+    let memory_dir = paths.runtime_root.join("factory-store").join("memory");
+    let store = meerkat::HnswMemoryStore::open(&memory_dir).expect("open the memory store");
+    for projection in &start.owed {
+        store
+            .finalize_compaction_batch(projection)
+            .await
+            .expect("an earlier finalization publishes the stage");
+    }
+    drop(store);
+    let (published, _) = published_compaction_entries(&paths, &start.run.w1_sid);
+    assert!(
+        published > 0,
+        "the earlier finalization published the discards"
+    );
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&AgentIdentity::from("w-1"))
+        .await
+        .expect("the settle answers");
+    let projections = match settlement {
+        meerkat_session::OwedCompactionSettlement::Settled { projections } => projections,
+        other => panic!("the settle acknowledges the owed rows: {other:?}"),
+    };
+    assert_the_owed_projection_settled(
+        &paths,
+        &start,
+        "settle after an unacknowledged finalization",
+    )
+    .await;
+    assert_eq!(
+        projections
+            .iter()
+            .map(|settled| settled.projection.clone())
+            .collect::<Vec<_>>(),
+        start.owed,
+        "the settle answers the owed projections"
+    );
+    let answered: usize = projections
+        .iter()
+        .map(|settled| settled.entries.len())
+        .sum();
+    assert_eq!(
+        answered, 0,
+        "the settle answers none of the discards an earlier finalization published"
+    );
+    start.assert_no_model_request("settle after an unacknowledged finalization");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A plain retirement of the dormant member (no rotation) does not settle
+/// it cold: the session can be resumed, and the resumed member's wake owns
+/// the finalization and its harvest, which a cold settle would preempt by
+/// publishing the batch and dropping it. The outbox row stays pending and
+/// the stage staged.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_retire_of_a_dormant_member_leaves_its_owed_projection_owed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+
+    tokio::time::timeout(
+        Duration::from_mins(1),
+        start.handle.retire(AgentIdentity::from("w-1")),
+    )
+    .await
+    .expect("the retirement answers")
+    .expect("the retirement of the dormant member succeeds");
+
+    for projection in &start.owed {
+        assert_eq!(
+            compaction_outbox_states(&paths, projection),
+            vec!["pending".to_string()],
+            "the plain retirement leaves the outbox row pending"
+        );
+        assert_eq!(
+            compaction_stage_state(&paths, projection).as_deref(),
+            Some("staged"),
+            "the plain retirement leaves the stage staged"
+        );
+    }
+    start.assert_no_model_request("plain retire");
+    let _ = start.handle.shutdown().await;
 }

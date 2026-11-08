@@ -2035,6 +2035,22 @@ pub enum MobError {
         input_id: meerkat_core::InputId,
     },
 
+    /// An input of the member reads no committed terminal yet, so the
+    /// operation that reads it answered nothing (the member runtime's
+    /// `RuntimeDriverError::InputTerminalNotYetReadable`). A host's settle of
+    /// the member's retained run answers it when the member's registration no
+    /// longer keeps the run but an input bound to the run reads no terminal,
+    /// for example when the read of that input's stored row failed. Retryable:
+    /// the host keeps its hold and settles again.
+    #[error(
+        "the terminal of input {input_id} of member '{member_id}' is not readable yet: {reason}"
+    )]
+    MemberInputTerminalNotYetReadable {
+        member_id: AgentIdentity,
+        input_id: meerkat_core::InputId,
+        reason: String,
+    },
+
     /// The mob's startup could not restore `restore` for member `member_id`'s
     /// session `session_id` (for example while another runtime owner on the
     /// realm hosts the session), so it deferred that restore instead of
@@ -3776,7 +3792,9 @@ impl MobError {
             | Self::FlowTurnTimedOut
             // The input aged out before it ran: nothing was delivered, and
             // resubmitting it is correct.
-            | Self::MemberInputRequeueExpired { .. } => MobFailureClass::Transport,
+            | Self::MemberInputRequeueExpired { .. }
+            // A read the store did not answer yet: asking again is correct.
+            | Self::MemberInputTerminalNotYetReadable { .. } => MobFailureClass::Transport,
             Self::Internal(_)
             | Self::WorkInputCompletionUnavailable { .. }
             | Self::ExternalMemberCleanupUncertain { .. }

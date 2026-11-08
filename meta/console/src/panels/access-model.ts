@@ -20,7 +20,11 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
   { id: "tools", label: "Tools", actions: ["agent.tool_grants.manage"] },
-  { id: "approvals", label: "Approvals", actions: ["gating.view", "gating.decide"] },
+  {
+    id: "approvals",
+    label: "Approvals",
+    actions: ["gating.view", "gating.decide", "decisions.view", "decisions.decide", "decisions.admin"],
+  },
   {
     id: "memory",
     label: "Memory",
@@ -39,7 +43,7 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   {
     id: "admin",
     label: "Admin",
-    actions: ["access.admin", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
+    actions: ["access.admin", "audit.view", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
   },
 ];
 

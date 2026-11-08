@@ -2350,6 +2350,32 @@ pub trait MobSessionService:
             .map(|()| ColdStartTailSettlement::Settled)
     }
 
+    /// Settle `session_id`'s owed compaction projections cold
+    /// (`PersistentSessionService::settle_owed_compaction_projections`):
+    /// finalize each memory batch the runtime's compaction outbox still owes
+    /// for a session no live agent of this service hosts, acknowledge its
+    /// row, and answer the finalized batches. A session this service hosts
+    /// answers [`meerkat_session::OwedCompactionSettlement::Live`]. It
+    /// registers nothing and wakes nothing.
+    ///
+    /// The default: a service that keeps no durable sessions has no outbox
+    /// and owes nothing. One that keeps durable sessions without forwarding
+    /// this refuses it typed, so a wrapper never drops a settle quietly: a
+    /// wrapper around a persistent service forwards it.
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+        if !self.supports_persistent_sessions() {
+            return Ok(meerkat_session::OwedCompactionSettlement::NothingOwed);
+        }
+        Err(SessionError::Unsupported(format!(
+            "session {session_id}: this session service keeps durable sessions but does not \
+             forward the owed compaction settle \
+             (MobSessionService::settle_owed_compaction_projections)"
+        )))
+    }
+
     /// Load the persisted session METADATA view when available.
     ///
     /// Metadata-only sibling of [`Self::load_persisted_session`] (meta
@@ -3925,6 +3951,18 @@ where
                 _ => ColdStartTailSettlement::Settled,
             },
         )
+    }
+
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+        // Fully qualified: the inherent method and this trait method share a
+        // name, and the inherent one owns the settle.
+        meerkat_session::PersistentSessionService::<B>::settle_owed_compaction_projections(
+            self, session_id,
+        )
+        .await
     }
 
     async fn materialize_session_resume_verdict(

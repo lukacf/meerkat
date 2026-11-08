@@ -21938,7 +21938,7 @@ async fn wedged_durability_degradation_interrupt_is_process_owned_and_deduplicat
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_effect() {
+async fn cancel_after_boundary_on_a_running_attached_runtime_calls_only_the_live_handle() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
         live_boundary_cancel_calls: Arc<AtomicUsize>,
@@ -22077,7 +22077,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
     assert_eq!(
         boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "in-loop boundary cancel should remain queued until apply returns"
+        "nothing reaches the executor-wide cancel while the run is in flight"
     );
 
     allow_finish.notify_waiters();
@@ -22090,9 +22090,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
         .expect("queued work should complete after its apply is released")
     {
         CompletionOutcome::CompletedWithoutResult => {}
-        other => panic!(
-            "expected attached queued prompt to complete normally before queued boundary cancel drains, got {other:?}"
-        ),
+        other => panic!("expected the attached steered prompt to complete normally, got {other:?}"),
     }
 
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -22104,7 +22102,6 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
             if snapshot.control.phase == RuntimeState::Attached
                 && snapshot.control.current_run_id.is_none()
                 && snapshot.inputs.current_run_id.is_none()
-                && boundary_cancel_calls.load(Ordering::SeqCst) == 1
             {
                 break;
             }
@@ -22112,12 +22109,16 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
         }
     })
     .await
-    .expect("attached runtime should eventually drain the queued boundary cancel");
+    .expect("the attached runtime returns to Attached after the run");
     assert_eq!(
         apply_calls.load(Ordering::SeqCst),
         1,
-        "queued boundary cancel should not replay the already-running attached steered turn"
+        "the boundary cancel does not replay the already-running attached steered turn"
     );
+
+    // The next input's apply runs without waiting for a release.
+    allow_finish.notify_one();
+    expect_no_executor_wide_boundary_cancel(&adapter, &session_id, &boundary_cancel_calls).await;
 }
 
 /// Cancellation, retry, and ownership pins for the machine-owned stop /
@@ -25832,14 +25833,21 @@ async fn start_boundary_cancel_callback_race(
     .await
 }
 
-async fn wait_for_queued_boundary_cancel(calls: &AtomicUsize) {
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while calls.load(Ordering::SeqCst) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the exact queued boundary-cancel effect should be applied");
+/// A boundary cancel taken while a run is current reaches that run only
+/// through the exact-run boundary handle. Once the session has served a next
+/// input (the loop realizes its queued effects between runs, before it takes
+/// that input), nothing has reached the executor-wide cancel.
+async fn expect_no_executor_wide_boundary_cancel(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    executor_wide_calls: &AtomicUsize,
+) {
+    expect_the_session_serves_a_next_input(adapter, session_id, "after the cancelled run").await;
+    assert_eq!(
+        executor_wide_calls.load(Ordering::SeqCst),
+        0,
+        "a run-bound boundary cancel never reaches the executor-wide cancel"
+    );
 }
 
 /// #1471: an exact-run boundary cancel records the request in the run's
@@ -26680,10 +26688,11 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
 
 /// The live callback runs without the session mutation gate, so unrelated
 /// machine inputs may commit while it is in flight. That state movement is
-/// not evidence that this cancel reached a boundary: the exact dispatch must
-/// still be queued when its generation remains current.
+/// not evidence that this cancel reached a boundary: the exact dispatch still
+/// completes, once, through the live handle, and nothing reaches the
+/// executor-wide cancel after the run.
 #[tokio::test]
-async fn cancel_after_boundary_unrelated_advance_during_callback_still_enqueues_exact_effect() {
+async fn cancel_after_boundary_unrelated_advance_during_callback_still_dispatches_once() {
     let mut race = start_boundary_cancel_callback_race(false).await;
     let cancel_adapter = Arc::clone(&race.adapter);
     let cancel_session = race.session_id.clone();
@@ -26715,7 +26724,7 @@ async fn cancel_after_boundary_unrelated_advance_during_callback_still_enqueues_
         .await
         .expect("cancel should return after callback release")
         .expect("cancel task should not panic")
-        .expect("successful live callback should commit its queued effect");
+        .expect("a successful live callback completes the dispatch");
     assert_eq!(
         race.handle_calls.load(Ordering::SeqCst),
         1,
@@ -26727,7 +26736,12 @@ async fn cancel_after_boundary_unrelated_advance_during_callback_still_enqueues_
         .expect("race should expose its first-apply release")
         .send(())
         .expect("first apply should still be blocked");
-    wait_for_queued_boundary_cancel(&race.queued_effect_calls).await;
+    expect_no_executor_wide_boundary_cancel(
+        &race.adapter,
+        &race.session_id,
+        &race.queued_effect_calls,
+    )
+    .await;
 }
 
 /// A callback failure must compensate only its exact pending dispatch. An
@@ -26786,7 +26800,12 @@ async fn cancel_after_boundary_callback_failure_after_unrelated_advance_rearms_r
         .expect("race should expose its first-apply release")
         .send(())
         .expect("first apply should still be blocked");
-    wait_for_queued_boundary_cancel(&race.queued_effect_calls).await;
+    expect_no_executor_wide_boundary_cancel(
+        &race.adapter,
+        &race.session_id,
+        &race.queued_effect_calls,
+    )
+    .await;
 }
 
 /// Destroy may commit while the live embedder callback is outside the
@@ -27002,11 +27021,11 @@ async fn assert_boundary_cancel_callback_cannot_cross_same_id_replacement(fail_o
     assert_eq!(
         replacement.queued_effect_calls.load(Ordering::SeqCst),
         0,
-        "the old queued runtime effect must never reach the replacement executor"
+        "the old cancel must never reach the replacement's executor-wide cancel"
     );
 
-    // The replacement-owned callback and queued effect remain healthy after
-    // the stale old callback returns.
+    // The replacement-owned callback remains healthy after the stale old
+    // callback returns.
     replacement
         .callback_release
         .take()
@@ -27024,7 +27043,12 @@ async fn assert_boundary_cancel_callback_cannot_cross_same_id_replacement(fail_o
         .expect("replacement race should expose its first-apply release")
         .send(())
         .expect("replacement first apply should still be blocked");
-    wait_for_queued_boundary_cancel(&replacement.queued_effect_calls).await;
+    expect_no_executor_wide_boundary_cancel(
+        &replacement.adapter,
+        &replacement.session_id,
+        &replacement.queued_effect_calls,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -27077,11 +27101,12 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_started.notify_one();
-            self.allow_finish
-                .take()
-                .expect("blocking executor should only apply once")
-                .await
-                .expect("test release sender should stay alive until apply is released");
+            // Only the first apply blocks; a later one runs at once.
+            if let Some(allow_finish) = self.allow_finish.take() {
+                allow_finish
+                    .await
+                    .expect("test release sender should stay alive until apply is released");
+            }
 
             Ok(CoreApplyOutput::with_untyped_snapshot(
                 RunBoundaryReceiptDraft {
@@ -27154,7 +27179,7 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
         .await
         .expect("attached steered prompt should request immediate processing");
 
-    // The first cancel dispatches: live wake first, one queued effect.
+    // The first cancel dispatches: one live wake to the exact run.
     adapter
         .cancel_after_boundary(&session_id)
         .await
@@ -27184,7 +27209,7 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
     assert_eq!(
         queued_boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "runtime loop is still blocked inside apply, so the queued effect has not drained"
+        "nothing reaches the executor-wide cancel while the run is in flight"
     );
 
     allow_finish_tx
@@ -27195,22 +27220,13 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
         other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
     }
 
-    // Exactly one queued effect was committed for the whole burst; it
-    // drains once the loop is released.
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if queued_boundary_cancel_calls.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the single committed boundary-cancel effect should drain after release");
+    // The whole burst delivered one live wake and no runtime-loop effect.
+    expect_no_executor_wide_boundary_cancel(&adapter, &session_id, &queued_boundary_cancel_calls)
+        .await;
     assert_eq!(
-        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
         1,
-        "the converged burst must commit exactly one queued boundary-cancel effect"
+        "the converged burst delivers exactly one live wake"
     );
 }
 

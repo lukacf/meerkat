@@ -13503,6 +13503,9 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             )
     }
 
+    /// With no run active the cancel is a no-op: the runtime loop applies an
+    /// executor-wide cancel only between runs, and an error here would stop
+    /// the loop and the session with it.
     async fn cancel_after_boundary(
         &mut self,
         _reason: String,
@@ -13515,6 +13518,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                     self.runtime_adapter.session_control_authority(),
                 )
                 .await
+                .or_else(|err| match err {
+                    meerkat::SessionError::NotRunning { .. } => Ok(()),
+                    err => Err(err),
+                })
                 .map_err(|err| {
                     meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
                         err.to_string(),
@@ -13524,6 +13531,10 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         self.service
             .cancel_after_boundary(&self.session_id)
             .await
+            .or_else(|err| match err {
+                meerkat::SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
             .map_err(|err| {
                 meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
                     err.to_string(),

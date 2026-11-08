@@ -22403,6 +22403,11 @@ pub mod effects {
         pub verdict: RetainedRunSettleVerdict,
         pub run_id: Option<RunId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExactRunBoundaryCancel {
+        pub run_id: RunId,
+        pub reason: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22682,6 +22687,7 @@ pub enum Effect {
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
     RetainedRunSettleResolved(effects::RetainedRunSettleResolved),
+    ExactRunBoundaryCancel(effects::ExactRunBoundaryCancel),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22948,6 +22954,7 @@ pub enum EffectKind {
     EmptyResumeRetirementResolved,
     InputControllerReleased,
     RetainedRunSettleResolved,
+    ExactRunBoundaryCancel,
 }
 
 pub mod command_capabilities {

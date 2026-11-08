@@ -14910,7 +14910,7 @@ meerkat_CancelAfterBoundary(arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RequestCancellationAtBoundary", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundary"], [machine |-> "meerkat", variant |-> "RuntimeEffectFact", payload |-> [kind |-> "CancelAfterBoundary", reason |-> packet.payload.reason], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundary"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RequestCancellationAtBoundary", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundary"], [machine |-> "meerkat", variant |-> "ExactRunBoundaryCancel", payload |-> [reason |-> packet.payload.reason, run_id |-> (IF "value" \in DOMAIN meerkat_current_run_id THEN meerkat_current_run_id["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundary"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CancelAfterBoundary", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -14977,7 +14977,7 @@ meerkat_CancelAfterBoundaryForRunRunning(arg_run_id, arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RequestCancellationAtBoundary", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRunning"], [machine |-> "meerkat", variant |-> "RuntimeEffectFact", payload |-> [kind |-> "CancelAfterBoundary", reason |-> packet.payload.reason], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRunning"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RequestCancellationAtBoundary", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRunning"], [machine |-> "meerkat", variant |-> "ExactRunBoundaryCancel", payload |-> [reason |-> packet.payload.reason, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CancelAfterBoundaryForRunRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1
@@ -15003,7 +15003,7 @@ meerkat_CancelAfterBoundaryForRunRetired(arg_run_id, arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RequestCancellationAtBoundary", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRetired"], [machine |-> "meerkat", variant |-> "RuntimeEffectFact", payload |-> [kind |-> "CancelAfterBoundary", reason |-> packet.payload.reason], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRetired"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RequestCancellationAtBoundary", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRetired"], [machine |-> "meerkat", variant |-> "ExactRunBoundaryCancel", payload |-> [reason |-> packet.payload.reason, run_id |-> packet.payload.run_id], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAfterBoundaryForRunRetired"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CancelAfterBoundaryForRunRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1

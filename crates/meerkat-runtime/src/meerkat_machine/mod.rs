@@ -6824,8 +6824,7 @@ struct RuntimeAcceptedBoundaryCancelPlan {
     witness: RuntimeEffectDispatchAttachmentWitness,
     boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
     pending_dispatch: PendingBoundaryCancelDispatchGuard,
-    expected_run_id: RunId,
-    projected_effect: crate::effect::ProjectedRuntimeEffect,
+    dispatch: crate::effect::BoundaryCancelDispatch,
     dispatch_generation: u64,
     dispatch_lifecycle_phase: dsl::MeerkatPhase,
 }
@@ -9460,8 +9459,7 @@ impl MeerkatMachine {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         member_authority: Option<RuntimeEffectDispatchMemberAuthority>,
         pending_dispatch: PendingBoundaryCancelDispatchGuard,
-        expected_run_id: Option<&RunId>,
-        projected_effect: crate::effect::ProjectedRuntimeEffect,
+        dispatch: crate::effect::BoundaryCancelDispatch,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: dsl::MeerkatPhase,
         allow_during_unregister_drain: bool,
@@ -9470,7 +9468,6 @@ impl MeerkatMachine {
         let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
         let machine = self.clone();
         let session_id = session_id.clone();
-        let expected_run_id = expected_run_id.cloned();
         let context = context.to_string();
         let completion = cleanup_spawner.spawn(async move {
             machine
@@ -9481,8 +9478,7 @@ impl MeerkatMachine {
                     boundary_handle,
                     member_authority,
                     pending_dispatch,
-                    expected_run_id.as_ref(),
-                    projected_effect,
+                    dispatch,
                     dispatch_generation,
                     dispatch_lifecycle_phase,
                     allow_during_unregister_drain,
@@ -9508,8 +9504,7 @@ impl MeerkatMachine {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         member_authority: Option<RuntimeEffectDispatchMemberAuthority>,
         mut pending_dispatch: PendingBoundaryCancelDispatchGuard,
-        expected_run_id: Option<&RunId>,
-        projected_effect: crate::effect::ProjectedRuntimeEffect,
+        dispatch: crate::effect::BoundaryCancelDispatch,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: dsl::MeerkatPhase,
         allow_during_unregister_drain: bool,
@@ -9520,13 +9515,10 @@ impl MeerkatMachine {
         // prove that neither the logical session nor attachment incarnation
         // changed before the queued effect is published.
         drop(held_mutation_gate);
+        let expected_run_id = dispatch.run_id().cloned();
+        let expected_run_id = expected_run_id.as_ref();
         let live_dispatch_result = self
-            .dispatch_cancel_after_boundary_live_handle(
-                boundary_handle,
-                expected_run_id,
-                &projected_effect,
-                context,
-            )
+            .dispatch_cancel_after_boundary_live_handle(boundary_handle, &dispatch, context)
             .await;
         #[cfg(any(test, feature = "test-support"))]
         if live_dispatch_result.is_ok() {
@@ -9536,14 +9528,17 @@ impl MeerkatMachine {
 
         // Reserve bounded-channel capacity without M. A wedged executor may
         // delay this process-owned transaction, but it cannot retain the
-        // session mutation authority or block teardown/replacement.
+        // session mutation authority or block teardown/replacement. Only the
+        // loop dispatch publishes a runtime-loop effect; the exact-run dispatch
+        // is complete once its boundary handle delivered it.
         let pre_reserve_state = Self::classify_dsl_boundary_cancel_dispatch(
             &witness.dsl_authority,
             dispatch_generation,
             &dispatch_lifecycle_phase,
             expected_run_id,
         );
-        let effect_permit = if live_dispatch_result.is_ok()
+        let effect_permit = if matches!(dispatch, crate::effect::BoundaryCancelDispatch::Loop(_))
+            && live_dispatch_result.is_ok()
             && pre_reserve_state == BoundaryCancelDispatchState::Current
         {
             Some(witness.effect_tx.clone().reserve_owned().await)
@@ -9653,16 +9648,18 @@ impl MeerkatMachine {
         }
 
         debug_assert!(witness.effect_tx.same_channel(&current_effect_tx));
-        let effect_permit = effect_permit
-            .ok_or_else(|| RuntimeDriverError::StaleAuthority {
-                reason: format!(
-                    "{context}: boundary-cancel dispatch became current after capacity reservation was skipped"
-                ),
-            })?
-            .map_err(|_| RuntimeDriverError::NotReady {
-                state: RuntimeState::Idle,
-            })?;
-        let _effect_tx = effect_permit.send(projected_effect.into_effect());
+        if let crate::effect::BoundaryCancelDispatch::Loop(projected_effect) = dispatch {
+            let effect_permit = effect_permit
+                .ok_or_else(|| RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "{context}: boundary-cancel dispatch became current after capacity reservation was skipped"
+                    ),
+                })?
+                .map_err(|_| RuntimeDriverError::NotReady {
+                    state: RuntimeState::Idle,
+                })?;
+            let _effect_tx = effect_permit.send(projected_effect.into_effect());
+        }
         pending_dispatch.disarm();
         Ok(gate_guard)
     }
@@ -9797,8 +9794,7 @@ impl MeerkatMachine {
                     cancel_plan.boundary_handle,
                     None,
                     cancel_plan.pending_dispatch,
-                    Some(&cancel_plan.expected_run_id),
-                    cancel_plan.projected_effect,
+                    cancel_plan.dispatch,
                     cancel_plan.dispatch_generation,
                     cancel_plan.dispatch_lifecycle_phase,
                     false,
@@ -9822,16 +9818,20 @@ impl MeerkatMachine {
     async fn dispatch_cancel_after_boundary_live_handle(
         &self,
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
-        expected_run_id: Option<&RunId>,
-        projected_effect: &crate::effect::ProjectedRuntimeEffect,
+        dispatch: &crate::effect::BoundaryCancelDispatch,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        let reason = projected_effect.reason().to_string();
-        // The cloneable live handle is exact-run authority. Attached runtimes
-        // legitimately have no run yet; their generated CancelAfterBoundary
-        // dispatch still goes through the in-loop executor effect below, but
-        // must not fabricate an ID for this live callback.
-        if let (Some(boundary_handle), Some(expected_run_id)) = (boundary_handle, expected_run_id) {
+        let reason = dispatch.reason().to_string();
+        // The cloneable live handle is exact-run authority, and the exact-run
+        // dispatch's only delivery: the machine binds it to the run current
+        // when it admitted the cancel. A loop dispatch has no run (the
+        // runtime is attached with none current); its generated effect goes
+        // to the runtime loop instead, and no ID is fabricated for this
+        // callback. Without a handle, a cancel the exact-run input admitted
+        // is still held by the run's turn state (`cancel_after_boundary`)
+        // until the run's first boundary.
+        if let (Some(boundary_handle), Some(expected_run_id)) = (boundary_handle, dispatch.run_id())
+        {
             boundary_handle
                 .cancel_after_boundary(expected_run_id, reason)
                 .await

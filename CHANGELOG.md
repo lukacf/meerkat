@@ -544,7 +544,10 @@ them.
   - A settlement that did not commit, or whose tail repair left the run's
     tail standing, answers the registration's refusal, never `Settled`: a
     durability reload refusal when its write failed (the reload loses the
-    stop, so the host keeps its hold, reloads and settles again) or its tail
+    stop, so the host keeps its hold, reloads and settles again; on a host
+    store realm, a write the store refused or left unsettled poisons the
+    session's scopes instead, and the reload fails until the realm is opened
+    again) or its tail
     repair failed (the reloaded registration keeps no run), and the refusal
     of a session that leaves the process when its store realm lost its
     fence (another writer took it, or the realm stopped itself:

@@ -326,6 +326,12 @@ committed. Four steps, per member:
    or when an unregister ended the run first (its inputs then
    end `stopped` when the unregister keeps queued work, as a mob Shutdown
    does by default, whatever their state, and `cancelled` when it stops).
+   On a host store realm, a settlement write whose batch the store refused,
+   or left unsettled, poisons the session's scopes while the realm keeps its
+   fence (see [Failures](#failures)): that member's settle then answers
+   `MemberReloadRequired` every time and its reload fails until the realm is
+   opened again, so reloading and settling again cannot succeed in this
+   process (see step 4).
    When the registration no longer keeps the run but an input of the run
    reads no committed terminal yet (the read of its stored row failed, for
    one), the answer is `MobError::MemberInputTerminalNotYetReadable`: settle
@@ -345,15 +351,24 @@ committed. Four steps, per member:
    release for a member the mob no longer holds answers `MemberNotFound`
    too, with nothing left staged. Two cases end the recovery in this
    process for every member. Once the mob is destroyed or shut down, its
-   actor is gone and every verb answers `MobError::ActorCommandChannelClosed`
-   (a destroyed mob's members are gone with it; a mob shut down is recovered
+   actor is gone and every command to it (the wake, the settle and the
+   release among them) answers `MobError::ActorCommandChannelClosed` (a
+   destroyed mob's members are gone with it; a mob shut down is recovered
    at its next start, under the hold again). Once the host store realm lost
    its fence (`SpiRealm::realm_poisoned` reads `Some`: another writer took
    the fence, or the realm stopped itself), every settle is refused
    `MemberSessionNotLive`: the realm refuses this process's reads and writes
    until it is opened again, so no wake, reload or cold read here can serve
    a member, and the realm's next owner recovers the runs (this process
-   recovers them only after it opens the realm again).
+   recovers them only after it opens the realm again). One case ends a
+   single member's recovery in this process while the realm keeps its
+   fence: a settlement write of that member whose batch the store refused,
+   or left unsettled, poisoned its session's scopes (`SpiRealm::poisoned_scopes`
+   lists them). Its settle answers `MemberReloadRequired` every time, and its
+   reload fails until the realm is opened again. The member stays held and
+   nothing of its run runs; opening the realm again (in a new process, or
+   with a new open of the realm in this one) lifts the poison, and a start
+   over the reopened realm, under the hold again, recovers it.
 
 ```rust
 use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobError, MobHandle};
@@ -460,7 +475,11 @@ refused `MemberReloadRequired`) until it is empty. A member leaves it once
 its run is settled or none is kept and its hold is released, or once the mob
 no longer holds it or the hold never applied to it; and a round leaves none
 when the mob's actor is gone or the realm lost its fence, which ends the
-recovery in this process (see step 4).
+recovery in this process (see step 4). On a host store realm, a member whose
+settlement write the store refused, or left unsettled, never leaves it in
+this process: the loop does not empty for that member until the realm is
+opened again (see step 4), so stop settling it once
+`SpiRealm::poisoned_scopes` lists a scope of its session, and keep its hold.
 
 A retry is safe. A settle that arrives while an earlier one is still
 settling the same run joins it and gets the same answer. A retry after the
@@ -478,7 +497,12 @@ standing, answers `RuntimeDriverError::RecoveryRepairBlocked`: reload the
 registration (`recover_or_discard_reload_required_registration_if_current`),
 which applies the staged hold again, and settle again (after a failed tail
 repair the reloaded registration keeps no run, so that settle answers
-`NotRetained`). A writer whose host store realm lost its fence (another
+`NotRetained`). On a host store realm, a settlement write whose batch the
+store refused, or left unsettled, poisons the session's scopes while the
+realm keeps its fence: the settle then answers `RecoveryRepairBlocked` every
+time and the reload fails until the realm is opened again, so the session
+stays held, and nothing of its run runs, until the realm's next open. A
+writer whose host store realm lost its fence (another
 writer took it, or the realm stopped itself) is refused as a session that
 leaves this process at every settle, `RuntimeDriverError::StaleAuthority`:
 the realm refuses that writer's reads and writes until it is opened again,

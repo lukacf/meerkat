@@ -434,7 +434,10 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   settle now: keep the hold and settle again. A settlement that did not
   commit, or that left the run's tail standing, is never `Settled`:
   `MobError::MemberReloadRequired` when its write failed (reload, settle
-  again) or its tail repair failed (reload; the member then keeps no run),
+  again; on a host store realm, a write the store refused or left unsettled
+  poisons the session's scopes, and the reload fails until the realm is
+  opened again, so the member stays held) or its tail repair failed
+  (reload; the member then keeps no run),
   `MobError::MemberSessionNotLive` when the session leaves the process
   (its store realm lost its fence, or an unregister ended the run
   first: its inputs then stopped when it keeps queued work, a mob
@@ -448,7 +451,8 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   the same on every round: that member is done. A host store realm that
   lost its fence (`SpiRealm::realm_poisoned`: no wake, reload or cold read
   in this process serves a member until the realm is opened again), and a
-  mob destroyed or shut down (every verb answers `ActorCommandChannelClosed`),
+  mob destroyed or shut down (every command to its actor answers
+  `ActorCommandChannelClosed`),
   end the recovery in this process.
   `MeerkatMachine::session_work_state` reads cold whether one session
   holds the work a start wakes a member for, without loading or registering

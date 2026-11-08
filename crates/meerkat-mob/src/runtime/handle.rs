@@ -11328,8 +11328,8 @@ impl MobHandle {
     /// [`meerkat_runtime::MeerkatMachine::input_terminal_receipt`].
     ///
     /// The verb never wakes a member. A member the mob does not hold (a
-    /// retired one) is [`MobError::MemberNotFound`], and once the mob is
-    /// destroyed or shut down every verb of the handle answers
+    /// retired one) is [`MobError::MemberNotFound`]; once the mob is destroyed
+    /// or shut down, every command to its actor answers
     /// [`MobError::ActorCommandChannelClosed`]. A member not materialized in
     /// this process (dormant, or waking), or whose registration is gone or
     /// leaving through its unregister, is [`MobError::MemberSessionNotLive`]:
@@ -11344,7 +11344,12 @@ impl MobHandle {
     /// tail repair left the run's tail standing (the reloaded member keeps no
     /// run), is refused with [`MobError::MemberReloadRequired`]: reload it
     /// ([`Self::reload_member_registration`]) under the hold and settle
-    /// again. A registration that no longer keeps the run while an input
+    /// again. On a host store realm, a settlement write whose batch the store
+    /// refused, or left unsettled, poisons the session's scopes instead:
+    /// every settle then answers [`MobError::MemberReloadRequired`] and the
+    /// reload fails until the realm is opened again, so the member stays
+    /// held, and nothing of its run runs, until then. A registration that
+    /// no longer keeps the run while an input
     /// bound to it reads no committed terminal yet is refused with the
     /// retryable [`MobError::MemberInputTerminalNotYetReadable`]: settle
     /// again. A placed member is refused with

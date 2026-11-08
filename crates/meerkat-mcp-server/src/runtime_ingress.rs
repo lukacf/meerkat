@@ -4458,6 +4458,25 @@ mod tests {
         ));
     }
 
+    /// The executor contract for the MCP server's session executor: a
+    /// boundary cancel the runtime loop applies while no run is active is a
+    /// no-op, so the session keeps serving input.
+    #[tokio::test]
+    async fn mcp_runtime_executor_idle_boundary_cancel_conformance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let session_id = create_deferred_session_with_generated_authority(&context, "hello").await;
+        context
+            .ensure_session(&session_id)
+            .await
+            .expect("MCP runtime executor should attach");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &context.runtime_adapter,
+            &session_id,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn mcp_runtime_apply_requests_post_handoff_teardown_for_archived_session() {
         let temp = tempfile::tempdir().expect("tempdir");

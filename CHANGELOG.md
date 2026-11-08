@@ -873,6 +873,31 @@ them.
   (`LlmError::AuthenticationFailed`, or the Copilot exchange outage's
   retryable class).
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  a MeerkatMachine boundary cancel taken while a run is current is bound to
+  that run (see Fixed). `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`) and the kernel
+  `generated::meerkat::Effect` and `EffectKind` gain
+  `ExactRunBoundaryCancel { run_id, reason }`, appended last, with the
+  kernel struct `generated::meerkat::effects::ExactRunBoundaryCancel`. The
+  transitions `CancelAfterBoundary`, `CancelAfterBoundaryForRunRunning` and
+  `CancelAfterBoundaryForRunRetired` emit it in place of
+  `RuntimeEffectFact { kind: CancelAfterBoundary, .. }`;
+  `CancelAfterBoundaryAttached` still emits that fact. An exhaustive match
+  needs the new arm.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`,
+  `meerkat-runtime`: a boundary cancel taken while a run is current reaches
+  that run only through the executor's `CoreExecutor::boundary_handle`; the
+  runtime no longer also calls the executor-wide
+  `CoreExecutor::cancel_after_boundary` once that run has ended. The
+  executor-wide call now serves only a cancel taken while no run is
+  current, and an implementation returns `Ok` when no run is active (the
+  trait's documented contract): an error there stops the session's runtime
+  loop.
+
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -2067,6 +2092,16 @@ them.
   run (a sticky fallback its interrupted run left in flight) waited the same
   way; it now reaches the session's event stream and the turn's own with
   that turn. (#2113, thanks @zond) Affects 0.9.0 through 0.9.10.
+
+- `meerkat-runtime`, `rkat`: a session served by `rkat run` or `rkat resume`
+  (for example an external mob member started with `--comms-listen-tcp`)
+  stopped accepting input after a supervisor interrupt or any other boundary
+  cancel (since 0.8.42). The cancel was also applied as an executor-wide
+  cancel once its run had ended, the CLI's executor refused it because no
+  run was active, and that refusal stopped the session's runtime. A boundary
+  cancel taken while a run is current now reaches that run only through the
+  executor's exact-run boundary handle, and an executor-wide cancel with no
+  run active is a no-op for every shipped executor.
 
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is

@@ -197,11 +197,85 @@ pub(crate) fn runtime_effect_projection_from_dsl_effects(
     runtime_effect_fact_from_raw_effects(effects.as_slice()).map(project_runtime_effect_fact)
 }
 
-pub(crate) fn runtime_effect_projection_optional_from_dsl_effects(
+/// A boundary cancel the machine bound to the exact run current when it
+/// admitted the cancel (`ExactRunBoundaryCancel`). Realized only through the
+/// executor's exact-run boundary handle, never as a runtime-loop effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExactRunBoundaryCancel {
+    run_id: meerkat_core::lifecycle::RunId,
+    reason: String,
+}
+
+impl ExactRunBoundaryCancel {
+    pub(crate) fn run_id(&self) -> &meerkat_core::lifecycle::RunId {
+        &self.run_id
+    }
+}
+
+/// How one committed boundary-cancel transition is dispatched, as the machine
+/// decided it.
+#[derive(Debug)]
+pub(crate) enum BoundaryCancelDispatch {
+    /// No run was current: the runtime loop applies the executor-wide cancel.
+    Loop(ProjectedRuntimeEffect),
+    /// A run was current: only the exact-run boundary handle delivers it.
+    ExactRun(ExactRunBoundaryCancel),
+}
+
+impl BoundaryCancelDispatch {
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::Loop(effect) => effect.reason(),
+            Self::ExactRun(cancel) => &cancel.reason,
+        }
+    }
+
+    /// The run the dispatch is bound to; `None` for the loop dispatch.
+    pub(crate) fn run_id(&self) -> Option<&meerkat_core::lifecycle::RunId> {
+        match self {
+            Self::Loop(_) => None,
+            Self::ExactRun(cancel) => Some(cancel.run_id()),
+        }
+    }
+}
+
+/// The boundary-cancel dispatch a committed transition emitted: its
+/// runtime-loop `RuntimeEffectFact` or its `ExactRunBoundaryCancel`, never
+/// both; `None` when it emitted neither.
+pub(crate) fn boundary_cancel_dispatch_optional_from_dsl_effects(
     effects: &DslTransitionEffects,
-) -> Result<Option<ProjectedRuntimeEffect>, String> {
-    runtime_effect_fact_optional_from_raw_effects(effects.as_slice())
-        .map(|fact| fact.map(project_runtime_effect_fact))
+) -> Result<Option<BoundaryCancelDispatch>, String> {
+    let loop_fact = runtime_effect_fact_optional_from_raw_effects(effects.as_slice())?;
+    let mut exact = effects.as_slice().iter().filter_map(|effect| match effect {
+        dsl::MeerkatMachineEffect::ExactRunBoundaryCancel { run_id, reason } => {
+            Some((run_id, reason))
+        }
+        _ => None,
+    });
+    let first_exact = exact.next();
+    if exact.next().is_some() {
+        return Err("DSL transition emitted multiple ExactRunBoundaryCancel effects".to_string());
+    }
+    match (loop_fact, first_exact) {
+        (Some(_), Some(_)) => Err(
+            "DSL transition emitted both a RuntimeEffectFact and an ExactRunBoundaryCancel"
+                .to_string(),
+        ),
+        (Some(fact), None) => Ok(Some(BoundaryCancelDispatch::Loop(
+            project_runtime_effect_fact(fact),
+        ))),
+        (None, Some((run_id, reason))) => {
+            let run_id = crate::meerkat_machine::dsl_authority::current_run_id_from_dsl(run_id)
+                .ok_or_else(|| "ExactRunBoundaryCancel names an invalid run id".to_string())?;
+            Ok(Some(BoundaryCancelDispatch::ExactRun(
+                ExactRunBoundaryCancel {
+                    run_id,
+                    reason: reason.clone(),
+                },
+            )))
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 #[cfg(test)]

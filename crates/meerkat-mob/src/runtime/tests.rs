@@ -20120,6 +20120,33 @@ async fn test_destroy_detaches_mob_owned_session_ingress_before_runtime_destroy(
     );
 }
 
+/// The executor contract for the mob's session executor: a boundary cancel
+/// the runtime loop applies while no run is active is a no-op, so the
+/// member's session keeps serving input.
+#[tokio::test]
+async fn mob_session_executor_idle_boundary_cancel_conformance() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    // Turn-driven: the member's runtime is attached with no run between
+    // turns, so only the check's own prompt runs on it.
+    let session_id = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-idle-boundary-cancel"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn a turn-driven session-backed member")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+    meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(&adapter, &session_id)
+        .await;
+    handle.destroy().await.expect("destroy the mob");
+}
+
 #[tokio::test]
 async fn test_shared_runtime_two_mobs_destroy_without_cross_delivered_signals() {
     let service = Arc::new(MockSessionService::new());

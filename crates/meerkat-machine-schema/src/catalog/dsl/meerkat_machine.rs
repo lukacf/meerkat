@@ -8804,6 +8804,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // retained: `run_id` is the run an accepted settle settles, the
             // current run (if any) of a busy one, and none otherwise.
             RetainedRunSettleResolved { verdict: Enum<RetainedRunSettleVerdict>, run_id: Option<RunId> },
+            // A boundary cancel bound to the exact run `run_id`, current when
+            // the cancel was admitted. Realized only through the executor's
+            // exact-run boundary handle, never as a runtime-loop effect: the
+            // loop applies its effects only between runs, so a loop-delivered
+            // cancel could never reach this run, and an executor-wide cancel
+            // there would meet no run, or another one.
+            ExactRunBoundaryCancel { run_id: RunId, reason: String },
         }
 
         // =====================================================================
@@ -9088,6 +9095,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputControllerReleased => local seam SurfaceResultAlignment,
         // The host's settle verb answers the verdict of its own transition.
         disposition RetainedRunSettleResolved => local seam SurfaceResultAlignment,
+        // Only the executor's exact-run boundary handle realizes a run-bound
+        // boundary cancel.
+        disposition ExactRunBoundaryCancel => local seam NoOwnerRealization,
 
         // =====================================================================
         // Helpers
@@ -15967,8 +15977,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // 11. CancelAfterBoundary: Attached + Running self-loops.
-        // The first cancel in a turn window dispatches (RuntimeEffectFact)
-        // and marks the dispatch outstanding; while outstanding, further
+        // The first cancel in a turn window dispatches and marks the dispatch
+        // outstanding. With no run current (Attached) the dispatch is the
+        // runtime-loop RuntimeEffectFact, the one way to reach an idle
+        // executor. With a run current (Running) it is ExactRunBoundaryCancel
+        // for that run, realized only through the exact-run boundary handle;
+        // no runtime-loop effect is emitted, so an executor-wide cancel never
+        // follows a run-bound one. While outstanding, further
         // cancels take the AlreadyPending no-op arms below — this is what
         // bounds an embedder boundary handle that (wrongly) re-enters
         // MeerkatMachine::cancel_after_boundary to exactly one extra lap.
@@ -16009,7 +16024,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: self.current_run_id.get("value"), reason: reason }
         }
         transition CancelAfterBoundaryAttachedAlreadyPending {
             on input CancelAfterBoundary { reason }
@@ -16066,7 +16081,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: run_id, reason: reason }
         }
         transition CancelAfterBoundaryForRunRetired {
             on input CancelAfterBoundaryForRun { run_id, reason }
@@ -16086,7 +16101,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Retired
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: run_id, reason: reason }
         }
         transition CancelAfterBoundaryForRunRunningAlreadyPending {
             on input CancelAfterBoundaryForRun { run_id, reason }

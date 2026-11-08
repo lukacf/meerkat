@@ -9175,6 +9175,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetainedRunSettleResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExactRunBoundaryCancel`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`

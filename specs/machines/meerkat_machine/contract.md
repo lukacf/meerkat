@@ -1196,6 +1196,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmptyResumeRetirementResolved`(verdict: EmptyResumeRetirementVerdict)
 - `InputControllerReleased`
 - `RetainedRunSettleResolved`(verdict: RetainedRunSettleVerdict, run_id: Option<RunId>)
+- `ExactRunBoundaryCancel`(run_id: RunId, reason: String)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -5839,7 +5840,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `not_retiring`
   - `no_dispatch_outstanding`
-- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- Emits: `RequestCancellationAtBoundary`, `ExactRunBoundaryCancel`
 - To: `Running`
 
 ### `CancelAfterBoundaryAttachedAlreadyPending`
@@ -5866,7 +5867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
   - `turn_cancellable`
   - `no_dispatch_outstanding`
-- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- Emits: `RequestCancellationAtBoundary`, `ExactRunBoundaryCancel`
 - To: `Running`
 
 ### `CancelAfterBoundaryForRunRetired`
@@ -5876,7 +5877,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
   - `turn_cancellable`
   - `no_dispatch_outstanding`
-- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
+- Emits: `RequestCancellationAtBoundary`, `ExactRunBoundaryCancel`
 - To: `Retired`
 
 ### `CancelAfterBoundaryForRunRunningAlreadyPending`

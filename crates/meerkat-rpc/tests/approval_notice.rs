@@ -43,6 +43,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 const LIMIT: Duration = Duration::from_secs(10);
+/// How long a connection must stay silent before it counts as drained.
+const QUIET: Duration = Duration::from_millis(500);
 const MOB: &str = "approval_notice_mob";
 const MEMBER: &str = "w1";
 /// The member tool the host gates; a comms tool every member has.
@@ -261,6 +263,19 @@ impl Connection {
     async fn collect_for(&mut self, window: Duration) {
         let deadline = tokio::time::Instant::now() + window;
         while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, self.frames.recv()).await {
+            self.route(frame);
+        }
+    }
+
+    /// Takes in every frame the server had produced before now: a
+    /// sentinel request is answered, then frames are read until
+    /// [`QUIET`] passes with nothing new. The server's writer selects
+    /// among its response and notification channels without priority, so
+    /// the sentinel's reply alone does not order an already queued
+    /// notification before it; the quiet period after it does.
+    async fn settle(&mut self) {
+        self.request("approval/list", json!({})).await;
+        while let Ok(Some(frame)) = tokio::time::timeout(QUIET, self.frames.recv()).await {
             self.route(frame);
         }
     }
@@ -526,6 +541,9 @@ async fn today_a_pending_plain_approval_is_only_visible_by_polling() {
     assert_eq!(decided["status"], "approved", "{decided}");
     client.response(turn).await;
     h.assert_tool_ran();
+    // A decision notification could be written after either reply; drain
+    // the connection before asserting it never came.
+    client.settle().await;
     assert!(
         client.approval_notifications().is_empty(),
         "no approval notification arrives for the decision either: {:?}",

@@ -1721,12 +1721,13 @@ struct CachedCopilotToken {
     generation: u64,
     token: String,
     source_generation: u64,
-    /// In token mode, the publication time of the account lease publication
-    /// this entry serves: with `source_generation` it names that
-    /// publication. A lease that takes another process's stored record keeps
-    /// its own generation when the record's is not above it, so the
-    /// generation alone can name another record's publication. `None` for
-    /// the device sign-in, whose entry is keyed by its record's generation.
+    /// The publication time of the source credential's publication this
+    /// entry serves: with `source_generation` it names that publication. In
+    /// token mode it is the account lease publication's; for the device
+    /// sign-in, the stored sign-in record marker's. A lease that takes
+    /// another process's stored record keeps its own generation when the
+    /// record's is not above it, so the generation alone can name another
+    /// record's publication.
     source_published_at_millis: Option<u64>,
     /// The expiry of the source credential's publication this entry serves,
     /// which the authorizer reports (`HttpAuthorizer::expires_at`): the
@@ -1795,6 +1796,7 @@ impl CachedCopilotToken {
     fn awaiting_first_token(
         generation: u64,
         source_generation: u64,
+        source_published_at_millis: Option<u64>,
         source_expires_at: Option<DateTime<Utc>>,
         exchange_unavailable: CopilotExchangeUnavailable,
     ) -> Self {
@@ -1802,7 +1804,7 @@ impl CachedCopilotToken {
             generation,
             token: String::new(),
             source_generation,
-            source_published_at_millis: None,
+            source_published_at_millis,
             source_expires_at,
             refresh_at: DateTime::<Utc>::MIN_UTC,
             expires_at: DateTime::<Utc>::MIN_UTC,
@@ -1894,8 +1896,11 @@ impl CopilotAuthorizer {
                         )
                     })?;
                     let now = (self.env.now)();
-                    if let Some(cached) = self.fresh_cached(source_generation, None, now)
-                        && !cached.model_discovery_due
+                    if let Some(cached) = self.fresh_cached(
+                        source_generation,
+                        Self::device_source_published_at(&source),
+                        now,
+                    ) && !cached.model_discovery_due
                     {
                         return Ok(cached);
                     }
@@ -1976,7 +1981,11 @@ impl CopilotAuthorizer {
         source_generation: u64,
     ) -> Result<CachedTokenView, CopilotTokenError> {
         let now = (self.env.now)();
-        if let Some(cached) = self.fresh_cached(source_generation, None, now) {
+        if let Some(cached) = self.fresh_cached(
+            source_generation,
+            Self::device_source_published_at(source),
+            now,
+        ) {
             if cached.model_discovery_due {
                 let models = self.fetch_models(&cached.api_base, &cached.token).await;
                 let discovery_now = (self.env.now)();
@@ -2053,6 +2062,7 @@ impl CopilotAuthorizer {
             }
             Err(CopilotTokenExchangeError::Unavailable(unavailable)) => unavailable,
         };
+        let source_published_at_millis = Self::device_source_published_at(source);
         let now = (self.env.now)();
         let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
         let mut cache = self.state.cache.write();
@@ -2070,12 +2080,15 @@ impl CopilotAuthorizer {
             *cache = Some(CachedCopilotToken::awaiting_first_token(
                 self.state.next_generation.fetch_add(1, Ordering::Relaxed),
                 source_generation,
+                source_published_at_millis,
                 source.expires_at,
                 unavailable,
             ));
             return Err(CopilotTokenError::ExchangeUnavailable(error));
         };
-        if cached.source_generation == source_generation && now < cached.expires_at {
+        let same_source = cached.source_generation == source_generation
+            && cached.source_published_at_millis == source_published_at_millis;
+        if same_source && now < cached.expires_at {
             cached.refresh_at = exchange_retry_at(now, unavailable.retry_after, cached.expires_at);
             tracing::warn!(
                 credential_identity = %self.binding.credential_identity(),
@@ -2096,13 +2109,14 @@ impl CopilotAuthorizer {
             retryable = %unavailable.retryable,
             "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
         );
-        if cached.source_generation != source_generation {
+        if !same_source {
             // The entry's token was minted from an earlier sign-in. The entry
             // now speaks for the current one, so a build admitted during the
             // outage publishes the current sign-in's expiry, and the earlier
             // sign-in's token is refused so it never serves this one.
             cached.refuse();
             cached.source_generation = source_generation;
+            cached.source_published_at_millis = source_published_at_millis;
             cached.source_expires_at = source.expires_at;
         }
         cached.exchange_unavailable = Some(unavailable);
@@ -2173,7 +2187,7 @@ impl CopilotAuthorizer {
             generation,
             token: token.token,
             source_generation,
-            source_published_at_millis: None,
+            source_published_at_millis: Self::device_source_published_at(source),
             source_expires_at: source.expires_at,
             refresh_at,
             expires_at,
@@ -2188,7 +2202,8 @@ impl CopilotAuthorizer {
 
     /// The cached token, while it is fresh and was built for the source
     /// credential's publication `source_generation`, published at
-    /// `source_published_at_millis` (`None` for the device sign-in).
+    /// `source_published_at_millis` (the account lease publication's time in
+    /// token mode, the sign-in record marker's for the device sign-in).
     fn fresh_cached(
         &self,
         source_generation: u64,
@@ -2209,6 +2224,16 @@ impl CopilotAuthorizer {
                     .is_some_and(|refresh_at| now >= refresh_at),
                 identity: cached.identity.clone(),
             })
+    }
+
+    /// The publication time of the device sign-in record `source`, from its
+    /// durable marker: with the marker generation it names the sign-in. Two
+    /// processes each publish their own sign-in under their own lease, so two
+    /// records can carry the same marker generation, and a lease that takes
+    /// another process's later sign-in can keep its generation.
+    fn device_source_published_at(source: &PersistedTokens) -> Option<u64> {
+        meerkat_core::tokens_lifecycle_publication(source)
+            .and_then(|publication| publication.credential_published_at_millis)
     }
 
     async fn load_source_tokens(&self) -> Result<PersistedTokens, ProviderAuthError> {
@@ -4695,6 +4720,17 @@ mod tests {
         )
     }
 
+    /// The publication time of the device sign-in record
+    /// [`resolver_environment`] stores, which its lease published: a cache
+    /// entry built for that record carries it.
+    fn stored_record_published_at(
+        auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+    ) -> Option<u64> {
+        auth_lease
+            .snapshot(&LeaseKey::from_credential_identity(&account_identity()))
+            .credential_published_at_millis
+    }
+
     #[test]
     fn authorization_scope_requires_exact_origin_and_path_boundary() {
         assert!(url_is_within_api_base(
@@ -4867,7 +4903,7 @@ mod tests {
     async fn routed_client_requires_reprojection_after_route_change() {
         let runtime = Arc::new(CopilotRuntime::new());
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -4895,7 +4931,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
-            source_published_at_millis: None,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5012,7 +5048,7 @@ mod tests {
 
         let runtime = CopilotRuntime::new();
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -5040,7 +5076,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
-            source_published_at_millis: None,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5163,7 +5199,7 @@ mod tests {
 
         let runtime = Arc::new(CopilotRuntime::new());
         let (auth_binding, binding) = validated_binding();
-        let (env, _) = resolver_environment(&auth_binding).await;
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
         let persistence_id = env
             .provider_auth_persistence()
             .expect("test persistence")
@@ -5199,7 +5235,7 @@ mod tests {
             generation: 1,
             token: "derived".to_string(),
             source_generation: 1,
-            source_published_at_millis: None,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
             expires_at: Utc::now() + Duration::hours(2),
@@ -5814,6 +5850,118 @@ mod tests {
             .await
             .expect("a waiter can lead the replacement flight");
         assert_eq!(transport.inner.request_count(), 2);
+    }
+
+    /// A device sign-in record the lease takes at its own generation is
+    /// another sign-in: the account does not serve the token derived from the
+    /// earlier one. This lease publishes the first sign-in; another process
+    /// signs in later at its own generation 1, and a status read takes that
+    /// record into the lease, which keeps generation 1 and the later
+    /// publication time. The next use derives a token from the later sign-in.
+    #[tokio::test]
+    async fn a_device_record_taken_at_the_same_generation_is_not_served_from_the_cache() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, auth_lease) =
+            resolver_environment_with_token(&auth_binding, "github-first").await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-first"),
+            models_response(),
+            token_response("derived-later"),
+            models_response(),
+        ]));
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        let authorizer = CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding,
+            env: env.clone(),
+            transport: transport.clone(),
+        };
+        let cached_token = || state.cache.read().as_ref().map(|cache| cache.token.clone());
+        authorizer
+            .prime()
+            .await
+            .expect("the first sign-in derives a token");
+        assert_eq!(cached_token().as_deref(), Some("derived-first"));
+
+        // Another process signs in later under its own lease.
+        std::thread::sleep(StdDuration::from_millis(5));
+        let identity = account_identity();
+        let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+        let lease_key = LeaseKey::from_credential_identity(&identity);
+        let later = PersistedTokens {
+            auth_mode: PersistedAuthMode::GithubCopilotOauth,
+            primary_secret: Some("github-later".to_string()),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: Some(Utc::now()),
+            scopes: vec!["read:user".to_string()],
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        };
+        let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+            &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+            &lease_key,
+            meerkat_core::persisted_token_expires_at_epoch_secs(&later),
+        )
+        .expect("another process publishes");
+        assert_eq!(transition.generation(), 1);
+        let later =
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &later, &transition)
+                .expect("mark the later sign-in");
+        let store = env
+            .provider_auth_persistence()
+            .expect("provider-auth persistence")
+            .token_store();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &later)
+            .await
+            .expect("store the later sign-in");
+        // A status read takes the later record into the lease.
+        let before = auth_lease.snapshot(&lease_key);
+        meerkat_core::rehydrate_marked_tokens_for_status_for_identity(
+            store.as_ref(),
+            &auth_lease,
+            &identity,
+            PersistedAuthMode::GithubCopilotOauth,
+            Utc::now(),
+        )
+        .await
+        .expect("the status read answers")
+        .expect("the later record is stored");
+        let after = auth_lease.snapshot(&lease_key);
+        assert_eq!(
+            (after.generation, after.adopted_marker_generation),
+            (before.generation, None),
+            "the lease takes the later record at its own generation"
+        );
+        assert_ne!(
+            after.credential_published_at_millis, before.credential_published_at_millis,
+            "under the later publication"
+        );
+
+        authorizer
+            .prime()
+            .await
+            .expect("the later sign-in derives a token");
+        assert_eq!(
+            cached_token().as_deref(),
+            Some("derived-later"),
+            "the account serves the token derived from the later sign-in, not the earlier one's"
+        );
+        let requests = transport.requests.lock();
+        assert_eq!(requests.len(), 4, "an exchange and a listing per sign-in");
+        assert_eq!(
+            requests[2]
+                .1
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("token github-later"),
+            "the exchange sends the later sign-in's GitHub token"
+        );
     }
 
     #[tokio::test]

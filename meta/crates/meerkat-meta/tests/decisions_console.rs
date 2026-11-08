@@ -1679,3 +1679,46 @@ async fn a_console_withdraw_made_for_another_caller_is_refused() {
     drop(off_app);
     off_runtime.shutdown().await;
 }
+
+/// A read-only Console refuses an administrator's withdraw (`-32010`)
+/// before any store read, and the decision stays open; its capabilities
+/// list the reads and no withdraw.
+#[tokio::test]
+async fn a_read_only_console_refuses_an_administrators_withdraw() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, writable) = console(&state, Some(ENFORCED), true).await;
+    drop(writable);
+    let mut read_only = decision_state(true);
+    read_only.console.read_only = true;
+    let app = runtime.build_console_json_router(read_only);
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+
+    let refused = rpc(
+        &app,
+        Some(ADMIN),
+        WITHDRAW,
+        json!({"decision_id": held.decision_id.to_string()}),
+    )
+    .await;
+    assert_withdraw_refused(&refused, -32010, &owner, &held);
+
+    let capabilities = rpc(&app, Some(ADMIN), "meta/capabilities", json!({})).await;
+    let methods: Vec<&str> = capabilities["result"]["methods"]
+        .as_array()
+        .unwrap_or_else(|| panic!("methods: {capabilities}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        methods.contains(&"meta/decisions/list"),
+        "the reads stay listed: {capabilities}"
+    );
+    assert!(
+        !methods.contains(&WITHDRAW),
+        "a read-only Console lists no withdraw: {capabilities}"
+    );
+    drop(app);
+    runtime.shutdown().await;
+}

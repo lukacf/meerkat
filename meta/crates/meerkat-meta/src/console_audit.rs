@@ -75,8 +75,10 @@ const MAX_VALUE_BYTES: usize = 256;
 const MAX_ROW_BYTES: usize = 4096;
 
 /// The JSON-RPC codes of an owner that failed: whether anything changed is
-/// not known. Every other error is a refusal.
-const FAILURE_CODES: [i64; 2] = [-32603, -32000];
+/// not known. A durable decision write whose commit the approval store
+/// cannot confirm (`ErrorCode::ApprovalCommitUnknown`, `-32035`) is one: it
+/// may have committed. Every other error is a refusal.
+const FAILURE_CODES: [i64; 3] = [-32603, -32000, -32035];
 
 /// The fields that name what a change is of, besides its `id` fields.
 const TARGET_NAMED: &[&str] = &[
@@ -1209,6 +1211,22 @@ mod tests {
         );
         assert_eq!(failed.outcome, ConsoleAuditOutcome::Failed);
         assert!(failed.receipt.is_empty());
+    }
+
+    /// A durable decision write whose commit the approval store cannot
+    /// confirm (`-32035`) may have changed something: its row says failed,
+    /// not refused.
+    #[test]
+    fn an_unconfirmed_decision_commit_is_recorded_as_failed() {
+        let code = i64::from(meerkat_contracts::ErrorCode::ApprovalCommitUnknown.jsonrpc_code());
+        let unconfirmed = ConsoleAuditEntry::answered(
+            entry("meta/decisions/withdraw").actor,
+            "meta/decisions/withdraw".to_string(),
+            Identifiers::default(),
+            &json!({ "error": { "code": code, "message": "the decision's write may have committed" } }),
+        );
+        assert_eq!(unconfirmed.outcome, ConsoleAuditOutcome::Failed);
+        assert_eq!(unconfirmed.code, Some(-32035));
     }
 
     /// A checked access edit carries its fields in its `checked_v1`

@@ -284,7 +284,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   approver without holders): it refuses to start with that configuration.
   Before rolling back, remove those actions from the rules and give each
   such approver id its `subjects` or `groups`, or restore the configuration
-  saved before the upgrade.
+  saved before the upgrade. An earlier `rpc_gateway` also refuses to start
+  with `runtime_options.decisions`, with an error that names the field
+  (`unsupported runtime_options fields: decisions`): leave it out of the
+  launch before rolling back.
 
 ### Added
 

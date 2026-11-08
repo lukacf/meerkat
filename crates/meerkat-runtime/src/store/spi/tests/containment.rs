@@ -1050,3 +1050,54 @@ fn a_realm_loss_refused_before_the_open_answers_a_misuse() {
         assert!(super::super::realm::refused_loss(&[effect], "lost").is_none());
     }
 }
+
+// A scope whose own conflict a load meets after the open (the open listed
+// its head) is quarantined then and leaves the baseline a re-acquire
+// compares with: the next re-acquire's listing, which reports that conflict
+// in place of the head, keeps the realm, and the scope still refuses.
+#[tokio::test(start_paused = true)]
+async fn a_conflict_met_at_a_load_leaves_the_baseline_and_keeps_the_realm() {
+    let host = reacquiring_host();
+    let scope = ScopeId::new(TEST_FAMILY, "loaded");
+    {
+        let realm = open_realm(&host).await;
+        commit_one(
+            &realm,
+            &scope,
+            ScopeDelta::Changes(vec![(
+                "entry".to_string(),
+                Some(Arc::new(b"first".to_vec())),
+            )]),
+        )
+        .await
+        .expect("the scope is written, its entry in a row");
+    }
+    host.expire_lease();
+
+    let realm = open_realm(&host).await;
+    let cells = realm.claim(TEST_FAMILY).expect("the family claims");
+    let name = host
+        .conflict_scope(ScopeKind::Record, "tst:rloaded~")
+        .expect("one scope");
+    {
+        let mut state = cells[0].lock().await;
+        match realm.load_body(&mut state).await {
+            Err(SpiError::ScopeQuarantined { cause, .. }) => {
+                assert!(cause.contains(&name), "the cause names the scope: {cause}");
+            }
+            other => panic!("the load refuses typed: {other:?}"),
+        }
+    }
+
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the conflict the load recorded keeps the realm: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert!(matches!(
+        commit_one(&realm, &scope, pin("next")).await,
+        Err(SpiError::ScopeQuarantined { .. })
+    ));
+}

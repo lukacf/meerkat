@@ -264,6 +264,19 @@ them.
   actor command and no wake; the `List` scope). A member the mob does not
   seat, a placed member and a mob without the runtime adapter hold none.
 
+- `meerkat-mob`: `MobHandle::wait_member_lifecycle_settled(identity,
+  timeout)` waits until MobMachine holds no lifecycle operation of the
+  member in flight (its spawn, a wake, its retirement, its identity entry's
+  removal or archive, or its held construction): the facts on which the
+  declared apply leaves the identity's declaration to the next apply
+  (`DeclaredEntryOutcome::Deferred`), so a host that waits and declares the
+  identity again is answered on the settled facts. It reads the machine
+  state the actor publishes (`MobMachineState::member_lifecycle_in_flight_for_identity`,
+  the `List` scope) and wakes on each state the actor publishes, with no
+  actor command and no polling, and answers the new
+  `MemberLifecycleSettlement`: `NothingInFlight`, `Settled`, or
+  `StillInFlight` when the timeout ran out.
+
 ### Changed
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate

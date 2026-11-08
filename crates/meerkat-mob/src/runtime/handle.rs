@@ -6442,6 +6442,21 @@ impl MobMachineStateChanges {
     }
 }
 
+/// What [`MobHandle::wait_member_lifecycle_settled`] saw of a member's
+/// lifecycle operations. A closed vocabulary: a host matches every answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberLifecycleSettlement {
+    /// No lifecycle operation of the member was in flight when the wait
+    /// began.
+    NothingInFlight,
+    /// A lifecycle operation of the member was in flight when the wait
+    /// began, and the actor then published a state with none in flight.
+    Settled,
+    /// A lifecycle operation of the member was still in flight when the
+    /// wait's timeout ran out.
+    StillInFlight,
+}
+
 /// Clone-cheap, thread-safe handle for interacting with a running mob.
 ///
 /// All mutation commands are sent through an mpsc channel to the actor.
@@ -10480,6 +10495,61 @@ impl MobHandle {
             &self.machine_state_watch_rx.borrow(),
             identity,
         )
+    }
+
+    /// Wait until MobMachine holds no lifecycle operation of `identity`'s
+    /// member in flight: its spawn, a wake, its retirement, its identity
+    /// entry's removal or archive, or the identity's held construction. These
+    /// are the facts on which MobMachine leaves a declaration of the identity
+    /// to the next apply (its verdict `LifecycleInFlight`, which
+    /// [`Self::apply_declared_roster`] answers
+    /// [`super::DeclaredEntryOutcome::Deferred`]), so a host that waits here
+    /// and declares the identity again is answered on the settled facts.
+    ///
+    /// Read from the machine state the actor publishes, as
+    /// [`Self::identity_entry`] is, and woken by each state the actor
+    /// publishes (see [`Self::machine_state_changes`]), never by polling: the
+    /// wait sends no actor command and wakes no member. It answers
+    /// [`MemberLifecycleSettlement::NothingInFlight`] at once when nothing is
+    /// in flight, [`MemberLifecycleSettlement::Settled`] once the actor
+    /// published a state with nothing in flight, and
+    /// [`MemberLifecycleSettlement::StillInFlight`] when `timeout` ran out
+    /// first. A mob whose actor is gone answers
+    /// [`MobError::ActorCommandChannelClosed`]. The handle's principal must
+    /// hold [`crate::ControlScope::List`]; a refusal is
+    /// [`MobError::ScopeDenied`].
+    pub async fn wait_member_lifecycle_settled(
+        &self,
+        identity: &AgentIdentity,
+        timeout: Duration,
+    ) -> Result<MemberLifecycleSettlement, MobError> {
+        let member = mob_dsl::AgentIdentity::from_domain(identity);
+        let in_flight = |state: &mob_dsl::MobMachineState| {
+            state.member_lifecycle_in_flight_for_identity(&member)
+        };
+        // Seen before each read: a state the actor publishes after the read
+        // wakes the wait.
+        let mut changes = self.machine_state_watch_rx.clone();
+        changes.mark_unchanged();
+        if !self.read_published_machine_state(crate::ControlScope::List, in_flight)? {
+            return Ok(MemberLifecycleSettlement::NothingInFlight);
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                changed = changes.changed() => {
+                    changed.map_err(|_| MobError::ActorCommandChannelClosed)?;
+                }
+                () = tokio::time::sleep(remaining) => {
+                    return Ok(MemberLifecycleSettlement::StillInFlight);
+                }
+            }
+            changes.mark_unchanged();
+            if !self.read_published_machine_state(crate::ControlScope::List, in_flight)? {
+                return Ok(MemberLifecycleSettlement::Settled);
+            }
+        }
     }
 
     /// Read the machine state the actor last published under `scope`, with

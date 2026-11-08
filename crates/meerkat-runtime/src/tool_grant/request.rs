@@ -18,7 +18,9 @@
 //!   meets the grant it issued and settles executed. It refuses a decision no
 //!   person decided (`not_a_human_decision`), a request whose subject ended
 //!   (`subject_ended`: a member identity whose mob is gone or was replaced,
-//!   or whose member left the roster) or that the host cannot confirm now
+//!   or whose member left the roster, or a subject that no longer lives the
+//!   life the request was made in, which its body records) or that the host
+//!   cannot confirm now
 //!   (`subject_unknown`, fail closed), a run-scoped request whose run is
 //!   over (`run_ended`), and a body this version cannot read
 //!   (`unreadable_request`). The host's [`ToolGrantSubjectObserver`] answers
@@ -112,6 +114,34 @@ pub struct ToolGrantIssueBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub origin: ToolGrantRequestOrigin,
+    /// The life of the subject the request was made in, as its host names
+    /// it (a mob member identity's life marker; none for a session): an
+    /// approval executed in another life of the subject issues nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_life: Option<ToolGrantSubjectLife>,
+}
+
+/// A token the host of a grant subject gives each life of the subject. A mob
+/// member identity's moves at every end of the identity (its member's
+/// retirement that ends it, the end of its identity entry, an abandoned
+/// respawn, a reset of its mob) and at nothing else, so a respawn keeps it.
+/// Two equal tokens of one subject name one life.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolGrantSubjectLife(String);
+
+impl ToolGrantSubjectLife {
+    /// The life the host names `token`.
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// The token.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl ToolGrantIssueBody {
@@ -179,11 +209,12 @@ impl Default for ToolGrantRequestPolicy {
 }
 
 /// What a host takes its agents' grant requests with: the decision owner
-/// that holds them, its request policy, and the principal an agent's request
-/// names as its requester. A host sets it on its runtime
+/// that holds them, its request policy, the principal an agent's request
+/// names as its requester, and what it sees of its subjects, whose life a
+/// request records. A host sets it on its runtime
 /// ([`crate::MeerkatMachine::set_tool_grant_request_host`]) while it runs the
 /// executor of the decisions they hold.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolGrantRequestHost {
     /// The decision owner the requests are held in.
     pub decisions: DurableDecisionService,
@@ -191,6 +222,21 @@ pub struct ToolGrantRequestHost {
     pub policy: ToolGrantRequestPolicy,
     /// The principal an agent's request names as its requester.
     pub requester: DecisionPrincipalKey,
+    /// What the host sees of its subjects: an agent's request records the
+    /// life of its subject ([`ToolGrantSubjectObserver::life`]). Without
+    /// it, a request records none.
+    pub subjects: Option<Arc<dyn ToolGrantSubjectObserver>>,
+}
+
+impl std::fmt::Debug for ToolGrantRequestHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolGrantRequestHost")
+            .field("decisions", &self.decisions)
+            .field("policy", &self.policy)
+            .field("requester", &self.requester)
+            .field("subjects", &self.subjects.is_some())
+            .finish()
+    }
 }
 
 /// One grant request, as a host or an agent asks for it.
@@ -207,6 +253,9 @@ pub struct ToolGrantIssueRequest {
     /// Who asks: the host's principal for a host's request, the agent's for
     /// an agent's.
     pub requester: DecisionPrincipalKey,
+    /// The life of the subject the request is made in, as its host names
+    /// it: the held body records it.
+    pub subject_life: Option<ToolGrantSubjectLife>,
 }
 
 /// A grant request was refused, or its decision could not be held.
@@ -359,6 +408,7 @@ pub(crate) fn hold_agent_tool_grant_request(
 ) -> Result<AgentRequestAnswer, ToolGrantRequestError> {
     let subject = request.subject.clone();
     let target = request.target.clone();
+    let subject_life = request.subject_life.clone();
     let (decision_id, hold) = tool_grant_hold(policy, max_lifetime_ms, now_ms, request)?;
     let held = |hold| -> Result<AgentRequestAnswer, ToolGrantRequestError> {
         let decision = decisions.hold(hold, true)?;
@@ -375,6 +425,8 @@ pub(crate) fn hold_agent_tool_grant_request(
         Err(DecisionError::NotFound(_)) => {}
         Err(error) => return Err(error.into()),
     }
+    // A request of another life of the subject is never joined: a later
+    // member of an identity's name asks for its own grant.
     let open = tool_grant_requests_of(decisions, &subject, None)?
         .into_iter()
         .find(|(decision, body)| {
@@ -383,6 +435,7 @@ pub(crate) fn hold_agent_tool_grant_request(
                 DecisionPhase::Open | DecisionPhase::Approved
             ) && body.target == target
                 && body.run_scope.is_none()
+                && body.subject_life == subject_life
         });
     if let Some((decision, body)) = open {
         return Ok(AgentRequestAnswer {
@@ -432,6 +485,7 @@ fn tool_grant_hold(
         run_scope: request.run_scope,
         reason: request.reason,
         origin: request.origin,
+        subject_life: request.subject_life,
     };
     let text = serde_json::to_string(&body)
         .map_err(|error| ToolGrantRequestError::Invalid(error.to_string()))?;
@@ -551,6 +605,9 @@ pub struct ToolGrantRequestNotice {
     pub subject: ToolGrantSubject,
     pub target: ToolGrantTarget,
     pub outcome: ToolGrantRequestOutcome,
+    /// The life of the subject the request was made in: a notice reaches
+    /// the subject only while it lives that life.
+    pub subject_life: Option<ToolGrantSubjectLife>,
 }
 
 impl ToolGrantRequestNotice {
@@ -577,6 +634,7 @@ impl ToolGrantRequestNotice {
             subject: body.subject.clone(),
             target: body.target.clone(),
             outcome,
+            subject_life: body.subject_life.clone(),
         })
     }
 }
@@ -601,8 +659,12 @@ pub trait ToolGrantRequestNotices: Send + Sync {
 #[non_exhaustive]
 pub enum ToolGrantSubjectPresence {
     /// The subject can hold a grant, and runs `current_run` here now (`None`
-    /// when it runs none here).
-    Held { current_run: Option<RunId> },
+    /// when it runs none here), in the life `life` (a member identity's life
+    /// marker; none for a session).
+    Held {
+        current_run: Option<RunId>,
+        life: Option<ToolGrantSubjectLife>,
+    },
     /// The subject ended: a member identity whose mob is gone or was
     /// replaced, or whose member left the roster. Its grants ended with it,
     /// and none is issued to it after.
@@ -621,8 +683,18 @@ pub trait ToolGrantSubjectObserver: Send + Sync {
     /// on this host. A member identity is held while its mob runs the
     /// incarnation the subject names and its roster holds the identity,
     /// running the current run of the session its member holds on this
-    /// host; otherwise it ended.
+    /// host, in the life its mob names now; otherwise it ended.
     async fn presence(&self, subject: &ToolGrantSubject) -> ToolGrantSubjectPresence;
+
+    /// The life `subject` lives now, as its host names it, read without a
+    /// wake or an actor command (an agent's request records it from inside
+    /// one of its subject's turns): a member identity's life marker while
+    /// its mob runs the incarnation the subject names, none otherwise. By
+    /// default none.
+    async fn life(&self, subject: &ToolGrantSubject) -> Option<ToolGrantSubjectLife> {
+        let _ = subject;
+        None
+    }
 }
 
 /// The executor of `tool_grant.issue` decisions: see the module
@@ -702,7 +774,14 @@ impl DecisionExecutor for ToolGrantIssueExecutor {
             Err(_) => return Self::refused("unreadable_request"),
         };
         let current_run = match self.subjects.presence(&body.subject).await {
-            ToolGrantSubjectPresence::Held { current_run } => current_run,
+            // An approval executed in another life of the subject than the
+            // one its request was made in issues nothing: a later member of
+            // an identity's name never holds a grant asked for an earlier
+            // one.
+            ToolGrantSubjectPresence::Held { life, .. } if life != body.subject_life => {
+                return Self::refused("subject_ended");
+            }
+            ToolGrantSubjectPresence::Held { current_run, .. } => current_run,
             // An ended identity's grants ended with it, and none is issued
             // after: a later member of its name never holds one asked for
             // this one.

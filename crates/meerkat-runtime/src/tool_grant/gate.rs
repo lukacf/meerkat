@@ -163,6 +163,12 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             .service
             .now_ms()
             .map_err(|error| ToolGrantAgentRequestRefusal::Unavailable(error.to_string()))?;
+        // The life of the subject the agent asks in: a request of another
+        // life is never joined, and its approval issues nothing in this one.
+        let subject_life = match &host.subjects {
+            Some(subjects) => subjects.life(&self.subject).await,
+            None => None,
+        };
         let answer = hold_agent_tool_grant_request(
             &host.decisions,
             &host.policy,
@@ -179,6 +185,7 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
                     call_id: request.call_id.to_owned(),
                 },
                 requester: host.requester,
+                subject_life,
             },
         )
         .map_err(|error| match error {

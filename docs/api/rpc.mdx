@@ -2183,10 +2183,16 @@ no method loads, registers or wakes the session or the member.
   name (its member retired, its entry ended, or its mob was reset) or after
   its mob was replaced, refused with the reason `subject_ended`, or while
   the server cannot tell what the identity is (`subject_unknown`, fail
-  closed). A request names the identity by its name and mob incarnation
-  only: an approval executed after a new member took the name in the same
-  incarnation issues the grant to that member, so reject or withdraw an
-  identity's open requests before its name is taken again. An identity end
+  closed). A request records the life of the identity it was asked in: an
+  approval executed after that life ended (its member retired, its entry
+  ended or its mob was reset, even when a new member took the name in the
+  same incarnation since) is refused `subject_ended` too, and its notice
+  reaches no member of a later life. A respawn keeps the life. A one-entry
+  unlist or a complete roster's seal of an identity entry with no member
+  leaves no record a restart reads, so after a restart an approval of a
+  request asked before such an end can reach a new member of the name:
+  reject or withdraw an identity's open requests before declaring its name
+  again (Known limitations). An identity end
   that lands while the approval is being executed, after the server read
   the identity and before the grant's commit, can leave the grant live on
   the ended identity: revoke it. A `current_run` request names

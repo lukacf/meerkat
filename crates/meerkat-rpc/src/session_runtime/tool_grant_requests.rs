@@ -43,8 +43,8 @@ use meerkat_runtime::decision::{
 use meerkat_runtime::tool_grant::wire::wire_tool_grant_target;
 use meerkat_runtime::tool_grant::{
     TOOL_GRANT_ISSUE_KIND, ToolGrantRequestHost, ToolGrantRequestNotice, ToolGrantRequestNotices,
-    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantSubjectObserver,
-    ToolGrantSubjectPresence,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantSubjectLife,
+    ToolGrantSubjectObserver, ToolGrantSubjectPresence,
 };
 use tokio::sync::{Notify, oneshot};
 
@@ -112,6 +112,10 @@ impl ToolGrantSubjectObserver for RuntimeSubjects {
             Some(runtime) => runtime.tool_grant_subject_presence(subject).await,
             None => ToolGrantSubjectPresence::Unknown,
         }
+    }
+
+    async fn life(&self, subject: &ToolGrantSubject) -> Option<ToolGrantSubjectLife> {
+        self.0.upgrade()?.tool_grant_subject_life(subject).await
     }
 }
 
@@ -308,7 +312,8 @@ impl SessionRuntime {
         *running = Some(RunningExecutor { stop, task });
         drop(running);
         // While the executor runs, the runtime takes its agents' requests,
-        // naming the realm's agent as their requester.
+        // naming the realm's agent as their requester, and each records the
+        // life of its subject.
         match self.tool_grant_agent_requester() {
             Ok(requester) => {
                 self.runtime_adapter()
@@ -316,6 +321,7 @@ impl SessionRuntime {
                         decisions: self.decision_service(),
                         policy: ToolGrantRequestPolicy::default(),
                         requester,
+                        subjects: Some(Arc::new(RuntimeSubjects(Arc::downgrade(self)))),
                     }));
             }
             Err(error) => {
@@ -366,7 +372,8 @@ impl SessionRuntime {
     /// What this runtime sees of a grant subject now: a session is held,
     /// running its current run here; a member identity is held while its mob
     /// runs the incarnation the subject names and its roster holds the
-    /// identity, running the current run of the session its member holds.
+    /// identity, running the current run of the session its member holds,
+    /// in the life its mob names now.
     async fn tool_grant_subject_presence(
         &self,
         subject: &ToolGrantSubject,
@@ -374,6 +381,7 @@ impl SessionRuntime {
         match subject {
             ToolGrantSubject::Session { session_id } => ToolGrantSubjectPresence::Held {
                 current_run: self.runtime_adapter().current_run(session_id).await,
+                life: None,
             },
             ToolGrantSubject::Identity {
                 mob_id,
@@ -384,6 +392,50 @@ impl SessionRuntime {
                     .await
             }
         }
+    }
+
+    /// The life a grant subject lives now, as its mob names it: a member
+    /// identity's life marker while its mob runs the incarnation the subject
+    /// names, read from the mob's published state (no wake, no actor
+    /// command); none for a session, or when the mob cannot be read.
+    pub(crate) async fn tool_grant_subject_life(
+        &self,
+        subject: &ToolGrantSubject,
+    ) -> Option<ToolGrantSubjectLife> {
+        match subject {
+            ToolGrantSubject::Session { .. } => None,
+            ToolGrantSubject::Identity {
+                mob_id,
+                mob_incarnation,
+                identity,
+            } => self.member_life(mob_id, mob_incarnation, identity).await,
+        }
+    }
+
+    /// A member identity's life marker while its mob runs `mob_incarnation`.
+    #[cfg(feature = "mob")]
+    async fn member_life(
+        &self,
+        mob_id: &str,
+        mob_incarnation: &str,
+        identity: &str,
+    ) -> Option<ToolGrantSubjectLife> {
+        let handle = self.subject_mob(mob_id, mob_incarnation).await.ok()?;
+        handle
+            .identity_life(&meerkat_mob::AgentIdentity::from(identity))
+            .ok()
+            .map(|life| ToolGrantSubjectLife::new(life.token()))
+    }
+
+    /// A server without mobs names no member's life.
+    #[cfg(not(feature = "mob"))]
+    async fn member_life(
+        &self,
+        _mob_id: &str,
+        _mob_incarnation: &str,
+        _identity: &str,
+    ) -> Option<ToolGrantSubjectLife> {
+        None
     }
 
     /// The mob `mob_id` while it runs the incarnation `mob_incarnation`.
@@ -428,11 +480,20 @@ impl SessionRuntime {
             }
             Err(_) => return ToolGrantSubjectPresence::Unknown,
         }
+        // The life the identity lives now: a request made in another one
+        // issues nothing.
+        let life = match handle.identity_life(&member) {
+            Ok(life) => ToolGrantSubjectLife::new(life.token()),
+            Err(_) => return ToolGrantSubjectPresence::Unknown,
+        };
         let current_run = match handle.resolve_bridge_session_id(&member).await {
             Some(session_id) => self.runtime_adapter().current_run(&session_id).await,
             None => None,
         };
-        ToolGrantSubjectPresence::Held { current_run }
+        ToolGrantSubjectPresence::Held {
+            current_run,
+            life: Some(life),
+        }
     }
 
     /// A server without mobs cannot tell what a member identity is: an
@@ -507,6 +568,22 @@ impl SessionRuntime {
         };
         let state = self.mob_state()?;
         let member = meerkat_mob::AgentIdentity::from(identity);
+        // The notice reaches the identity only while it lives the life its
+        // request was made in, as the executor decides: a later member of
+        // the name never reads an earlier life's notice.
+        if let Some(asked_in) = &notice.subject_life {
+            match handle.identity_life(&member) {
+                Ok(life) if life.token() == asked_in.as_str() => {}
+                Ok(_) => {
+                    return Some(ApprovalConsentDeliveryState::Failed {
+                        reason: format!(
+                            "the identity {identity} of mob {mob_id} ended after its request"
+                        ),
+                    });
+                }
+                Err(_) => return None,
+            }
+        }
         let content = meerkat_core::types::ContentInput::Text(format!(
             "{TOOL_GRANT_REQUEST_EVENT}: {}",
             notice_payload(notice)

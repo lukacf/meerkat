@@ -33,8 +33,8 @@ use meerkat_core::session_owner_wake::{
     SessionOwnerWakeFuture, SessionOwnerWakeOutcome, SessionOwnerWakeRegistry, SessionOwnerWaker,
 };
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantAgentRequest, ToolGrantAgentRequestRefusal, ToolGrantCall,
-    ToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRefusal, ToolGrantSubject,
+    GatedToolTable, SessionToolGrants, ToolGrantAgentRequest, ToolGrantAgentRequestRefusal,
+    ToolGrantCall, ToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRefusal, ToolGrantSubject,
     ToolGrantTarget,
 };
 use meerkat_core::types::{SessionId, ToolDef, ToolName, ToolProvenance, ToolSourceKind};
@@ -53,8 +53,8 @@ use meerkat_runtime::tool_grant::{
     ToolGrantIssueRequest, ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRequestHost,
     ToolGrantRequestNotice, ToolGrantRequestNotices, ToolGrantRequestOrigin,
     ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantService,
-    ToolGrantServiceError, ToolGrantStatus, ToolGrantSubjectObserver, ToolGrantSubjectPresence,
-    ToolGrantWindow, hold_tool_grant_request, tool_grant_requests_of,
+    ToolGrantServiceError, ToolGrantStatus, ToolGrantSubjectLife, ToolGrantSubjectObserver,
+    ToolGrantSubjectPresence, ToolGrantWindow, hold_tool_grant_request, tool_grant_requests_of,
 };
 
 /// The host clock reading every test starts at, in UNIX ms.
@@ -1583,18 +1583,27 @@ impl ToolGrantRequestNotices for RecordedNotices {
 }
 
 /// The run each subject runs now, as the host sees it: a session's own, or
-/// the run of the session a member identity's member holds; and the member
-/// identities that ended.
+/// the run of the session a member identity's member holds; the member
+/// identities that ended; and the life each member identity lives.
 #[derive(Default)]
 struct HostRuns {
     runs: std::sync::Mutex<BTreeMap<String, RunId>>,
     ended: std::sync::Mutex<BTreeSet<String>>,
     unknown: std::sync::Mutex<BTreeSet<String>>,
+    lives: std::sync::Mutex<BTreeMap<String, ToolGrantSubjectLife>>,
 }
 
 impl HostRuns {
     fn set(&self, session_id: &SessionId, run_id: Option<RunId>) {
         self.set_subject(&ToolGrantSubject::session(session_id.clone()), run_id);
+    }
+
+    /// The life `subject` lives now, as its host names it.
+    fn set_life(&self, subject: &ToolGrantSubject, life: &str) {
+        self.lives.lock().unwrap().insert(
+            subject.key().as_str().to_owned(),
+            ToolGrantSubjectLife::new(life),
+        );
     }
 
     fn set_subject(&self, subject: &ToolGrantSubject, run_id: Option<RunId>) {
@@ -1639,7 +1648,16 @@ impl ToolGrantSubjectObserver for HostRuns {
         }
         ToolGrantSubjectPresence::Held {
             current_run: self.runs.lock().unwrap().get(&key).cloned(),
+            life: self.lives.lock().unwrap().get(&key).cloned(),
         }
+    }
+
+    async fn life(&self, subject: &ToolGrantSubject) -> Option<ToolGrantSubjectLife> {
+        self.lives
+            .lock()
+            .unwrap()
+            .get(subject.key().as_str())
+            .cloned()
     }
 }
 
@@ -1700,13 +1718,21 @@ impl RequestRig {
         )
     }
 
-    /// A host's request for `subject`'s `deploy`, for ten minutes.
+    /// A host's request for `subject`'s `deploy`, for ten minutes, made in
+    /// the life the host names for `subject` now.
     fn request_for(
         &self,
         subject: ToolGrantSubject,
         request_id: &str,
         run_scope: Option<RunId>,
     ) -> StoredDecision {
+        let subject_life = self
+            .runs
+            .lives
+            .lock()
+            .unwrap()
+            .get(subject.key().as_str())
+            .cloned();
         hold_tool_grant_request(
             &self.decisions,
             &ToolGrantRequestPolicy::default(),
@@ -1724,6 +1750,7 @@ impl RequestRig {
                     request_id: request_id.to_owned(),
                 },
                 requester: host_requester(),
+                subject_life,
             },
         )
         .expect("hold the request")
@@ -2054,6 +2081,7 @@ async fn a_tool_grant_request_with_a_review_stage_is_refused() {
             origin: ToolGrantRequestOrigin::Host {
                 request_id: "ask-1".to_owned(),
             },
+            subject_life: None,
         };
         let text = serde_json::to_string(&body).unwrap();
         let rendering = DecisionRendering::new("Grant deploy for 10 min.").unwrap();
@@ -2316,6 +2344,76 @@ async fn an_approved_request_to_an_ended_identity_issues_nothing() {
     }
 }
 
+/// A request records the life of its member identity it was made in. An
+/// approval executed while the identity lives another life (its member
+/// retired and a new member took the name) issues nothing: the execution is
+/// refused `subject_ended`, and the notice names the life the request was
+/// made in. An approval executed in the request's own life issues the grant.
+#[tokio::test]
+async fn an_approval_executed_in_another_life_of_the_identity_issues_nothing() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let member = member_subject();
+        rig.runs.set_life(&member, "0.0");
+        let earlier = rig.request_for(member.clone(), "ask-earlier", None);
+        assert_eq!(
+            ToolGrantIssueBody::of(&earlier).unwrap().subject_life,
+            Some(ToolGrantSubjectLife::new("0.0")),
+            "{backend:?}: the body records the life the request was made in"
+        );
+
+        // The identity's life ends and a new member takes the name.
+        rig.runs.set_life(&member, "0.1");
+        let later = rig.request_for(member.clone(), "ask-later", None);
+        rig.decide(&earlier, true);
+        rig.decide(&later, true);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &earlier.decision_id),
+            vec![DecisionPassOutcome::ExecutionRefused],
+            "{backend:?}: {pass:?}"
+        );
+        assert_eq!(
+            rig.decisions
+                .get(&earlier.decision_id)
+                .unwrap()
+                .execution_refusal
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("subject_ended"),
+            "{backend:?}"
+        );
+        assert!(
+            rig.grants
+                .issued_for(&earlier.decision_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend:?}: nothing is issued to a later life"
+        );
+        assert!(
+            rig.grants
+                .issued_for(&later.decision_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "{backend:?}: the request of the life the identity lives issues"
+        );
+        let notices = rig.notices.0.lock().unwrap().clone();
+        let earlier_notice = notices
+            .iter()
+            .find(|notice| notice.decision_id == earlier.decision_id)
+            .expect("the earlier request's notice");
+        assert_eq!(
+            earlier_notice.subject_life,
+            Some(ToolGrantSubjectLife::new("0.0")),
+            "{backend:?}: the notice names the life its request was made in"
+        );
+    }
+}
+
 /// An approved request whose subject the host cannot tell now (it cannot
 /// read its record of the mob or the roster) issues nothing: the execution
 /// is refused `subject_unknown`, fail closed, and a later pass, once the
@@ -2414,6 +2512,7 @@ async fn an_agent_held_request_names_the_agent_as_requester() {
             decisions: decisions.clone(),
             policy: ToolGrantRequestPolicy::default(),
             requester: agent_requester(),
+            subjects: None,
         }));
 
         let receipt = grants
@@ -2506,6 +2605,7 @@ async fn an_agents_repeated_request_for_a_target_answers_its_open_request() {
             decisions: decisions.clone(),
             policy: ToolGrantRequestPolicy::default(),
             requester: agent_requester(),
+            subjects: None,
         }));
         let shell = ToolGrantTarget::Family {
             family: "shell".to_string(),
@@ -2592,6 +2692,16 @@ fn machine_taking_requests(
     durable: &Durable,
     clock: &Arc<FakeClock>,
 ) -> (Arc<MeerkatMachine>, DurableDecisionService) {
+    machine_taking_requests_seeing(durable, clock, None)
+}
+
+/// As [`machine_taking_requests`], its host seeing its subjects through
+/// `subjects` (each request records its subject's life).
+fn machine_taking_requests_seeing(
+    durable: &Durable,
+    clock: &Arc<FakeClock>,
+    subjects: Option<Arc<dyn ToolGrantSubjectObserver>>,
+) -> (Arc<MeerkatMachine>, DurableDecisionService) {
     let machine = durable.machine(clock);
     let decisions = DurableDecisionService::with_clock(
         Arc::new(InMemoryDecisionStore::new()),
@@ -2601,6 +2711,7 @@ fn machine_taking_requests(
         decisions: decisions.clone(),
         policy: ToolGrantRequestPolicy::default(),
         requester: agent_requester(),
+        subjects,
     }));
     (machine, decisions)
 }
@@ -2727,6 +2838,7 @@ async fn an_agents_ask_never_joins_a_run_scoped_request() {
                     request_id: "host-run-scoped".to_owned(),
                 },
                 requester: host_requester(),
+                subject_life: None,
             },
         )
         .expect("the host's run-scoped request is held");
@@ -2780,6 +2892,7 @@ async fn an_ask_that_joins_a_request_answers_with_that_requests_duration() {
                     request_id: "host-window".to_owned(),
                 },
                 requester: host_requester(),
+                subject_life: None,
             },
         )
         .expect("the host's window request is held");
@@ -3413,5 +3526,75 @@ async fn an_identity_end_after_its_grants_run_ended_changes_nothing() {
             ),
             "{backend:?}: the refusal cites no grant of the earlier life: {events:?}"
         );
+    }
+}
+
+/// An agent's ask joins only an open request of its subject's own life:
+/// after the member identity's life ended (its member retired) and a new
+/// member took the name, the new member's ask for the target an earlier
+/// life's open request names holds a request of its own, recording the new
+/// life; a second ask in the new life joins that one.
+#[tokio::test]
+async fn a_new_lifes_ask_never_joins_an_earlier_lifes_request() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let lives = Arc::new(HostRuns::default());
+        let member = member_subject();
+        lives.set_life(&member, "0.0");
+        let (machine, decisions) = machine_taking_requests_seeing(
+            &durable,
+            &clock,
+            Some(Arc::clone(&lives) as Arc<dyn ToolGrantSubjectObserver>),
+        );
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let earlier = RuntimeSessionToolGrants::for_member_subject(
+            machine.tool_grant_service(),
+            machine.tool_grant_deadlines().clone(),
+            SessionId::new(),
+            &member,
+        );
+        let earlier_run = RunId::new();
+        let first = earlier
+            .request_grant(agent_ask(&shell, &earlier_run, "earlier-1"))
+            .await
+            .expect("the earlier life's request is held");
+
+        // The identity's life ends, and a new member takes the name.
+        lives.set_life(&member, "0.1");
+        let later = RuntimeSessionToolGrants::for_member_subject(
+            machine.tool_grant_service(),
+            machine.tool_grant_deadlines().clone(),
+            SessionId::new(),
+            &member,
+        );
+        let later_run = RunId::new();
+        let second = later
+            .request_grant(agent_ask(&shell, &later_run, "later-1"))
+            .await
+            .expect("the new life's request is held");
+        assert_ne!(
+            second.decision_id, first.decision_id,
+            "{backend:?}: the new life's ask joined the earlier life's request"
+        );
+        assert!(!second.joined, "{backend:?}");
+        let body = ToolGrantIssueBody::of(&decisions.get(&second.decision_id).expect("held"))
+            .expect("the body");
+        assert_eq!(
+            body.subject_life,
+            Some(ToolGrantSubjectLife::new("0.1")),
+            "{backend:?}: the request records the new life"
+        );
+
+        // In its own life, a second ask joins that life's open request.
+        let again = later
+            .request_grant(agent_ask(&shell, &later_run, "later-2"))
+            .await
+            .expect("the second ask is answered");
+        assert_eq!(again.decision_id, second.decision_id, "{backend:?}");
+        assert!(again.joined, "{backend:?}");
     }
 }

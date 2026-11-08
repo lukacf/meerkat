@@ -252,6 +252,24 @@ them.
   a respawn's abandonment replayed onto a retirement the replay folded as a
   plain terminal) emits `IdentityEnded`, as the live terminal abandonment
   does.
+- `meerkat-mob`, `meerkat-machine-kernels`, `meerkat-machine-schema`: an
+  identity's life marker (see Added, approval-carried tool grants).
+  MobMachine's state (`MobMachineState` in meerkat-mob and
+  meerkat-machine-schema, and the kernel `generated::mob::State`) gains the
+  public fields `identity_life_resets: u64` and `identity_life_ends` (each
+  identity's ends since the last reset), so code that builds it literally
+  must set them; `MobMachineSignal` (meerkat-mob and meerkat-machine-schema)
+  and its variant enum, and the kernel `generated::mob::Signal` and
+  `SignalKind`, gain `EndIdentityLife { agent_identity }` and
+  `RecoverIdentityLifeResets { resets }`, and the kernel
+  `generated::mob::TransitionId` gains `EndIdentityLifeRunning`,
+  `EndIdentityLifeStopped`, `EndIdentityLifeCompleted`,
+  `EndIdentityLifeDestroyed`, `RecoverIdentityLifeResetsRunning`,
+  `RecoverIdentityLifeResetsStopped`, `RecoverIdentityLifeResetsCompleted`
+  and `RecoverIdentityLifeResetsDestroyed`, each after every published
+  variant; exhaustive matches must add them. Behaviour: the arms that end
+  an identity (`UnlistIdentityEntryRemoved`, `RemoveIdentityEntryRemoved`,
+  the terminal abandonments of a respawn) and the reset move the marker.
 - `meerkat-runtime`, `meerkat-machine-kernels`, `meerkat-machine-schema`:
   the generated `ToolGrantLifecycleMachine`'s `ToolGrantEndReason` and
   `ToolGrantUseRefusal` gain `SubjectEnded`, its `ToolGrantLifecycleInput`
@@ -510,9 +528,9 @@ them.
   execution meets the grant it issued (`ToolGrantService::issued_for`) and
   settles executed. It refuses a decision no person decided
   (`not_a_human_decision`), a request whose subject ended (`subject_ended`:
-  a member identity whose mob is gone or was replaced, or whose name no
-  member holds when the approval is executed; see Known limitations for a
-  name a new member took) or that the host cannot confirm now
+  a member identity whose mob is gone or was replaced, whose name no member
+  holds when the approval is executed, or whose life the request was asked
+  in ended, as below) or that the host cannot confirm now
   (`subject_unknown`),
   a run-scoped request whose run is over
   (`run_ended`) and a body this version cannot read (`unreadable_request`),
@@ -520,8 +538,20 @@ them.
   host's `ToolGrantRequestNotices`; the host's `ToolGrantSubjectObserver`
   answers what the subject is now (`ToolGrantSubjectPresence`: held, with
   its current run, a session's own or the run of the session a member
-  identity's member holds; ended; or unknown, which refuses the approval
-  `subject_unknown`, fail closed).
+  identity's member holds, and its life; ended; or unknown, which refuses
+  the approval `subject_unknown`, fail closed). A request records the life
+  of its subject it was asked in (`ToolGrantSubjectLife`, in the body's
+  `subject_life` and the notice's; `ToolGrantSubjectObserver::life` names
+  it for an agent's request, through `ToolGrantRequestHost::subjects`): an
+  approval executed in another life is refused `subject_ended`, its notice
+  reaches no later life, and an agent's ask never joins a request of
+  another life. A mob member identity's life is its mob's life marker
+  (`meerkat_mob::IdentityLife`, `MobHandle::identity_life`), MobMachine
+  state that moves at every end of the identity (the end of a retirement
+  that ends it, its entry's one-entry unlist or removal, a respawn abandoned
+  after its old member's archive, a reset of its mob) and at nothing else:
+  a respawn keeps it, and a resume rebuilds it from the journal (the
+  terminal row of a retirement records whether it ended its identity).
   `tool_grant_requests_of` reads a
   subject's requests (the ended ones from a deadline bound on), and
   `MeerkatMachine::list_tool_grant_requests` lists them with the ended ones
@@ -804,7 +834,13 @@ them.
   one still within its window comes back live on the next upgrade. 0.9.10
   executes no `tool_grant.issue` decision (it has no executor of the kind):
   open and approved requests, and the notices of ended ones, wait for the
-  next upgrade, where a request past its deadline by then expires.
+  next upgrade, where a request past its deadline by then expires. A
+  member's retirement row this release writes records whether its end
+  ended the identity under an internal key 0.9.10 ignores (the row parses
+  as before); the identity life markers are not stored otherwise, and the
+  next upgrade rebuilds them from the journal. A retirement 0.9.10 ends
+  records no such key, so withdraw the open requests of an identity that
+  ended while 0.9.10 ran before upgrading again.
 
 - An identity adopted before this release recorded no profile source in its
   desired material: its material reads as `Unrecorded`, and the identity
@@ -895,13 +931,14 @@ them.
   peer under another composition or realm in the same process, refuses the
   work at admission.
 
-- A grant request names a mob member identity by its name and mob
-  incarnation only. When the requested identity ends (its member retires,
-  its identity entry ends, or its mob is reset) and a new member takes the
-  name in the same mob incarnation before a person's approval is executed,
-  the approval issues the grant to the new member, and the request's notice
-  reaches it. Reject or withdraw an identity's open requests before its
-  name is taken again, or revoke such a grant (`tool_grants/revoke`).
+- A one-entry unlist or a complete roster's seal of a Declared identity
+  entry with no member writes no journal row, so a restart cannot tell
+  that the entry's identity ended there: its life marker comes back as it
+  was before that end. After such an end and a restart, an approval of a
+  grant request asked for the identity before the end issues the grant to
+  a new member of the name declared after the restart, and the request's
+  notice reaches it. Reject or withdraw an identity's open requests before
+  declaring its name again, or revoke such a grant (`tool_grants/revoke`).
 
 - A member identity's end that lands while an approval of one of its grant
   requests is being executed, after the executor read the identity and

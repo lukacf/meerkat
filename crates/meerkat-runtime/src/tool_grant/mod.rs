@@ -64,9 +64,9 @@ pub use request::{
     TOOL_GRANT_ISSUE_BODY, TOOL_GRANT_ISSUE_KIND, TOOL_GRANT_ISSUE_RENDERER, ToolGrantIssueBody,
     ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantRequestError, ToolGrantRequestHost,
     ToolGrantRequestNotice, ToolGrantRequestNotices, ToolGrantRequestOrigin,
-    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantSubjectObserver,
-    ToolGrantSubjectPresence, hold_tool_grant_request, tool_grant_issue_kind,
-    tool_grant_requests_of,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantSubjectLife,
+    ToolGrantSubjectObserver, ToolGrantSubjectPresence, hold_tool_grant_request,
+    tool_grant_issue_kind, tool_grant_requests_of,
 };
 pub use service::{
     RevokedToolGrant, StoredToolGrant, ToolGrantListing, ToolGrantRequest, ToolGrantRevocation,

@@ -451,6 +451,9 @@ pub async fn handle_request(
         Ok(requester) => requester,
         Err(message) => return RpcResponse::error(id, error::INTERNAL_ERROR, message),
     };
+    // The life of the subject the request is made in (a member identity's
+    // life marker): an approval executed in another life issues nothing.
+    let subject_life = runtime.tool_grant_subject_life(&subject.subject).await;
     let request = ToolGrantIssueRequest {
         subject: subject.subject,
         target,
@@ -461,6 +464,7 @@ pub async fn handle_request(
             request_id: uuid::Uuid::new_v4().to_string(),
         },
         requester,
+        subject_life,
     };
     match runtime.runtime_adapter().request_tool_grant(
         &decisions,

@@ -10254,6 +10254,75 @@ mod tests {
             );
         }
 
+        /// A grant request asked for a member identity before its member
+        /// respawns issues after the respawn: a respawn keeps the identity's
+        /// life, so a person's approval issues the grant the request asked
+        /// for, which the respawned member holds.
+        #[tokio::test]
+        async fn a_request_made_before_a_respawn_still_issues() {
+            use meerkat_core::approval::decision::{DecisionId, DecisionPhase};
+
+            let rig = decision_rig().await;
+            let runtime = Arc::clone(&rig.router.runtime);
+            create_mob(&rig, "respawned", shell_gated_role()).await;
+            spawn(&rig, "respawned", "worker-1", None).await;
+            let requested = ok(
+                &rig,
+                "tool_grants/request",
+                serde_json::json!({
+                    "subject": identity_subject("respawned", "worker-1"),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 600_000,
+                }),
+                "the member's grant is requested",
+            )
+            .await;
+            let decision_id = DecisionId::new(
+                requested["decision"]["decision_id"]
+                    .as_str()
+                    .expect("the decision id"),
+            )
+            .expect("decision id");
+            ok(
+                &rig,
+                "mob/respawn",
+                serde_json::json!({"mob_id": "respawned", "agent_identity": "worker-1"}),
+                "the member respawns",
+            )
+            .await;
+
+            super::tool_grant_rpc::approve_as_a_person(&runtime, &decision_id);
+            let settled = until("the approval is executed or refused", || async {
+                runtime.nudge_tool_grant_request_executor();
+                runtime
+                    .decision_service()
+                    .get(&decision_id)
+                    .ok()
+                    .filter(|row| {
+                        matches!(
+                            row.state.phase,
+                            DecisionPhase::Executed | DecisionPhase::ExecutionRefused
+                        )
+                    })
+            })
+            .await;
+            assert_eq!(
+                settled.state.phase,
+                DecisionPhase::Executed,
+                "a respawn keeps the identity's life: {settled:?}"
+            );
+            let live: Vec<_> = list_identity(&rig, "respawned", "worker-1", false)
+                .await
+                .into_iter()
+                .filter(|grant| grant["status"] == "active")
+                .collect();
+            assert_eq!(
+                live.len(),
+                1,
+                "the respawned member holds the grant: {live:?}"
+            );
+        }
+
         /// An identity entry whose member the host retired outlives the
         /// retirement, unseated, with its grants. The one-entry unlist of
         /// the unseated entry ends the identity at once, and with it the

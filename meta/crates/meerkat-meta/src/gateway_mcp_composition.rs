@@ -159,15 +159,16 @@ impl<'a> GatewayFactoryConstruction<'a> {
 /// or rolled back here, and an unknown outcome is never a success.
 ///
 /// The stdio gateway serves its own installation to its SDK host
-/// (`meta/realm_mcp/*`); a launch without a provider credential store of its
-/// own keeps no secret value, and its secret writes answer
+/// (`meta/realm_mcp/*`), over the member factory's credential store (the one
+/// the launch names, else the default store); a launch whose store did not
+/// open keeps no secret value, and its secret writes answer
 /// [`McpServiceSecretUpdateError::Ownership`].
 #[derive(Clone)]
 pub struct GatewayRealmMcpInstallation {
     storage: ResolvedStorage,
-    /// The factory's own credential store; `None` on a launch that keeps
-    /// none (only the stdio gateway's own installation, never one a host
-    /// gets from [`GatewayFactoryConstruction::realm_mcp_installation`]).
+    /// The factory's own credential store; `None` on a launch whose store
+    /// did not open (only the stdio gateway's own installation, never one a
+    /// host gets from [`GatewayFactoryConstruction::realm_mcp_installation`]).
     persistence: Option<ProviderAuthPersistence>,
 }
 
@@ -323,12 +324,12 @@ impl GatewayRealmMcpInstallation {
     }
 
     /// The credential store the secret values live in: refused, with
-    /// nothing written, on a launch that keeps none.
+    /// nothing written, on a launch that has none.
     fn credential_store(&self) -> Result<&ProviderAuthPersistence, McpServiceSecretUpdateError> {
         self.persistence.as_ref().ok_or_else(|| {
             McpServiceSecretUpdateError::Ownership(
-                "this launch keeps no provider credential store of its own, so it holds no \
-                 MCP service secret"
+                "this launch's provider credential store did not open, so it holds no MCP \
+                 service secret"
                     .to_owned(),
             )
         })

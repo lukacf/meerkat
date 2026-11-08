@@ -246,7 +246,7 @@ await runtime.realmMcpRemoveSecret(server, "SEARCH_API_KEY");
 ```
 
 The value is sent once, in the `set_secret` request, and never appears in an
-answer or an error. A launch without a credential store of its own rejects the
+answer or an error. A launch whose credential store did not open rejects the
 secret methods with `RealmMcpUnavailableError`; a write whose result is
 unknown rejects with `RealmMcpOutcomeUnknownError`. See
 [Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).

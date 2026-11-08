@@ -16401,9 +16401,9 @@ impl meerkat_core::AdministrationEntry for StdioConnectionEntry {
 }
 
 /// The stdio gateway's own realm MCP installation of `storage`'s realm, over
-/// `factory`'s own credential store when the launch keeps one. A store that
-/// did not open holds no secret value here: the secret methods answer
-/// `realm_mcp_unavailable`, as on a launch without one.
+/// `factory`'s credential store (the one the launch names, else the default
+/// store). A store that did not open holds no secret value here: the secret
+/// methods answer `realm_mcp_unavailable`.
 fn gateway_realm_mcp_installation(
     factory: &AgentFactory,
     storage: &meerkat_core::storage_layout::ResolvedStorage,

@@ -22,7 +22,7 @@
 //! `realm_mcp_refusal.kind`), nothing written; `access_denied` (`-32030`,
 //! the entry's refusal), nothing written; `realm_mcp_unavailable`
 //! (`-32004`): the document or the credential owner could not be held now,
-//! or the launch keeps no credential store, nothing written;
+//! or the launch's credential store did not open, nothing written;
 //! `realm_mcp_outcome_unknown` (`-32603`): the write began and its result is
 //! not known.
 
@@ -208,7 +208,7 @@ fn refused(refusal: Value, message: String) -> JsonRpcError {
 }
 
 /// The document or the credential owner could not be held now, or the
-/// launch keeps no credential store. Nothing was written.
+/// launch's credential store did not open. Nothing was written.
 fn unavailable(message: String) -> JsonRpcError {
     JsonRpcError {
         code: CAPABILITY_UNAVAILABLE_CODE,

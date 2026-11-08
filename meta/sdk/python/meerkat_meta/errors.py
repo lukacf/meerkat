@@ -110,7 +110,8 @@ REALM_MCP_REFUSAL_KINDS: frozenset[str] = frozenset(
     }
 )
 # The realm's document or its credential owner could not be held now, or
-# the launch keeps no credential store (``-32004``); nothing was written.
+# the launch's credential store did not open (``-32004``); nothing was
+# written.
 REALM_MCP_UNAVAILABLE_KIND: str = "realm_mcp_unavailable"
 # A realm MCP write began and its result is not known (``-32603``).
 REALM_MCP_OUTCOME_UNKNOWN_KIND: str = "realm_mcp_outcome_unknown"
@@ -868,8 +869,8 @@ class RealmMcpUnavailableError(CapabilityUnavailableError):
     """Raised when a ``meta/realm_mcp/*`` write could not be made now.
 
     The installation realm's config document or its credential owner could
-    not be held (retry), or the launch keeps no provider credential store of
-    its own (the secret methods). Nothing was written. ``-32004`` with data
+    not be held (retry), or the launch's provider credential store did not
+    open (the secret methods). Nothing was written. ``-32004`` with data
     ``kind`` ``"realm_mcp_unavailable"``.
     """
 

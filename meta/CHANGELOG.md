@@ -457,7 +457,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   value appears only in the `set_secret` request, never in an answer, an
   error or a log line. Typed outcomes: `realm_mcp_refused` (`-32602`, a
   closed vocabulary of kinds), `realm_mcp_unavailable` (`-32004`, also a
-  launch without a provider credential store of its own) and
+  launch whose provider credential store did not open) and
   `realm_mcp_outcome_unknown` (`-32603`). The Console does not serve them,
   and a candidate launch refuses the writes. Python `realm_mcp_servers`,
   `realm_mcp_install`, `realm_mcp_set_secret` and `realm_mcp_remove_secret`

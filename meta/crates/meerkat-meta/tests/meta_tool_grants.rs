@@ -168,11 +168,35 @@ impl RosterProvider for SpecsRoster {
 /// The members' model: a request whose last message names [`PROBE`] calls
 /// the gated tool once, under a fresh call id; a request whose last message
 /// carries tool results sends each result's text on the row's channel and
-/// answers; any other request answers.
+/// answers; any other request answers. The last message is read past Core's
+/// system notices (a grant that opens a gated name at a model-request
+/// boundary adds one). Every request is logged (its tools and the start of
+/// its last message), so a probe that times out says what the model saw.
 #[derive(Clone)]
 struct ProbeClient {
     next_call: Arc<AtomicUsize>,
     results: mpsc::UnboundedSender<String>,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ProbeClient {
+    fn log(&self, request: &LlmRequest) {
+        let tools = request
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let last = request
+            .messages
+            .last()
+            .and_then(|message| serde_json::to_string(message).ok())
+            .unwrap_or_default();
+        let last = last.chars().take(240).collect::<String>();
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(format!("tools {tools:?}; last {last}"));
+    }
 }
 
 impl meerkat_client::LlmClient for ProbeClient {
@@ -184,7 +208,13 @@ impl meerkat_client::LlmClient for ProbeClient {
         &'a self,
         request: &'a LlmRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
-        let call = match request.messages.last() {
+        self.log(request);
+        let last = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !matches!(message, Message::SystemNotice(_)));
+        let call = match last {
             Some(Message::ToolResults { results, .. }) => {
                 for result in results {
                     let _ = self.results.send(result.text_content());
@@ -259,6 +289,7 @@ struct Rig {
     runtime: meerkat_meta::UnifiedRuntime,
     probes: mpsc::UnboundedReceiver<String>,
     probe_turns: usize,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Boot the gateway's runtime composition on `state` for the mob `mob_id`.
@@ -279,9 +310,11 @@ async fn boot_with_roster(
     roster: Arc<dyn RosterProvider>,
 ) -> Rig {
     let (results, probes) = mpsc::unbounded_channel();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let client = ProbeClient {
         next_call: Arc::new(AtomicUsize::new(0)),
         results,
+        seen: Arc::clone(&seen),
     };
     let builder = UnifiedRuntimeBuilder::default()
         .definition(definition)
@@ -299,6 +332,7 @@ async fn boot_with_roster(
         runtime,
         probes,
         probe_turns: 0,
+        seen,
     }
 }
 
@@ -350,10 +384,18 @@ impl Rig {
             )
             .await;
         assert!(sent["error"].is_null(), "the probe is admitted: {sent:#?}");
-        tokio::time::timeout(PROBE_BOUND, self.probes.recv())
-            .await
-            .expect("the probe turn calls the gated tool")
-            .expect("the probe channel stays open")
+        match tokio::time::timeout(PROBE_BOUND, self.probes.recv()).await {
+            Ok(Some(result)) => result,
+            Ok(None) => panic!("the probe channel stays open"),
+            Err(_) => {
+                let seen = self
+                    .seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .join("\n");
+                panic!("the probe turn calls the gated tool; the model saw:\n{seen}")
+            }
+        }
     }
 
     fn materialization(&self) -> Option<MemberMaterializationPhase> {
@@ -366,6 +408,36 @@ impl Rig {
     async fn shutdown(self) {
         let _ = self.runtime.shutdown().await;
     }
+
+    /// Shut down before a reopen over the same state directory in this
+    /// process: the shutdown stands the durable child root down within its
+    /// terminal window, which a loaded host can outrun, and a reopen of a
+    /// root still claimed is refused `AlreadyClaimed`. Stand down again,
+    /// bounded, until the root is released.
+    async fn shutdown_for_reopen(self) {
+        let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !child_root_released(&outcome) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            outcome = self
+                .runtime
+                .mob_runtime()
+                .stand_down_child_mobs(deadline)
+                .await;
+        }
+        assert!(
+            child_root_released(&outcome),
+            "the durable child root is released before the reopen: {outcome:?}"
+        );
+    }
+}
+
+fn child_root_released(outcome: &meerkat_meta::ChildMobStandDownOutcome) -> bool {
+    matches!(
+        outcome,
+        meerkat_meta::ChildMobStandDownOutcome::Released { .. }
+            | meerkat_meta::ChildMobStandDownOutcome::NotConfigured
+    )
 }
 
 fn tool_target() -> Value {
@@ -610,7 +682,7 @@ async fn identity_grants_survive_a_gateway_restart() {
         }))
         .await;
     let grant_id = granted["grant"]["grant_id"].clone();
-    rig.shutdown().await;
+    rig.shutdown_for_reopen().await;
 
     let mut rig = boot(temp.path(), &mob_id).await;
     let listed = rig
@@ -886,7 +958,7 @@ async fn a_mob_destroyed_and_created_again_holds_none_of_the_old_grants() {
         .destroy()
         .await
         .expect("the mob is destroyed");
-    rig.shutdown().await;
+    rig.shutdown_for_reopen().await;
 
     let mut rig = boot(temp.path(), &mob_id).await;
     let listed = rig

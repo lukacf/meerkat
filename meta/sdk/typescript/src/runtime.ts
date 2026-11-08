@@ -2820,8 +2820,8 @@ export class MetaRuntime {
    * (`definition_changed`) once the document no longer lists it. Setting
    * again replaces the value. The value is sent once, in this request, and
    * appears in no answer or error. Resolves `{}`; rejects with
-   * {@link RealmMcpUnavailableError} on a launch without a credential store
-   * of its own.
+   * {@link RealmMcpUnavailableError} on a launch whose credential store did
+   * not open.
    */
   async realmMcpSetSecret(
     server: Record<string, unknown>,

@@ -2073,8 +2073,8 @@ class MetaRuntime:
         (``definition_changed``) once the document no longer lists it.
         Setting again replaces the value. The value is sent once, in this
         request, and appears in no answer, error or log line. Returns ``{}``.
-        Raises :class:`RealmMcpUnavailableError` on a launch without a
-        credential store of its own.
+        Raises :class:`RealmMcpUnavailableError` on a launch whose credential
+        store did not open.
         """
         raw = await self._rpc(
             "meta/realm_mcp/set_secret",

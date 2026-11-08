@@ -289,7 +289,7 @@ export const REALM_MCP_REFUSAL_KINDS: ReadonlySet<string> = new Set([
 ]);
 /**
  * The realm's document or its credential owner could not be held now, or the
- * launch keeps no credential store (`-32004`); nothing was written.
+ * launch's credential store did not open (`-32004`); nothing was written.
  */
 export const REALM_MCP_UNAVAILABLE_KIND = "realm_mcp_unavailable" as const;
 /** A realm MCP write began and its result is not known (`-32603`). */
@@ -853,7 +853,7 @@ export class RealmMcpRefusedError extends RpcError {
 /**
  * A `meta/realm_mcp/*` write could not be made now: the installation realm's
  * config document or its credential owner could not be held (retry), or the
- * launch keeps no provider credential store of its own (the secret methods).
+ * launch's provider credential store did not open (the secret methods).
  * Nothing was written. `-32004` with data `kind` `"realm_mcp_unavailable"`.
  */
 export class RealmMcpUnavailableError extends CapabilityUnavailableError {

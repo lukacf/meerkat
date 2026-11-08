@@ -58,8 +58,16 @@ struct Gateway {
 }
 
 impl Gateway {
-    /// Start a gateway logging at `log_filter`.
+    /// Start a gateway logging at `log_filter`, its default provider
+    /// credential store under `scratch` (never the user's own).
     fn start(scratch: &Path, log_filter: &str) -> Self {
+        Self::start_with_config_home(scratch, log_filter, &scratch.join("xdg-config"))
+    }
+
+    /// Start a gateway logging at `log_filter`, with `config_home` as its
+    /// configuration directory (where its default provider credential store
+    /// lives).
+    fn start_with_config_home(scratch: &Path, log_filter: &str, config_home: &Path) -> Self {
         let stderr = scratch.join(format!(
             "gateway-{}.stderr",
             SystemTime::now()
@@ -71,6 +79,7 @@ impl Gateway {
             .arg("--persistent")
             .env("OPENAI_API_KEY", "sk-regression-test")
             .env("XDG_STATE_HOME", scratch.join("xdg-state"))
+            .env("XDG_CONFIG_HOME", config_home)
             .env("RUST_LOG", log_filter)
             .current_dir(scratch)
             .stdin(Stdio::piped())
@@ -177,13 +186,14 @@ impl Drop for Gateway {
     }
 }
 
-/// A stdio server declaring one secret slot. It is never launched here: no
-/// member is built.
+/// A stdio server declaring one secret slot, as the realm's document lists
+/// it. It is never launched here: no member is built.
 fn server(name: &str, args: &[&str]) -> Value {
     json!({
         "name": name,
         "command": "sh",
         "args": args,
+        "env": {},
         "secret_env": [SLOT],
         "connect_timeout_secs": 1,
     })
@@ -348,13 +358,22 @@ fn a_secret_binds_to_the_reviewed_definition_and_is_never_echoed_or_logged() {
     );
 }
 
-/// A launch without a provider credential store of its own keeps no secret
-/// value: `set_secret` and `remove_secret` answer `realm_mcp_unavailable`
-/// (`-32004`), while the listing and the install still serve.
+/// A launch without a provider credential store keeps no secret value. A
+/// launch that names no store uses the default one under its configuration
+/// directory; here that directory sits under a regular file, so the store
+/// cannot open: `set_secret` and `remove_secret` answer
+/// `realm_mcp_unavailable` (`-32004`), while the listing and the install
+/// still serve.
 #[test]
 fn without_a_credential_store_the_secret_methods_are_unavailable() {
     let scratch = tempfile::tempdir().unwrap();
-    let mut gateway = Gateway::start(scratch.path(), "info");
+    let not_a_directory = scratch.path().join("not-a-directory");
+    std::fs::write(&not_a_directory, b"").expect("a regular file");
+    let mut gateway = Gateway::start_with_config_home(
+        scratch.path(),
+        "info",
+        &not_a_directory.join("xdg-config"),
+    );
     gateway.init(&scratch.path().join("state"), json!({"demo_llm": true}));
     let listed = gateway.rpc("meta/realm_mcp/servers", json!({}));
     assert!(listed["error"].is_null(), "{listed:#}");

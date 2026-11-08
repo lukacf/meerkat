@@ -250,6 +250,8 @@ pub enum MobMachineCatalogInput {
     SettleHostPreparation,
     EndPreparationConstruction,
     UnlistIdentityEntry,
+    ResolveMemberDispatchAdmission,
+    RecordMemberDispatchAdmissionLineage,
 }
 
 impl MobMachineCatalogInput {
@@ -500,6 +502,8 @@ impl MobMachineCatalogInput {
         Self::SettleHostPreparation,
         Self::EndPreparationConstruction,
         Self::UnlistIdentityEntry,
+        Self::ResolveMemberDispatchAdmission,
+        Self::RecordMemberDispatchAdmissionLineage,
     ];
 
     #[must_use]
@@ -753,6 +757,8 @@ impl MobMachineCatalogInput {
             Self::SettleHostPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleHostPreparation,
             Self::EndPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndPreparationConstruction,
             Self::UnlistIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnlistIdentityEntry,
+            Self::ResolveMemberDispatchAdmission => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberDispatchAdmission,
+            Self::RecordMemberDispatchAdmissionLineage => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordMemberDispatchAdmissionLineage,
         }
     }
 
@@ -1031,6 +1037,8 @@ impl MobMachineCatalogInput {
             Self::SettleHostPreparation => "SettleHostPreparation",
             Self::EndPreparationConstruction => "EndPreparationConstruction",
             Self::UnlistIdentityEntry => "UnlistIdentityEntry",
+            Self::ResolveMemberDispatchAdmission => "ResolveMemberDispatchAdmission",
+            Self::RecordMemberDispatchAdmissionLineage => "RecordMemberDispatchAdmissionLineage",
         }
     }
 }

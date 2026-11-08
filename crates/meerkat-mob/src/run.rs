@@ -695,6 +695,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SettleHostPreparation { .. }
             | mob_dsl::MobMachineInput::EndPreparationConstruction { .. }
             | mob_dsl::MobMachineInput::UnlistIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -2001,6 +2003,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::SettleHostPreparation { .. }
             | mob_dsl::MobMachineInput::EndPreparationConstruction { .. }
             | mob_dsl::MobMachineInput::UnlistIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }

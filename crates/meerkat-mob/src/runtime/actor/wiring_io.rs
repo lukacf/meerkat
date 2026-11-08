@@ -1951,6 +1951,7 @@ mod wiring_incarnation_tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            dispatch_admission_lineage: false,
             direct_member_fence: None,
         }
     }

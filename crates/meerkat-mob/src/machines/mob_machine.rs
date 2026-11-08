@@ -83,6 +83,13 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     InstructionEffect, InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
     OperatorInstructionRefusal, operator_instruction_target_applies,
 };
+// A member build's tool dispatch admission: what the shell observed of the
+// build's lineage, what the host's customizer derived, and the verdict. The
+// schema's own types, one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    MemberDispatchAdmissionHostAnswer, MemberDispatchAdmissionLineage,
+    MemberDispatchAdmissionVerdict,
+};
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;

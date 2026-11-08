@@ -4333,6 +4333,26 @@ fn seed_mob_authority_sync_from_events(
                         "recover_member_definition_wiring_exempt",
                     )?;
                 }
+                // A member whose lineage runs under a host's tool dispatch
+                // admission: its row persists the record its seat made, and
+                // the replay records this incarnation in MobMachine again
+                // before the boot plan is sealed, so every build of it after
+                // the restart reads the record. A row without it (an earlier
+                // release wrote none) records nothing.
+                if member_spawned.dispatch_admission_lineage() {
+                    apply_seeded_mob_input(
+                        authority,
+                        mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &member_spawned.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &member_spawned.agent_runtime_id,
+                            ),
+                        },
+                        "recover_member_dispatch_admission_lineage",
+                    )?;
+                }
                 // The member of an identity entry: its row records the
                 // entry's origin, and the replay records the entry again
                 // before the boot plan is sealed.
@@ -12205,6 +12225,8 @@ pub(super) struct SeatedMemberRestore {
 pub(super) struct MemberRestoreSeating {
     overlay: Option<Arc<dyn AgentToolDispatcher>>,
     overlay_origin: super::fork_build::RetainedOverlayOrigin,
+    /// Whether the member is restored under a tool dispatch admission.
+    dispatch_admission: bool,
     profile_override: Option<crate::profile::Profile>,
     model_override: Option<String>,
 }
@@ -13183,6 +13205,37 @@ pub(super) async fn restore_resumed_member(
     let restore_resume_from_role = restore_resume_from_role
         .clone()
         .or_else(|| candidate.resume_from_role.clone());
+    // The tool dispatch admission the member is restored under: the host's,
+    // derived for this build. MobMachine decides it from the member's
+    // recorded lineage on a fork of the authority that is never committed: a
+    // member whose lineage runs under an admission is restored under the one
+    // the host derives now, or not at all (its restore fails with the typed
+    // refusal as its diagnostic), and never runs ungated (see `fork_build`).
+    let mut restore_spec = restore_spec;
+    let mut verdicts = base.fork();
+    restore_spec.tool_dispatch_admission = match super::fork_build::rebuild_dispatch_admission(
+        &definition.id,
+        spawn_member_customizer.as_ref(),
+        entry,
+        &bridge_session_id,
+        &restore_spec,
+        |identity, lineage, host_answer| {
+            super::fork_build::resolve_dispatch_admission_on(
+                &mut verdicts,
+                identity,
+                lineage,
+                host_answer,
+            )
+        },
+    ) {
+        Ok(admission) => admission,
+        Err(error) => {
+            return Ok(MemberRestorePlan::Unseated(member_restore_failure(
+                &bridge_session_id,
+                error.to_string(),
+            )));
+        }
+    };
     // The overlay this member is restored with: the customizer's overlay for
     // its own identity, except for a fork-derived member seated with its
     // source's overlay whose source (and every in-mob ancestor that overlay
@@ -13260,6 +13313,7 @@ pub(super) async fn restore_resumed_member(
     let seating = MemberRestoreSeating {
         overlay: restore_overlay.clone(),
         overlay_origin: restore_overlay_origin,
+        dispatch_admission: restore_spec.tool_dispatch_admission.is_some(),
         profile_override: restore_spec.override_profile.clone(),
         model_override: restore_spec.model_override.clone(),
     };
@@ -14130,6 +14184,11 @@ pub(super) async fn apply_member_restore_plan(
         seating.overlay.clone(),
         seating.overlay_origin,
     );
+    // And whether it is restored under a tool dispatch admission: what a
+    // fork of it observes of its lineage.
+    commit
+        .per_spawn_external_tools_seed
+        .retain_dispatch_admission(&entry.agent_identity, seating.dispatch_admission);
     commit
         .restored_overlays
         .insert(entry.agent_identity.clone(), seating.overlay);

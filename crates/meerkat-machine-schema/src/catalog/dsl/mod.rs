@@ -4991,6 +4991,26 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "MobNotRunning",
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "MemberDispatchAdmissionLineage",
+                &[
+                    "NoneRecorded",
+                    "Recorded",
+                    "SourceBuiltGated",
+                    "SourceBuiltUngated",
+                    "SourceRebuildGated",
+                    "SourceRebuildUngated",
+                    "Unknown",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberDispatchAdmissionHostAnswer",
+                &["NotAsked", "Derived", "NoneDerived"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberDispatchAdmissionVerdict",
+                &["AskHost", "Inherit", "Refused", "NoneRequired"],
+            ),
         ],
         input_variant_ids(MOB_MACHINE_RUNTIME_INTERNAL_INPUTS),
     )
@@ -5266,6 +5286,15 @@ runtime_internal_inputs!(
         // The one-entry unlist of a roster-owned identity, decided in the
         // actor's step for the handle's unlist. Not a surface command.
         UnlistIdentityEntry,
+        // A member build's tool dispatch admission, decided in the step that
+        // seats or rebuilds the member (a fork seat, a respawn, a wake, a
+        // restore, a reload, an explicit resume). Not a surface command.
+        ResolveMemberDispatchAdmission,
+        // The record of a member incarnation whose lineage runs under a
+        // tool dispatch admission, applied by the seat that requires it and
+        // by the replay of a spawn row that carries it. Not a surface
+        // command.
+        RecordMemberDispatchAdmissionLineage,
     ]
 );
 

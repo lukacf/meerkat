@@ -1273,6 +1273,26 @@ pub(super) enum MobCommand {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<Vec<mob_dsl::MobMachineEffect>, MobError>>,
     },
+    /// What this mob observes of a fork source's tool dispatch admission
+    /// lineage (its build in this process, its lineage record, or the host's
+    /// answer for its next build), for a fork of it. Driven by the handle's
+    /// fork paths after their own admission; not a surface command.
+    ObserveForkSourceDispatchLineage {
+        source_identity: AgentIdentity,
+        source_session_id: SessionId,
+        reply_tx: oneshot::Sender<Result<mob_dsl::MemberDispatchAdmissionLineage, MobError>>,
+    },
+    /// One fork seat's tool dispatch admission, decided by MobMachine from
+    /// the observed `lineage`, asking the host's spawn customizer for
+    /// `child` when the machine says so. Driven by the handle's fork paths
+    /// before anything is forked; not a surface command.
+    ResolveSeatDispatchAdmission {
+        lineage: mob_dsl::MemberDispatchAdmissionLineage,
+        child: Box<super::handle::SpawnMemberSpec>,
+        spawn_source: super::handle::SpawnSource,
+        spawner: Option<AgentIdentity>,
+        reply_tx: oneshot::Sender<Result<super::fork_build::SeatDispatchAdmission, MobError>>,
+    },
     /// Actor-linearized no-op used by fenced member-operator execution before
     /// any operation whose implementation may otherwise be projection-only.
     /// The command gate performs the exact residency validation; the handler
@@ -2365,6 +2385,8 @@ impl MobCommand {
             Self::CommitFlowFrameStorePlan { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMachineInput { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ApplyMachineInputEffects { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ObserveForkSourceDispatchLineage { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveSeatDispatchAdmission { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ValidateCommandAuthority { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdmitControlScope { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PruneStaleMemberOperatorRequests { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2608,6 +2630,8 @@ impl MobCommand {
             Self::CommitFlowFrameStorePlan { .. } => "CommitFlowFrameStorePlan",
             Self::ProjectMachineInput { .. } => "ProjectMachineInput",
             Self::ApplyMachineInputEffects { .. } => "ApplyMachineInputEffects",
+            Self::ObserveForkSourceDispatchLineage { .. } => "ObserveForkSourceDispatchLineage",
+            Self::ResolveSeatDispatchAdmission { .. } => "ResolveSeatDispatchAdmission",
             Self::ValidateCommandAuthority { .. } => "ValidateCommandAuthority",
             Self::AdmitControlScope { .. } => "AdmitControlScope",
             Self::PruneStaleMemberOperatorRequests { .. } => "PruneStaleMemberOperatorRequests",

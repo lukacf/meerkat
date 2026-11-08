@@ -12,6 +12,8 @@ mod temporary_council;
 pub use forked_participant::{
     ForkedParticipantRecord, ForkedParticipantSidecar, ForkedParticipantStore,
 };
+#[cfg(test)]
+pub(crate) use in_memory::InMemoryEventLogForTest;
 pub use in_memory::{
     InMemoryForkedParticipantStore, InMemoryMobEventStore, InMemoryMobIdentityStatusStore,
     InMemoryMobIdentityStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,

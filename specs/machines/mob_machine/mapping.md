@@ -5754,6 +5754,60 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberCustodyRestoredUnrecordedDestroyed`
   - anchors: (unclaimed)
   - scenarios: `member-custody-degraded`
+- `ResolveMemberDispatchAdmissionAskHostRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberDispatchAdmissionLineageRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberDispatchAdmissionLineageStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`
@@ -6331,6 +6385,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `IdentityEntryUnlisted`
   - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `MemberDispatchAdmissionResolved`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
 ### Invariants

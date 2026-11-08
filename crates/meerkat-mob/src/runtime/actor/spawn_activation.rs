@@ -2347,6 +2347,7 @@ impl MobActor {
                 fork_source: state.fork_source.clone(),
                 fork_overlay: state.fork_overlay,
                 definition_wiring: state.definition_wiring,
+                dispatch_admission_lineage: state.dispatch_admission.lineage,
             });
         }
         {
@@ -2358,11 +2359,15 @@ impl MobActor {
                 state.fork_overlay,
                 &self.definition.id,
             );
-            self.per_spawn_external_tools.write().await.retain(
+            let mut retained = self.per_spawn_external_tools.write().await;
+            retained.retain(
                 &state.identity,
                 state.per_spawn_external_tools.take(),
                 origin,
             );
+            // Whether the member's build runs under a tool dispatch
+            // admission: what a fork of it observes of its lineage.
+            retained.retain_dispatch_admission(&state.identity, state.dispatch_admission.present);
         }
 
         // Row #314: record the machine-owned external-member rebind capability

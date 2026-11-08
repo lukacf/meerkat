@@ -2405,6 +2405,10 @@ impl PreparedOperationAuthorization for IdentityChangeGrantDecision {
             Ok(())
         }
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 impl super::MobHandle {

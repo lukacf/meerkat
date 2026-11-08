@@ -34,15 +34,16 @@
 \* the execution. An authorization carries the host's answer for the
 \* approver who decided: still current, or no longer current. Any other
 \* party's input, a deadline observation and a replayed settlement may still
-\* arrive.
+\* arrive. The owner may open a cleanup, settle it, and settle a reply (with
+\* the held digest or another) in any phase and order: the machine decides.
 \*
 \* Properties. Each step property is checked on every step by its wrapper,
 \* which records the property in audit_broken when the step breaks it; the
 \* invariant of the same name requires that it never was:
 \*
 \*   AuditTerminalsLatch: an ended decision (Rejected, Expired, Withdrawn,
-\*     Executed, ExecutionRefused) never moves again; only its owed notice
-\*     settles.
+\*     Executed, ExecutionRefused) never moves again; only its owed notice,
+\*     its owed cleanup and an executed decision's reply settle.
 \*   AuditApprovalIsAttested: an approval comes only from an open decision,
 \*     before its deadline, by an attested decision bound to the held
 \*     subject digest: a human acting for the sealed approver id, eligible,
@@ -80,6 +81,14 @@
 \*     before its deadline ends the decision refused when no permit is
 \*     outstanding, and changes nothing while one is: the owner settles it
 \*     first, and a commit made under it still settles as executed.
+\*   AuditCleanupOwedUnderPermit: a cleanup is opened only by the owner
+\*     holding its permit on an approved decision, from nothing owed.
+\*   AuditCleanupSettledAfterTheEnd: an owed cleanup is never dropped, a
+\*     settled one never reopens (settling it again is refused), and a
+\*     cleanup settles only by its settlement once the decision ended
+\*     (executed, refused or expired).
+\*   AuditReplySettledOnce: an executed decision's reply settles once, by
+\*     its settlement, to the digest it names, and never changes after.
 \* and two state invariants:
 \*   AuditCommittedIsSettleable: once the owner committed, the decision is
 \*     Executed, or Approved with the permit still outstanding, so the commit
@@ -94,7 +103,7 @@
 \*     that fired.
 \*
 \* Reachability (the runner): every wrapper fires in the bounded space,
-\* checked from TLC's coverage, and seventeen scenarios are checked as
+\* checked from TLC's coverage, and twenty scenarios are checked as
 \* expected violations of their negations: a human approval executed and its
 \* notice delivered; an execution retried after a release; an approval
 \* closed by the owner's permanent refusal; a review escalated and then
@@ -107,11 +116,13 @@
 \* the deadline refused; a decision observed before the first presentation
 \* refused and then an approval; an approval observed in the same
 \* millisecond as the first presentation; an approver no longer current
-\* whose decision ends refused with no permit; and an approver no longer
+\* whose decision ends refused with no permit; an approver no longer
 \* current while a permit is outstanding, whose commit still settles as
-\* executed. With --mutants the runner seeds one defect per property into a
-\* copy of the generated model and requires TLC to refuse each with that
-\* property.
+\* executed; a cleanup opened under the permit and settled after the
+\* execution, and after an expiry; and an executed decision's reply settled,
+\* then another refused. With --mutants the runner seeds one defect per
+\* property into a copy of the generated model and requires TLC to refuse
+\* each with that property.
 \*
 \* The executor's obligations. The machine records that a permit is
 \* outstanding, not who holds it or whether a commit landed under it. The
@@ -246,6 +257,12 @@ AuditAuthorizeInputs ==
 
 AuditNoticeInputs == { [delivered |-> b] : b \in BOOLEAN }
 
+\* A reply settles by its digest: the held one, or another.
+AuditReplyInputs == { [digest |-> d] : d \in {AuditHeld, AuditOther} }
+
+\* The input of an arm that takes no fields: no property reads one.
+AuditNoInput == [none |-> TRUE]
+
 \* One application of a generated arm to an input record, per input.
 HoldArm(Arm(_, _, _, _, _, _, _, _, _, _), in) ==
     Arm(in.decision_id, in.now_ms, in.deadline_at_ms, in.subject_digest,
@@ -266,6 +283,7 @@ ReleaseExecutionArm(Arm(_), in) == Arm(in.now_ms)
 RecordExecutedArm(Arm(_, _, _), in) == Arm(in.operation_id, in.request_digest, in.now_ms)
 CloseRefusedArm(Arm(_), in) == Arm(in.now_ms)
 SettleNoticeArm(Arm(_), in) == Arm(in.delivered)
+SettleReplyArm(Arm(_), in) == Arm(in.digest)
 
 \* --- step properties --------------------------------------------------
 \* Each reads the step's input record, the state before (unprimed) and the
@@ -396,6 +414,33 @@ AuditApproverCurrentKept(kind, arm, in) ==
               ELSE /\ phase' = "ExecutionRefused"
                    /\ ended_at_ms' = Some(in.now_ms)
 
+\* A cleanup is opened only by the owner holding its permit on an approved
+\* decision, from nothing owed.
+AuditCleanupOpenedUnderPermit(kind) ==
+    (cleanup # "Owed" /\ cleanup' = "Owed") =>
+        /\ kind = "OweCleanup"
+        /\ phase = "Approved"
+        /\ permit_issued
+        /\ cleanup = "NotOwed"
+
+\* An owed cleanup is never dropped, a settled one never reopens, and a
+\* cleanup settles only by its settlement, once the decision ended.
+AuditCleanupKeptUntilTheEnd(kind) ==
+    /\ cleanup = "Owed" => cleanup' \in {"Owed", "Settled"}
+    /\ cleanup = "Settled" => cleanup' = "Settled"
+    /\ (cleanup # "Settled" /\ cleanup' = "Settled") =>
+           /\ kind = "SettleCleanup"
+           /\ phase \in {"Executed", "ExecutionRefused", "Expired"}
+
+\* An executed decision's reply settles once, by its settlement, to the
+\* digest it names; a settled reply never changes.
+AuditReplyKeptOnce(kind, in) ==
+    /\ reply_digest # None => reply_digest' = reply_digest
+    /\ (reply_digest = None /\ reply_digest' # None) =>
+           /\ kind = "SettleReply"
+           /\ phase = "Executed"
+           /\ reply_digest' = Some(in.digest)
+
 \* The time of a present optional time. It never names the option's value
 \* field: TLC compares record fields in the order their names were first
 \* seen, and the model's None must keep comparing its tag first.
@@ -469,6 +514,9 @@ AuditBreaks(kind, arm, in) ==
           ELSE {"DecisionFollowsPresentation"})
     \cup (IF AuditApproverCurrentKept(kind, arm, in) THEN {}
           ELSE {"PermitOnlyForCurrentApprover"})
+    \cup (IF AuditCleanupOpenedUnderPermit(kind) THEN {} ELSE {"CleanupOwedUnderPermit"})
+    \cup (IF AuditCleanupKeptUntilTheEnd(kind) THEN {} ELSE {"CleanupSettledAfterTheEnd"})
+    \cup (IF AuditReplyKeptOnce(kind, in) THEN {} ELSE {"ReplySettledOnce"})
 
 \* The scenario marks a step leaves for the witnesses.
 AuditMarks(arm, in) ==
@@ -495,6 +543,7 @@ AuditMarks(arm, in) ==
           THEN {"ApproverRevokedRefused"} ELSE {})
     \cup (IF arm = "AuthorizeExecutionRefusedRevokedSettlementOwed"
           THEN {"RevokedSettlementOwed"} ELSE {})
+    \cup (IF arm = "SettleReplyRefusedOther" THEN {"ReplyRefused"} ELSE {})
 
 \* Every wrapper ends with this step: the step properties it broke, the
 \* marks it left and the earliest approver presentation accepted.
@@ -896,6 +945,67 @@ AuditSettleNoticeRefusedNotEnded(in) ==
        \/ SettleNoticeArm(SettleNoticeRefusedNotEndedApproved, in)
     /\ AuditStep("SettleNotice", "SettleNoticeRefusedNotEnded", in)
 
+AuditOweCleanup ==
+    /\ OweCleanup
+    /\ AuditStep("OweCleanup", "OweCleanup", AuditNoInput)
+
+AuditOweCleanupReplayed ==
+    /\ OweCleanupReplayed
+    /\ AuditStep("OweCleanup", "OweCleanupReplayed", AuditNoInput)
+
+AuditOweCleanupRefusedNotAuthorized ==
+    /\ OweCleanupRefusedNotAuthorized
+    /\ AuditStep("OweCleanup", "OweCleanupRefusedNotAuthorized", AuditNoInput)
+
+AuditOweCleanupRefusedNotApproved ==
+    /\ \/ OweCleanupRefusedNotApprovedOpen
+       \/ OweCleanupRefusedNotApprovedRejected
+       \/ OweCleanupRefusedNotApprovedExpired
+       \/ OweCleanupRefusedNotApprovedWithdrawn
+       \/ OweCleanupRefusedNotApprovedExecuted
+       \/ OweCleanupRefusedNotApprovedExecutionRefused
+    /\ AuditStep("OweCleanup", "OweCleanupRefusedNotApproved", AuditNoInput)
+
+AuditSettleCleanup ==
+    /\ \/ SettleCleanupExecuted
+       \/ SettleCleanupExecutionRefused
+       \/ SettleCleanupExpired
+    /\ AuditStep("SettleCleanup", "SettleCleanup", AuditNoInput)
+
+AuditSettleCleanupRefusedNotOwed ==
+    /\ \/ SettleCleanupRefusedNotOwedRejected
+       \/ SettleCleanupRefusedNotOwedExpired
+       \/ SettleCleanupRefusedNotOwedWithdrawn
+       \/ SettleCleanupRefusedNotOwedExecuted
+       \/ SettleCleanupRefusedNotOwedExecutionRefused
+    /\ AuditStep("SettleCleanup", "SettleCleanupRefusedNotOwed", AuditNoInput)
+
+AuditSettleCleanupRefusedNotEnded ==
+    /\ \/ SettleCleanupRefusedNotEndedOpen
+       \/ SettleCleanupRefusedNotEndedApproved
+    /\ AuditStep("SettleCleanup", "SettleCleanupRefusedNotEnded", AuditNoInput)
+
+AuditSettleReply(in) ==
+    /\ SettleReplyArm(SettleReply, in)
+    /\ AuditStep("SettleReply", "SettleReply", in)
+
+AuditSettleReplyReplayed(in) ==
+    /\ SettleReplyArm(SettleReplyReplayed, in)
+    /\ AuditStep("SettleReply", "SettleReplyReplayed", in)
+
+AuditSettleReplyRefusedOther(in) ==
+    /\ SettleReplyArm(SettleReplyRefusedOther, in)
+    /\ AuditStep("SettleReply", "SettleReplyRefusedOther", in)
+
+AuditSettleReplyRefusedNotExecuted(in) ==
+    /\ \/ SettleReplyArm(SettleReplyRefusedNotExecutedOpen, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedApproved, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedRejected, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedExpired, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedWithdrawn, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedExecutionRefused, in)
+    /\ AuditStep("SettleReply", "SettleReplyRefusedNotExecuted", in)
+
 AuditNext ==
     \/ \E in \in AuditHoldInputs : AuditHoldHuman(in)
     \/ \E in \in AuditHoldInputs : AuditHoldReview(in)
@@ -970,6 +1080,17 @@ AuditNext ==
     \/ \E in \in AuditNoticeInputs : AuditSettleNoticeReplayed(in)
     \/ \E in \in AuditNoticeInputs : AuditSettleNoticeRefused(in)
     \/ \E in \in AuditNoticeInputs : AuditSettleNoticeRefusedNotEnded(in)
+    \/ AuditOweCleanup
+    \/ AuditOweCleanupReplayed
+    \/ AuditOweCleanupRefusedNotAuthorized
+    \/ AuditOweCleanupRefusedNotApproved
+    \/ AuditSettleCleanup
+    \/ AuditSettleCleanupRefusedNotOwed
+    \/ AuditSettleCleanupRefusedNotEnded
+    \/ \E in \in AuditReplyInputs : AuditSettleReply(in)
+    \/ \E in \in AuditReplyInputs : AuditSettleReplyReplayed(in)
+    \/ \E in \in AuditReplyInputs : AuditSettleReplyRefusedOther(in)
+    \/ \E in \in AuditReplyInputs : AuditSettleReplyRefusedNotExecuted(in)
     \/ AuditCommit
 
 AuditSpec == AuditInit /\ [][AuditNext]_<<vars, auditVars>>
@@ -992,6 +1113,9 @@ AuditNoPermitAtOrAfterDeadline == "NoPermitAtOrAfterDeadline" \notin audit_broke
 AuditReleaseClearsPermit == "ReleaseClearsPermit" \notin audit_broken
 AuditDecisionFollowsPresentation == "DecisionFollowsPresentation" \notin audit_broken
 AuditPermitOnlyForCurrentApprover == "PermitOnlyForCurrentApprover" \notin audit_broken
+AuditCleanupOwedUnderPermit == "CleanupOwedUnderPermit" \notin audit_broken
+AuditCleanupSettledAfterTheEnd == "CleanupSettledAfterTheEnd" \notin audit_broken
+AuditReplySettledOnce == "ReplySettledOnce" \notin audit_broken
 
 AuditCommittedIsSettleable ==
     audit_committed => (phase = "Executed" \/ (phase = "Approved" /\ permit_issued))
@@ -1052,6 +1176,16 @@ AuditWitnessApproverRevokedEndsRefused ==
 \* executed.
 AuditWitnessRevokedPermitSettledExecuted ==
     audit_committed /\ phase = "Executed" /\ "RevokedSettlementOwed" \in audit_seen
+\* A cleanup opened under the permit, owed through the commit and settled
+\* after the execution.
+AuditWitnessCleanupSettledAfterExecution ==
+    audit_committed /\ phase = "Executed" /\ cleanup = "Settled"
+\* A cleanup opened under the permit, owed through a release at the
+\* deadline (the expiry), and settled after it.
+AuditWitnessCleanupSettledAfterExpiry == phase = "Expired" /\ cleanup = "Settled"
+\* An executed decision's reply settled, then another reply refused.
+AuditWitnessReplySettledThenAnotherRefused ==
+    phase = "Executed" /\ reply_digest # None /\ "ReplyRefused" \in audit_seen
 
 NotAuditWitnessHumanApprovalExecutedAndNoticed == ~AuditWitnessHumanApprovalExecutedAndNoticed
 NotAuditWitnessRetriedAfterRelease == ~AuditWitnessRetriedAfterRelease
@@ -1071,4 +1205,7 @@ NotAuditWitnessDecidedBeforePresentationRefused ==
 NotAuditWitnessApprovedAtThePresentation == ~AuditWitnessApprovedAtThePresentation
 NotAuditWitnessApproverRevokedEndsRefused == ~AuditWitnessApproverRevokedEndsRefused
 NotAuditWitnessRevokedPermitSettledExecuted == ~AuditWitnessRevokedPermitSettledExecuted
+NotAuditWitnessCleanupSettledAfterExecution == ~AuditWitnessCleanupSettledAfterExecution
+NotAuditWitnessCleanupSettledAfterExpiry == ~AuditWitnessCleanupSettledAfterExpiry
+NotAuditWitnessReplySettledThenAnotherRefused == ~AuditWitnessReplySettledThenAnotherRefused
 ====

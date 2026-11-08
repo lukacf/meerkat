@@ -61629,6 +61629,63 @@ async fn test_fanout_emits_per_target_and_aggregate_completion_events() {
     );
 }
 
+/// An open approval branch runs only its decision's approved work: it is an
+/// active member of its grantee's role, and a role-wide flow step of that
+/// role selects the grantee, never the branch.
+#[tokio::test]
+async fn a_role_wide_flow_step_never_selects_an_open_approval_branch() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(2_000, 8)).await;
+    let grantee = AgentIdentity::from("w-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), grantee.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spec).await.expect("spawn the grantee");
+    let decision = meerkat_core::approval::decision::DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new("flow-target")
+            .expect("subject key"),
+    );
+    let (branch, _) = handle
+        .open_approval_branch(&grantee, &decision)
+        .await
+        .expect("the approval branch opens");
+    assert!(
+        handle.list_members().await.iter().any(|entry| {
+            entry.agent_identity == branch
+                && entry.role.as_str() == "worker"
+                && entry.status == MobMemberStatus::Active
+        }),
+        "the branch is an active member of its grantee's role"
+    );
+
+    let run_id = handle
+        .run_flow(
+            FlowId::from("demo"),
+            serde_json::json!({ "case": "approval-branch" }),
+        )
+        .await
+        .expect("run flow");
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    let events = handle.events().replay_all().await.expect("replay");
+    let mut targets: Vec<AgentIdentity> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::StepDispatched {
+                run_id: id, target, ..
+            } if id == &run_id => Some(target.identity.clone()),
+            _ => None,
+        })
+        .collect();
+    targets.sort();
+    targets.dedup();
+    assert_eq!(
+        targets,
+        vec![grantee],
+        "the role-wide step selected the grantee only"
+    );
+}
+
 #[tokio::test]
 async fn test_run_snapshots_are_captured_per_run_and_remain_immutable() {
     let (handle, service) =
@@ -92686,6 +92743,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::ApprovalBranchReserved { .. } => "approval_branch_reserved".to_string(),
         MobError::IdentityChangeRefused { refusal } => {
             format!("identity_change_refused:{}", refusal.kind())
         }

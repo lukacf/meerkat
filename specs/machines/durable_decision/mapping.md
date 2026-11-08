@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DurableDecisionMachine`
 
 ### Code Anchors
-- `durable_decision` (machine `DurableDecisionMachine`): `crates/meerkat-runtime/src/decision/dsl.rs` — DurableDecisionMachine owns one durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision bound to the subject digest, the execution permit and the executed fact, expiry at the sealed deadline, withdrawal, and the requester notice an ended decision owes; ended decisions are terminal
+- `durable_decision` (machine `DurableDecisionMachine`): `crates/meerkat-runtime/src/decision/dsl.rs` — DurableDecisionMachine owns one durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision bound to the subject digest, the execution permit and the executed fact, expiry at the sealed deadline, withdrawal, the requester notice an ended decision owes, the cleanup an owner's execution opens under its permit and settles after the end, and an executed decision's one reply; ended decisions are terminal
 
 ### Scenarios
 - `durable_decision_hold` — durable_decision_machine.rs::hold_seals_the_binding_and_opens_by_stage and hold_replays_the_same_binding_and_refuses_another hold a decision by stage with its sealed binding, refuse a past or empty window and a self review, replay the same hold in every held phase and refuse a hold that changes any sealed field
@@ -19,6 +19,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `durable_decision_execution` — durable_decision_machine.rs::execution_is_authorized_only_while_approved_with_the_held_binding, executed_replays_and_a_mismatched_binding_is_refused, a_permit_outstanding_across_the_deadline_settles_executed_or_expired and close_refused_never_follows_executed authorize a permit only for the held binding of an approved decision, record the execution only under an outstanding permit, replay it, release a permit with no commit, and close a permanent refusal
 - `durable_decision_approver_currentness` — durable_decision_machine.rs::an_approver_who_is_no_longer_current_gets_no_permit refuses a permit when the approver who decided is no longer current, ends a decision with no outstanding permit refused with its notice owed, and holds one whose permit is outstanding until its owner settles it
 - `durable_decision_notice` — durable_decision_machine.rs::notice_is_owed_once_at_the_end_for_routable_decisions owes one requester notice at every end of a routable decision, settles it delivered or failed, replays the same receipt and refuses a contradicting one, an unroutable requester's and a notice before the end
+- `durable_decision_cleanup` — durable_decision_machine.rs::a_cleanup_is_opened_under_a_permit_and_settled_after_the_end opens an owner's cleanup only while it holds its permit, replays an open cleanup, keeps it owed across a release, a refusal and an expiry, settles it only after the decision ended, refuses a settlement before the end and once nothing is owed, and refuses an opening outside an approved decision
+- `durable_decision_reply` — durable_decision_machine.rs::one_reply_settles_for_an_executed_decision settles the first reply of an executed decision by its digest, replays the same one, refuses another, and refuses a reply of a decision that did not execute
 - `durable_decision_terminal_latch` — durable_decision_machine.rs::every_command_class_in_every_phase_is_total_and_only_mutates_where_intended and recover_from_state_refuses_each_torn_shape refuse every input an ended or approved decision does not accept with its typed refusal and a byte-identical state, and refuse a recovered row that breaks any invariant
 
 ### Transitions
@@ -457,6 +459,90 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeExecutionRefusedRevokedSettlementOwed`
   - anchors: `durable_decision`
   - scenarios: `durable_decision_approver_currentness`
+- `OweCleanup`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupReplayed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotAuthorized`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotApprovedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotApprovedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotApprovedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotApprovedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotApprovedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `OweCleanupRefusedNotApprovedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotOwedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotOwedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotOwedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotOwedExecuted`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotOwedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotEndedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleCleanupRefusedNotEndedApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `SettleReply`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyReplayed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedOther`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedNotExecutedOpen`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedNotExecutedApproved`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedNotExecutedRejected`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedNotExecutedExpired`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedNotExecutedWithdrawn`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
+- `SettleReplyRefusedNotExecutedExecutionRefused`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
 
 ### Effects
 - `Held`
@@ -503,7 +589,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `durable_decision_notice`
 - `Refused`
   - anchors: `durable_decision`
-  - scenarios: `durable_decision_hold`, `durable_decision_human_decision`, `durable_decision_review`, `durable_decision_deadline`, `durable_decision_withdrawal`, `durable_decision_execution`, `durable_decision_approver_currentness`, `durable_decision_notice`, `durable_decision_terminal_latch`
+  - scenarios: `durable_decision_hold`, `durable_decision_human_decision`, `durable_decision_review`, `durable_decision_deadline`, `durable_decision_withdrawal`, `durable_decision_execution`, `durable_decision_approver_currentness`, `durable_decision_notice`, `durable_decision_cleanup`, `durable_decision_reply`, `durable_decision_terminal_latch`
+- `CleanupOwed`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `CleanupSettled`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`
+- `ReplySettled`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`
 
 ### Invariants
 - `unheld_is_empty`
@@ -554,6 +649,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ended_decisions_owe_their_notice`
   - anchors: `durable_decision`
   - scenarios: `durable_decision_approver_currentness`, `durable_decision_notice`, `durable_decision_terminal_latch`
+- `cleanup_follows_a_permit`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`, `durable_decision_terminal_latch`
+- `cleanup_settles_after_the_end`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_cleanup`, `durable_decision_terminal_latch`
+- `only_executed_settles_a_reply`
+  - anchors: `durable_decision`
+  - scenarios: `durable_decision_reply`, `durable_decision_terminal_latch`
 
 
 <!-- GENERATED_COVERAGE_END -->

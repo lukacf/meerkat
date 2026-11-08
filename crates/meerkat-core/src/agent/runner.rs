@@ -6120,6 +6120,10 @@ mod skill_activation_effect_tests {
         ) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct PausedAppReviewer(Arc<(tokio::sync::Semaphore, tokio::sync::Semaphore)>);
@@ -6556,6 +6560,10 @@ mod skill_activation_effect_tests {
             assert!(self.0.same_operation(binding));
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct AttachmentRunAttempt {
@@ -6731,6 +6739,10 @@ mod skill_activation_effect_tests {
                 &self,
                 _binding: &PreparedAuthorizationBinding,
             ) -> Result<(), OperationAuthorizationError> {
+                Ok(())
+            }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
                 Ok(())
             }
         }

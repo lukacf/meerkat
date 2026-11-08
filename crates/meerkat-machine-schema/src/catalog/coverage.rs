@@ -1940,7 +1940,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "durable_decision",
                 "DurableDecisionMachine",
                 "crates/meerkat-runtime/src/decision/dsl.rs",
-                "DurableDecisionMachine owns one durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision bound to the subject digest, the execution permit and the executed fact, expiry at the sealed deadline, withdrawal, and the requester notice an ended decision owes; ended decisions are terminal",
+                "DurableDecisionMachine owns one durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision bound to the subject digest, the execution permit and the executed fact, expiry at the sealed deadline, withdrawal, the requester notice an ended decision owes, the cleanup an owner's execution opens under its permit and settles after the end, and an executed decision's one reply; ended decisions are terminal",
                 CoverageClaims::none()
                     .transitions(&[
                         "HoldHuman",
@@ -2088,6 +2088,34 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "SettleNoticeRefusedNotEndedApproved",
                         "AuthorizeExecutionRefusedApproverRevoked",
                         "AuthorizeExecutionRefusedRevokedSettlementOwed",
+                        "OweCleanup",
+                        "OweCleanupReplayed",
+                        "OweCleanupRefusedNotAuthorized",
+                        "OweCleanupRefusedNotApprovedOpen",
+                        "OweCleanupRefusedNotApprovedRejected",
+                        "OweCleanupRefusedNotApprovedExpired",
+                        "OweCleanupRefusedNotApprovedWithdrawn",
+                        "OweCleanupRefusedNotApprovedExecuted",
+                        "OweCleanupRefusedNotApprovedExecutionRefused",
+                        "SettleCleanupExecuted",
+                        "SettleCleanupExecutionRefused",
+                        "SettleCleanupExpired",
+                        "SettleCleanupRefusedNotOwedRejected",
+                        "SettleCleanupRefusedNotOwedExpired",
+                        "SettleCleanupRefusedNotOwedWithdrawn",
+                        "SettleCleanupRefusedNotOwedExecuted",
+                        "SettleCleanupRefusedNotOwedExecutionRefused",
+                        "SettleCleanupRefusedNotEndedOpen",
+                        "SettleCleanupRefusedNotEndedApproved",
+                        "SettleReply",
+                        "SettleReplyReplayed",
+                        "SettleReplyRefusedOther",
+                        "SettleReplyRefusedNotExecutedOpen",
+                        "SettleReplyRefusedNotExecutedApproved",
+                        "SettleReplyRefusedNotExecutedRejected",
+                        "SettleReplyRefusedNotExecutedExpired",
+                        "SettleReplyRefusedNotExecutedWithdrawn",
+                        "SettleReplyRefusedNotExecutedExecutionRefused",
                     ])
                     .effects(&[
                         "Held",
@@ -2105,6 +2133,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "ExecutionRefused",
                         "NoticeSettled",
                         "Refused",
+                        "CleanupOwed",
+                        "CleanupSettled",
+                        "ReplySettled",
                     ])
                     .invariants(&[
                         "unheld_is_empty",
@@ -2123,6 +2154,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "expiry_never_precedes_its_deadline",
                         "withdrawal_precedes_the_deadline",
                         "ended_decisions_owe_their_notice",
+                        "cleanup_follows_a_permit",
+                        "cleanup_settles_after_the_end",
+                        "only_executed_settles_a_reply",
                     ]),
             )],
             &[
@@ -2354,6 +2388,64 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 scenario(
+                    "durable_decision_cleanup",
+                    "durable_decision_machine.rs::a_cleanup_is_opened_under_a_permit_and_settled_after_the_end opens an owner's cleanup only while it holds its permit, replays an open cleanup, keeps it owed across a release, a refusal and an expiry, settles it only after the decision ended, refuses a settlement before the end and once nothing is owed, and refuses an opening outside an approved decision",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "OweCleanup",
+                            "OweCleanupReplayed",
+                            "OweCleanupRefusedNotAuthorized",
+                            "OweCleanupRefusedNotApprovedOpen",
+                            "OweCleanupRefusedNotApprovedRejected",
+                            "OweCleanupRefusedNotApprovedExpired",
+                            "OweCleanupRefusedNotApprovedWithdrawn",
+                            "OweCleanupRefusedNotApprovedExecuted",
+                            "OweCleanupRefusedNotApprovedExecutionRefused",
+                            "SettleCleanupExecuted",
+                            "SettleCleanupExecutionRefused",
+                            "SettleCleanupExpired",
+                            "SettleCleanupRefusedNotOwedRejected",
+                            "SettleCleanupRefusedNotOwedExpired",
+                            "SettleCleanupRefusedNotOwedWithdrawn",
+                            "SettleCleanupRefusedNotOwedExecuted",
+                            "SettleCleanupRefusedNotOwedExecutionRefused",
+                            "SettleCleanupRefusedNotEndedOpen",
+                            "SettleCleanupRefusedNotEndedApproved",
+                        ])
+                        .effects(&[
+                            "CleanupOwed",
+                            "CleanupSettled",
+                            "Refused",
+                        ])
+                        .invariants(&[
+                            "cleanup_follows_a_permit",
+                            "cleanup_settles_after_the_end",
+                        ]),
+                ),
+                scenario(
+                    "durable_decision_reply",
+                    "durable_decision_machine.rs::one_reply_settles_for_an_executed_decision settles the first reply of an executed decision by its digest, replays the same one, refuses another, and refuses a reply of a decision that did not execute",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "SettleReply",
+                            "SettleReplyReplayed",
+                            "SettleReplyRefusedOther",
+                            "SettleReplyRefusedNotExecutedOpen",
+                            "SettleReplyRefusedNotExecutedApproved",
+                            "SettleReplyRefusedNotExecutedRejected",
+                            "SettleReplyRefusedNotExecutedExpired",
+                            "SettleReplyRefusedNotExecutedWithdrawn",
+                            "SettleReplyRefusedNotExecutedExecutionRefused",
+                        ])
+                        .effects(&[
+                            "ReplySettled",
+                            "Refused",
+                        ])
+                        .invariants(&[
+                            "only_executed_settles_a_reply",
+                        ]),
+                ),
+                scenario(
                     "durable_decision_terminal_latch",
                     "durable_decision_machine.rs::every_command_class_in_every_phase_is_total_and_only_mutates_where_intended and recover_from_state_refuses_each_torn_shape refuse every input an ended or approved decision does not accept with its typed refusal and a byte-identical state, and refuse a recovered row that breaks any invariant",
                     CoverageClaims::none()
@@ -2431,6 +2523,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "expiry_never_precedes_its_deadline",
                             "withdrawal_precedes_the_deadline",
                             "ended_decisions_owe_their_notice",
+                            "cleanup_follows_a_permit",
+                            "cleanup_settles_after_the_end",
+                            "only_executed_settles_a_reply",
                         ]),
                 ),
             ],

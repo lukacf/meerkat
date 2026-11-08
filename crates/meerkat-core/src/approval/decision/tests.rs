@@ -514,6 +514,8 @@ fn stored(
         permit_issued: false,
         executed_request_digest: None,
         notice,
+        cleanup: DecisionCleanup::NotOwed,
+        reply_digest: None,
     };
     StoredDecision::held(descriptor, state)
 }
@@ -1113,5 +1115,98 @@ fn a_core_before_0911_reads_new_human_evidence_as_torn() {
         digest_before_0911(&read),
         evidence.digest().expect("digest"),
         "an older Core's digest of the new evidence is not the row's: the row is torn"
+    );
+}
+
+/// The bytes of an executed, noticed row that carries neither fact of an
+/// executed decision (a cleanup owed, a reply settled): what a 0.9.10
+/// reader decodes. A kind that never opens the facts writes exactly these.
+const EXECUTED_ROW_WITHOUT_FACTS: &str = concat!(
+    r#"{"decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""descriptor":{"kind":"release","subject_key":"subject-a","operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"team:owners","deadline_at_ms":100,"created_at_ms":10,"#,
+    r#""request":{"build":7},"rendering":"Release build 7.","renderer":"render.v1","#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"},"#,
+    r#""state":{"phase":"executed","#,
+    r#""decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""deadline_at_ms":100,"#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"approver:team:owners","reviewer":null,"stage":"human","#,
+    r#""first_presented_to_approver_at_ms":null,"presented_to_reviewer":false,"#,
+    r#""evidence_digest":null,"decided_at_ms":null,"ended_at_ms":50,"permit_issued":false,"#,
+    r#""executed_request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""notice":"delivered"},"revision":1}"#,
+);
+
+#[test]
+fn a_row_without_the_executed_decisions_facts_keeps_its_bytes() {
+    let mut row = stored(
+        "subject-a",
+        DecisionPhase::Executed,
+        DecisionNotice::Delivered,
+        100,
+    );
+    row.state.executed_request_digest = Some(row.state.request_digest.clone());
+    row.state.ended_at_ms = Some(50);
+    assert_eq!(
+        serde_json::to_string(&row).expect("the row encodes"),
+        EXECUTED_ROW_WITHOUT_FACTS
+    );
+}
+
+/// What sealing a hold of `kind` in a reviewer's review stage answers.
+fn sealed_with_a_reviewer(kind: &str) -> Result<DecisionDescriptor, DecisionContractError> {
+    let mut request = hold_request(rendering("Approve the held operation."), None)
+        .with_reviewer(key(PrincipalKind::SharedAgent, "reviewer"));
+    request.kind = DecisionKind::new(kind).expect("kind");
+    DecisionDescriptor::seal(request, 10)
+}
+
+/// `kind` is decided by people only: a hold of it that names a reviewer is
+/// refused, and nothing is sealed.
+fn assert_decided_by_people_only(kind: &str) {
+    let parsed = DecisionKind::new(kind).expect("kind");
+    assert!(decided_by_people_only(&parsed), "{kind} is listed");
+    assert_eq!(
+        sealed_with_a_reviewer(kind).expect_err("a review stage is refused"),
+        DecisionContractError::ReviewStageNotAllowed { kind: parsed }
+    );
+}
+
+#[test]
+fn a_grant_child_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("grant.child");
+}
+
+#[test]
+fn a_tool_grant_issue_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("tool_grant.issue");
+}
+
+#[test]
+fn a_route_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("route.release");
+}
+
+#[test]
+fn a_gating_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("gating.release");
+}
+
+/// The control: a kind a reviewer may decide keeps its review stage.
+#[test]
+fn a_release_decision_keeps_its_review_stage() {
+    assert!(!decided_by_people_only(
+        &DecisionKind::new("release").expect("kind")
+    ));
+    let sealed = sealed_with_a_reviewer("release").expect("sealed with its review stage");
+    assert_eq!(
+        sealed.reviewer,
+        Some(key(PrincipalKind::SharedAgent, "reviewer"))
     );
 }

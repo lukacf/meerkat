@@ -44,14 +44,43 @@ pub use keys::{
 };
 pub use parts::{CanonicalPart, PresentationAudience, PresentationRecord, canonical_parts};
 pub use record::{
-    ConsentProvenance, DECISION_PRESENTATIONS_MAX, DecisionDescriptor, DecisionHoldRequest,
-    DecisionMachineState, DecisionNotice, DecisionOutcome, DecisionPhase, DecisionStage,
-    StoredDecision,
+    ConsentProvenance, DECISION_PRESENTATIONS_MAX, DecisionCleanup, DecisionDescriptor,
+    DecisionHoldRequest, DecisionMachineState, DecisionNotice, DecisionOutcome, DecisionPhase,
+    DecisionStage, StoredDecision,
 };
 pub use store::{
     DECISION_PAGE_MAX, DecisionExecutorClaim, DecisionListFilter, DecisionPage, DecisionRow,
     DecisionStore, InMemoryDecisionStore, UnreadableDecision, decision_is_due, decision_owes_work,
 };
+
+/// The authority label of an approval branch: a one-time member forked from
+/// a grantee to run the approved work of one durable decision, whose id is
+/// the label's value. A host treats a member with this label as private to
+/// no person: no conversation, viewer or memory of anyone's reaches it.
+pub const APPROVAL_BRANCH_LABEL: &str = "decision.approval_branch";
+
+/// The decision kinds decided by people only: a hold of one of them that
+/// names a reviewer is refused
+/// ([`DecisionContractError::ReviewStageNotAllowed`]), and each one's
+/// executor refuses an execution whose provenance is not a person's. A
+/// model reviewer's allow can therefore never approve a grant, a tool
+/// grant, a release or a gate.
+///
+/// The list must grow with each kind decided by people only, whichever crate
+/// owns the kind: a kind missing from it keeps a review stage.
+pub const DECIDED_BY_PEOPLE_ONLY: &[&str] = &[
+    "grant.child",
+    "tool_grant.issue",
+    "route.release",
+    "gating.release",
+];
+
+/// Whether decisions of `kind` are decided by people only
+/// ([`DECIDED_BY_PEOPLE_ONLY`]).
+#[must_use]
+pub fn decided_by_people_only(kind: &DecisionKind) -> bool {
+    DECIDED_BY_PEOPLE_ONLY.contains(&kind.as_str())
+}
 
 /// A durable decision value is not valid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -76,6 +105,12 @@ pub enum DecisionContractError {
     /// from the rendering.
     #[error("the given subject digest is not the rendering's digest")]
     SubjectDigestMismatch,
+    /// A hold names a reviewer for a kind decided by people only
+    /// ([`DECIDED_BY_PEOPLE_ONLY`]): nothing is held.
+    #[error(
+        "review_stage_not_allowed: decisions of {kind} are decided by people only, so a hold names no reviewer"
+    )]
+    ReviewStageNotAllowed { kind: DecisionKind },
     /// A value could not be encoded.
     #[error("decision value could not be encoded: {0}")]
     Encoding(String),

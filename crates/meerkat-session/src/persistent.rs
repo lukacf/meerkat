@@ -8386,6 +8386,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// committed transcript observed by the fork is stable without a lock of
     /// its own. The stale-live-session discard is skipped because the source's
     /// live session is in use by that running turn.
+    ///
+    /// An empty-prefix fork (`DurableForkSourceAdmission::EmptyPrefix`) takes
+    /// this guard too: it takes no message, and its build comes from one
+    /// committed snapshot read whole, so a concurrent writer of the source
+    /// changes nothing the child takes from it; a running source's live
+    /// session stays its turn's.
     fn caller_turn_fork_mutation_guard() -> SessionMutationGuard {
         SessionMutationGuard {
             _turn_finalization_guard: None,
@@ -9016,10 +9022,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             boundary,
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn)
         );
+        let empty_prefix = matches!(
+            boundary,
+            ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::EmptyPrefix)
+        );
         let quiescent = matches!(
             boundary,
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent)
         );
+        // An empty-prefix fork takes nothing of the transcript, which is
+        // why it may skip the source's turn: any other count is refused
+        // before anything is read.
+        if empty_prefix && message_count != Some(0) {
+            return Err(SessionError::Unsupported(
+                "an empty-prefix fork takes no message of its source: its message count must be 0"
+                    .into(),
+            ));
+        }
         let _mutation_guard = match boundary {
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent) => {
                 self.quiescent_fork_mutation_guard(source_session_id)
@@ -9028,6 +9047,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn) => {
                 Self::caller_turn_fork_mutation_guard()
             }
+            // Nothing the source's turn could extend is observed: no lock,
+            // and no running source is refused or waited for.
+            ForkSourceBoundary::Admission(
+                meerkat_core::DurableForkSourceAdmission::EmptyPrefix,
+            ) => Self::caller_turn_fork_mutation_guard(),
             ForkSourceBoundary::HeldTurnBoundary {
                 turn_finalization_guard,
                 recovery_gate_bound,
@@ -9040,7 +9064,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await?
             }
         };
-        let source = if caller_turn {
+        // Both read the committed snapshot whole, through a running turn's
+        // provisional tail, and never write the source.
+        let source = if caller_turn || empty_prefix {
             self.source_session_for_caller_turn_fork_locked(source_session_id)
                 .await?
         } else {

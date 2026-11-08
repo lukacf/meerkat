@@ -3,6 +3,7 @@
 //! correlated access relation; they are not production ingress implementations.
 #![allow(clippy::expect_used)]
 
+mod approval_operation;
 mod audit;
 mod connector_approval;
 mod delegated_search;
@@ -289,20 +290,28 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::new_with(None)
+    }
+
+    /// The fixture whose grant owner asks `currentness`, when given, at each
+    /// spend of an approval-carried use.
+    fn new_with(currentness: Option<Arc<dyn crate::grants::ApprovalUseCurrentness>>) -> Self {
         let publication = LocalAuthorizationPublication::new();
         let clock = Arc::new(Clock(AtomicU64::new(100), AtomicBool::new(false)));
-        let grants = Arc::new(
-            LocalGrantAuthority::new(
-                LocalGrantConfiguration {
-                    root: who("root"),
-                    namespace: id("grants"),
-                    generation: 1,
-                },
-                publication.clone(),
-                clock.clone(),
-            )
-            .expect("grant owner"),
-        );
+        let owner = LocalGrantAuthority::new(
+            LocalGrantConfiguration {
+                root: who("root"),
+                namespace: id("grants"),
+                generation: 1,
+            },
+            publication.clone(),
+            clock.clone(),
+        )
+        .expect("grant owner");
+        let grants = Arc::new(match currentness {
+            Some(currentness) => owner.with_approval_use_currentness(currentness),
+            None => owner,
+        });
         let root = grants
             .issue_root(
                 &who("root"),

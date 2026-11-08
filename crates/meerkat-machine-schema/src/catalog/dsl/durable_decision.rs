@@ -66,7 +66,22 @@
 //!
 //! `Rejected`, `Expired`, `Withdrawn`, `Executed` and `ExecutionRefused` are
 //! terminal. Once a decision reaches one, no input moves it again; only its
-//! owed notice settles. A restart or a clock rollback can never revive it.
+//! owed notice and cleanup settle, and an executed decision's one reply. A
+//! restart or a clock rollback can never revive it.
+//!
+//! # What an executed decision owes
+//!
+//! Two facts sit beside the notice, for kinds whose owner opens them; every
+//! other kind never sets them and behaves as before. The cleanup
+//! (`OweCleanup`, `SettleCleanup`) records that the owner's execution left
+//! work outside the store to undo once the decision's work is over: the
+//! owner opens it while it holds its permit, before it creates anything, and
+//! settles it only after the decision ended and it undid that work, so it is
+//! owed across a release, a refusal or an expiry; once settled, nothing is
+//! owed, and settling again is refused `NotOwed`. The reply (`SettleReply`)
+//! records the digest of the one reply an executed decision's work sends
+//! its requester: the first settles it, the same one again replays, and
+//! another is refused.
 //!
 //! # Totality discipline
 //!
@@ -147,6 +162,22 @@ pub mod types {
         Escalate,
     }
 
+    /// What an owner's execution of a decision left outside the decision
+    /// store to undo once the decision's work is over (for example a branch
+    /// and the controller grant it runs under).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum DurableDecisionCleanup {
+        /// The owner's execution left nothing to undo.
+        #[default]
+        NotOwed,
+        /// Opened by the owner, while it held its permit, before it created
+        /// anything to undo; owed until the owner settles it.
+        Owed,
+        /// The owner undid what its execution created, after the decision
+        /// ended.
+        Settled,
+    }
+
     /// Why an input was refused. Every refusal leaves the decision unchanged,
     /// except `Expired`, which a touch at or after the deadline emits with
     /// the expiry it recorded.
@@ -195,7 +226,8 @@ pub mod types {
         /// passed, or the approver is no longer current): the owner must
         /// settle the permit before anything else.
         SettlementOwed,
-        /// No notice is owed, or this receipt contradicts the settled one.
+        /// No notice, cleanup or reply is owed, or this receipt or reply
+        /// contradicts the settled one.
         NotOwed,
         /// The human decision was observed before the decision's first
         /// presentation to the approver.
@@ -207,13 +239,13 @@ pub mod types {
 macro_rules! durable_decision_catalog_machine_dsl {
     ($rust_crate:literal, $rust_module:literal) => {
         pub use $crate::catalog::dsl::durable_decision::types::{
-            DecisionDigest, DecisionParty, DurableDecisionNotice, DurableDecisionRefusal,
-            DurableDecisionReviewVerdict, DurableDecisionStage,
+            DecisionDigest, DecisionParty, DurableDecisionCleanup, DurableDecisionNotice,
+            DurableDecisionRefusal, DurableDecisionReviewVerdict, DurableDecisionStage,
         };
 
         meerkat_machine_dsl::machine! {
             machine DurableDecisionMachine {
-                version: 2,
+                version: 3,
                 rust: $rust_crate / $rust_module,
 
                 state {
@@ -260,6 +292,14 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     executed_request_digest: Option<DecisionDigest>,
                     // The requester notice the decision owes.
                     notice: Enum<DurableDecisionNotice>,
+                    // What the owner's execution left outside the store to
+                    // undo: opened while its permit is outstanding, before it
+                    // creates anything to undo, and settled once the decision
+                    // ended and the owner undid it.
+                    cleanup: Enum<DurableDecisionCleanup>,
+                    // The digest of the one reply the executed decision's
+                    // work sends its requester, once it is settled.
+                    reply_digest: Option<DecisionDigest>,
                 }
 
                 init(Unheld) {
@@ -280,6 +320,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     permit_issued = false,
                     executed_request_digest = None,
                     notice = DurableDecisionNotice::NotRequired,
+                    cleanup = DurableDecisionCleanup::NotOwed,
+                    reply_digest = None,
                 }
 
                 terminal [Rejected, Expired, Withdrawn, Executed, ExecutionRefused]
@@ -379,6 +421,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     CloseRefused { now_ms: u64 },
                     // The requester notice's delivery receipt.
                     SettleNotice { delivered: bool },
+                    // The owner, holding its permit, is about to create work
+                    // outside the store that must be undone once the
+                    // decision's work is over.
+                    OweCleanup {},
+                    // The owner undid what its execution created.
+                    SettleCleanup {},
+                    // The executed decision's work settles its one reply, by
+                    // the reply's digest.
+                    SettleReply { digest: DecisionDigest },
                 }
 
                 effect DurableDecisionEffect {
@@ -407,6 +458,9 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     ExecutionRefused { decision_id: String, closed_at_ms: u64 },
                     NoticeSettled { decision_id: String, delivered: bool },
                     Refused { decision_id: String, reason: Enum<DurableDecisionRefusal> },
+                    CleanupOwed { decision_id: String },
+                    CleanupSettled { decision_id: String },
+                    ReplySettled { decision_id: String, digest: DecisionDigest },
                 }
 
                 // The notice an ending owes: a routable requester's notice
@@ -450,6 +504,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                             && !self.permit_issued
                             && self.executed_request_digest == None
                             && self.notice == DurableDecisionNotice::NotRequired
+                            && self.cleanup == DurableDecisionCleanup::NotOwed
+                            && self.reply_digest == None
                         )
                 }
 
@@ -485,7 +541,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 // An open decision has no outcome, no permit and owes no
-                // notice yet.
+                // notice, cleanup or reply yet.
                 invariant open_has_no_outcome {
                     self.lifecycle_phase != Phase::Open
                         || (
@@ -494,6 +550,8 @@ macro_rules! durable_decision_catalog_machine_dsl {
                             && self.ended_at_ms == None
                             && !self.permit_issued
                             && self.executed_request_digest == None
+                            && self.cleanup == DurableDecisionCleanup::NotOwed
+                            && self.reply_digest == None
                             && (
                                 self.notice == DurableDecisionNotice::NotRequired
                                 || self.notice == DurableDecisionNotice::NotDue
@@ -607,6 +665,30 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     || self.notice != DurableDecisionNotice::NotDue
                 }
 
+                // A cleanup is owed only by a decision whose owner held a
+                // permit: an approved decision, or one that ended after an
+                // execution permit (executed, refused, or expired).
+                invariant cleanup_follows_a_permit {
+                    self.cleanup == DurableDecisionCleanup::NotOwed
+                        || self.lifecycle_phase == Phase::Approved
+                        || self.lifecycle_phase == Phase::Executed
+                        || self.lifecycle_phase == Phase::ExecutionRefused
+                        || self.lifecycle_phase == Phase::Expired
+                }
+
+                // A cleanup settles only once the decision ended.
+                invariant cleanup_settles_after_the_end {
+                    self.cleanup != DurableDecisionCleanup::Settled
+                        || self.lifecycle_phase == Phase::Executed
+                        || self.lifecycle_phase == Phase::ExecutionRefused
+                        || self.lifecycle_phase == Phase::Expired
+                }
+
+                // Only an executed decision's work settles a reply.
+                invariant only_executed_settles_a_reply {
+                    self.reply_digest == None || self.lifecycle_phase == Phase::Executed
+                }
+
                 // Lifecycle facts: the owner service persists the row in one
                 // conditional write and realizes the fact.
                 disposition Held => local seam OwnerRealizationOnly,
@@ -621,6 +703,9 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 disposition Executed => local seam OwnerRealizationOnly,
                 disposition ExecutionRefused => local seam OwnerRealizationOnly,
                 disposition NoticeSettled => local seam OwnerRealizationOnly,
+                disposition CleanupOwed => local seam OwnerRealizationOnly,
+                disposition CleanupSettled => local seam OwnerRealizationOnly,
+                disposition ReplySettled => local seam OwnerRealizationOnly,
                 // Verdicts: the calling surface mirrors them as its typed
                 // result.
                 disposition HoldReplayed => local seam SurfaceResultAlignment,
@@ -2024,6 +2109,139 @@ macro_rules! durable_decision_catalog_machine_dsl {
                         decision_id: self.decision_id,
                         reason: DurableDecisionRefusal::SettlementOwed
                     }
+                }
+
+                // ----------------------------------------------------------
+                // OweCleanup, SettleCleanup and SettleReply: what an
+                // executed decision owes after its execution (declared last,
+                // so the transition ids of the earlier arms keep their order)
+                // ----------------------------------------------------------
+
+                // The owner holds its permit and opens the cleanup before it
+                // creates anything to undo.
+                transition OweCleanup {
+                    on input OweCleanup {}
+                    guard "approved" { self.lifecycle_phase == Phase::Approved }
+                    guard "permit_outstanding" { self.permit_issued }
+                    guard "not_owed" { self.cleanup == DurableDecisionCleanup::NotOwed }
+                    update {
+                        self.cleanup = DurableDecisionCleanup::Owed;
+                    }
+                    to Approved
+                    emit CleanupOwed { decision_id: self.decision_id }
+                }
+
+                // Opened again (an execution tried again after a release):
+                // nothing changes.
+                transition OweCleanupReplayed {
+                    on input OweCleanup {}
+                    guard "approved" { self.lifecycle_phase == Phase::Approved }
+                    guard "permit_outstanding" { self.permit_issued }
+                    guard "owed" { self.cleanup == DurableDecisionCleanup::Owed }
+                    update {}
+                    to Approved
+                    emit CleanupOwed { decision_id: self.decision_id }
+                }
+
+                transition OweCleanupRefusedNotAuthorized {
+                    on input OweCleanup {}
+                    guard "approved" { self.lifecycle_phase == Phase::Approved }
+                    guard "no_permit" { !self.permit_issued }
+                    update {}
+                    to Approved
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::NotAuthorized
+                    }
+                }
+
+                transition OweCleanupRefusedNotApproved {
+                    per_phase [Open, Rejected, Expired, Withdrawn, Executed, ExecutionRefused]
+                    on input OweCleanup {}
+                    update {}
+                    to Open
+                    emit Refused {
+                        decision_id: self.decision_id,
+                        reason: DurableDecisionRefusal::NotApproved
+                    }
+                }
+
+                // The decision ended and the owner undid what its execution
+                // created.
+                transition SettleCleanup {
+                    per_phase [Executed, ExecutionRefused, Expired]
+                    on input SettleCleanup {}
+                    guard "owed" { self.cleanup == DurableDecisionCleanup::Owed }
+                    update {
+                        self.cleanup = DurableDecisionCleanup::Settled;
+                    }
+                    to Executed
+                    emit CleanupSettled { decision_id: self.decision_id }
+                }
+
+                // No cleanup is owed: none was opened, or it is settled.
+                transition SettleCleanupRefusedNotOwed {
+                    per_phase [Rejected, Expired, Withdrawn, Executed, ExecutionRefused]
+                    on input SettleCleanup {}
+                    guard "not_owed" { self.cleanup != DurableDecisionCleanup::Owed }
+                    update {}
+                    to Rejected
+                    emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOwed }
+                }
+
+                // The decision has not ended: what its execution created may
+                // still be used again.
+                transition SettleCleanupRefusedNotEnded {
+                    per_phase [Open, Approved]
+                    on input SettleCleanup {}
+                    update {}
+                    to Open
+                    emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOwed }
+                }
+
+                // The executed decision's work settles its one reply.
+                transition SettleReply {
+                    on input SettleReply { digest }
+                    guard "executed" { self.lifecycle_phase == Phase::Executed }
+                    guard "none_settled" { self.reply_digest == None }
+                    update {
+                        self.reply_digest = Some(digest);
+                    }
+                    to Executed
+                    emit ReplySettled { decision_id: self.decision_id, digest: digest }
+                }
+
+                // The same reply again changes nothing.
+                transition SettleReplyReplayed {
+                    on input SettleReply { digest }
+                    guard "executed" { self.lifecycle_phase == Phase::Executed }
+                    guard "same_reply" {
+                        self.reply_digest != None && self.reply_digest.get("value") == digest
+                    }
+                    update {}
+                    to Executed
+                    emit ReplySettled { decision_id: self.decision_id, digest: digest }
+                }
+
+                // Another reply than the settled one is refused.
+                transition SettleReplyRefusedOther {
+                    on input SettleReply { digest }
+                    guard "executed" { self.lifecycle_phase == Phase::Executed }
+                    guard "another_reply" {
+                        self.reply_digest != None && self.reply_digest.get("value") != digest
+                    }
+                    update {}
+                    to Executed
+                    emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOwed }
+                }
+
+                // Only an executed decision's work replies.
+                transition SettleReplyRefusedNotExecuted {
+                    per_phase [Open, Approved, Rejected, Expired, Withdrawn, ExecutionRefused]
+                    on input SettleReply { digest }
+                    update {}
+                    to Open
+                    emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOwed }
                 }
             }
         }

@@ -927,6 +927,10 @@ impl PreparedOperationAuthorization for NativePreparedAuthorization {
         // became unavailable after entry. Never reauthorize historical outcome.
         self.prepared.observe(binding, observation)
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.prepared.spend_at_entry()
+    }
 }
 
 fn malformed() -> OperationRefused {
@@ -3244,5 +3248,9 @@ impl PreparedOperationAuthorization for NativeControlDecision {
         observation: OperationObservation,
     ) -> Result<(), OperationObservationError> {
         self.inner.observe(binding, observation)
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
     }
 }

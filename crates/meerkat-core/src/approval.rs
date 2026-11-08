@@ -2889,6 +2889,10 @@ mod review_owner_tests {
         ) -> Result<(), OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct AllowWork;

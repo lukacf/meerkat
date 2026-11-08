@@ -79,6 +79,8 @@ pub mod tokio {
 pub use ::tokio;
 
 pub mod accept;
+#[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
+pub mod approval_grants;
 pub mod auth_machine;
 pub mod bounded_submit;
 pub mod coalescing;

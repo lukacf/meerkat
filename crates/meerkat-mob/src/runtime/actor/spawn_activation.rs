@@ -2347,6 +2347,7 @@ impl MobActor {
                 fork_source: state.fork_source.clone(),
                 fork_overlay: state.fork_overlay,
                 definition_wiring: state.definition_wiring,
+                approval_branch: state.approval_branch.clone(),
             });
         }
         {

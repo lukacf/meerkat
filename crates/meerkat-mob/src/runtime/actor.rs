@@ -7125,6 +7125,9 @@ pub(super) struct PendingSpawn {
     /// no member held: its row names the incarnation it follows, read from
     /// the machine state before its membership step.
     pub(super) fresh_life: bool,
+    /// The decision whose approval branch the spawn seats: its row and
+    /// roster entry record it as the member's typed creation source.
+    pub(super) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -8056,6 +8059,9 @@ struct SpawnFinalizeCtx {
     /// no member held: its row names the incarnation it follows, read from
     /// the machine state before its membership step.
     fresh_life: bool,
+    /// The decision whose approval branch the spawn seats: its row and
+    /// roster entry record it as the member's typed creation source.
+    approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8122,6 +8128,9 @@ struct SpawnActivateState {
     /// Whether the definition's wiring rules apply to the member, for its
     /// roster entry (MobMachine's own fact decides its wiring).
     definition_wiring: crate::DefinitionWiring,
+    /// The decision whose approval branch the member is, for its roster
+    /// entry (its typed creation source).
+    approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -8174,6 +8183,7 @@ impl SpawnActivateState {
             // Recorded on the spawn's row at its admission.
             history_unavailable: _,
             fresh_life: _,
+            approval_branch,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -8227,6 +8237,7 @@ impl SpawnActivateState {
             fork_source,
             fork_overlay,
             definition_wiring,
+            approval_branch,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -36411,6 +36422,7 @@ impl MobActor {
             created_custody: false,
             history_unavailable: None,
             fresh_life: false,
+            approval_branch: entry.approval_branch,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -36690,6 +36702,16 @@ impl MobActor {
                 ))
             );
         }
+        // An approval branch's identity and label belong to the branch's own
+        // opening (`MobHandle::open_approval_branch`, whose spec records the
+        // decision as the member's typed creation source) and to the restore
+        // of the member that records it. Checked after the host's customizer,
+        // so no customizer plants them either.
+        if let Err(error) =
+            super::approval_branch::admit_approval_branch_reservation(&spec, spawn_source)
+        {
+            reject_spawn_before_custody!("approval_branch_reservation", error);
+        }
         // A held spawn stops at the local provisioner's hold point: placed,
         // resumed and identity-reconciled members never reach it.
         if held.is_some()
@@ -36810,6 +36832,9 @@ impl MobActor {
             // spawn of a store-owned identity that owes a kickoff, and its
             // seat's embodiment.
             created_custody,
+            // Admitted above: the decision whose approval branch this spawn
+            // seats, recorded on its row and roster entry.
+            approval_branch,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -37054,6 +37079,7 @@ impl MobActor {
             created_custody,
             history_unavailable,
             fresh_life,
+            approval_branch,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -37686,6 +37712,7 @@ impl MobActor {
             created_custody,
             history_unavailable,
             fresh_life,
+            approval_branch,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -37903,6 +37930,7 @@ impl MobActor {
                 created_custody,
                 history_unavailable,
                 fresh_life,
+                approval_branch: approval_branch.clone(),
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -38123,6 +38151,7 @@ impl MobActor {
             created_custody,
             history_unavailable,
             fresh_life,
+            approval_branch,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -39146,6 +39175,9 @@ impl MobActor {
             fresh_session_id: _,
             history_unavailable: _,
             fresh_life: _,
+            // A placed spawn never seats an approval branch: the reservation
+            // admission refused one before a placed spawn is taken.
+            approval_branch: _,
             created_custody,
         } = spec;
         let Some(host) = placement else {
@@ -40065,6 +40097,7 @@ impl MobActor {
             created_custody: false,
             history_unavailable: None,
             fresh_life: false,
+            approval_branch: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -40363,6 +40396,7 @@ impl MobActor {
                 created_custody,
                 history_unavailable,
                 fresh_life,
+                approval_branch,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -40570,6 +40604,7 @@ impl MobActor {
                                 created_custody,
                                 history_unavailable,
                                 fresh_life,
+                                approval_branch: approval_branch.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40657,6 +40692,7 @@ impl MobActor {
                                 created_custody,
                                 history_unavailable,
                                 fresh_life,
+                                approval_branch: approval_branch.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40807,6 +40843,9 @@ impl MobActor {
             fresh_session_id: _,
             history_unavailable: _,
             fresh_life: _,
+            // A policy auto-spawn is fresh: `SpawnMemberSpec::new` records no
+            // approval branch.
+            approval_branch: _,
             // A policy auto-spawn is a worker's.
             created_custody: _,
         } = member_spec;
@@ -40815,6 +40854,16 @@ impl MobActor {
             return Err(MobError::WiringError(format!(
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
+        }
+        // Work routed to an approval branch's identity never spawns one: only
+        // the branch's opening takes it.
+        if super::approval_branch::takes_approval_branch_reservation(
+            agent_identity,
+            labels.as_ref(),
+        ) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: agent_identity.clone(),
+            });
         }
         self.probe_member_admission(agent_identity, false, false)?;
         {
@@ -41048,6 +41097,7 @@ impl MobActor {
             created_custody: false,
             history_unavailable: None,
             fresh_life: false,
+            approval_branch: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -41991,6 +42041,7 @@ impl MobActor {
             spawned.fork_source = ctx.fork_source.clone();
             spawned.fork_overlay = ctx.fork_overlay;
             spawned.definition_wiring = ctx.definition_wiring;
+            spawned.approval_branch = ctx.approval_branch.clone();
             // Durable: the identity entry MobMachine recorded for the placed
             // member in its membership commit (a spawn holding the entry's
             // custody), so replay records the entry again after the carrier.
@@ -42155,6 +42206,10 @@ impl MobActor {
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
         spawned_event.definition_wiring = ctx.definition_wiring;
+        // Durable: the approval branch's typed creation source, which replay
+        // records on its roster entry, so its opening adopts it and nothing
+        // wires, unwires or respawns it after a restart either.
+        spawned_event = spawned_event.with_approval_branch(ctx.approval_branch.clone());
         // Durable: the identity entry MobMachine records for the member in
         // the membership commit's own step (a spawn with entry custody), so
         // replay records the entry again.
@@ -47600,6 +47655,8 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
+            .await?;
         match self
             .prepare_member_wire(local, target)
             .await?
@@ -47610,6 +47667,41 @@ impl MobActor {
                 self.dispatch_prepared_wiring(*prepared, None),
             )),
         }
+    }
+
+    /// The members a wire or unwire command between `local` and `target`
+    /// names: `local`, and the target when it is a member.
+    fn wiring_endpoints<'a>(
+        local: &'a AgentIdentity,
+        target: &'a super::handle::PeerTarget,
+    ) -> impl Iterator<Item = &'a AgentIdentity> {
+        let peer = match target {
+            super::handle::PeerTarget::Local(peer) => Some(peer),
+            _ => None,
+        };
+        std::iter::once(local).chain(peer)
+    }
+
+    /// Refuse a wire, unwire or respawn command that names an open approval
+    /// branch (a member whose typed creation source records a decision's
+    /// branch): only its opening seats it, wired to nobody, and nothing
+    /// changes its wiring or seats it again. Nothing is changed.
+    async fn refuse_approval_branch_control<'a>(
+        &self,
+        identities: impl IntoIterator<Item = &'a AgentIdentity>,
+    ) -> Result<(), MobError> {
+        let roster = self.roster.read().await;
+        for identity in identities {
+            if roster
+                .get(identity)
+                .is_some_and(|entry| entry.approval_branch().is_some())
+            {
+                return Err(MobError::ApprovalBranchReserved {
+                    identity: identity.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// D-wire-handler (#26) + #31 D-trust-reconciliation (Wave D): forward a
@@ -48766,6 +48858,7 @@ impl MobActor {
                 },
             )));
         }
+        self.refuse_approval_branch_control(&endpoint_ids).await?;
 
         let broken_members = self
             .dsl_authority
@@ -49743,6 +49836,8 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
+            .await?;
         match self
             .prepare_member_unwire(local, target, None, false)
             .await?
@@ -51958,6 +52053,11 @@ impl MobActor {
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::MobRespawnError;
 
+        // An open approval branch is never seated again: refused before
+        // anything is retired or read.
+        self.refuse_approval_branch_control(std::iter::once(&agent_identity))
+            .await
+            .map_err(MobRespawnError::from)?;
         // A member whose startup custody restore was deferred gets it
         // re-attempted before the respawn reads the member's session (its
         // retained tool restrictions) or retires it.

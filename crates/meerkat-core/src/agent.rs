@@ -2278,7 +2278,11 @@ impl ToolDispatchContext {
 
     /// Spend this dispatch's retained review once for the decision staging
     /// returned (`entering`, or this context's own when staging refreshed
-    /// nothing). R1 and ungoverned entries spend nothing.
+    /// nothing). R1 and ungoverned entries spend nothing. Then the entering
+    /// decision's own entry spend, once: a use of a grant that serves a
+    /// counted number of uses, acknowledged by its owner before the effect
+    /// ([`crate::authorization::PreparedOperationAuthorization::spend_at_entry`]).
+    /// Its refusal refuses the entry.
     fn spend_review_entry(
         &self,
         entering: Option<Self>,
@@ -2289,6 +2293,9 @@ impl ToolDispatchContext {
             (Some(entry), Some(check)) => entry.consume_held(check)?,
             _ => crate::approval::review::ReviewedEntryCustody::none(),
         };
+        if let Some(check) = current.prepared_authorization() {
+            check.spend_at_entry()?;
+        }
         Ok((entering, custody))
     }
 
@@ -7218,6 +7225,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// The dispatch's own operation is reachable only with its actual
@@ -7321,6 +7332,10 @@ mod governed_operation_tests {
             _binding: &PreparedAuthorizationBinding,
             _event: OperationObservation,
         ) -> Result<(), OperationObservationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -7819,6 +7834,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn churn_context(work: &Arc<ChurnWork>) -> ToolDispatchContext {
@@ -8149,6 +8168,10 @@ mod governed_operation_tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// What one fenced call through the execution policy gate did under an
@@ -8414,6 +8437,10 @@ mod governed_operation_tests {
                 self.facts.complete_change(false);
                 self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

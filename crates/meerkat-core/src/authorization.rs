@@ -1007,6 +1007,18 @@ pub trait PreparedOperationAuthorization: Send + Sync {
         binding: &PreparedAuthorizationBinding,
     ) -> Result<(), crate::OperationAuthorizationError>;
 
+    /// Spend what this exact decision's entry spends, once, at the effect
+    /// entry: [`crate::ToolDispatchContext::enter_reviewed_effect_held`]
+    /// calls it after the staging that passed and the review it spends,
+    /// before the effect. For an operation whose grant serves a counted
+    /// number of uses, it spends one, acknowledged by the grant's owner
+    /// before it returns. A refusal refuses the entry: the effect does not
+    /// run. A decision that spends nothing answers `Ok(())`.
+    ///
+    /// It has no default: a wrapper of a prepared decision must forward it,
+    /// so no wrapper can let an operation enter without its spend.
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError>;
+
     /// Stage a protected native observation at an actual boundary. This is
     /// separate from the allocation-free currentness check. Governed native
     /// contexts install a real input-row sink; this compatibility default is
@@ -1399,6 +1411,10 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
             }
         }
         struct Work(Arc<Check>);

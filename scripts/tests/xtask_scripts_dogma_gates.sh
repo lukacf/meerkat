@@ -385,9 +385,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
 # durable_decision_audit.sh requires a final distinct-state count at or above
 # its floor, a coverage block in which each of its covered actions (of module
-# durable_decision_audit) generated a state, its seventeen witnesses violated,
+# durable_decision_audit) generated a state, its twenty witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
+# approval_grant_audit.sh (grant_authority) requires a final distinct-state
+# count at or above its floor, a coverage block in which each of its covered
+# actions (of module approval_grant_audit) generated a state, its fourteen
+# witnesses violated, and with --mutants each seeded defect's invariant
+# violated.
 # instruction_boundary_audit.sh (session_document) requires its six
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
@@ -890,7 +895,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditResumedRunWaitsForDestination is violated."' \
   'echo "Error: Action property AuditResumedRunBindsItsDestination is violated."' \
   'echo "Error: Invariant input_controller_holds_are_kept_unstaged_governed_inputs is violated."' \
-  'for action in AuditHoldHuman AuditHoldReview AuditHoldRefusedWindow AuditHoldRefusedSelfReview AuditHoldReplayed AuditHoldConflict AuditPresentAtDeadline AuditPresentRefusedSubjectChanged AuditPresentRefusedIncomplete AuditPresentToApprover AuditPresentRefusedUntimed AuditPresentRefusedWrongApproverAudience AuditPresentToReviewer AuditPresentRefusedWrongReviewerAudience AuditPresentRefusedNotOpen AuditDecideAtDeadline AuditDecideRefusedReviewStage AuditDecideRefusedEvidenceRequired AuditDecideRefusedSubjectChanged AuditDecideRefusedNotEligible AuditDecideRefusedSelfApproval AuditDecideRefusedPresentationIncomplete AuditDecideRefusedDecidedBeforePresentation AuditDecideApproved AuditDecideRejected AuditDecideRefusedNotOpen AuditReviewAtDeadline AuditReviewRefusedHumanStage AuditReviewRefusedWrongReviewer AuditReviewRefusedEvidenceRequired AuditReviewRefusedSubjectChanged AuditReviewRefusedPresentationIncomplete AuditReviewAllowed AuditReviewDenied AuditReviewEscalated AuditReviewRefusedNotOpen AuditWithdrawAtDeadline AuditWithdrawByHost AuditWithdrawByRequester AuditWithdrawRefusedNotRequester AuditWithdrawRefusedNotOpen AuditExpireOpenDue AuditExpireOpenNotDue AuditExpireApprovedDue AuditExpireApprovedSettlementOwed AuditExpireApprovedNotDue AuditExpireSettled AuditAuthorizeExecution AuditAuthorizeExecutionAtDeadline AuditAuthorizeExecutionRefusedSettlementOwed AuditAuthorizeExecutionRefusedBinding AuditAuthorizeExecutionRefusedNotApproved AuditAuthorizeExecutionRefusedApproverRevoked AuditAuthorizeExecutionRefusedRevokedSettlementOwed AuditReleaseExecution AuditReleaseExecutionAtDeadline AuditReleaseExecutionRefusedNotAuthorized AuditReleaseExecutionRefusedNotApproved AuditRecordExecuted AuditRecordExecutedRefusedNotAuthorized AuditRecordExecutedRefusedBinding AuditRecordExecutedReplayed AuditRecordExecutedReplayRefusedBinding AuditRecordExecutedRefusedNotApproved AuditCloseRefused AuditCloseRefusedWithPermit AuditCloseRefusedAtDeadline AuditCloseRefusedNotApproved AuditSettleNoticeDelivered AuditSettleNoticeFailed AuditSettleNoticeReplayed AuditSettleNoticeRefused AuditSettleNoticeRefusedNotEnded AuditCommit; do echo "<$action line 1, col 1 to line 1, col 2 of module durable_decision_audit>: 1:1"; done' \
+  'for action in AuditHoldHuman AuditHoldReview AuditHoldRefusedWindow AuditHoldRefusedSelfReview AuditHoldReplayed AuditHoldConflict AuditPresentAtDeadline AuditPresentRefusedSubjectChanged AuditPresentRefusedIncomplete AuditPresentToApprover AuditPresentRefusedUntimed AuditPresentRefusedWrongApproverAudience AuditPresentToReviewer AuditPresentRefusedWrongReviewerAudience AuditPresentRefusedNotOpen AuditDecideAtDeadline AuditDecideRefusedReviewStage AuditDecideRefusedEvidenceRequired AuditDecideRefusedSubjectChanged AuditDecideRefusedNotEligible AuditDecideRefusedSelfApproval AuditDecideRefusedPresentationIncomplete AuditDecideRefusedDecidedBeforePresentation AuditDecideApproved AuditDecideRejected AuditDecideRefusedNotOpen AuditReviewAtDeadline AuditReviewRefusedHumanStage AuditReviewRefusedWrongReviewer AuditReviewRefusedEvidenceRequired AuditReviewRefusedSubjectChanged AuditReviewRefusedPresentationIncomplete AuditReviewAllowed AuditReviewDenied AuditReviewEscalated AuditReviewRefusedNotOpen AuditWithdrawAtDeadline AuditWithdrawByHost AuditWithdrawByRequester AuditWithdrawRefusedNotRequester AuditWithdrawRefusedNotOpen AuditExpireOpenDue AuditExpireOpenNotDue AuditExpireApprovedDue AuditExpireApprovedSettlementOwed AuditExpireApprovedNotDue AuditExpireSettled AuditAuthorizeExecution AuditAuthorizeExecutionAtDeadline AuditAuthorizeExecutionRefusedSettlementOwed AuditAuthorizeExecutionRefusedBinding AuditAuthorizeExecutionRefusedNotApproved AuditAuthorizeExecutionRefusedApproverRevoked AuditAuthorizeExecutionRefusedRevokedSettlementOwed AuditReleaseExecution AuditReleaseExecutionAtDeadline AuditReleaseExecutionRefusedNotAuthorized AuditReleaseExecutionRefusedNotApproved AuditRecordExecuted AuditRecordExecutedRefusedNotAuthorized AuditRecordExecutedRefusedBinding AuditRecordExecutedReplayed AuditRecordExecutedReplayRefusedBinding AuditRecordExecutedRefusedNotApproved AuditCloseRefused AuditCloseRefusedWithPermit AuditCloseRefusedAtDeadline AuditCloseRefusedNotApproved AuditSettleNoticeDelivered AuditSettleNoticeFailed AuditSettleNoticeReplayed AuditSettleNoticeRefused AuditSettleNoticeRefusedNotEnded AuditOweCleanup AuditOweCleanupReplayed AuditOweCleanupRefusedNotAuthorized AuditOweCleanupRefusedNotApproved AuditSettleCleanup AuditSettleCleanupRefusedNotOwed AuditSettleCleanupRefusedNotEnded AuditSettleReply AuditSettleReplyReplayed AuditSettleReplyRefusedOther AuditSettleReplyRefusedNotExecuted AuditCommit; do echo "<$action line 1, col 1 to line 1, col 2 of module durable_decision_audit>: 1:1"; done' \
   'echo "Error: Invariant NotAuditWitnessHumanApprovalExecutedAndNoticed is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetriedAfterRelease is violated."' \
   'echo "Error: Invariant NotAuditWitnessExecutionRefused is violated."' \
@@ -908,6 +913,9 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessApprovedAtThePresentation is violated."' \
   'echo "Error: Invariant NotAuditWitnessApproverRevokedEndsRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRevokedPermitSettledExecuted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCleanupSettledAfterExecution is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCleanupSettledAfterExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReplySettledThenAnotherRefused is violated."' \
   'echo "Error: Invariant AuditTerminalsLatch is violated."' \
   'echo "Error: Invariant AuditApprovalIsAttested is violated."' \
   'echo "Error: Invariant AuditRejectionIsAttested is violated."' \
@@ -923,7 +931,36 @@ printf '%s\n' \
   'echo "Error: Invariant AuditPermitOnlyForCurrentApprover is violated."' \
   'echo "Error: Invariant AuditCommittedIsSettleable is violated."' \
   'echo "Error: Invariant AuditFirstPresentationIsTheEarliest is violated."' \
+  'echo "Error: Invariant AuditCleanupOwedUnderPermit is violated."' \
+  'echo "Error: Invariant AuditCleanupSettledAfterTheEnd is violated."' \
+  'echo "Error: Invariant AuditReplySettledOnce is violated."' \
   'echo "Error: Invariant first_presentation_is_a_reading is violated."' \
+  'for action in AuditConfigure AuditIssueRoot AuditIssueChild AuditRevoke AuditResolve AuditSpend AuditSpendRefusedApproverRevoked AuditSpendUncertain AuditRestart AuditPrepare AuditEnter AuditEnterStale; do echo "<$action line 1, col 1 to line 1, col 2 of module approval_grant_audit>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessApprovalChildIssued is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUsedOnce is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSecondUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherDigestRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherRequesterRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherWorkRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWindowElapsedRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessParentRevokedBeforeUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessApproverRevokedBeforeUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDeviceTrustRefusedUnderRule is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSpentThenCrashStillSpent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRacingSecondAttemptRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPlainChildRefusedUnderRule is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainSpendNotEntered is violated."' \
+  'echo "Error: Invariant AuditNoUseBeyondUses is violated."' \
+  'echo "Error: Invariant AuditUseOnlyExactOperation is violated."' \
+  'echo "Error: Invariant AuditUseOnlyBoundRequesterAndWork is violated."' \
+  'echo "Error: Invariant AuditNoChildWithoutApprovalUnderRule is violated."' \
+  'echo "Error: Invariant AuditNoApprovalChildWithoutRule is violated."' \
+  'echo "Error: Invariant AuditRuleAssuranceHolds is violated."' \
+  'echo "Error: Invariant AuditIssuedTermsAreApproved is violated."' \
+  'echo "Error: Invariant AuditNoSpendAfterApproverRevoked is violated."' \
+  'echo "Error: Invariant AuditOneGrantPerDecision is violated."' \
+  'echo "Error: Invariant AuditSpendAdvancesPublication is violated."' \
+  'echo "Error: Invariant AuditSpentSurvivesRestart is violated."' \
   'echo "Error: Invariant unseated_entry_is_not_a_member is violated."' \
   'echo "Error: Invariant retiring_entry_is_a_declared_entry is violated."' \
   'echo "Error: Invariant marked_entry_has_no_spawn_in_flight is violated."' \

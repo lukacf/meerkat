@@ -570,6 +570,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn observed_control(session: &Session) -> Arc<SystemContextControlRequest> {
@@ -780,6 +784,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn owner(permitted: &Arc<AtomicBool>, entries: &Arc<AtomicUsize>) -> WorkAuthorizationContext {
@@ -868,6 +876,11 @@ mod tests {
                     {
                         self.0.observe(binding, observation.clone())?;
                         self.1.observe(binding, observation)
+                    }
+
+                    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                        self.0.spend_at_entry()?;
+                        self.1.spend_at_entry()
                     }
                 }
                 Ok(Arc::new(Decision(
@@ -1304,6 +1317,10 @@ mod tests {
                     EntryChange::Deny => self.owner.permitted.store(false, Ordering::Release),
                 }
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

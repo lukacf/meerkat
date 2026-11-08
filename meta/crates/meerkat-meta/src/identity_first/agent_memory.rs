@@ -3779,6 +3779,10 @@ memory = false
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// An embedder's wrapper that forwards dispatch but resolves its own

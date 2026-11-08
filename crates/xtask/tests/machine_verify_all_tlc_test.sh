@@ -1292,20 +1292,23 @@ fi
 
 # The durable decision record (DurableDecisionMachine: one decision's sealed
 # binding, its attested decision, the execution permit and the executed
-# fact, expiry, withdrawal and the requester notice an ended decision owes)
-# is model-checked by a hand-written audit over the generated model: every
-# input in every phase, through one wrapper per arm, under every generated
-# invariant plus twelve step properties (terminals latch; approvals and
-# rejections attested; execution only from Approved with the held binding;
-# expiry only at the deadline and, for an approved decision, only without
-# an outstanding permit or by its release; withdrawal only while open by the
-# requester or the host; the sealed binding never changes; the notice owed
-# once at the end; no permit at or after the deadline; a release clears the
-# permit; a human decision decided only when observed at or after its first
-# presentation, and refused for the order only before it) and two state
-# invariants (an owner's commit stays settleable; the first presentation
-# time is the earliest). It requires every wrapper to fire, fifteen
-# witnesses reached and refuses twenty-four seeded defects (--mutants). 6
+# fact, expiry, withdrawal, the requester notice an ended decision owes, and
+# an executed decision's cleanup and its one reply) is model-checked by a
+# hand-written audit over the generated model: every input in every phase,
+# through one wrapper per arm, under every generated invariant plus sixteen
+# step properties (terminals latch; approvals and rejections attested;
+# execution only from Approved with the held binding; expiry only at the
+# deadline and, for an approved decision, only without an outstanding permit
+# or by its release; withdrawal only while open by the requester or the
+# host; the sealed binding never changes; the notice owed once at the end;
+# no permit at or after the deadline; a release clears the permit; a human
+# decision decided only when observed at or after its first presentation,
+# and refused for the order only before it; a permit only for an approver
+# still current; a cleanup opened only under a permit and settled only after
+# the end; one reply settled) and two state invariants (an owner's commit
+# stays settleable; the first presentation time is the earliest). It
+# requires every wrapper to fire, twenty witnesses reached and refuses
+# thirty-three seeded defects (--mutants; a thirty-fourth from 7 steps). 6
 # steps reach every witness. It runs alone in shard audits-j.
 durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
 if [[ ! -x "${durable_decision_audit}" ]]; then
@@ -1315,6 +1318,33 @@ fi
 if run_part audits-j; then
   echo "running bounded durable decision TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
+# Approval-carried child grants (GrantAuthorityMachine: a grant under a child
+# rule has children only through a person's decision for the rule's approver
+# id, and such a child serves its own requester, work and operation, at most
+# its uses) are model-checked by a hand-written audit over the generated
+# model: a parent without a rule or under one of two rules, children with
+# the valid approval or one defect, uses with the valid facts or one defect
+# at a clock in 0..3, revocations, an uncertain journal write, one restart
+# from the journal and two concurrent attempts, under every generated
+# invariant plus eight step properties (a use names its leaf's exact
+# operation, requester and work; a child under a rule meets it, with an
+# assurance it accepts; an approval child only under a rule, with the
+# approved request's terms, depth 0, a window and a use; nothing spent for
+# an approver no longer current; a spend advances the revision) and three
+# state invariants (no use beyond the uses; one grant per decision; every
+# entered use spent in the journal). It requires every wrapper to fire,
+# fourteen witnesses reached and refuses thirteen seeded defects
+# (--mutants). 6 steps reach every witness.
+approval_grant_audit="${workspace_root}/specs/machines/grant_authority/approval_grant_audit.sh"
+if [[ ! -x "${approval_grant_audit}" ]]; then
+  echo "error: approval grant audit runner is missing from workspace runfiles: ${approval_grant_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded approval grant TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${approval_grant_audit}" "${APPROVAL_GRANT_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT

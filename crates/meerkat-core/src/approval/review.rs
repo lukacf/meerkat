@@ -2692,6 +2692,10 @@ mod seam_tests {
         ) -> Result<(), OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct R2Work;
@@ -2970,6 +2974,10 @@ mod reservation_tests {
             if let Some(hook) = hook {
                 hook();
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

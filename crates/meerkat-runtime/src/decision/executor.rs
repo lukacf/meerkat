@@ -37,7 +37,9 @@
 //!
 //! A host drives passes ([`DecisionExecutorLoop::pass`]): once at start,
 //! after it records a decision, and on a timer for the deadlines. A pass
-//! reads the due and owed pages of the store, never every row.
+//! reads the due and owed pages of the store, never every row, and then
+//! asks each claimed kind to sweep what its executions left outside the
+//! store, from the kind's own durable state ([`DecisionExecutor::sweep`]).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -116,6 +118,21 @@ pub trait DecisionExecutor: Send + Sync {
         &self,
         decision: &StoredDecision,
     ) -> Option<ApprovalConsentDeliveryState>;
+
+    /// Settle what this kind's executions left outside the decision store
+    /// (work to undo once a decision's work is over, which an execution
+    /// opens as the decision's cleanup with
+    /// [`DurableDecisionService::owe_cleanup`] before it creates any of
+    /// it), read from the kind's own durable state: undo what is due and
+    /// settle each decision's cleanup
+    /// ([`DurableDecisionService::settle_cleanup`]). The loop calls it once
+    /// per pass while it holds the kind's claim, after the owed decisions,
+    /// and records the outcome of each decision it acted on. A kind whose
+    /// executions leave nothing outside the store answers no outcome.
+    ///
+    /// It has no default: a wrapper must forward it, or what the kind's
+    /// executions left would never be undone.
+    async fn sweep(&self) -> Vec<(DecisionId, DecisionPassOutcome)>;
 }
 
 /// The host's current answer for the party that decided a decision.
@@ -143,6 +160,8 @@ pub enum DecisionDeferral {
     RecordUnavailable,
     /// The notice could not be delivered now.
     NoticeUndelivered,
+    /// The cleanup a decision owes could not be finished now.
+    CleanupUnsettled,
 }
 
 /// What a pass did to one decision.
@@ -169,6 +188,9 @@ pub enum DecisionPassOutcome {
     Expired,
     /// The owed notice was settled with its receipt.
     NoticeSettled,
+    /// What the decision's execution left outside the store was undone,
+    /// and its cleanup settled.
+    CleanupSettled,
     /// Nothing could be done now; a later pass asks again.
     Deferred(DecisionDeferral),
     /// No executor of the decision's kind is registered in this loop. It
@@ -310,8 +332,10 @@ impl DecisionExecutorLoop {
     /// kind the loop does not hold, then the decisions due an expiry
     /// observation (their expiry is recorded), then the owed ones (approved
     /// decisions are settled first and executed; ended ones get their
-    /// notice). A decision of a kind with no executor in this loop, or of a
-    /// kind whose claim it does not hold, is left as stored.
+    /// notice), then each claimed kind's sweep of what its executions left
+    /// outside the store ([`DecisionExecutor::sweep`]). A decision of a kind
+    /// with no executor in this loop, or of a kind whose claim it does not
+    /// hold, is left as stored.
     ///
     /// A pass may be dropped at any await: a permit it issued and did not
     /// settle stays outstanding, and the next pass, of this loop or the
@@ -366,6 +390,15 @@ impl DecisionExecutorLoop {
                 Some(next) => after = Some(next),
                 None => break,
             }
+        }
+        let claimed: Vec<Arc<dyn DecisionExecutor>> = self
+            .kinds
+            .values()
+            .filter(|registered| registered.claim.is_some())
+            .map(|registered| Arc::clone(&registered.executor))
+            .collect();
+        for executor in claimed {
+            pass.outcomes.extend(executor.sweep().await);
         }
         pass
     }

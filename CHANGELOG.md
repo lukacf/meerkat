@@ -361,6 +361,114 @@ them.
   named here is exhaustive, so a downstream exhaustive match needs the new
   arms, or a wildcard arm.
 
+- `meerkat-core`: `DurableForkSourceAdmission` gains `EmptyPrefix`, appended
+  last, so an exhaustive match needs its arm: a durable fork that takes no
+  message of its source (see Added).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`: the grant owner's
+  approval-carried children (see Added). `GrantRecord`
+  (`catalog::dsl::grant_authority::types`) gains the public fields
+  `child_approval: Option<ChildApprovalRule>` and
+  `approval: Option<GrantApproval>`, so code that builds it literally must
+  set them (`None` for both is the record as before, serialized to the
+  same bytes). In `GrantAuthorityInput` (meerkat-machine-schema
+  `catalog::dsl::grant_authority`) and the kernel
+  `generated::grant_authority::inputs`, `IssueChild` gains
+  `terms_digest: Sha256Digest` and `ResolveUse` gains
+  `requester: Option<GrantPrincipal>`, `work: Option<OriginalWorkRef>` and
+  `operation: Option<GrantOperationBinding>`, so code that builds them
+  literally must set them (`None` for the three is a plain resolution).
+  `GrantAuthorityMachineState` (meerkat-machine-schema
+  `catalog::dsl::grant_authority`) gains the public fields `spent`,
+  `consumed` and `carried_decisions`, so code that builds it literally must
+  set them. `GrantAuthorityInput` and `GrantAuthorityInputVariant` gain
+  `ConsumeUse`, and `GrantAuthorityEffect` and `GrantAuthorityEffectVariant`
+  gain `UseConsumed`; the kernel's `Input` and `InputKind` gain `ConsumeUse`,
+  its `Effect` and `EffectKind` gain `UseConsumed`, and its `TransitionId`
+  gains `ConsumeUse` and `ConsumeUseRefusedApproverRevoked`, each appended
+  last, so an exhaustive match needs their arms. The machine is at version
+  3.
+
+- `meerkat-core`: `PreparedOperationAuthorization` gains the required
+  method `spend_at_entry` (see Added), with no default: an implementation
+  states the spend its decision takes when its effect enters (`Ok(())` for
+  none), and a wrapper forwards it. A default that spent nothing would let
+  a wrapper's approval-carried operation enter without spending its use.
+
+- `meerkat-core`: `ToolExecutionResolutionError` is `#[non_exhaustive]` and
+  gains `RefusedWithData { tool_name, message, data }`: a plan-time refusal
+  now surfaces as `execution_failed` with its data
+  (`ToolError::ExecutionFailedWithData`), the same shape as at effect time.
+  A downstream exhaustive match needs a wildcard arm.
+
+- `meerkat-runtime`: `DecisionExecutor` gains the required method `sweep`,
+  with no default: each pass asks each kind the loop claims, after the owed
+  decisions, to undo what its executions left outside the decision store
+  (see Added). An executor whose executions leave nothing there answers no
+  outcome (`Vec::new()`), and a wrapper forwards it.
+
+- `meerkat-core`: `DecisionMachineState` gains the public fields
+  `cleanup: DecisionCleanup` and `reply_digest: Option<String>`, so code
+  that builds it literally must set them (`DecisionCleanup::NotOwed` and
+  `None` are the state as before, stored as the same bytes; see Upgrade
+  notes).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the `DurableDecisionMachine`, at version 3, owns two facts of an executed
+  decision (see Added). `DurableDecisionMachineState`
+  (meerkat-machine-schema `catalog::dsl::durable_decision` and
+  meerkat-runtime `decision::dsl`) and the kernel's
+  `generated::durable_decision::State` gain the public fields
+  `cleanup: DurableDecisionCleanup` and `reply_digest: Option<DecisionDigest>`,
+  so code that builds them literally must set them (`NotOwed` and `None` are
+  the state as before). `DurableDecisionInput` and
+  `DurableDecisionInputVariant` (meerkat-machine-schema and meerkat-runtime)
+  gain `OweCleanup`, `SettleCleanup` and `SettleReply` (the input with its
+  `digest`), and `DurableDecisionEffect` and `DurableDecisionEffectVariant`
+  gain `CleanupOwed`, `CleanupSettled` and `ReplySettled`; the kernel's
+  `Input`, `InputKind`, `Effect` and `EffectKind` gain the matching
+  variants. The kernel `generated::durable_decision::TransitionId` gains
+  `OweCleanup`, `OweCleanupReplayed`, `OweCleanupRefusedNotAuthorized`,
+  `OweCleanupRefusedNotApprovedOpen`, `OweCleanupRefusedNotApprovedRejected`,
+  `OweCleanupRefusedNotApprovedExpired`,
+  `OweCleanupRefusedNotApprovedWithdrawn`,
+  `OweCleanupRefusedNotApprovedExecuted`,
+  `OweCleanupRefusedNotApprovedExecutionRefused`, `SettleCleanupExecuted`,
+  `SettleCleanupExecutionRefused`, `SettleCleanupExpired`,
+  `SettleCleanupRefusedNotOwedRejected`,
+  `SettleCleanupRefusedNotOwedExpired`,
+  `SettleCleanupRefusedNotOwedWithdrawn`,
+  `SettleCleanupRefusedNotOwedExecuted`,
+  `SettleCleanupRefusedNotOwedExecutionRefused`,
+  `SettleCleanupRefusedNotEndedOpen`,
+  `SettleCleanupRefusedNotEndedApproved`, `SettleReply`,
+  `SettleReplyReplayed`, `SettleReplyRefusedOther`,
+  `SettleReplyRefusedNotExecutedOpen`,
+  `SettleReplyRefusedNotExecutedApproved`,
+  `SettleReplyRefusedNotExecutedRejected`,
+  `SettleReplyRefusedNotExecutedExpired`,
+  `SettleReplyRefusedNotExecutedWithdrawn` and
+  `SettleReplyRefusedNotExecutedExecutionRefused`. Every new variant is
+  appended last, so no existing variant's implicit discriminant moves, and
+  an exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a hold of a
+  decision whose kind is decided by people only (`grant.child`,
+  `tool_grant.issue`, `route.release` and `gating.release`:
+  `DECIDED_BY_PEOPLE_ONLY`) that names a reviewer is refused
+  `review_stage_not_allowed` (`DecisionContractError::ReviewStageNotAllowed`)
+  and holds nothing. 0.9.10 held a decision of any kind in the review stage.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: the member
+  identity prefix `approval-branch-` and the label `decision.approval_branch`
+  are reserved for approval branches (see Added). A spawn, ensure,
+  reconcile, fork, dormant seat or resume that takes either, other than a
+  branch's own opening and the restore of a member that records it, is
+  refused `MobError::ApprovalBranchReserved`, and so is a wire, unwire or
+  respawn of an open approval branch. 0.9.10 treated them as an ordinary
+  identity and label: retire a member that uses them, and seat it under
+  another identity, before upgrading.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -747,6 +855,231 @@ them.
   (the published machine state and the runtime's hold registry, with no
   actor command and no wake; the `List` scope). A member the mob does not
   seat, a placed member and a mob without the runtime adapter hold none.
+
+- `meerkat-mob`: `MobHandle::fork_member_at_empty_prefix` forks a member at
+  an empty prefix and seats the child as a new member: the child has none of
+  the source's messages and the build of the source's last committed
+  snapshot. A source whose turn is running is neither refused nor waited
+  for, since an empty prefix observes nothing that turn could extend, and
+  the fork never writes the source. The durable fork owner admits it as
+  `DurableForkSourceAdmission::EmptyPrefix`, which refuses any message count
+  other than 0.
+
+- `meerkat-authorization`: approval-carried child grants (the grant owner,
+  `GrantAuthorityMachine`, at version 3). A grant issued under a child rule
+  (`LocalGrantAuthority::issue_root_with_child_rule` or
+  `issue_child_with_child_rule`; a `ChildApprovalRule` names an approver id
+  and whether a device-trusted person is accepted, `GrantDeviceTrust`,
+  refused by default) has children only through `issue_approval_child`.
+  Each such child carries a `GrantApproval`: the decision it was issued
+  under (its id; its approver id, which must be the rule's; a human tier;
+  and the decider's assurance, the person authenticated on the decision's
+  event, or device trust where the rule accepts it, while a service
+  credential relaying a decision never meets a rule), the approved
+  request's digest, the one requester and the one work that may use it, the
+  exact operation when one is bound (`GrantOperationBinding`), and its
+  uses. The owner issues it only with terms whose digest
+  (`grant_child_terms_digest` over `GrantChildTerms`) is the approved
+  request's, at depth 0, in a window, with at least one use, and at most
+  one grant per decision; a refusal is typed (`ApprovalChildRefusal`). An
+  approval-carried child resolves only for a use that names its requester,
+  its work and its operation (`resolve_lineage_with_use` with a
+  `GrantUse`; a governed work's resolution names the work's own requester
+  and work), and each use is spent by `consume_use` before it enters: the
+  spend is acknowledged in the grant journal first, advances the owner's
+  revision so that every decision prepared before it is stale, and is
+  refused, with nothing spent, for a decision whose approver is no longer
+  current (`ConsumeUseRefusal::ApproverNotCurrent`). A spend whose journal
+  write is uncertain counts as spent and its use does not enter
+  (`ConsumeUseRefusal::Uncertain`). A hand-written TLC audit
+  (`specs/machines/grant_authority/approval_grant_audit.sh`) checks the
+  rule, the terms, the uses and the spend, across a restart from the
+  journal and two concurrent attempts.
+
+- `meerkat-core`, `meerkat-mcp`, `meerkat-authorization`: a grant bound to
+  one exact MCP operation. `meerkat_core::canonical_json::canonical_json` is
+  RFC 8785 canonical JSON (members sorted by UTF-16 code units, ECMAScript
+  number and string forms; no canonical form, `None`, for an integer a
+  double cannot hold exactly), and `meerkat_core::mcp_request_digest` the
+  digest of one MCP call's exact request: SHA-256 of the canonical JSON of
+  its server, raw operation and arguments. The MCP router states it with
+  each call's operation target, on its ordinary and its checked routes
+  (`ToolExecutionOwnerWitness::with_request_digest` and `request_digest`,
+  read through `ResolvedToolExecutionPlan::single_operation_request_digest`),
+  and a plan is dispatched only for a call with the same digest. A governed
+  MCP call's grant use names its exact operation
+  (`grant_policy::operation_request_binding`: its target, the action
+  `mcp`/its raw operation, `grants::mcp_operation_binding`, and the
+  digest), so a grant that binds one exact operation serves only a call of
+  exactly that request: a call of another request, or one whose owner
+  states no digest, is refused at its preparation, before any entry, and
+  spends nothing. `grant_child_terms_digest` is over the terms' RFC 8785
+  canonical JSON.
+
+- `meerkat-runtime` (feature `local-authorization`): approval-carried
+  governed child grants, the `grant.child` decision kind
+  (`approval_grants`). An agent offers the agent that asked it, for that
+  work's requester, one exact operation of a governed MCP source it reaches
+  under a grant whose children need a person's decision (`access_offer`):
+  Core takes the offering grant from the calling work's own lineage for the
+  operation's server, the requester and the origin from the calling work
+  (in a peer work, the work the asking agent sent; else the calling work),
+  computes the operation's digest from its exact arguments, and holds a
+  `grant.child` decision for the offering grant's rule's approver id, in
+  the human stage only (a `grant.child` hold that names a reviewer is
+  refused `review_stage_not_allowed`), until the host's decision window
+  passes or, when the offering grant's window ends sooner, until that
+  window's end less the requested window: an approval after it could only
+  end `terms_changed`, so the decision expires instead. Its held request
+  (`grant.child.v1`, `GrantChildRequest`) carries the exact terms the
+  grant is issued with, whose digest is the decision's request digest, and
+  its rendering (`grant.render-v1`) every term the approver approves; it is
+  read only as Core held it (`GrantChildRequestError`): the operation's
+  digest is the digest of the arguments the rendering shows, the reply goes
+  to the terms' requester, and the terms name the decision's approved
+  work. An offer is refused at hold, typed (`AccessOfferRefusal`, its kind
+  and reason), when nothing approved could run: `no_child_approval_rule`
+  (with its reason: `no_parent_grant`, `parent_not_current` or
+  `parent_cannot_delegate`), `reply_route_unavailable`,
+  `approval_branch_unavailable` (with its reason: `not_branchable`,
+  `controller_cannot_admit_child`, or `subject_mismatch` when the offering
+  grant acts for another principal than the asking agent's controller
+  grant, so an approved work has one represented subject),
+  `uses_over_policy` and `window_over_policy` (`ApprovalGrantPolicy`: one
+  use and a 15-minute window by default), `window_over_parent` (the
+  offering grant's window ends first, or leaves no time to decide) and
+  `outside_parent_bounds` (with its reason: `processor_excluded` or
+  `audience_excluded`, when the offering grant's bounds exclude the
+  approval branch or the requester). The executor (`GrantDecisionExecutor`,
+  from `ApprovalGrants::executor`, for the `DecisionExecutorLoop` of the
+  runtime that holds the grant owner's single-writer custody) executes an
+  approved offer only for a person's decision whose offering grant still
+  resolves and whose effective terms are still the presented ones. Before
+  it opens anything it opens the decision's cleanup (see the next entry);
+  it then opens a one-time approval branch of the asking agent (a member
+  forked from it at an empty prefix, labelled `decision.approval_branch`
+  with the decision id), issues the branch a controller grant, a child of
+  the asking agent's own (depth 0, processed by the branch only, its id
+  derived from the decision and recovered on retry), and the
+  approval-carried grant, and records the decision executed. An execution
+  refused for good ends the decision refused with its token:
+  `malformed_request`, `not_a_human_decision`, `parent_refused`,
+  `terms_changed`, `terms_unbounded`, `approval_branch_unavailable`,
+  `assurance_below_rule`, `no_child_approval_rule` or `decision_carried`.
+  Its notice admits the approved work into the branch the execution opened
+  (`ApprovalCarriedIngress`): the request's requester, the decision ingress
+  as its ingress actor, the grant's represented subject, the branch as its
+  executor, one target lineage (the bound operation's, ending at the
+  approval-carried grant) and no base, enrolled in the host's custody of
+  originals before its admission, in the origin's realm and ingress domain.
+  Only then is the origin told that access was approved, with no content;
+  an admission that fails for good tells it the request was refused. A
+  redelivered notice admits nothing new. Once the branch ended it forks
+  nothing and tells the origin how its request ended, from the decision's
+  reply fact (approved when the work settled a reply, refused when it
+  settled none), and settles with the origin's receipt; while the origin
+  cannot be told, the notice stays owed. The approved work runs the
+  approved operation once and replies once (`reply_to_requester`: Core's
+  rule of the approved work, never a grant). The decision settles the
+  reply by the digest of its text before the host's route delivers it: the
+  same text again is handed to the route, which answers the first
+  delivery, and another text is refused `reply_already_settled`, whatever
+  the route does. A delivery the route cannot make now answers
+  `reply_route_unavailable` with `retry: same_text`: the settled text is
+  the one to send again. When the approved work ends or the grant's window
+  does, whichever is first, the branch is retired, its controller grant
+  revoked and the decision's cleanup settled; what a stop, a busy custody
+  or an unavailable read left is swept by Core's pass
+  (`DecisionExecutor::sweep`), from the grant owner's unrevoked branch
+  controller grants and the host's open branches, and
+  `ApprovalGrants::sweep_branches` runs that sweep at once; a branch its
+  host will not retire has its controller grant revoked all the same, and
+  its settled cleanup is reported once. A declined, expired, withdrawn
+  or refused offer tells its origin how it ended, with no content, once
+  its branch is retired. A `decisions` tool refused for good answers
+  `execution_failed` with typed data, at its plan as at its effect:
+  `not_governed_work` (outside governed work of one original),
+  `not_an_approved_work`, `reply_already_settled`, `reply_route_unavailable`
+  (with `retry: same_text`), or an offer's refusal kind and reason; a
+  grant owner that cannot answer now answers the retryable
+  `tool_unavailable` (`temporarily_unavailable`). Hosts compose it
+  (`ApprovalGrants`, `ApprovalGrantsConfiguration`) from their decision
+  owner, their grant owner, their approval branches (`ApprovalBranchHost`,
+  whose list of open branches is whole or not given: a host that cannot
+  list every open branch without waking a member or a mob answers
+  unavailable), their requester reply route (`RequesterReplyRoute`, with
+  `can_deliver`) and the native custody that revokes a retired branch's
+  controller grant (`ApprovalControllerCustody`, implemented by
+  `MeerkatMachine`), give their agents the `decisions` tools
+  (`ApprovalGrants::tools`, `DecisionsToolDispatcher`), and compose their
+  grant owner with `DecisionApprovalUseCurrentness`.
+
+- `meerkat-core`, `meerkat-runtime`: two facts of an executed durable
+  decision, owned by the `DurableDecisionMachine` (see Breaking) and
+  settled like its notice. Its cleanup (`DecisionCleanup`): an owner whose
+  execution leaves work outside the decision store to undo once the
+  decision's work is over opens it while it holds its permit, before it
+  creates any of it (`DurableDecisionService::owe_cleanup`), and settles it
+  after the decision ended and it undid that work (`settle_cleanup`); it
+  stays owed across a release, a refusal or an expiry. Its one reply
+  (`settle_reply`): the first settles it by digest, the same one again
+  replays, another is refused `not_owed`. A kind that opens neither keeps
+  its rows byte for byte. A pass records a settled cleanup
+  (`DecisionPassOutcome::CleanupSettled`) or one that cannot settle now
+  (`DecisionDeferral::CleanupUnsettled`). A kind decided by people only
+  (`approval::decision::decided_by_people_only`, `DECIDED_BY_PEOPLE_ONLY`)
+  refuses a review stage at its hold
+  (`DecisionContractError::ReviewStageNotAllowed`, `review_stage_not_allowed`).
+
+- `meerkat-core`, `meerkat-authorization-contracts`: the operation targets
+  of the `decisions` tools, `ToolOperationTarget::DecisionHold` and
+  `ToolOperationTarget::RequesterReply`, and their grant targets,
+  `GrantTarget::DecisionHold` (a hold of a decision for one approver id,
+  covered only by a lineage selected for exactly it) and
+  `GrantTarget::RequesterReply` (selected by no basis). Both enums are
+  non-exhaustive. `meerkat_core::approval::decision::APPROVAL_BRANCH_LABEL`
+  names the approval branch label.
+
+- `meerkat-core`, `meerkat-authorization`: a governed operation's effect
+  entry spends what its prepared decision spends
+  (`PreparedOperationAuthorization::spend_at_entry`, a required method that
+  every wrapper forwards; see Breaking), once, after the review it spends:
+  for an operation whose lineage ends at an approval-carried grant, one use
+  (`LocalWorkPolicy::entry_spend`, `GrantUseSpend`,
+  `LocalGrantAuthority::spend_use_at_entry`), asking the host's currentness
+  owner for the person who decided (`ApprovalUseCurrentness`,
+  `ApprovalUseAnswer`; `LocalGrantAuthority::with_approval_use_currentness`):
+  a person no longer current refuses the entry and spends nothing, and an
+  unsettled answer, or an owner without a currentness owner, is
+  unavailable and spends nothing. `LocalGrantAuthority::retained_grant`
+  reads a retained grant's immutable facts (`RetainedGrant`, with its
+  issuer), `unrevoked_grants` the unrevoked grants a selection names, from
+  the owner's resident state (no store read), and
+  `child_admissible` whether a child grant would be issued now, without
+  issuing it. The grant-backed policy admits a reply to the requester only
+  in an approval-carried work (`grant_policy::requester_reply_values`,
+  `REQUESTER_REPLY_FEATURE`, `REQUESTER_REPLY_ACTION`), under the host's
+  work-owner bounds and the approval grant's window. `GrantPrincipal` is
+  exported and `GrantChildTerms` deserializes.
+
+- `meerkat-mob`: approval branches.
+  `MobHandle::open_approval_branch` forks a grantee at an empty prefix into
+  the one-time branch of a decision (its identity from
+  `MobHandle::approval_branch_identity`), labelled
+  `decision.approval_branch`, exempt from the definition's wiring and wired
+  to no parent, and records the decision as the member's typed creation
+  source (its `MemberSpawned` row and `RosterEntry::approval_branch`);
+  opening it again adopts only the member whose recorded source is that
+  decision. The identity prefix `approval-branch-` and the label are
+  reserved: every other spawn, ensure, reconcile, fork, dormant seat,
+  rotation and policy spawn that takes them, and every wire, unwire or
+  respawn of an open branch, is refused `MobError::ApprovalBranchReserved`
+  (`approval_branch_reserved`) by the mob itself, so every surface answers
+  it. No role-addressed dispatch (a flow step, its target provisioning, a
+  supervisor escalation) selects an open branch.
+  `MobHandle::retire_approval_branch` retires a branch and
+  `MobHandle::approval_branches` lists the open ones, by their recorded
+  source.
 
 ### Changed
 
@@ -1321,6 +1654,39 @@ them.
   the timing as the host store SPI reference describes (Core's Timeouts And
   The Safety Condition).
 
+- A grant journal that holds a grant issued under a child rule, an
+  approval-carried child or a spent use (see Added) cannot be read by
+  0.9.10: its reader refuses the journal, so that grant owner is
+  unavailable there. A journal of plain grants is read by both releases.
+  Before a rollback, revoke the approval-carried grants or let them
+  expire.
+
+- 0.9.10 cannot decode a retained work whose basis selects a lineage for a
+  hold of a decision (`GrantTarget::DecisionHold`: the calling work of an
+  access offer), since it does not know that grant target. Before a
+  rollback, let such works end.
+
+- 0.9.10 reads a durable decision whose row records a cleanup or a reply
+  (an executed `grant.child` decision) as unreadable, and acts on it in no
+  way: its machine state refuses a field it does not know
+  (`DecisionMachineState`, `deny_unknown_fields`, in
+  `crates/meerkat-core/src/approval/decision/record.rs`), and its decision
+  store reads a row it cannot decode as `DecisionRow::Unreadable` (`decode`,
+  in `crates/meerkat-store/src/approval_decision_store.rs`). Such a row
+  stays unreadable there for good: a settled cleanup and a settled reply
+  are stored too, so settling them does not make the row readable to
+  0.9.10. Every other decision's row is unchanged, byte for byte, and both
+  releases read it.
+
+- 0.9.10 knows nothing of approval branches: it reads an open branch as an
+  ordinary member (it ignores the member's recorded creation source), so
+  nothing keeps wiring, flows or messages off it there, and nothing
+  retires it. Before a rollback, let the approval branches end and their
+  cleanups settle, so that no approval branch is open at the rollback.
+  The archived session of a retired branch, which holds its approved
+  work and its answer, stays as readable on 0.9.10 as any archived
+  session.
+
 ### Known limitations
 
 - Peers keep the original requester in process only. A delivery over a
@@ -1357,6 +1723,18 @@ them.
   realm is poisoned until it is reopened. A store that gives each acquire a
   server-side deadline below Core's acquire timeout
   (`SpiRealmConfig::renew_timeout`) avoids it.
+
+- No stock Core host composes approval-carried grants (`ApprovalGrants`):
+  a host composes them (see Added).
+
+- An approval branch's privacy toward console viewers and memory is the
+  host's. Core keeps every spawn, wire and respawn path off the branch and
+  labels it (`APPROVAL_BRANCH_LABEL`); a host's console and memory must
+  neither show nor index a member with that label.
+
+- The derivation of an access offer in a peer work (the asking agent, the
+  requester and the origin from the work the asking agent sent) is covered
+  at the runtime level only.
 
 ## [0.9.10] - 2026-11-04
 

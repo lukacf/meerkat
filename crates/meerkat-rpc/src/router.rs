@@ -8419,6 +8419,10 @@ mod tests {
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     impl meerkat_core::authorization::WorkAuthorization for ConsentRequiredWork {

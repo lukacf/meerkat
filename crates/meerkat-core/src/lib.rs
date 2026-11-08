@@ -82,6 +82,7 @@ pub mod authorization;
 pub mod blob;
 pub mod budget;
 pub mod call_origin;
+pub mod canonical_json;
 pub use call_origin::{CALL_ORIGIN_META_KEY, TOOL_CALL_DEDUPE_KEY_META_KEY, WireCallOrigin};
 pub mod comms;
 pub mod compact;
@@ -700,7 +701,7 @@ pub use tool_execution::{
     ToolExecutionContract, ToolExecutionContractError, ToolExecutionDeclarationError,
     ToolExecutionMode, ToolExecutionOwnerWitness, ToolExecutionResolutionContext,
     ToolExecutionResolutionError, ToolOperationTarget, ToolOutputPolicy, ToolProgressPolicy,
-    ephemeral_tool_catalog_binding_fingerprint,
+    ephemeral_tool_catalog_binding_fingerprint, mcp_request_digest,
 };
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,

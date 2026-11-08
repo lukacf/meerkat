@@ -4047,7 +4047,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // The MCP servers this build marked grant-gated, by server name.
             // Every tool a gated server provides is gated from the moment it
             // appears: a boundary adds its names (ExtendToolGrantGate), and
-            // only a server the gate gates may be staged on the grant path
+            // a grant-time live attach stages only a server the gate gates
             // (SurfaceStageGatedAdd). Replaced by every build.
             tool_grant_gated_servers: Set<String>,
             // Whether this build gates every MCP server it does not configure
@@ -7416,8 +7416,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // provides now (ExtendToolGrantGate): the gate only grows within
             // a build, and no name opens.
             ExtendToolGrantGate { server: String, gated: Set<ToolName> },
-            // The grant path stages an MCP server the gate gates, and no
-            // other (SurfaceStageGatedAdd); the ordinary stage is
+            // A grant-time live attach stages an MCP server the gate gates,
+            // and no other (SurfaceStageGatedAdd); the ordinary stage is
             // SurfaceStageAdd.
             SurfaceStageGatedAdd { surface_id: String, now_ms: u64 },
         }
@@ -23726,12 +23726,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // SurfaceStageGatedAdd: the grant path's stage of an MCP server. It
-        // is the ordinary add stage, admitted only for a server the build's
-        // scoped tool grant gate gates (a server the gate names, or, while
-        // the build gates every server it does not configure ungated, any
-        // server outside its ungated servers), so a grant never attaches an
-        // ungated server. Its apply is the ordinary SurfaceApplyBoundary.
+        // SurfaceStageGatedAdd: a grant-time live attach's stage of a gated
+        // MCP server, the live attach's check (its caller lands with the
+        // live attach; a build's lazy residency of a gated server it
+        // configures is the factory's build-composition filter). It is the
+        // ordinary add stage, admitted only for a server the build's scoped
+        // tool grant gate gates (a server the gate names, or, while the build
+        // gates every server it does not configure ungated, any server
+        // outside its ungated servers). Its apply is the ordinary
+        // SurfaceApplyBoundary.
         transition SurfaceStageGatedAddIdle {
             on input SurfaceStageGatedAdd { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Idle }

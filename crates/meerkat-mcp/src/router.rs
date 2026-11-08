@@ -664,11 +664,11 @@ impl SurfaceOwner {
         }
     }
 
-    /// The gated twin of [`Self::apply`]'s add stage: stage `surface_id` on
-    /// the grant path (`SurfaceStageGatedAdd`), which the machine admits only
-    /// for a server the build's scoped tool grant gate gates, and record the
-    /// stage's lineage in the held lineages, as `apply` does, under the same
-    /// handle read lock.
+    /// The gated twin of [`Self::apply`]'s add stage: stage `surface_id` as
+    /// a grant-time live attach does (`SurfaceStageGatedAdd`), which the
+    /// machine admits only for a server the build's scoped tool grant gate
+    /// gates, and record the stage's lineage in the held lineages, as `apply`
+    /// does, under the same handle read lock.
     fn apply_gated_add(
         &self,
         surface_id: SurfaceId,
@@ -2399,12 +2399,16 @@ impl McpRouter {
         self.stage_add_payload(config)
     }
 
-    /// Stage a server add on the grant path for the next boundary apply: the
-    /// ordinary add, admitted only for a server the build's scoped tool grant
-    /// gate gates (`SurfaceStageGatedAdd`), so a grant never attaches an
-    /// ungated server. A governed name is refused and the payload validated
-    /// as [`Self::stage_add`] does. The stage's lineage is this router's, so
-    /// the construction that staged it releases it when it ends.
+    /// Stage a server add for the next boundary apply as a grant-time live
+    /// attach of a gated server stages it: the ordinary add, admitted only
+    /// for a server the build's scoped tool grant gate gates
+    /// (`SurfaceStageGatedAdd`). It is the live attach's check, and its
+    /// caller lands with the live attach; a build stages its configured
+    /// servers with [`Self::stage_add`] or [`Self::stage_add_governed`], and
+    /// whether it stages a gated one (lazy residency) is the factory's
+    /// build-composition filter. A governed name is refused and the payload
+    /// validated as [`Self::stage_add`] does. The stage's lineage is this
+    /// router's, so the construction that staged it releases it when it ends.
     ///
     /// # Errors
     /// The surface's refusal when the gate does not gate the server, and the

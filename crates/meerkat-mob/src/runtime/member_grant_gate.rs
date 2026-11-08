@@ -70,6 +70,10 @@ pub struct MemberGrantGate {
     /// does not name: while the unconfigured-servers mode is on, the only
     /// servers the gate does not gate.
     pub ungated_servers: BTreeSet<String>,
+    /// Every MCP server the member's own profile configures: the servers its
+    /// next build stages, a gated one only while a live grant of it covers
+    /// the member when that build reads the grants.
+    pub configured_servers: BTreeSet<String>,
 }
 
 impl MemberGrantGate {
@@ -90,6 +94,11 @@ impl MemberGrantGate {
             gated: own.grant_gated.clone(),
             not_mounted: GrantGatedTools::default(),
             ungated_servers: BTreeSet::new(),
+            configured_servers: own
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect(),
         };
         if let Some(role) = role {
             let entries = role.grant_gated.without(&own.grant_gated);
@@ -108,11 +117,11 @@ impl MemberGrantGate {
                 .extend(entries.mcp_servers.iter().cloned());
             gate.gated.unconfigured_mcp_servers |= entries.unconfigured_mcp_servers;
         }
-        gate.ungated_servers = own
-            .mcp_servers
+        gate.ungated_servers = gate
+            .configured_servers
             .iter()
-            .map(|server| server.name.clone())
-            .filter(|server| !gate.gated.mcp_servers.contains(server))
+            .filter(|server| !gate.gated.mcp_servers.contains(*server))
+            .cloned()
             .collect();
         gate
     }
@@ -335,9 +344,9 @@ mod tests {
     /// A member's gate joins its own gate with its role's current gate: a
     /// role server and the role's unconfigured-servers mode are gated from
     /// the moment they appear; the servers the member's own profile
-    /// configures and its gate does not name are its ungated servers, which
-    /// the mode leaves open; a role family its switches leave off is not
-    /// mounted.
+    /// configures are its configured servers, and those its gate does not
+    /// name are its ungated servers, which the mode leaves open; a role
+    /// family its switches leave off is not mounted.
     #[test]
     fn a_member_gate_joins_role_servers_and_the_mode_and_lists_its_ungated_servers() {
         let own = ToolConfig {
@@ -368,6 +377,10 @@ mod tests {
         assert_eq!(
             gate.ungated_servers,
             BTreeSet::from(["calendar".to_string()])
+        );
+        assert_eq!(
+            gate.configured_servers,
+            BTreeSet::from(["calendar".to_string(), "tickets".to_string()])
         );
         let named = gate.named();
         assert!(named.gates_mcp_server("drive", &gate.ungated_servers));

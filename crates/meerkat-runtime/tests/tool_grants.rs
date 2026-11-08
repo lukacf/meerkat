@@ -1539,17 +1539,19 @@ async fn a_build_reads_which_gated_servers_a_live_server_grant_covers() {
 /// The shell's MCP server predicate answers what the generated machine
 /// admits. For every gate over two servers (its gated servers, its ungated
 /// servers and its unconfigured-servers mode) and every server asked, a third
-/// one the gate does not know included, each reader of the gate
+/// one the gate does not know included, the predicate
+/// (`meerkat_core::tool_grant::server_is_grant_gated`) and each reader of the
+/// gate that answers through it
 /// (`SessionToolVisibilityState::tool_grant_gates_server` for dispatch and
 /// visibility, `InstalledToolGrantGate::gates_server` for `applies`,
-/// `GrantGatedTools::gates_mcp_server` for a grant request) gates exactly the
+/// `GrantGatedTools::gates_mcp_server` for a grant request) gate exactly the
 /// servers a real `MeerkatMachine` admits for `ExtendToolGrantGate` and for
-/// `SurfaceStageGatedAdd`. A change to the machine's server guards fails here
-/// until the shell follows it.
+/// `SurfaceStageGatedAdd`. A change to the machine's server guards or to the
+/// predicate fails here until the two agree again.
 #[tokio::test]
 async fn the_server_predicate_answers_what_the_machine_admits() {
     use meerkat_core::handles::ExternalToolSurfaceHandle;
-    use meerkat_core::tool_grant::GrantGatedTools;
+    use meerkat_core::tool_grant::{GrantGatedTools, server_is_grant_gated};
 
     let subsets = || -> [BTreeSet<String>; 4] {
         [
@@ -1604,12 +1606,15 @@ async fn the_server_predicate_answers_what_the_machine_admits() {
                         .external_tool_surface()
                         .stage_gated_add(server.to_string(), 0)
                         .is_ok();
+                    let predicate = server_is_grant_gated(&gated, mode, &ungated, server);
                     let context = format!(
                         "gated {gated:?}, ungated {ungated:?}, mode {mode}, server {server}: \
-                         machine extend {extended}, machine stage {staged}, visibility \
-                         {visibility}, installed {installed}, requested {requested}"
+                         machine extend {extended}, machine stage {staged}, predicate \
+                         {predicate}, visibility {visibility}, installed {installed}, \
+                         requested {requested}"
                     );
                     assert_eq!(extended, staged, "{context}");
+                    assert_eq!(predicate, extended, "{context}");
                     assert_eq!(visibility, extended, "{context}");
                     assert_eq!(installed, extended, "{context}");
                     assert_eq!(requested, extended, "{context}");

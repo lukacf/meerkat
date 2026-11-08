@@ -267,18 +267,59 @@ pub struct GrantToolResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireToolGrantApplies {
-    /// The identity's live member build runs a gate that covers the target.
+    /// The identity's live member build runs a gate that covers the target
+    /// (for a gated MCP server the member's profile configures, the build
+    /// holds the server too).
     Now,
     /// The target is not mounted: the live build ignored it, or, with no
     /// live build, the next build cannot mount it.
     NotMounted,
-    /// The member's next build applies it: the member is not live here, or
-    /// its live build predates the gate that covers the target.
+    /// The member's next build applies it: the member is not live here, its
+    /// live build predates the gate that covers the target, or the target is
+    /// a gated MCP server the member's profile configures that the live
+    /// build left unattached.
     AtNextBuild,
     /// Forward compatibility: a value this version does not know. The
     /// server never sends it.
     #[serde(other)]
     Unknown,
+}
+
+/// The entries of a build's tool grant gate as `tool_grants/list` shows
+/// them: built-in tool families, tool names, MCP servers and the
+/// unconfigured-servers mode. Advisory, so tolerant: a field this version
+/// does not know is ignored, never refused, and a newer server's gate never
+/// fails the result it rides on. (A gate a request names is the closed
+/// [`WireGrantGatedTools`].)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolGrantGateEntries {
+    /// Built-in tool families, such as `shell`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub families: Vec<String>,
+    /// Tool names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// MCP server names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    /// Whether every MCP server the build does not configure itself is
+    /// gated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfigured_mcp_servers: bool,
+}
+
+impl From<&meerkat_core::tool_grant::GrantGatedTools> for WireToolGrantGateEntries {
+    fn from(gate: &meerkat_core::tool_grant::GrantGatedTools) -> Self {
+        let mut tools: Vec<String> = gate.tools.iter().map(ToString::to_string).collect();
+        tools.sort();
+        Self {
+            families: gate.families.iter().cloned().collect(),
+            tools,
+            mcp_servers: gate.mcp_servers.iter().cloned().collect(),
+            unconfigured_mcp_servers: gate.unconfigured_mcp_servers,
+        }
+    }
 }
 
 /// A build's tool grant gate: what it gates, and the role entries it
@@ -287,9 +328,9 @@ pub enum WireToolGrantApplies {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireToolGrantGateView {
     #[serde(default)]
-    pub gated: WireGrantGatedTools,
+    pub gated: WireToolGrantGateEntries,
     #[serde(default)]
-    pub not_mounted: WireGrantGatedTools,
+    pub not_mounted: WireToolGrantGateEntries,
 }
 
 /// A mob member identity's tool grant gate, as `tool_grants/list` answers

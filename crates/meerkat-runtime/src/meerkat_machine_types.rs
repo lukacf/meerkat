@@ -1384,7 +1384,8 @@ meerkat_machine_runtime_internal_inputs!(
     VisibilityAuthorityLifecycle => [
         ExtendToolGrantGate,
     ],
-    // The grant path's stage of an MCP server the build's grant gate gates.
+    // A grant-time live attach's stage of an MCP server the build's grant
+    // gate gates.
     ExternalSurfaceLifecycle => [
         SurfaceStageGatedAdd,
     ],

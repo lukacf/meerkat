@@ -278,10 +278,13 @@ and confinement all still apply to every call it opens.
   A gated server the build configures starts no process until a live grant
   of that server covers it when a build reads the grants (a respawn or a
   resume): until then nothing of it is connected, and a call naming one of
-  its tools finds no tool. A tool name only a gated server provides is
-  granted through its server, not by name. A role server, like a role tool
-  name, is gated from the moment it appears and never fails the member's
-  build.
+  its tools finds no tool. The build decides this itself as it composes the
+  session's tools; MeerkatMachine's gated stage (`SurfaceStageGatedAdd`,
+  `McpRouter::stage_add_gated`) is the check of a grant-time live attach of
+  a gated server, and its caller lands with the live attach. A tool name only
+  a gated server provides is granted through its server, not by name. A role
+  server, like a role tool name, is gated from the moment it appears and
+  never fails the member's build.
 - **Granting.** `MeerkatMachine::grant_tool` issues a grant for a subject (a
   session, or a mob member identity in one mob incarnation,
   `ToolGrantSubject::member`), a target (one tool name, a built-in family
@@ -290,14 +293,24 @@ and confinement all still apply to every call it opens.
   a window of at most the host policy's maximum lifetime, 24 hours by default.
   `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
   the Rust API; `ToolGrantService` offers the same operations over any
-  `RuntimeStore`. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
+  `RuntimeStore`. Grant a mob member identity with
+  `MobHandle::grant_member_tool`: the mob's actor decides it against its live
+  roster as it commits, in order with the retirements that end an identity's
+  grants, so a member retired before the commit is refused and a retirement
+  after the commit ends the grant. The direct writers,
+  `MeerkatMachine::grant_tool` and `ToolGrantService::grant` with a member
+  subject, do not consult the roster: a grant they write for an identity
+  that has retired is issued, and a name seated again in the same incarnation
+  holds it. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
   `tool_grants/list` and `tool_grants/audit` serve them for sessions and mob
   member identities (see
   [scoped tool grants over JSON-RPC](/api/rpc#scoped-tool-grants)), and the
-  Python and TypeScript SDKs wrap them. A member's build reads its identity's
-  grants first, then its session's, so an identity grant follows the member
-  across respawns and restarts; its grants end when its identity ends, and a
-  reset of its mob, which ends every identity the mob held, ends them too.
+  Python and TypeScript SDKs wrap them; `tool_grants/grant` commits an
+  identity grant through the mob's actor. A member's build reads its
+  identity's grants first, then its session's, so an identity grant follows
+  the member across respawns and restarts; its grants end when its identity
+  ends, and a reset of its mob, which ends every identity the mob held, ends
+  them too.
 - **Adjudication.** Every model-request boundary first gates the names each
   gated MCP server provides now, then opens the gated names a live grant
   admits at that moment (a server grant opens its server's gated names

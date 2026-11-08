@@ -2746,6 +2746,11 @@ class MeerkatClient:
         readable. Ended (expired or revoked) grants are listed only with
         ``include_ended``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the server cannot read.
+        For a member identity in the mob's roster the result also carries
+        ``"gate"``: ``"running"``, what the member's live build gates and the
+        names it ignored as not mounted (``None`` when no build of it is live
+        on the server), and ``"next_build"``, the gate its next build
+        resolves. The gate is advisory.
         """
         params: dict[str, Any] = {
             "subject": self._tool_grant_subject(session_id, mob_id, identity),

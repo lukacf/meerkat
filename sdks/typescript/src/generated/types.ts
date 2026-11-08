@@ -1769,9 +1769,16 @@ export interface WireUnreadableToolGrantAuditRow {
   sequence: number;
 }
 
+export interface WireToolGrantGateEntries {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
 export interface WireToolGrantGateView {
-  gated?: WireGrantGatedTools;
-  not_mounted?: WireGrantGatedTools;
+  gated?: WireToolGrantGateEntries;
+  not_mounted?: WireToolGrantGateEntries;
 }
 
 export interface WireMemberToolGrantGate {

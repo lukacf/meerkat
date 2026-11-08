@@ -472,6 +472,7 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireUnreadableToolGrant",
     "WireToolGrantAuditRow",
     "WireUnreadableToolGrantAuditRow",
+    "WireToolGrantGateEntries",
     "WireToolGrantGateView",
     "WireMemberToolGrantGate",
     "GrantToolParams",

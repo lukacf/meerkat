@@ -2198,11 +2198,25 @@ version, or damaged): its place in the subject's log."""
 
 
 @dataclass
+class WireToolGrantGateEntries:
+    """The entries of a build's tool grant gate as `tool_grants/list` shows
+them: built-in tool families, tool names, MCP servers and the
+unconfigured-servers mode. Advisory, so tolerant: a field this version
+does not know is ignored, never refused, and a newer server's gate never
+fails the result it rides on. (A gate a request names is the closed
+[`WireGrantGatedTools`].)"""
+    families: Optional[list[str]] = None
+    mcp_servers: Optional[list[str]] = None
+    tools: Optional[list[str]] = None
+    unconfigured_mcp_servers: Optional[bool] = None
+
+
+@dataclass
 class WireToolGrantGateView:
     """A build's tool grant gate: what it gates, and the role entries it
 ignores as not mounted (never gated, never open)."""
-    gated: Optional[WireGrantGatedTools] = None
-    not_mounted: Optional[WireGrantGatedTools] = None
+    gated: Optional[WireToolGrantGateEntries] = None
+    not_mounted: Optional[WireToolGrantGateEntries] = None
 
 
 @dataclass

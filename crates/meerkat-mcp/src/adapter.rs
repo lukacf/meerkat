@@ -796,9 +796,10 @@ impl McpRouterAdapter {
         Ok(())
     }
 
-    /// Stage an MCP server add on the grant path
-    /// ([`McpRouter::stage_add_gated`]): admitted only for a server the
-    /// build's scoped tool grant gate gates.
+    /// Stage an MCP server add as a grant-time live attach of a gated server
+    /// stages it ([`McpRouter::stage_add_gated`]): admitted only for a server
+    /// the build's scoped tool grant gate gates. Its caller lands with the
+    /// live attach; a build never calls it.
     pub async fn stage_add_gated(&self, config: McpServerConfig) -> Result<(), String> {
         self.refuse_if_closing()?;
         let mut router = self.router.write().await;

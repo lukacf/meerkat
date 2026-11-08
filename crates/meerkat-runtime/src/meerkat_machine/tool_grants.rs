@@ -24,9 +24,11 @@ use crate::tool_grant::{
 impl MeerkatMachine {
     /// The scoped tool grant gate the session `session_id` runs now, as its
     /// machine records it: the gate its build installed, the names a
-    /// boundary since gated for a gated server, and the names a live grant
-    /// opened at its last boundary. `None` when the session is not registered
-    /// here: this loads, registers and wakes nothing.
+    /// boundary since gated for a gated server, the names a live grant
+    /// opened at its last boundary, and the MCP servers its external tool
+    /// surface holds (an add staged or pending, or the server active), read
+    /// from the same state. `None` when the session is not registered here:
+    /// this loads, registers and wakes nothing.
     pub async fn tool_grant_gate(&self, session_id: &SessionId) -> Option<RunningToolGrantGate> {
         let authority = {
             let sessions = self.sessions.read().await;
@@ -36,6 +38,19 @@ impl MeerkatMachine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = authority.state();
+        let attached_servers = state
+            .known_surfaces
+            .iter()
+            .filter(|surface| {
+                state.surface_base_state.get(*surface)
+                    == Some(&super::dsl::ExternalToolSurfaceBaseState::Active)
+                    || state.surface_staged_op.get(*surface)
+                        == Some(&super::dsl::SurfaceStagedOp::Add)
+                    || state.surface_pending_op.get(*surface)
+                        == Some(&super::dsl::SurfacePendingOp::Add)
+            })
+            .cloned()
+            .collect();
         Some(RunningToolGrantGate {
             gate: InstalledToolGrantGate {
                 gated: state.tool_grant_gated_names.clone(),
@@ -45,6 +60,7 @@ impl MeerkatMachine {
                 not_mounted_names: state.tool_grant_not_mounted_names.clone(),
             },
             open: state.tool_grant_open_names.clone(),
+            attached_servers,
         })
     }
     /// This runtime's scoped tool grant service, over its store.
@@ -74,6 +90,14 @@ impl MeerkatMachine {
     /// it (a session subject is served by its own session). When that
     /// session is served here, its deadline driver is armed for the subject
     /// with the grant's deadline.
+    ///
+    /// Grant a mob member identity through
+    /// `meerkat_mob::MobHandle::grant_member_tool`, which the mob's actor
+    /// decides against its live roster as it commits, in order with the
+    /// retirements that end an identity's grants. This writer, like
+    /// [`ToolGrantService::grant`] with a member subject, does not consult the
+    /// roster: a grant it writes for an identity that has retired is issued,
+    /// and a name seated again in the same incarnation holds it.
     ///
     /// # Errors
     /// The service's refusal.

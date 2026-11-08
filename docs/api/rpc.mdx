@@ -2073,8 +2073,9 @@ live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-gran
 A mob member's build gates what its profile's `tools.grant_gated` and its
 role's current gate name; a gated MCP server a member's profile configures
 starts no process until a live grant of that server covers it at the member's
-build, so after such a grant the member connects it at its next build (a
-`mob/respawn`, for one). `tool_grants/grant`, `tool_grants/revoke`,
+build (the build decides this as it composes the member's tools), so after
+such a grant the member connects it at its next build (a `mob/respawn`, for
+one). `tool_grants/grant`, `tool_grants/revoke`,
 `tool_grants/list` and `tool_grants/audit` manage the grants of a session or
 of a mob member identity. They read and write grant rows only: no method
 loads, registers or wakes the session or the member.
@@ -2133,7 +2134,10 @@ loads, registers or wakes the session or the member.
   profile). An identity grant is decided against the mob's live roster as it
   commits, in order with the retirements that end an identity: a member
   retired before the commit is refused `subject_unknown`, and a retirement
-  after the commit ends the grant. Exactly one of
+  after the commit ends the grant. A grant between a respawn's retirement of
+  the old member and the seating of its replacement is refused
+  `subject_unknown` too, since the identity is out of the roster then: retry
+  it once the respawn answers. Exactly one of
   `duration_ms` and `expires_at_ms` (UNIX ms) bounds the grant, at most the
   host's maximum lifetime (24 hours by default). `decision_ref`, when given,
   is the host's reference to the decision it made before issuing (non-empty,
@@ -2142,7 +2146,9 @@ loads, registers or wakes the session or the member.
   applies to the member's running build: `now` (that build gates the
   target), `not_mounted` (that build, or with no live build the next one,
   ignores the target as not mounted) or `at_next_build` (the member is not
-  live here, or its live build predates the gate that names the target). It
+  live here, its live build predates the gate that names the target, or the
+  target is a gated MCP server the member's profile configures that its live
+  build left unattached, since no live grant covered it then). It
   is advisory: the grant is issued either way. A session before or during its first turn is granted
   from its staged build. A gate no grant could honour fails the session's
   build, which a deferred create reports at its first `turn/start`.

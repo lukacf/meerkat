@@ -529,6 +529,11 @@ impl ToolGrantService {
 
     /// Issue one grant.
     ///
+    /// The service writes the grant row and consults no mob roster: for a
+    /// mob member identity subject, issue the grant through
+    /// `meerkat_mob::MobHandle::grant_member_tool`, which decides it against
+    /// the mob's live roster as it commits.
+    ///
     /// # Errors
     /// [`ToolGrantServiceError::InvalidWindow`] for a window that is past,
     /// empty or longer than the policy's maximum lifetime,

@@ -188,11 +188,17 @@ impl GrantGatedTools {
     /// Whether this gate gates the MCP server `server` of a build that
     /// configures the servers `configured`: the gate names it, or the gate
     /// gates every server the build does not configure and `server` is not
-    /// one of them.
+    /// one of them ([`server_is_grant_gated`]; a configured server the gate
+    /// names is gated, so `configured` stands for the build's ungated
+    /// servers).
     #[must_use]
     pub fn gates_mcp_server(&self, server: &str, configured: &BTreeSet<String>) -> bool {
-        self.mcp_servers.contains(server)
-            || (self.unconfigured_mcp_servers && !configured.contains(server))
+        server_is_grant_gated(
+            &self.mcp_servers,
+            self.unconfigured_mcp_servers,
+            configured,
+            server,
+        )
     }
 }
 
@@ -295,26 +301,60 @@ impl InstalledToolGrantGate {
     }
 }
 
+/// Whether a scoped tool grant gate gates the MCP server `server`: the gate
+/// names it (`gated_servers`), or the gate gates every server its build does
+/// not configure ungated (`gates_unconfigured_servers`) and `server` is not
+/// one of the servers the build configures ungated (`ungated_servers`).
+///
+/// The shell's one server predicate: every reader of a gate answers through
+/// it ([`crate::SessionToolVisibilityState::tool_grant_gates_server`] for the
+/// dispatch gate and the visible set, [`InstalledToolGrantGate::gates_server`]
+/// for `applies`, [`GrantGatedTools::gates_mcp_server`] for a grant request).
+/// MeerkatMachine's guards state the same predicate (`server_is_gated` on
+/// `ExtendToolGrantGate`, `server_is_grant_gated` on `SurfaceStageGatedAdd`);
+/// the runtime's grant tests compare the two over every gate of two servers.
+#[must_use]
+pub fn server_is_grant_gated(
+    gated_servers: &BTreeSet<String>,
+    gates_unconfigured_servers: bool,
+    ungated_servers: &BTreeSet<String>,
+    server: &str,
+) -> bool {
+    gated_servers.contains(server)
+        || (gates_unconfigured_servers && !ungated_servers.contains(server))
+}
+
 /// The scoped tool grant gate a live build runs, as its session's machine
 /// records it: the gate the build installed, with the names a model-request
-/// boundary since gated for a gated server, and the gated names a live grant
-/// opened at the last boundary.
+/// boundary since gated for a gated server, the gated names a live grant
+/// opened at the last boundary, and the MCP servers the session's external
+/// tool surface holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunningToolGrantGate {
     /// What the build gates now.
     pub gate: InstalledToolGrantGate,
     /// The gated names a live grant opened at the last boundary.
     pub open: BTreeSet<ToolName>,
+    /// The MCP servers the session's external tool surface holds now: an add
+    /// staged or pending, or the server active. A gated server the build
+    /// configures but left unattached, since no live grant covered it when
+    /// the build read the grants, is not here: the build's own filter never
+    /// staged it.
+    pub attached_servers: BTreeSet<String>,
 }
 
 impl InstalledToolGrantGate {
     /// Whether the gate gates the MCP server `server`: a server it names, or,
     /// while it gates every server its build does not configure ungated, any
-    /// server outside its ungated servers.
+    /// server outside its ungated servers ([`server_is_grant_gated`]).
     #[must_use]
     pub fn gates_server(&self, server: &str) -> bool {
-        self.gated_servers.contains(server)
-            || (self.gates_unconfigured_servers && !self.ungated_servers.contains(server))
+        server_is_grant_gated(
+            &self.gated_servers,
+            self.gates_unconfigured_servers,
+            &self.ungated_servers,
+            server,
+        )
     }
 
     /// Whether the gate gates what `target` names: its tool name, any name

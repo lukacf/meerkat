@@ -4358,13 +4358,17 @@ impl SessionToolVisibilityState {
     /// Whether this build's scoped tool grant gate gates the MCP server
     /// `server`: a server the gate names, or, while the build gates every
     /// server it does not configure ungated, any server outside its ungated
-    /// servers. The one server predicate every reader of the gate uses, as
-    /// the machine's guards do.
+    /// servers. It answers through [`crate::tool_grant::server_is_grant_gated`],
+    /// the shell's one server predicate, which states the machine's server
+    /// guards in Rust.
     #[must_use]
     pub fn tool_grant_gates_server(&self, server: &str) -> bool {
-        self.tool_grant_gated_servers.contains(server)
-            || (self.tool_grant_gates_unconfigured_servers
-                && !self.tool_grant_ungated_servers.contains(server))
+        crate::tool_grant::server_is_grant_gated(
+            &self.tool_grant_gated_servers,
+            self.tool_grant_gates_unconfigured_servers,
+            &self.tool_grant_ungated_servers,
+            server,
+        )
     }
 
     /// Whether the tool `name`, provided by `provenance`, is grant-gated: its

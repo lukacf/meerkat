@@ -13107,6 +13107,25 @@ impl meerkat::surface::PreDequeueHostRuntimeCheck for CliSessionHostRuntimeCheck
     }
 }
 
+/// The CLI runtime executor's answer to the runtime loop's executor-wide
+/// boundary cancel, for either session service it holds (the persistent one
+/// `rkat run`, `rkat resume` and the scheduled-session host use, or the
+/// plain one). A cancel that finds no run active is a no-op: the loop applies
+/// it only between runs, and an error would stop the loop and the session
+/// with it. Any other refusal fails the cancel.
+fn cli_executor_wide_boundary_cancel_result(
+    result: Result<(), meerkat::SessionError>,
+) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+    match result {
+        Ok(()) | Err(meerkat::SessionError::NotRunning { .. }) => Ok(()),
+        Err(err) => Err(
+            meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                err.to_string(),
+            ),
+        ),
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     /// Every turn forwards the primitive's native work context into the
@@ -13505,41 +13524,26 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
 
     /// With no run active the cancel is a no-op: the runtime loop applies an
     /// executor-wide cancel only between runs, and an error here would stop
-    /// the loop and the session with it.
+    /// the loop and the session with it. Both session services answer through
+    /// `cli_executor_wide_boundary_cancel_result`.
     async fn cancel_after_boundary(
         &mut self,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         #[cfg(feature = "session-store")]
         if let Some(persistent) = self.persistent_service.as_ref() {
-            return persistent
-                .cancel_current_after_boundary_with_machine_authority(
-                    &self.session_id,
-                    self.runtime_adapter.session_control_authority(),
-                )
-                .await
-                .or_else(|err| match err {
-                    meerkat::SessionError::NotRunning { .. } => Ok(()),
-                    err => Err(err),
-                })
-                .map_err(|err| {
-                    meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
-                        err.to_string(),
+            return cli_executor_wide_boundary_cancel_result(
+                persistent
+                    .cancel_current_after_boundary_with_machine_authority(
+                        &self.session_id,
+                        self.runtime_adapter.session_control_authority(),
                     )
-                });
+                    .await,
+            );
         }
-        self.service
-            .cancel_after_boundary(&self.session_id)
-            .await
-            .or_else(|err| match err {
-                meerkat::SessionError::NotRunning { .. } => Ok(()),
-                err => Err(err),
-            })
-            .map_err(|err| {
-                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
-                    err.to_string(),
-                )
-            })
+        cli_executor_wide_boundary_cancel_result(
+            self.service.cancel_after_boundary(&self.session_id).await,
+        )
     }
 
     async fn stop_runtime_executor(
@@ -28265,6 +28269,132 @@ default_model = "gemma"
         .await;
         runtime_adapter
             .unregister_session(&session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
+    /// Register a session served by the CLI runtime executor over a real
+    /// persistent session service, as `rkat run` builds and registers one: a
+    /// deferred create under the session's own runtime bindings, then the
+    /// executor holding the service and the session's live actor witness.
+    /// Its turns run on a scripted model that answers at once.
+    #[cfg(feature = "session-store")]
+    async fn a_persistent_cli_served_session(
+        temp: &tempfile::TempDir,
+    ) -> (Arc<meerkat_runtime::MeerkatMachine>, SessionId) {
+        let store = sqlite_session_store(temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        )
+        .expect("construct runtime authority");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(store)
+            .builtins(false)
+            .shell(false);
+        let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+            None,
+        )
+        .expect("compose the CLI runtime-backed service");
+        let llm: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare the session's runtime bindings");
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(session),
+                    resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(llm)),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("create the session with its first turn deferred");
+        let publication_actor_witness = service
+            .live_session_actor_witness(&session_id)
+            .await
+            .expect("the created session has a live actor");
+        let executor = Box::new(CliRuntimeExecutor {
+            service: Arc::clone(&service) as Arc<dyn meerkat_core::service::SessionService>,
+            persistent_service: Some(Arc::clone(&service)),
+            publication_actor_witness: Some(publication_actor_witness),
+            session_id: session_id.clone(),
+            runtime_adapter: Arc::clone(&runtime_adapter),
+            workgraph_service: None,
+            event_tx: None,
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await
+            .expect("the CLI runtime executor registers");
+        (runtime_adapter, session_id)
+    }
+
+    /// The executor contract for the CLI runtime executor as `rkat run`,
+    /// `rkat resume` and the scheduled-session host build it, over a
+    /// persistent session service: a boundary cancel the runtime loop applies
+    /// while no run is active is a no-op.
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn cli_runtime_executor_over_a_persistent_service_idle_boundary_cancel_conformance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (runtime_adapter, session_id) = a_persistent_cli_served_session(&temp).await;
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime_adapter,
+            &session_id,
+        )
+        .await;
+        unregister_cli_runtime_session(&runtime_adapter, &session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
+    /// A supervisor interrupt (the InterruptMember path) that reaches an idle
+    /// session `rkat run` serves over its persistent session service, as an
+    /// external mob member started with `--comms-listen-tcp` is, leaves the
+    /// session serving its next input.
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn an_idle_supervisor_interrupt_leaves_a_persistent_cli_session_serving() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (runtime_adapter, session_id) = a_persistent_cli_served_session(&temp).await;
+        runtime_adapter
+            .cancel_after_boundary_for_optional_member_incarnation(&session_id, None)
+            .await
+            .expect("the idle interrupt's boundary cancel");
+        let next = admit_cli_prompt(
+            &runtime_adapter,
+            &session_id,
+            "the next turn",
+            "after the idle interrupt",
+        )
+        .await;
+        expect_cli_prompt_completed(next, "after the idle interrupt").await;
+        unregister_cli_runtime_session(&runtime_adapter, &session_id)
             .await
             .expect("test runtime cleanup");
     }

@@ -20,7 +20,7 @@ authorization check of the
 | Fence | Directory | Covers |
 |-------|-----------|--------|
 | U, the user document fence | the user rkat root | the user-global `config.toml` and the `config_state.json` beside it |
-| C(r), a credential fence | `<credential root>/<r>` | the credentials a file-backed credential store keeps for realm id `r`, for a store that fences its writes |
+| C(r), a credential fence | `<credential root>/<r>` | the credentials a persisted credential store keeps for realm id `r`: the file and auto stores fence under their own root, a keychain store under the default one (`<config dir>/meerkat/credentials`); a process-local store has none |
 | R(p), a realm fence | `<state root>/<p>` | realm `p`'s own `config.toml` and `config_state.json`, and its `authorization/` files (the grant log and the stock selection) |
 | a fence beside a document | the document's directory | any other config document and the files beside it |
 
@@ -45,7 +45,12 @@ store's maintenance fence or a realm's leases), other than the config
 runtime's own in-process write mutex, which only that runtime's own writes
 take. An operation that already holds another lock takes its fences only
 with the form that never waits: the work owner's child issuance, beside its
-reservation, and the staged grant, under the stage's custody.
+reservation, and the staged grant, under the stage's custody. A persisted
+credential store's coordinator is the exception to both rules: an entry for a
+credential key takes the coordinator's in-process gate for that key first (a
+refresh first joins one already running for the key), then waits for C of the
+key's realm, unless its operation already holds it, and then for the key's
+lock file, both within the entry's bound.
 
 ## Writers And Holders
 
@@ -68,6 +73,8 @@ waiting releases nothing before the last write returned.
 | A child grant issuance, by a work owner or a helper's prepared issuance | R of the realm whose grant log it appends | none; the forms that wait for a rebuild wait a held fence out within the same bounds |
 | `rkat realm delete` and `rkat realm prune` | R of the realm | none: `--force` overrides heartbeat leases only, and prune keeps a held realm as active |
 | `rkat storage migrate --apply`'s split-brain archive | R of every copy, before its maintenance fence | none: the resolution is refused |
+| An entry of a persisted credential store's coordinator (`RefreshCoordinator`: a refresh or an exclusive mutation of one credential key), which every write of the store runs inside: a login, a logout, a token refresh, an MCP service secret, a connector client's secret | C of the key's realm, after the coordinator's in-process gate for the key and before the key's lock file | up to 2 min; for a store that can wait on an operating-system keychain, none for unattended work and up to 5 s for interactive work |
+| A connector client update: `put_connector_client`, `rotate_connector_client_secret` and `remove_connector_client` (`rkat auth connector-client set`, `rotate-secret` and `remove`) | the realm's own document's (U for `global`, R otherwise) and C of the realm, in one set; its coordinator entry then takes C no second time (`with_exclusive_mutation_under`) | up to 5 s |
 
 Only a realm delete or prune and the migration archive remove or move a live
 `admission.lock`, and only while they hold it.
@@ -87,6 +94,19 @@ typed `FenceUnavailableCause`, and each fenced API has its own variants:
 `ReviewedConnectorRefusal`, `AdmissionInProgress` in
 `HelperChildIssuanceRefusal`, and `AdmissionFence` in the grant owner's
 `GrantRefusal`, `GrantStoreError` and `GrantDurabilityError`.
+
+The credential writes have their own variants: `AdmissionInProgress` and
+`AdmissionFenceUnavailable` in `RefreshError`, `CredentialMutationError` and
+`McpServiceSecretUpdateError` (a coordinator with no credential root to fence
+under refuses as unavailable), and `AdmissionFence` in `TokenStoreError`, a
+store write whose guard does not hold the store's fence. The other credential
+surfaces report the two refusals as ones they already have, and no credential
+refusal carries an `ADMISSION_*` code: connector login and MCP OAuth as
+`CredentialAccess` pending or unavailable, the host-auth wire reason as
+`credential_access_pending` or `credential_store_unavailable`, a provider's
+`AuthError` as `CredentialAccessPending` or `CredentialStoreUnavailable`, and
+a connector client update as `ConnectorClientUpdateError::Ownership`, which
+did not start.
 
 ## Permissions
 

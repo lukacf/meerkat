@@ -675,6 +675,61 @@ async fn pending_intent_cannot_outlive_current_contributor_cancellation() {
     fixture.assert_no_source();
 }
 
+/// A lineage the grant owner resolved, as the pure check of a helper
+/// operation's issued lineage reads it: fixed restrictions, still current.
+struct ResolvedForCheck(ExecutionRestrictions);
+
+impl ResolvedLineage for ResolvedForCheck {
+    fn restrictions(&self) -> &ExecutionRestrictions {
+        &self.0
+    }
+
+    fn check_current(&self) -> Result<(), meerkat_authorization::publication::PublicationError> {
+        Ok(())
+    }
+}
+
+/// The check of one helper operation's issued lineage (`intent`, the
+/// operation's own child grant from the fixture's admitted facts) answers a
+/// resolution the grant owner cannot answer now (an owner change in
+/// progress, or one published during it) unavailable, retryable, at the
+/// parent lineage's resolution and at the issued lineage's; the owner's own
+/// refusal denies at either.
+fn assert_lineage_refusals(intent: &ChildGrantIntent) {
+    use meerkat_authorization::grants::GrantRefusal;
+    let mut lineage = intent.parent_lineage.clone();
+    let mut leaf = lineage
+        .last()
+        .cloned()
+        .expect("the operation's configured parent");
+    leaf.grant_id = intent.id.clone();
+    lineage.push(leaf);
+    for (refusal, answer) in [
+        (GrantRefusal::Unavailable, OriginalWriterError::Unavailable),
+        (GrantRefusal::Denied, OriginalWriterError::OperationDenied),
+    ] {
+        assert_eq!(
+            check_issued_lineage(intent, &lineage, |_, _| Err::<ResolvedForCheck, _>(refusal)),
+            Err(answer),
+            "{refusal:?} at the parent lineage's resolution"
+        );
+        let resolutions = std::cell::Cell::new(0);
+        assert_eq!(
+            check_issued_lineage(intent, &lineage, |_, _| {
+                resolutions.set(resolutions.get() + 1);
+                if resolutions.get() == 1 {
+                    Ok(ResolvedForCheck(ExecutionRestrictions::unrestricted()))
+                } else {
+                    Err(refusal)
+                }
+            }),
+            Err(answer),
+            "{refusal:?} at the issued lineage's resolution"
+        );
+        assert_eq!(resolutions.get(), 2, "the issued lineage was resolved");
+    }
+}
+
 mod origin_tests;
 mod report_tests;
 
